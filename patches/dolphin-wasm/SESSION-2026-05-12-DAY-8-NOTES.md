@@ -41,7 +41,7 @@ the long-frame count grew.
 ## 2. fastsw shadow propagation — Rasterizer.cpp
 
 **Symptom:** with `fastsw=1` (the recommended optimization level), the
-Peach's Castle dome and Hyrule Temple shadow walls rendered as dotted
+dome of one battle stage and the shadow walls of another rendered as dotted
 black holes — only every other pixel had the correct shaded color, the
 rest stayed at the clear color.
 
@@ -63,7 +63,7 @@ effect on correctness.
 Gated on `bpmem.blendmode.color_update` so we don't waste work
 propagating stale color when BlendTev wasn't going to write anyway.
 
-**Measured (Peach's Castle / Hyrule Temple after fix):**
+**Measured (the two stages after fix):**
 
 | Config | Visuals | presentFps | gap | gameSpeed |
 |--------|---------|-----------:|-----|----------:|

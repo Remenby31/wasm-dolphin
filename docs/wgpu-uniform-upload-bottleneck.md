@@ -1,13 +1,13 @@
-# Mario Kart Wii on hardware WebGPU: where the missing performance is
+# Hardware WebGPU on a Wii racing scene: where the missing performance is
 
-Measured on `perf/wgpu-mkwii-throughput`, from main `5105474` (PR #19 merged).
+Measured on a throughput branch, from main `5105474` (PR #19 merged).
 
     core sha256   650308c2c52fbf7fa9818cbe1fa27c2794ae31c5d0d56344533858a179f229e3
     vendor tree   37ed892e5367e448634807deef5f74fe66c1012f
     browser       Chrome 152.0.7977.83
     GPU           AMD Radeon RX 9070 XT
     CPU           Ryzen 9 9950X3D (16C/32T)
-    fixture       __mkw-race.sav, SAVE_STATE_AT=0, INPUT_SCRIPT=none, 60 s
+    fixture       __race.sav, SAVE_STATE_AT=0, INPUT_SCRIPT=none, 60 s
     query         video=wgpu&presenter=webgpu, no diagnostic flags
 
 ## Baseline
@@ -69,7 +69,7 @@ That is what saturates the upload arena: 242 wraps, ~800 waits, 2.1 s blocked,
 125 ms worst single stall, 32 MiB high-water on a 32 MiB arena. The command
 ring, by contrast, never waits once.
 
-The UBO slice cache cannot fix it: the VS hit rate is 8.3%. Mario Kart Wii
+The UBO slice cache cannot fix it: the VS hit rate is 8.3%. The Wii racing game
 really does change its constants nearly every draw. It just changes very
 little of them.
 
@@ -246,7 +246,7 @@ It was built anyway, because "do not build this yet" rested on an estimate and
 the benchmark had since been hardened enough to test it.
 
     rig           RTX 3090, Ryzen, Chromium 145, ANGLE Vulkan
-    fixture       __mkw-race.sav, SAVE_STATE_AT=0, INPUT_SCRIPT=none, 40 s
+    fixture       __race.sav, SAVE_STATE_AT=0, INPUT_SCRIPT=none, 40 s
     arms          control vs WGPUUBODELTA=1, 6 pairs, 4 warmups discarded
 
 | | median frames/60 s | spread |
@@ -436,7 +436,7 @@ critical path, and 35% of slack is worth nothing -- which is what both attacks
 measured. The profile said "35% of a thread" and that was read as "35% of the
 frame"; they are only the same thing on the critical path.
 
-## Where this leaves Mario Kart Wii
+## Where this leaves the Wii racing game
 
 The renderer is no longer what limits this title. What is left on the critical
 path is PPC emulation:

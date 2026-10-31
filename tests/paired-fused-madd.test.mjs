@@ -44,7 +44,7 @@ function assertSame(result, label) {
     : result.message || `oracle code ${result.code}`}`);
 }
 
-// The Strikers inputs of Interpreter_FPUtils.h (frA, frC, frB): a * c + b is
+// The tie inputs of upstream Interpreter_FPUtils.h (frA, frC, frB): a * c + b is
 // exactly a single midpoint, 0xbfeab7e2f0000000 (29 low bits 0x10000000).
 const TIE = [single(0x42480000), single(0xbc88cc38), single(0x1b1c72a0)];
 

@@ -2,7 +2,7 @@
 
 These are diagnostic headed-Chrome runs, not a claim that `video=wgpu` is
 release-ready or full speed. Every run directly loaded the version-matched
-Kirby-versus-Link battle save; none stopped at character select.
+reference battle save; none stopped at character select.
 
 | Field | Value |
 | --- | --- |
@@ -10,7 +10,7 @@ Kirby-versus-Link battle save; none stopped at character select.
 | Browser | Headed Chrome `143.0.7499.4` |
 | Branch/commit | `perf/next-program` / `c175006b…625f8`, dirty diagnostic tree |
 | Core | 12,813,188 bytes; SHA-256 `4fddc41d…ea85` |
-| ROM/save | SHA-256 `1018b65a…7c67` / `620879e2…56d1` |
+| ROM/save | SHA-256 not tracked (local reference config) |
 | Mode | `video=wgpu`, `presenter=webgpu`, `wasmjit=0`, fixed battle |
 
 The matching machine-readable record is
@@ -134,5 +134,4 @@ Five arms sampled a legitimate one-draw post-load EFB pass with all-zero
 output, so this six-run set misses the strict first-pass classifier gate and
 is not a performance promotion. The separate corrected smoke and third
 cache-on arm produced nonzero completed-pass output. No arm retained a
-pre-pass baseline, so neither result is before/after mutation proof. Full run
-records are in [the next-program package](melee-next-program-2026-07-10.md).
+pre-pass baseline, so neither result is before/after mutation proof.

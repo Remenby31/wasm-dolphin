@@ -546,7 +546,7 @@ sourceContractTest("opt-in UBO cache is exact, two-entry MRU, serial-bounded, an
   // the NEXT draw's binding 0 to utility constants. OnScreenUI uploads its
   // viewport uniform before iterating its draw lists, so an empty list uploaded
   // without drawing and left the flag set -- and the next GX draw read ImGui
-  // data as pixel constants. That is the Super Mario Sunshine white
+  // data as pixel constants. That is a platformer's white
   // file-select background. The domain is now chosen from the bound pipeline's
   // declared usage instead, so zero utility draws cannot redirect anything.
   assert.equal(

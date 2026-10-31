@@ -264,7 +264,7 @@ function validateFixtureAndBoundary(manifest, samples, addIssue, runId) {
   const benchmark = manifest.benchmark || {};
   check(fixture.isoVerified === true && fixture.saveStateVerified === true &&
       fixture.saveStateLoaded === true && fixture.battleCheckpoint?.verified === true,
-    "FIXTURE_UNVERIFIED", "Fixed Kirby-vs-Link fixture is not verified", addIssue, runId);
+    "FIXTURE_UNVERIFIED", "Fixed reference-battle fixture is not verified", addIssue, runId);
   check(Number(benchmark.saveStateAt) === 0 && benchmark.inputScriptMode === "none" &&
       benchmark.timingStartsAfterVerifiedLoad === true, "TIMING_BOUNDARY",
     "Run did not directly load the fixed save before timing with input disabled", addIssue, runId);

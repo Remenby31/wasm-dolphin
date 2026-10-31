@@ -3,7 +3,7 @@
 Day 15 proved a `wgpuRenderPass` clear was reaching the canvas via
 `?video=webgpu`. Day 16's goal: replace the Day-15 cycling-colour clear
 loop with **real Dolphin frames**, so the user sees the GameCube intro
-and Melee menus rendering through the WebGPU canvas.
+and the game's menus rendering through the WebGPU canvas.
 
 ## What changed
 

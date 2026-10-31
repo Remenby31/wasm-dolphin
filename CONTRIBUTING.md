@@ -10,9 +10,8 @@ of the combined work. See **License and attribution** in the [README](README.md)
 
 ## The most useful things to work on
 
-**Benchmark more titles.** The per-game renderer table in
-[`src/game-profiles.js`](src/game-profiles.js) is built from two 45-disc sweeps
-on a single machine. Every title measured on different hardware makes it less
+**Benchmark more titles.** What is known about how titles behave on each
+renderer comes from two 45-disc sweeps on a single machine. Every title measured on different hardware makes it less
 of a one-machine artifact. You do not need to write code to help here — a
 careful measurement with screenshots is a real contribution.
 
@@ -27,8 +26,9 @@ across raster, TEV, texture, FIFO, and XFB, so the hot phases are known; see
 [`docs/software-raster-profiling.md`](docs/software-raster-profiling.md).
 Vectorizing or parallelizing them is the route to being crisp *and* smooth.
 
-**Fix a broken title.** Anything on the software list in `game-profiles.js`
-with a reason like "renders black on hardware" is a concrete, bounded bug.
+**Fix a broken title.** Any title logged in
+[`docs/webgpu-hardware-renderer-bugs.md`](docs/webgpu-hardware-renderer-bugs.md)
+with a symptom like "renders black on hardware" is a concrete, bounded bug.
 
 ## The evidence standard
 
@@ -43,10 +43,10 @@ usable:
   reproduced.
 - **Say which machine and GPU.** Results here are GPU-, browser-, and
   machine-dependent, and a number without that context is not transferable.
-- **Screenshots for anything visual.** A wrong frame can be fast. This is why
-  a title only earns a `hardware` profile if its frame was checked *by eye*
-  against the software render **and** it is materially faster — a large FPS win
-  alone is not enough.
+- **Screenshots for anything visual.** A wrong frame can be fast. A hardware
+  renderer result only counts if its frame was checked *by eye* against the
+  software render **and** it is materially faster — a large FPS win alone is
+  not enough.
 - **Prefer a repeated trial to a single run.** Scene, cache, and warmup effects
   are large here.
 
@@ -68,7 +68,7 @@ ROM/save/checkpoint identities, sends no input, and writes JSON/CSV/events plus
 screenshots:
 
 ```powershell
-$env:ROM='<your Melee Rev 2 ISO>'; $env:SAVE_STATE_PATH='<your save state>'
+$env:ROM='<your disc image>'; $env:SAVE_STATE_PATH='<your save state>'
 $env:PERF_PROBE_HEADED='1'; npm run perf:gate
 ```
 

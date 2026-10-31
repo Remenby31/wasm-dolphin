@@ -1598,7 +1598,7 @@ function requestedVideoBackend() {
   }
   // Day-16: `?video=webgpu` keeps the Software→WebGPU-presenter hybrid
   // (real game pixels reach the canvas through a wgpuRenderPass blit,
-  // CPU does the rasterisation). Stable, plays Melee.
+  // CPU does the rasterisation). Stable, plays a full game.
   //
   // Day-17+: `?video=wgpu` selects the real WebGPU video backend that's
   // under construction — no Software bridge, the C++ side owns the
@@ -1828,14 +1828,14 @@ function requestedPresentationPacing(videoBackend = "Software Renderer") {
   const requested = new URLSearchParams(window.location.search).get("pacing");
   // §28cl pacing modes:
   //   direct — paint immediately when a new frame arrives (lowest latency,
-  //            but canvas only updates as often as Melee produces unique
+  //            but canvas only updates as often as the game produces unique
   //            frames, which is often only 10-15 Hz despite 60fps core)
   //   smooth — buffer N frames + paint on a steady 60Hz cadence (smoother
   //            visual but adds latency from the buffer depth)
   //   tick   — §28cl best-of-both: present immediately on new frames (zero
   //            buffer, zero added latency, like direct) AND also re-paint
   //            the LAST KNOWN frame on a steady 16.7ms tick so the canvas
-  //            keeps refreshing even when Melee renders duplicates. Visual
+  //            keeps refreshing even when the game renders duplicates. Visual
   //            cadence stays at 60Hz like a real GameCube on a CRT.
   if (requested === "tick") return "tick";
   if (videoBackend === "OGL") {
@@ -1966,8 +1966,8 @@ function requestedCorrectTimeDrift() {
 // Unknown category names are logged and ignored (so a typo doesn't pretend to
 // disable things it isn't actually disabling).
 const CACHED_INTERPRETER_DISABLE_BITS = {
-  meleeloop:   1 << 0,
-  meleecall:   1 << 1,
+  idlepollloop: 1 << 0,
+  statuscall:  1 << 1,
   osinterrupt: 1 << 2,
   dcbxloop:    1 << 3,
   fastbranch:  1 << 4,
@@ -1993,7 +1993,7 @@ const CACHED_INTERPRETER_DISABLE_BITS = {
   regionchaincache: 1 << 18, // 0187 region chaining looks the next region up in one cache line (ENABLE polarity; default-on; ?regionchaincache=0 turns it off)
   regshape:        1 << 28, // 0184 x64 register shape: at most 4 GPRs per block in locals (ENABLE polarity; default-off; ?regshape=x64)
   // Aliases the plan / TL;DR uses interchangeably:
-  fastinputpoll: 1 << 1, // legacy synonym for meleecall (input-poll lives there)
+  fastinputpoll: 1 << 1, // legacy synonym for statuscall (input-poll lives there)
   fastmem:       1 << 7, // legacy synonym for fastsystem (load/store-ish helpers)
   all:           0x47fffff
 };
@@ -2045,7 +2045,7 @@ function requestedCachedInterpreterDisableMask() {
   }
   // §28bt block re-dispatch: DEFAULT-ON. Rigorously verified +11% warm
   // (4-run non-overlapping same-binary A/B, correctness-clean on battle);
-  // it is the evidence-backed JIT-core speed win for the >50% of hot Melee
+  // it is the evidence-backed JIT-core speed win for the >50% of hot game
   // code that runs short interpreted blocks. The earlier "cutscene stall"
   // was the unrelated NKit/reload OOM artifact, not §28bt (which is a CPU
   // dispatch-loop change, gated, with all per-block state writeback intact).

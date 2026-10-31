@@ -147,7 +147,7 @@ The three P1s and the trivial P2s are fixed in #43; the rest is tracked here.
 - [ ] **Budget escapes**: the first module of a slice and the fallback compile are never refused by the slice budget. Bound both (defer a module whose estimate alone exceeds the slice target to a slice with nothing else).
 - [ ] **Boot window on a first launch**: the 3 s window starts at the first install, which on a first launch (regions from the optimisation, minutes in) falls in the middle of play. Open it only for installs that come from the cache before the first image.
 - [ ] **Hand-over before boot races**: `retain` does not receive the bytes, so the region's byte key is registered by an async digest that may land after the pthread barrier. Pass the bytes (or the key) to `retain` and await it before the barrier.
-- [ ] **Modules kept for the session**: every region Module stays alive in discio's map (127 MB of wire bytes for MKDD) for the whole session. Release a region's Module once installed on every pthread, or cap by bytes.
+- [ ] **Modules kept for the session**: every region Module stays alive in discio's map (127 MB of wire bytes for a GameCube racing game) for the whole session. Release a region's Module once installed on every pthread, or cap by bytes.
 
 Order after #43 (Main, 2026-10-20): TTFF aot=1 vs off on main; the late ready signal; the FP analyses; the dispatch share (22 % of host time).
 - [ ] **Orphan request after a late mark** (review of #58, P3): when discio marks an old request after a cache clear but before the re-post, the region installs synchronously with the in-flight key still set, and the re-post's answer later leaves a stale 1 in the slot; a block sharing it compiles cold once. Same family as "Cold compile counted as Ready".

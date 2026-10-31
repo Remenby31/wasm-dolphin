@@ -2,7 +2,7 @@
 
 ## Outcome
 
-Headed/operator validation reports a changing Melee battle image from the true
+Headed/operator validation reports a changing battle image from the true
 hardware WebGPU path, but it is not yet full speed on the validation machine.
 The original captures in this document ran at roughly 47-53% game speed. Later
 fixed-work work reduced unrelated overhead and established a 73-76% visible
@@ -29,10 +29,10 @@ No default rendering or JIT flag changed. Automated comparisons used
 
 ## Evidence boundary
 
-- Scene: direct-loaded `__battle.sav`, Kirby versus Link. The harness pauses,
+- Scene: direct-loaded `__battle.sav`, the reference battle. The harness pauses,
   applies the save, and resumes without driving menus or character select.
-- ROM SHA-256: `1018b65a58ca654056be1611a43e753de5dd5f842ce5266581b29c6a12ce7c67`.
-- Save SHA-256: `620879e2ed3c35248deba9fb2f7b2a39f91f5374d2f6a98d2a2455cb55e156d1`.
+- ROM SHA-256: `<reference disc SHA-256, not tracked>`.
+- Save SHA-256: `<reference savestate SHA-256, not tracked>`.
 - Machine: Windows 11 Pro build 26200; Ryzen 9 9950X3D, 32 logical CPUs,
   125.6 GiB reported RAM; Radeon RX 9070 XT, driver `32.0.31021.5001`.
 - Browser: Chrome `143.0.7499.4`; WebGPU adapter reports AMD/RDNA 4.
@@ -55,7 +55,7 @@ scene identity. Battle-image identity is operator validation.
 The direct-save scene executed at least 2.602 billion telemetry-only counter
 writes per 12 emulated seconds even with `ppcprof=0`. Release builds now use
 `DOLPHIN_WEB_HOT_COUNTERS=0`, which removes those writes at compile time while
-preserving JIT engagement/failure metrics and the Melee idle-loop counters used
+preserving JIT engagement/failure metrics and the game idle-loop counters used
 by throttle behavior. Browser helper telemetry explicitly reports
 `hotcounts:off`.
 
@@ -260,11 +260,8 @@ the raw artifacts remain under `.omx/wgpu-perf/geomcopy-ab-*`.
 
 ## Limits
 
-These measurements cover one machine, one Chrome build, one Melee save, and
+These measurements cover one machine, one Chrome build, one battle save, and
 one experimental backend. Time-window screens are not deterministic
 fixed-work benchmarks. The semantic proof covers a bounded command prefix and
 does not prove pixels or all future frames. No claim here establishes full
 speed, broad GameCube/Wii compatibility, or release readiness.
-
-The machine-readable companion is
-[`perf-results/melee-wgpu-applied-save-and-replay-2026-07-13.json`](perf-results/melee-wgpu-applied-save-and-replay-2026-07-13.json).

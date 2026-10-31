@@ -23,7 +23,7 @@ previous successful acknowledgement for every one-way request:
 ...?metrics=1&legacyonewayack=1
 ```
 
-Use repeated, balanced-order runs of the same Kirby-versus-Link fixed save.
+Use repeated, balanced-order runs of the same reference-battle fixed save.
 Do not interpret message-count reduction as a speedup by itself; compare game
 speed, unique visual FPS, interval distributions, main-thread stalls, and input
 latency before accepting a performance claim.

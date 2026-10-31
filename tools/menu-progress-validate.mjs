@@ -1,11 +1,11 @@
-// Playwright validator that boots Melee through the GameCube intro, save
+// Playwright validator that boots the reference game through the GameCube intro, save
 // dialog, attract cutscene, title, main menu, and into character select.
 // Captures screenshots at every input event, every 4s, plus a per-second HUD
 // + canvas-hash log so we can tell which menu screens were reached.
 //
 //   node tools/menu-progress-validate.mjs --duration 360
 //
-// Env: ROM (default smash melee path), BASE_URL, OGL_PROXY_MODE, HEADED=1.
+// Env: ROM (required: the disc image), BASE_URL, OGL_PROXY_MODE, HEADED=1.
 
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { createWriteStream, existsSync } from "node:fs";
@@ -27,8 +27,7 @@ import { buildVisibleHarnessUrl } from "./benchmark-url.mjs";
 const root = process.cwd();
 const args = parseArgs(process.argv.slice(2));
 const baseUrl = args.baseUrl || process.env.BASE_URL || "http://127.0.0.1:8082/";
-const romPath = args.rom || process.env.ROM ||
-  "F:/Games/GameCube/Super Smash Bros. Melee (USA) (En,Ja) (v1.02).iso";
+const romPath = args.rom || process.env.ROM || "";
 const durationSeconds = args.duration ?? Number(process.env.DURATION || 360);
 const sampleMs = args.sampleMs ?? Number(process.env.SAMPLE_MS || 1000);
 const screenshotEverySeconds = args.shotEvery ?? Number(process.env.SHOT_EVERY || 4);
@@ -49,9 +48,9 @@ const outDir = args.outDir
   ? path.resolve(args.outDir)
   : path.join(root, ".omx", "menu-progress", stamp);
 
-if (!existsSync(romPath)) throw new Error(`Missing Melee ISO: ${romPath}`);
+if (!existsSync(romPath)) throw new Error(`Missing disc image: ${romPath}`);
 
-// Default Melee input script. Each X press = GC A, Enter = Start, WASD = stick.
+// Default input script for the reference game. Each X press = GC A, Enter = Start, WASD = stick.
 // Tuned for proxy mode (~38% game speed): real-time elapsed must be ~2.6x of
 // what the in-game animation length would be at 100%.
 //
@@ -67,7 +66,7 @@ if (!existsSync(romPath)) throw new Error(`Missing Melee ISO: ${romPath}`);
 // short intervals so attract-mode skips and dialogs auto-advance. With JIT
 // off the emulator runs ~190% speed in headless Chrome, so what reads as
 // real-second N here is roughly emulator-second N*2. Press both keys often
-// enough that whichever screen Melee is on gets unstuck.
+// enough that whichever screen the game is on gets unstuck.
 function makeAggressiveInputScript() {
   const events = [];
   let index = 0;
@@ -185,7 +184,7 @@ if (process.env.XFBFAST) url.searchParams.set("xfbfast", process.env.XFBFAST);
 if (process.env.DISABLE) url.searchParams.set("disable", process.env.DISABLE);
 // WGPUCLEARRECT=0 turns the scissored EFB clear off. It is on by default in the
 // backend, so this is a bisection knob: with it off the renderer falls back to
-// whole-attachment loadOp clears and Mario Kart Wii composites a patchwork.
+// whole-attachment loadOp clears and a Wii racing game composites a patchwork.
 if (process.env.WGPUCLEARRECT)
   url.searchParams.set("wgpuclearrect", process.env.WGPUCLEARRECT);
 if (process.env.REDISPATCH) url.searchParams.set("redispatch", process.env.REDISPATCH);
@@ -621,7 +620,7 @@ try {
   };
 
   // SAVE_STATE_AT=0 bypasses menu navigation and character select. Load the
-  // Kirby-vs-Link fixture before first-visible and audio sampling so the
+  // reference-battle fixture before first-visible and audio sampling so the
   // headed run begins at the battle rather than presenting boot/menu output.
   if (saveStateUrl && saveStateAt <= 0) {
     await loadConfiguredSaveState(0);

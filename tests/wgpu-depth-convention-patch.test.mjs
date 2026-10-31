@@ -2,14 +2,14 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 // SOURCE-CONTRACT test over patch 0068 and the Naga bridge. It cannot render;
-// the visual evidence (Mario Kart: Double Dash!! race and attract demo against
+// the visual evidence (a racing game's race and attract demo against
 // the software renderer) is in the PR. It pins the two decisions that make
 // that evidence hold, so a later patch cannot quietly undo them:
 //
 //   1. The WebGPU EFB holds 1 - z, like every Dolphin backend without
 //      bSupportsReversedDepthRange. Earlier patches skipped the 1 - z for
 //      api_type Vulkan (= WebGPU here) in z-texture/fog depth, EFB depth
-//      copies, peeks, pokes and clears. MKDD's z-texture draw then wrote
+//      copies, peeks, pokes and clears. A racing game's z-texture draw then wrote
 //      "nearest" over the whole frame and the track failed the depth test.
 //   2. Dual-source blending is enabled from the host's device feature, so a
 //      draw with GX destination alpha still blends with the TEV alpha.

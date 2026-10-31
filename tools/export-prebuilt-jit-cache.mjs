@@ -5,7 +5,7 @@
 // Workflow (orchestrated by `npm run build:prebuilt-cache`):
 //   1. Pre-step (separate command): run the validator with
 //      `PROBE_PERSIST_DIR=<dir>` for ~120s on the menu+battle path so the
-//      IDB store fills with all the blocks Melee touches during boot,
+//      IDB store fills with all the blocks the game touches during boot,
 //      menu, and warm battle.
 //   2. This script: launch playwright with the same persistent profile dir,
 //      open the wasm-dolphin homepage (just needs the same origin for IDB

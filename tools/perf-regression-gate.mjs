@@ -10,7 +10,8 @@ import {
 } from "../src/causal-telemetry.js";
 
 import {
-  FIXED_MELEE_BATTLE_FIXTURE,
+  FIXED_BATTLE_FIXTURE,
+  requireReferenceSha256,
   PERF_EVENT_SCHEMA_VERSION,
   assertBattleCheckpoint,
   assertRunProvenance,
@@ -88,9 +89,9 @@ await main().catch((error) => {
 });
 
 async function main() {
-  const romPath = path.resolve(requiredFixturePath(cli.rom || process.env.ROM, "Melee ISO", "--rom or ROM"));
+  const romPath = path.resolve(requiredFixturePath(cli.rom || process.env.ROM, "disc image", "--rom or ROM"));
   const saveStatePath = path.resolve(
-    requiredFixturePath(cli.saveState || process.env.SAVE_STATE_PATH, "Kirby-vs-Link save state", "--save-state or SAVE_STATE_PATH")
+    requiredFixturePath(cli.saveState || process.env.SAVE_STATE_PATH, "reference-battle save state", "--save-state or SAVE_STATE_PATH")
   );
   rejectMenuDrivingConfiguration();
 
@@ -137,12 +138,12 @@ async function main() {
   await mkdir(outDir, { recursive: true });
   const [romFixture, saveFixture, coreArtifact] = await Promise.all([
     verifyFileFixture(romPath, {
-      label: "Melee ISO",
-      expectedSha256: FIXED_MELEE_BATTLE_FIXTURE.isoSha256,
+      label: "disc image",
+      expectedSha256: requireReferenceSha256("iso"),
     }),
     verifyFileFixture(saveStatePath, {
-      label: "Kirby-vs-Link save state",
-      expectedSha256: FIXED_MELEE_BATTLE_FIXTURE.saveStateSha256,
+      label: "reference-battle save state",
+      expectedSha256: requireReferenceSha256("state"),
     }),
     describeFile(corePath, { hash: true }),
   ]);
@@ -259,7 +260,7 @@ async function main() {
       audioClaimsEligible: audioClaimQualification.eligible,
       audioClaimQualification,
       generatedAt: new Date().toISOString(),
-      scene: FIXED_MELEE_BATTLE_FIXTURE.sceneLabel,
+      scene: FIXED_BATTLE_FIXTURE.sceneLabel,
       baseUrl,
       durationSeconds,
       targetCoreSeconds,
@@ -528,7 +529,7 @@ async function runScenario(scenario, context) {
       saveStatePath: context.saveStatePath,
       saveStateAt: 0,
       inputScript: context.postLoadInputScriptCanonical || "none",
-      sceneLabel: FIXED_MELEE_BATTLE_FIXTURE.sceneLabel,
+      sceneLabel: FIXED_BATTLE_FIXTURE.sceneLabel,
       artifactDescriptions: {
         rom: context.romFixture,
         core: context.coreArtifact,
@@ -582,13 +583,13 @@ async function runScenario(scenario, context) {
     manifest.servedApplication = context.servedApplication;
     manifest.experiment = scenario.experiment || null;
     manifest.fixture = {
-      sceneLabel: FIXED_MELEE_BATTLE_FIXTURE.sceneLabel,
+      sceneLabel: FIXED_BATTLE_FIXTURE.sceneLabel,
       isoVerified: true,
       saveStateVerified: true,
       saveStateLoaded: false,
       battleCheckpoint: { verified: false },
-      expectedIsoSha256: FIXED_MELEE_BATTLE_FIXTURE.isoSha256,
-      expectedSaveStateSha256: FIXED_MELEE_BATTLE_FIXTURE.saveStateSha256,
+      expectedIsoSha256: context.romFixture.sha256,
+      expectedSaveStateSha256: context.saveFixture.sha256,
     };
     await writeFile(path.join(scenarioDir, "manifest.json"), JSON.stringify(manifest, null, 2));
 
@@ -2493,7 +2494,7 @@ async function stageSaveState(saveStatePath, sha256) {
   const destination = path.join(directory, `${sha256}.sav`);
   await mkdir(directory, { recursive: true });
   if (path.resolve(saveStatePath) !== path.resolve(destination)) await copyFile(saveStatePath, destination);
-  await verifyFileFixture(destination, { label: "staged Kirby-vs-Link save state", expectedSha256: sha256 });
+  await verifyFileFixture(destination, { label: "staged reference-battle save state", expectedSha256: sha256 });
   return destination;
 }
 

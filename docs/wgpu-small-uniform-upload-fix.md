@@ -1,4 +1,4 @@
-# Sunshine background: uniform-source leak fixed
+# Small uniform uploads: utility constants leaking into GX draws (fixed)
 
 The white file-select background was caused by the WebGPU backend binding
 ImGui utility data as GameCube pixel-shader constants. It was not a failed
@@ -30,7 +30,7 @@ successful screenshots.
 - A utility upload can initialize the uniform buffer before the first GX draw.
 - Separately fixed retained VS/PS/GS slice expiration when optional content
   caching is disabled. A compiled ring-wrap regression reproduces that defect;
-  fixing it alone did not resolve Sunshine's incorrect source selection.
+  fixing it alone did not resolve the platformer's incorrect source selection.
 
 Native changes are captured in patches 0064 and 0065. The built core, ABI pin,
 source lock and vendor snapshot are updated together. The new core SHA-256 is
@@ -51,15 +51,15 @@ repeated utility draws, pipeline transitions, initialization and epoch changes;
 and retained uniforms across 84 ring wraps under 24 cache/fast/dense scenarios.
 
 Two independent 75-second cold boots also reach the complete file-select
-background. A 60-second Mario Kart Wii saved-scene check and 50-second Wario
-World boot retain their rendered scenes. All five acceptance runs use the
+background. A 60-second saved-scene check on the Wii racing game and a 50-second boot of
+another platformer retain their rendered scenes. All five acceptance runs use the
 expected hardware core and report zero renderer errors. `npm run check`,
 all 880 tests, and `npm run verify:provenance` pass.
 
-Validation covers the reported Sunshine file-select/dialog failure and these
-regression scenes; it is not a full Sunshine playthrough.
+Validation covers the reported file-select/dialog failure and these
+regression scenes; it is not a full playthrough.
 
-Local evidence is under `.omx/sunshine-fix/`: `firstdraw-source-kind/`,
+Local evidence is under `.omx/uniform-fix/`: `firstdraw-source-kind/`,
 `fixed-firstdraw-source-kind/findings.json`, `fixed-long-replay/findings.json`,
 `cold-boot-1/`, `cold-boot-2/`, `verification-summary.json`, and
 `all-tests-final.log`. The saved state and game-derived captures remain
@@ -76,16 +76,16 @@ Same ROM, same input script, same machine, 150 s, hardware WebGPU:
 | core | file-select background | distinct sampled frames | validation errors |
 | --- | --- | ---: | ---: |
 | `650308c2` (main) | **white** | 71 / 151 | 0 |
-| `286e7287` (this branch) | beach, Mario, A/B/C boxes, OPTIONS sign | **149 / 151** | 0 |
+| `286e7287` (this branch) | beach, the player character, A/B/C boxes, OPTIONS sign | **149 / 151** | 0 |
 
 Reaching the failure needs menu input. With `INPUT_SCRIPT=none` both cores
 render the attract-mode background correctly and the bug does not appear --
 an earlier check that stopped there would have cleared a core that is in fact
-broken, which is worth knowing before trusting any future Sunshine result.
+broken, which is worth knowing before trusting any future result on that game.
 
-Regressions: Mario Kart Wii from the deterministic race state renders its full
-3D scene, and Melee reaches character select with every portrait drawn; both
-report zero validation errors. Throughput on Mario Kart Wii is unchanged --
+Regressions: the Wii racing game from the deterministic race state renders its full
+3D scene, and a fighting game reaches character select with every portrait drawn; both
+report zero validation errors. Throughput on the Wii racing game is unchanged --
 eight pairs, median +0.35%, five of eight positive, sign p = 0.73 -- so the
 per-texture samplers cost nothing measurable.
 
@@ -99,13 +99,13 @@ guarded, warm-ups discarded.
 
 | workload | rig | pairs | A median | B median | median delta | positive | sign p |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Mario Kart Wii | Radeon RX 9070 XT | 8 | 2452.3 | 2467.2 | +0.35% | 5/8 | 0.73 |
-| Mario Kart Wii | RTX 3090 | 8 | 1521.1 | 1473.4 | +0.20% | 4/8 | 1.00 |
-| Super Mario Sunshine (attract) | Radeon RX 9070 XT | 6 | 2102.9 | 2096.2 | -0.40% | 2/6 | 0.69 |
-| Melee (Great Bay battle) | Radeon RX 9070 XT | 6 | 1753.4 | 1926.4 | -0.03% | 3/6 | 1.00 |
-| Sunshine (file select, save state) | Radeon RX 9070 XT | 6 | 3602.1 | 3546.6 | **-1.08%** | 1/6 | 0.22 |
+| The Wii racing game | Radeon RX 9070 XT | 8 | 2452.3 | 2467.2 | +0.35% | 5/8 | 0.73 |
+| The Wii racing game | RTX 3090 | 8 | 1521.1 | 1473.4 | +0.20% | 4/8 | 1.00 |
+| Platformer (attract) | Radeon RX 9070 XT | 6 | 2102.9 | 2096.2 | -0.40% | 2/6 | 0.69 |
+| Fighting game (battle stage) | Radeon RX 9070 XT | 6 | 1753.4 | 1926.4 | -0.03% | 3/6 | 1.00 |
+| Platformer (file select, save state) | Radeon RX 9070 XT | 6 | 3602.1 | 3546.6 | **-1.08%** | 1/6 | 0.22 |
 
-No regression on Mario Kart Wii on either rig. Sunshine reads slightly
+No regression on the Wii racing game on either rig. The platformer reads slightly
 negative and is not resolved; its first two pairs ran while both arms were
 still drifting upward, and the four pairs after that settled are -0.3, -2.0,
 -0.5 and -0.6 -- all negative, which at four pairs is p = 0.125 and cannot be
@@ -117,7 +117,7 @@ extra work of drawing a background that used to be white.
 
 Backward compatibility was checked separately, because the consumer and the
 core version independently: the new worker against the old core `650308c2`
-renders Mario Kart Wii correctly with zero validation errors. An untagged
+renders the Wii racing game correctly with zero validation errors. An untagged
 sampler word still decodes to the old shared linear/repeat state.
 
 ### The one place it costs something
@@ -126,7 +126,7 @@ The deterministic file-select fixture is the only workload where the sign is
 consistent: five of six pairs negative, median -1.08%. It is not resolved at
 six pairs, but it is the workload where the fix does the most extra work, and
 the reason is the point of the change: on the old core that screen renders a
-white rectangle, and on this one it renders the beach, Mario, the file boxes
+white rectangle, and on this one it renders the beach, the player character, the file boxes
 and the signpost. About one percent is what drawing the scene costs.
 
 A single run of that fixture first read main at 3014 frames/60s against 3609

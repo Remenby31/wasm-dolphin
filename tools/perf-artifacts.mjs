@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { createReadStream } from "node:fs";
+import { createReadStream, readFileSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -129,13 +129,51 @@ export function evaluateWgpuRuntimeConfigEvidence({
   return { required: true, runtimeConfig: runtimeConfig ?? null, failures };
 }
 
-export const FIXED_MELEE_BATTLE_FIXTURE = Object.freeze({
-  sceneLabel: "Melee Kirby vs Link fixed battle",
-  isoSha256: "1018b65a58ca654056be1611a43e753de5dd5f842ce5266581b29c6a12ce7c67",
-  saveStateSha256: "620879e2ed3c35248deba9fb2f7b2a39f91f5374d2f6a98d2a2455cb55e156d1",
+// The reference disc's and savestate's SHA-256 are not in the tree: a
+// commercial disc's hash identifies it (and the state is that game's RAM).
+// Each comes from its variable (REFERENCE_ISO_SHA256, REFERENCE_STATE_SHA256)
+// or from its field (isoSha256, stateSha256) of the JSON file named by
+// REFERENCE_FIXTURE (an untracked local config, e.g. ~/salon-bench/ref.json).
+// Null when neither is set.
+const REFERENCE_HASHES = Object.freeze({
+  iso: { variable: "REFERENCE_ISO_SHA256", field: "isoSha256", label: "reference disc" },
+  state: { variable: "REFERENCE_STATE_SHA256", field: "stateSha256", label: "reference savestate" },
+});
+export function referenceSha256(kind, env = process.env, read = (file) => readFileSync(file, "utf8")) {
+  const spec = REFERENCE_HASHES[kind];
+  if (!spec) throw new Error(`unknown reference hash ${kind}`);
+  const direct = String(env[spec.variable] ?? "").trim().toLowerCase();
+  if (/^[0-9a-f]{64}$/.test(direct)) return direct;
+  if (!env.REFERENCE_FIXTURE) return null;
+  let config;
+  try {
+    config = JSON.parse(read(env.REFERENCE_FIXTURE));
+  } catch (error) {
+    throw new Error(`REFERENCE_FIXTURE ${env.REFERENCE_FIXTURE}: ${error.message}`);
+  }
+  const hash = String(config?.[spec.field] ?? "").trim().toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(hash)) throw new Error(`REFERENCE_FIXTURE ${env.REFERENCE_FIXTURE}: no ${spec.field} (64 hex digits)`);
+  return hash;
+}
+export const referenceIsoSha256 = (env, read) => referenceSha256("iso", env, read);
+
+// The same, required: a run that verifies the reference fixture stops here,
+// before any browser, when the expected hash is not configured.
+export function requireReferenceSha256(kind, env = process.env, read) {
+  const hash = referenceSha256(kind, env, read);
+  if (!hash) {
+    const spec = REFERENCE_HASHES[kind];
+    throw new Error(`${spec.label} SHA-256 not configured: set ${spec.variable}, or REFERENCE_FIXTURE to a JSON file with ${spec.field}`);
+  }
+  return hash;
+}
+export const requireReferenceIsoSha256 = (env, read) => requireReferenceSha256("iso", env, read);
+
+export const FIXED_BATTLE_FIXTURE = Object.freeze({
+  sceneLabel: "fixed reference battle",
 });
 
-export const FIXED_MELEE_BATTLE_CHECKPOINT = Object.freeze({
+export const FIXED_BATTLE_CHECKPOINT = Object.freeze({
   // Recorded from the paused, exact-state checkpoint. The harness pauses the
   // core before State::LoadAs so these values are tied to save bytes rather
   // than wall-clock delay after loading. Restored in-slice bookkeeping can
@@ -154,23 +192,23 @@ export const FIXED_MELEE_BATTLE_CHECKPOINT = Object.freeze({
   minLoadedCheckpointGeneration: 1,
 });
 
-const FIXED_MELEE_SOFTWARE_XFB_HASH_BY_FASTSW = Object.freeze({
+const FIXED_SOFTWARE_XFB_HASH_BY_FASTSW = Object.freeze({
   0: "55dc4398",
-  1: FIXED_MELEE_BATTLE_CHECKPOINT.xfbHash,
+  1: FIXED_BATTLE_CHECKPOINT.xfbHash,
 });
 
-const FIXED_MELEE_WGPU_XFB_HASH = "6fd97dc5";
+const FIXED_WGPU_XFB_HASH = "6fd97dc5";
 
 export function expectedBattleCheckpointForParams(params = {}) {
   const video = String(params.video || "software").toLowerCase();
   const fastsw = Number.parseInt(String(params.fastsw ?? "1"), 10);
-  let xfbHash = FIXED_MELEE_BATTLE_CHECKPOINT.xfbHash;
+  let xfbHash = FIXED_BATTLE_CHECKPOINT.xfbHash;
   if (video === "software") {
-    xfbHash = FIXED_MELEE_SOFTWARE_XFB_HASH_BY_FASTSW[fastsw] ?? xfbHash;
+    xfbHash = FIXED_SOFTWARE_XFB_HASH_BY_FASTSW[fastsw] ?? xfbHash;
   } else if (video === "wgpu") {
-    xfbHash = FIXED_MELEE_WGPU_XFB_HASH;
+    xfbHash = FIXED_WGPU_XFB_HASH;
   }
-  return { ...FIXED_MELEE_BATTLE_CHECKPOINT, xfbHash };
+  return { ...FIXED_BATTLE_CHECKPOINT, xfbHash };
 }
 
 export const HOST_CORE_ABI_VERSION = 1;
@@ -1014,7 +1052,7 @@ export function parseBattleCheckpoint(framePayload) {
   };
 }
 
-export function assertBattleCheckpoint(checkpoint, expected = FIXED_MELEE_BATTLE_CHECKPOINT) {
+export function assertBattleCheckpoint(checkpoint, expected = FIXED_BATTLE_CHECKPOINT) {
   const required = ["frame", "coreTicks", "ppcPc", "xfbHash", "width", "height"];
   const missing = required.filter((field) => checkpoint?.[field] === null || checkpoint?.[field] === undefined || checkpoint?.[field] === "");
   if (missing.length) throw new Error(`Battle/XFB checkpoint is incomplete: ${missing.join(", ")}`);

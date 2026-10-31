@@ -60,7 +60,7 @@ function assertSame(result, label) {
     : result.message || `oracle code ${result.code}`}`);
 }
 
-// a, c, b: the Strikers tie, the double-rounding traps (a = 1/c), underflowed
+// a, c, b: the upstream FPUtils tie, the double-rounding traps (a = 1/c), underflowed
 // products, denormal frC, and huge and tiny magnitudes around the old guards.
 function edgeCases(r) {
   const cases = [

@@ -1,7 +1,7 @@
 # PPC-to-WASM JIT flags
 
 These URL parameters control the experimental PowerPC-to-WebAssembly JIT and
-its diagnostic/bisection features. Defaults favor the known-good Melee
+its diagnostic/bisection features. Defaults favor the known-good
 software-hybrid configuration. Several optimizations stay off until their
 correctness is established.
 
@@ -62,13 +62,13 @@ decimal bitmask, or a `0x` hexadecimal bitmask. Unknown names are logged and
 ignored. Current named categories include:
 
 ```text
-meleeloop meleecall osinterrupt dcbxloop fastbranch fastfp fastinteger
+idlepollloop statuscall osinterrupt dcbxloop fastbranch fastfp fastinteger
 fastsystem wasmblock wasmcarry wasmaddc wasmsubfc wasmadde wasmsubfe
 wasmaddze blockredispatch blockmerge regalloc shortprefix smearcompile
 fastmemhoist inlinefma all
 ```
 
-Aliases include `fastinputpoll` for `meleecall` and `fastmem` for
+Aliases include `fastinputpoll` for `statuscall` and `fastmem` for
 `fastsystem`. Because this surface is for controlled experiments, always save
 the complete URL alongside results.
 

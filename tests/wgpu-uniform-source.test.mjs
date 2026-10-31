@@ -185,7 +185,7 @@ int main() {
     WebGPUGfx::kUboRingSize, kUsageUniform, BufferResourceRole::UboRing);
   const auto selected = [&] { return renderer.m_cmd_stream.bound.back()[0]; };
 
-  // Actual Sunshine trigger: ImGui uploads, emits zero draws, then GX resumes.
+  // Actual trigger seen in a platformer: ImGui uploads, emits zero draws, then GX resumes.
   renderer.SetPipeline(&utility);
   renderer.UploadUtilityUniforms(ui.data(), sizeof(ui));
   renderer.SetPipeline(&gx);

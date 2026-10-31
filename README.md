@@ -161,8 +161,8 @@ The replay side (`src/wgpu-*.js`) includes:
 Defaults that differ between V8 and JavaScriptCore are chosen in one place,
 from `src/wasm-engine.js`, and each can be forced with a URL parameter.
 
-`src/game-profiles.js` holds a per-title renderer table inherited from the
-original fork; titles absent from it keep the default renderer.
+No behaviour depends on the game: the renderer and every default are the same
+for every disc (`tests/no-game-specific.test.mjs` guards titles and disc IDs).
 
 ## Repository layout
 

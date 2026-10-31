@@ -27,7 +27,7 @@
 //   node tools/cpu-profile-capture.mjs
 //
 // Env:
-//   ROM              disc image path (default: Mario Kart Double Dash)
+//   ROM              disc image path (required)
 //   SAVE_STATE_URL   save state to load for a warm in-game scene
 //   SAVE_STATE_AT    seconds after boot to load it (default 35)
 //   WARMUP_SECONDS   min seconds before profiling starts (default 90)
@@ -42,9 +42,8 @@ import { pathToFileURL } from "node:url";
 
 const root = process.cwd();
 
-const romPath =
-  process.env.ROM ||
-  "F:/Backups/portable ssd backup/ROMS/Mario Kart - Double Dash!! (USA).iso";
+const romPath = process.env.ROM || "";
+if (!romPath) throw new Error("set ROM to the disc image to profile");
 const baseUrl = process.env.BASE_URL || "http://127.0.0.1:8082/";
 const warmupSeconds = Number(process.env.WARMUP_SECONDS || 90);
 const profileSeconds = Number(process.env.PROFILE_SECONDS || 20);

@@ -1,12 +1,11 @@
-# Melee CoreTiming phase attribution — validation template
+# CoreTiming phase attribution — validation template
 
-Use this template for a headed, direct-save Kirby-versus-Link run after the
+Use this template for a headed, direct-save reference-battle run after the
 `0018-core-timing-phase-attribution.patch` core has been rebuilt. It contains
 no benchmark result. Do not replace `TODO` fields with estimates.
 
-The retained 2026-07-10 measurements are recorded separately in
-[the measured TEV and CoreTiming report](melee-tev-core-timing-evidence-2026-07-10.md),
-so this file remains a reusable blank validation template.
+The retained 2026-07-10 measurements were recorded separately, so this file
+remains a reusable blank validation template.
 
 ## Run identity
 

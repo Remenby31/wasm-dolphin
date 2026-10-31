@@ -196,7 +196,7 @@ machine). The rebuilt core is loaded with `&coreid=sha256:83514d0e…`; the
 network log confirms the candidate JS and WASM were the ones executed. REC
 config: `core=upstream&video=software&presenter=webgpu&cpu=dual&speed=1&wasmjit=1&jitwarmup=700&oc=1&pacing=tick&fastsw=1&metrics=1`.
 Mean (min to max) of 1 s samples after a fixed warm-up (25 s homebrew, 70 s
-MKDD).
+for a GameCube racing game).
 
 | Disc | Core | Speed % | Presented/s | Unique visuals/s | JIT blocks |
 | --- | --- | --- | --- | --- | --- |
@@ -565,15 +565,13 @@ glue, WASM import, C++ dynamic-JIT wrapper, and active patch series.
 
 Build success alone does not establish gameplay parity. Compare two independent
 build records with `npm run compare:core-builds -- <left> <right>`, then run the
-fixed Kirby-versus-Link save smoke on the candidate and on the default baseline.
+fixed reference-battle save smoke on the candidate and on the default baseline.
 
 Two independent builds of this core matched byte-for-byte. The independent
 records include an identical 10,322,762-byte code section (SHA-256
 `e7de8131567eba0b8f64e1d1fcc24e4d849f553a9e425c9ff82209fe9a2b5b02`)
 and 2,451,983-byte data section (SHA-256
 `aa01b9bc6d7892a16d3d8d692248e7646b6401232eba4d853fa4b1503ae91484`).
-The current parity and gameplay evidence are summarized in the
-[software-raster phase package](perf-results/melee-software-raster-phases-2026-07-10.md).
 
 ## Known local assumptions
 
