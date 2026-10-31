@@ -125,6 +125,7 @@ import {
 } from "./wgpu-consumer-reset-attestation.js";
 import { createWgpuSemanticRuntime } from "./wgpu-semantic-runtime.js";
 import { createWgpuFatalReporter, handleWgpuDeviceLoss, wgpuFatalPageReason } from "./wgpu-device-lifecycle.js";
+import { coreIntegrityOf, createWgpuIntegrity, skippedDrawCause } from "./wgpu-integrity.js";
 import {
   attemptRetainedWgpuUpload,
   createWgpuMappedStagingPool
@@ -469,6 +470,35 @@ function harnessRegionMissTop(heap, m = moduleInstance) {
 // collisions, resets), cumulative.
 const GEOMETRY_CACHE_FIELDS = ["hits", "hitBytes", "inserts", "insertBytes", "misses", "missBytes",
   "blocked", "capSkips", "failed", "switches", "compares", "collisions", "resets"];
+// validationReadIntegrity: the replay's integrity counters, cumulative and
+// flat (fatal ones: INTEGRITY_FATAL), plus the non-fatal context the probes
+// judge by rate (pipelines pending, staging waits, upload timeouts).
+function readWgpuIntegrity() {
+  const m = moduleInstance;
+  let geometryCacheCollisions = 0, geometryCacheFailed = 0;
+  if (typeof m?._DolphinWeb_GeometryCacheStats === "function" && typeof m._malloc === "function") {
+    const p = m._malloc(8 * GEOMETRY_CACHE_FIELDS.length);
+    try {
+      const n = m._DolphinWeb_GeometryCacheStats(p) | 0;
+      const values = new Float64Array(m.HEAPU8.buffer, p, Math.min(n, GEOMETRY_CACHE_FIELDS.length));
+      const at = (name) => { const k = GEOMETRY_CACHE_FIELDS.indexOf(name); return k >= 0 && k < values.length ? values[k] : 0; };
+      geometryCacheCollisions = at("collisions");
+      geometryCacheFailed = at("failed");
+    } finally {
+      m._free(p);
+    }
+  }
+  return wgpuIntegrity.snapshot({
+    ...coreIntegrityOf(parseWgpuProducerStateStats(api?.getWebGpuStateCacheStats?.() ?? "")),
+    stagingUnsafe: webGpuCausalStats.mappedStagingUnsafeCapacityCount || 0,
+    stagingCapacityWaits: webGpuCausalStats.mappedStagingCapacityWaitCount || 0,
+    presentRejected: self._wgPresentRejectedLogCount || 0,
+    geometryCacheCollisions,
+    geometryCacheFailed,
+    presents: webGpuExecStats.present
+  });
+}
+
 function harnessGeometryCacheStats() {
   if (!harnessEnabled) return { error: "harness hooks are off" };
   const m = moduleInstance;
@@ -2310,6 +2340,8 @@ async function handleMessage(type, payload) {
       return { mode: relaxedMadd, coreFused: moduleInstance?._DolphinWeb_FusedMadd ? moduleInstance._DolphinWeb_FusedMadd() === 1 : null };
     case "validationReadPacingConfig":
       return harnessPacingConfig();
+    case "validationReadIntegrity":
+      return readWgpuIntegrity();
     case "validationReadGeometryCache":
       return harnessGeometryCacheStats();
     case "validationReadJitRegionStats":
@@ -6930,6 +6962,7 @@ async function createWebGpuPresenter(canvas) {
     },
   };
   device.addEventListener?.("uncapturederror", (event) => {
+    wgpuIntegrity.note("uncapturedErrors");
     recordRendererError("uncaptured-error", event?.error?.message || event?.message || "unknown");
   });
   const format = typeof gpu.getPreferredCanvasFormat === "function" ? gpu.getPreferredCanvasFormat() : "bgra8unorm";
@@ -7080,6 +7113,7 @@ fn fs(input: VertexOutput) -> @location(0) vec4f {
       postStatus,
     });
     if (!loss.handled) return;
+    wgpuIntegrity.note("deviceLosses");
     // Lost above 1x (out of memory, GPU process reset): never again at that
     // scale in this worker, and the page restarts at 1x (core-host).
     const internalResolution = wgpuInternalResolution;
@@ -10946,6 +10980,7 @@ function markWgpuMappedCapacityWait(uploadRole = WGPU_UPLOAD_ROLE.UNKNOWN) {
 function markWgpuReplayFatal(scope, detail) {
   if (wgpuReplayFatal) return false;
   wgpuReplayFatal = { scope: String(scope), detail: String(detail || "unknown") };
+  wgpuIntegrity.note("replayFatal");
   resetWgpuMappedDrainCoalescing(WGPU_MAPPED_DRAIN_FORCE_REASONS.FATAL);
   wgpuSparseUbo?.reset(`fatal-${scope}`);
   if (wgpuUboComputeProjectionActive) {
@@ -12942,6 +12977,8 @@ function getConstFsModule(dev) {
 // presented a frame; suppresses the legacy CPU-framebuffer canvas blit
 // in runPresentationLoop so the two don't fight over renderGpu.context.
 let cmdRingOwnsCanvas = false;
+// Always on (src/wgpu-integrity.js): what makes a picture wrong silently.
+const wgpuIntegrity = createWgpuIntegrity();
 const webGpuExecStats = {
   beginFb0: 0, beginFbN: 0, draw: 0, drawIdx: 0, setPipe: 0,
   setBg: 0, present: 0, missPipe: 0, missBg: 0, skipDraw: 0, lastLog: 0
@@ -15844,6 +15881,10 @@ function drainWebGpuCmdRing(source = "presentation") {
           }
           else if (pass) {
             webGpuExecStats.skipDraw = (webGpuExecStats.skipDraw || 0) + 1;
+            wgpuIntegrity.skip(skippedDrawCause({
+              hasPipeline: passHasPipe, bindGroupsValid: bgValid[0] && bgValid[1] && bgValid[2],
+              needsVertexBuffer: passNeedsVertexBuffer, vertexBufferValid
+            }));
           }
           break;
         case WGPU_CMD_OP_DRAW_INDEXED:
@@ -15853,6 +15894,10 @@ function drainWebGpuCmdRing(source = "presentation") {
           if (pass && !(passHasPipe && bgValid[0] && bgValid[1] && bgValid[2] &&
               (!passNeedsVertexBuffer || vertexBufferValid) && indexBufferValid)) {
             webGpuExecStats.skipDraw = (webGpuExecStats.skipDraw || 0) + 1;
+            wgpuIntegrity.skip(skippedDrawCause({
+              hasPipeline: passHasPipe, bindGroupsValid: bgValid[0] && bgValid[1] && bgValid[2],
+              needsVertexBuffer: passNeedsVertexBuffer, vertexBufferValid, indexed: true, indexBufferValid
+            }));
           } else if (pass) {
             diagTallyDrawTarget(passFbId, currentBackbufferSourceTextureId);
             vpDiagNoteDraw(passFbId, self._wgCurPipe);
