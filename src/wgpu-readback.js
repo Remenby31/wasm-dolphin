@@ -60,8 +60,11 @@ export class WgpuReadback {
   // heap(): the wasm heap's current Uint8Array (it can grow); words(): the
   // shared Int32Array the slots' words live in. poolBytes caps the MAP_READ
   // buffers kept for reuse.
-  constructor({ device, heap, words, poolBytes = 8 << 20 }) {
+  // busy(fn): runs a completion (texels written to the heap) under the
+  // caller's busy clock (the worker's replayBusy); plain call by default.
+  constructor({ device, heap, words, poolBytes = 8 << 20, busy = (fn) => fn() }) {
     this.device = device;
+    this.busy = busy;
     this.heap = heap;
     this.words = words;
     this.poolBytes = poolBytes;
@@ -216,7 +219,7 @@ export class WgpuReadback {
     }
     this.stats.maxLatencyMs = Math.max(this.stats.maxLatencyMs, now() - c.at);
     recordLatency(this.latency.mapped, now() - c.at);
-    this.finish(entry, "ok", buffer);
+    this.busy(() => this.finish(entry, "ok", buffer));
   }
 
   // The map of a buffer the device may have refused (createBuffer out of

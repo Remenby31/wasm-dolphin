@@ -145,6 +145,13 @@ const HOMEBREW_OUT = path.join(REPO_ROOT, "harness", "homebrew", "out");
 const HOMEBREW_FIXTURES = path.join(REPO_ROOT, "harness", "homebrew", "fixtures");
 export const isHomebrew = (iso) => [HOMEBREW_OUT, HOMEBREW_FIXTURES].some((d) => iso.startsWith(d + path.sep));
 export const STATE_ROUTE = "**/__harness_state.sav";
+// What the engine under measure runs besides the game, as far as the numbers
+// go: an A/B or a noise reading compares only results of the same version.
+// Unset in a summary (1): before #386. 2: the product turns the 0113
+// headroom counters on in every run (a clock read per Throttle and per GPU
+// pass with work, present sleeps timed) and times the worker's entry points
+// (occupancy stats), --headroom or not.
+export const PROBE_VERSION = 2;
 
 // The host CPU model (Linux: lscpu "Model name"), read with each window of a
 // pinned run: the CI bench pairs only windows of the same model (a runner
@@ -1151,7 +1158,7 @@ async function main() {
   for (const [n, a] of Object.entries(sideArgs)) console.warn(`[race-perf] Chrome flags on the ${n}: ${a}`);
   const summary = {
     sceneProtocol: sceneCheck.protocol ? { state: state && path.basename(state), ...sceneCheck.protocol, warnings: sceneCheck.warnings } : null,
-    probe: "race-perf", at: new Date().toISOString(),
+    probe: "race-perf", probeVersion: PROBE_VERSION, at: new Date().toISOString(),
     // --decoupled-unlimited: the sides it decoupled (harness/lib/kpi.mjs
     // refuses such a result: an upper bound, not a KPI).
     ...(o.decoupledUnlimited ? { decoupledUnlimited: Object.keys(sides).filter((n) => pacingExpectation(sides[n].query ?? o.query, { decoupledUnlimited: true }) === "decoupled") } : {}),

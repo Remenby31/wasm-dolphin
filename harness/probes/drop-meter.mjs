@@ -75,7 +75,7 @@ import { integrityBrief, integrityOf, parseIntegrityAllow, readIntegrity, treeHa
 // What this probe runs in the page and the worker (samplers, counters): an
 // A/A's noise holds only for the same version (review of #271: the page's
 // rAF counter changes the environment). Raised with each such change.
-export const PROBE_VERSION = 4; // 3: the power source per run and per summary (an older A/A has none); 4: the state load at the first call (#325), ~2.5 s earlier than after a refused try
+export const PROBE_VERSION = 5; // 3: the power source per run and per summary (an older A/A has none); 4: the state load at the first call (#325), ~2.5 s earlier than after a refused try; 5: the product turns the 0113 headroom counters on and times the worker's entry points (occupancy stats, #386)
 
 // What the site runs (salon packages/core engineParams, profile "fast", with
 // a WebGPU adapter).

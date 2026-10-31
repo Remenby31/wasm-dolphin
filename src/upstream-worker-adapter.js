@@ -404,6 +404,7 @@ export class UpstreamWorkerAdapter {
     this.framesOutOfOrder = null;
     // Occupancy shares of the last window, 0..1; null when unavailable.
     this.cpuThreadBusy = null;
+    this.gpuThreadBusy = null;
     this.replayBusy = null;
     this.visualChangeFps = 0;
     this.visualFrameHash = 0;
@@ -1507,7 +1508,7 @@ export class UpstreamWorkerAdapter {
       if (key in response) this[key] = Number.isFinite(response[key]) ? response[key] : null;
     }
     // Same for the occupancy shares (src/occupancy-stats.js): null is a value.
-    for (const key of ["cpuThreadBusy", "replayBusy"]) {
+    for (const key of ["cpuThreadBusy", "gpuThreadBusy", "replayBusy"]) {
       if (key in response) this[key] = Number.isFinite(response[key]) ? response[key] : null;
     }
     if (Number.isFinite(response.visualChangeFps)) {
