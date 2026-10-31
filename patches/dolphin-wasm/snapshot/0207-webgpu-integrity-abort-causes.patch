@@ -1,5 +1,5 @@
 diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.h b/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.h
-index aed345b..6240016 100644
+index aed345b..6ebc18f 100644
 --- a/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.h
 +++ b/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.h
 @@ -3,6 +3,7 @@
@@ -34,7 +34,7 @@ index aed345b..6240016 100644
  enum class BufferUploadRole : u32
  {
    Unknown = 0,
-@@ -454,6 +472,24 @@ public:
+@@ -454,6 +472,30 @@ public:
    {
      return m_batch_abort_count.load(std::memory_order_relaxed);
    }
@@ -56,10 +56,16 @@ index aed345b..6240016 100644
 +  {
 +    return m_upload_texture_failed.load(std::memory_order_relaxed);
 +  }
++  // Explicit aborts of a pass left open by a nested BeginPass (no renderer
++  // site): with WebGPUGfx's sites, they sum to the Explicit cause.
++  u64 GetNestedBeginAbortCount() const
++  {
++    return m_nested_begin_aborts.load(std::memory_order_relaxed);
++  }
    u64 GetBatchOversizeCount() const
    {
      return m_batch_oversize_count.load(std::memory_order_relaxed);
-@@ -595,6 +631,21 @@ private:
+@@ -595,6 +637,22 @@ private:
    bool m_required_publication_failed = false;
    std::atomic<u64> m_batch_abort_count{0};
    std::atomic<u64> m_batch_oversize_count{0};
@@ -67,6 +73,7 @@ index aed345b..6240016 100644
 +  std::array<std::atomic<u64>, static_cast<u32>(BufferUploadRole::Count)> m_upload_failed_by_role{};
 +  std::atomic<u64> m_upload_alloc_failed{0};
 +  std::atomic<u64> m_upload_texture_failed{0};
++  std::atomic<u64> m_nested_begin_aborts{0};
 +  void CountUploadFailed(BufferUploadRole role)
 +  {
 +    const u32 k = static_cast<u32>(role) < static_cast<u32>(BufferUploadRole::Count) ?
@@ -82,7 +89,7 @@ index aed345b..6240016 100644
    // Producer-assigned resource ids. One space is fine — opcode
    // implies class on the consumer. Starts at 1 (0 = none/sentinel).
 diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.cpp b/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.cpp
-index 48c4569..7ccab78 100644
+index 48c4569..cb4f5f1 100644
 --- a/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.cpp
 +++ b/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.cpp
 @@ -615,12 +615,12 @@ bool WebGPUCommandStream::PushBatch(const CmdRecord* records, u32 count)
@@ -150,7 +157,62 @@ index 48c4569..7ccab78 100644
            PoisonPass();
            return 0;
          }
-@@ -1058,6 +1062,7 @@ bool WebGPUCommandStream::PushUploadBuffer(u32 id, u32 dst_offset, u32 src_heap_
+@@ -912,6 +916,7 @@ u32 WebGPUCommandStream::UploadAlloc(const void* data, size_t len, u32 align)
+ {
+   if (!data)
+   {
++    m_upload_alloc_failed.fetch_add(1, std::memory_order_relaxed);
+     PoisonPass();
+     return 0;
+   }
+@@ -932,6 +937,7 @@ UploadPacket WebGPUCommandStream::UploadAllocTwoSegments(const void* first, size
+   if ((first_len != 0 && first == nullptr) || (second_len != 0 && second == nullptr) ||
+       (first_len == 0 && second_len == 0))
+   {
++    m_upload_alloc_failed.fetch_add(1, std::memory_order_relaxed);
+     PoisonPass();
+     return packet;
+   }
+@@ -940,6 +946,7 @@ UploadPacket WebGPUCommandStream::UploadAllocTwoSegments(const void* first, size
+   if ((second_align & (second_align - 1)) != 0 || first_len > UINT32_MAX ||
+       second_len > UINT32_MAX)
+   {
++    m_upload_alloc_failed.fetch_add(1, std::memory_order_relaxed);
+     PoisonPass();
+     return packet;
+   }
+@@ -947,12 +954,14 @@ UploadPacket WebGPUCommandStream::UploadAllocTwoSegments(const void* first, size
+   const size_t second_offset = (first_len + second_align - 1) & ~(static_cast<size_t>(second_align) - 1);
+   if (second_offset < first_len || second_len > UINT32_MAX - second_offset)
+   {
++    m_upload_alloc_failed.fetch_add(1, std::memory_order_relaxed);
+     PoisonPass();
+     return packet;
+   }
+   const size_t payload_size = second_offset + second_len;
+   if (payload_size > UINT32_MAX - 3u)
+   {
++    m_upload_alloc_failed.fetch_add(1, std::memory_order_relaxed);
+     PoisonPass();
+     return packet;
+   }
+@@ -986,6 +995,7 @@ u32 WebGPUCommandStream::UploadAllocUboPacket(
+ {
+   if (!plan.valid || plan.packet_size == 0)
+   {
++    m_upload_alloc_failed.fetch_add(1, std::memory_order_relaxed);
+     PoisonPass();
+     return 0;
+   }
+@@ -1008,6 +1018,7 @@ u32 WebGPUCommandStream::UploadAllocUboPacket(
+         ubo.size > plan.packet_size - offset)
+     {
+       RollbackLastUpload(ptr, plan.packet_size);
++      m_upload_alloc_failed.fetch_add(1, std::memory_order_relaxed);
+       PoisonPass();
+       return 0;
+     }
+@@ -1058,6 +1069,7 @@ bool WebGPUCommandStream::PushUploadBuffer(u32 id, u32 dst_offset, u32 src_heap_
  {
    if (!m_header || id == 0 || src_heap_ptr == 0 || len == 0)
    {
@@ -158,7 +220,7 @@ index 48c4569..7ccab78 100644
      PoisonPass();
      return false;
    }
-@@ -1070,6 +1075,7 @@ bool WebGPUCommandStream::PushUploadBuffer(u32 id, u32 dst_offset, u32 src_heap_
+@@ -1070,6 +1082,7 @@ bool WebGPUCommandStream::PushUploadBuffer(u32 id, u32 dst_offset, u32 src_heap_
    rec.arg.u[4] = static_cast<u32>(role);
    if (!Push(rec))
    {
@@ -166,7 +228,7 @@ index 48c4569..7ccab78 100644
      RollbackLastUpload(src_heap_ptr, len);
      return false;
    }
-@@ -1104,6 +1110,7 @@ bool WebGPUCommandStream::PushUploadTexture(u32 id, u32 src_heap_ptr, u32 bytes_
+@@ -1104,6 +1117,7 @@ bool WebGPUCommandStream::PushUploadTexture(u32 id, u32 src_heap_ptr, u32 bytes_
  {
    if (!m_header || id == 0 || src_heap_ptr == 0)
    {
@@ -174,7 +236,15 @@ index 48c4569..7ccab78 100644
      PoisonPass();
      return false;
    }
-@@ -1210,7 +1217,7 @@ bool WebGPUCommandStream::PushBeginPass(u32 fb_id, float r, float g, float b, fl
+@@ -1118,6 +1132,7 @@ bool WebGPUCommandStream::PushUploadTexture(u32 id, u32 src_heap_ptr, u32 bytes_
+   rec.arg.u[6] = layer;
+   if (!Push(rec))
+   {
++    m_upload_texture_failed.fetch_add(1, std::memory_order_relaxed);
+     RollbackLastUpload(src_heap_ptr, bytes_per_row * h);
+     return false;
+   }
+@@ -1210,15 +1225,20 @@ bool WebGPUCommandStream::PushBeginPass(u32 fb_id, float r, float g, float b, fl
    if (m_required_publication_failed)
    {
      m_required_publication_failed = false;
@@ -183,7 +253,20 @@ index 48c4569..7ccab78 100644
      TraceEvent(OwnershipTraceEvent::Abort, static_cast<u32>(CmdOp::BeginPass), 0, 1);
      m_trace_pending_transaction = 0;
      return false;
-@@ -1770,6 +1777,46 @@ extern "C" EMSCRIPTEN_KEEPALIVE int RunWebGpuCommandStreamGeometryRollbackSmoke(
+   }
+   // A nested BEGIN indicates the caller lost ownership of the previous pass.
+   // Drop that private batch before accepting a new transaction.
++  // 0207: an explicit abort with no renderer site, counted as "nested".
+   if (m_pass_staging)
++  {
++    if (!m_pass_poisoned)
++      m_nested_begin_aborts.fetch_add(1, std::memory_order_relaxed);
+     AbortPass();
++  }
+   if (m_trace_enabled.load(std::memory_order_acquire))
+   {
+     if (m_trace_pending_transaction == 0)
+@@ -1770,6 +1790,67 @@ extern "C" EMSCRIPTEN_KEEPALIVE int RunWebGpuCommandStreamGeometryRollbackSmoke(
      return FailGeometrySmoke(207, "failed allocation did not reject the owning pass");
    if (invalid.header.write.load(std::memory_order_acquire) != 0)
      return FailGeometrySmoke(208, "rejected pass became visible to the consumer");
@@ -227,6 +310,27 @@ index 48c4569..7ccab78 100644
 +  if (arena.stream.UploadAlloc(huge.data(), huge.size(), 4) != 0 ||
 +      arena.stream.GetUploadAllocFailedCount() != 1)
 +    return FailGeometrySmoke(217, "an upload larger than the arena was not counted");
++  // 0207 follow-up: a nested BeginPass is an explicit abort with its own count;
++  // a null or malformed allocation and a refused texture record count as
++  // failed uploads.
++  CommandStreamSmokeFixture nested;
++  if (!nested.stream.PushBeginPass(1, 0, 0, 0, 1, 0, 0) ||
++      !nested.stream.PushBeginPass(2, 0, 0, 0, 1, 0, 0) ||
++      nested.stream.GetNestedBeginAbortCount() != 1 ||
++      nested.stream.GetBatchAbortCount(BatchAbortCause::Explicit) != 1)
++    return FailGeometrySmoke(218, "a nested BeginPass was not counted as an explicit nested abort");
++  if (invalid.stream.GetUploadAllocFailedCount() != 1)
++    return FailGeometrySmoke(219, "a null allocation was not counted as a failed upload");
++  CommandStreamSmokeFixture segments;
++  if (segments.stream.UploadAllocTwoSegments(nullptr, 4, nullptr, 0, 4, 4).src_heap_ptr != 0 ||
++      segments.stream.GetUploadAllocFailedCount() != 1)
++    return FailGeometrySmoke(220, "a malformed two-segment allocation was not counted");
++  CommandStreamSmokeFixture texture;
++  const u32 texel = texture.stream.UploadAlloc(payload, 4, 4);
++  WebGPUCommandStreamTestPeer::FailConsumer(texture.stream, 0x534D4F4Bu);
++  if (texel == 0 || texture.stream.PushUploadTexture(9, texel, 4, 1, 1, 0, 0) ||
++      texture.stream.GetUploadTextureFailedCount() != 1)
++    return FailGeometrySmoke(221, "a texture record the ring refused was not counted");
    return 0;
  }
  
@@ -268,10 +372,10 @@ index ac5e615..9886fcd 100644
    void DestroyRetiredGeometryBuffers();
    void ResetRecordedPassState();
 diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp b/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp
-index d1da33c..d21c236 100644
+index d1da33c..2828581 100644
 --- a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp
 +++ b/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp
-@@ -437,6 +437,35 @@ void RecordUboPacketOpportunity(u32 change_mask, const std::array<u32, 3>& paylo
+@@ -437,6 +437,37 @@ void RecordUboPacketOpportunity(u32 change_mask, const std::array<u32, 3>& paylo
    s_ubo_packet_aligned_bytes.fetch_add(aligned_bytes, std::memory_order_relaxed);
  }
  
@@ -294,6 +398,8 @@ index d1da33c..d21c236 100644
 +  std::string out;
 +  for (u32 i = 0; i < static_cast<u32>(GfxAbortSite::Count); ++i)
 +    out += (i ? "," : "") + std::to_string(s_abort_by_site[i].load(std::memory_order_relaxed));
++  // last: a nested BeginPass (the command stream's, no renderer site)
++  out += "," + std::to_string(GetCommandStream().GetNestedBeginAbortCount());
 +  return out;
 +}
 +static std::string UploadFailedRoles()
@@ -307,12 +413,12 @@ index d1da33c..d21c236 100644
  extern "C" EMSCRIPTEN_KEEPALIVE const char* GetWebGpuStateCacheStats()
  {
    static std::string stats;
-@@ -452,6 +481,14 @@ extern "C" EMSCRIPTEN_KEEPALIVE const char* GetWebGpuStateCacheStats()
+@@ -452,6 +483,14 @@ extern "C" EMSCRIPTEN_KEEPALIVE const char* GetWebGpuStateCacheStats()
        << " wgbabort:" << GetCommandStream().GetBatchAbortCount()
        << " wgboversize:" << GetCommandStream().GetBatchOversizeCount()
        << " wguploadto:" << GetCommandStream().GetUploadTimeoutCount()
 +      // 0207: aborts by cause (BatchAbortCause order), the renderer's by
-+      // site (GfxAbortSite order), failed uploads (arena; buffer
++      // site (GfxAbortSite order, then nested BeginPass), failed uploads (arena; buffer
 +      // records by BufferUploadRole; texture records)
 +      << " wgabortc:" << AbortCauses()
 +      << " wggfxabort:" << AbortSites()
@@ -322,7 +428,7 @@ index d1da33c..d21c236 100644
        << " wgubo:" << ((s_ubo_control_mode.load(std::memory_order_relaxed) & 1u) ? 1 : 0)
        << " wgubometrics:"
        << (s_ubo_cache_metrics_enabled.load(std::memory_order_relaxed) ? 1 : 0)
-@@ -1498,7 +1535,7 @@ void WebGPUGfx::SetScissorRect(const MathUtil::Rectangle<int>& rc)
+@@ -1498,7 +1537,7 @@ void WebGPUGfx::SetScissorRect(const MathUtil::Rectangle<int>& rc)
    if (m_pass_open && m_scissor[2] > 0 && m_scissor[3] > 0)
    {
      if (!m_cmd_stream.PushSetScissor(m_scissor[0], m_scissor[1], m_scissor[2], m_scissor[3]))
@@ -331,19 +437,21 @@ index d1da33c..d21c236 100644
    }
  }
  
-@@ -1606,8 +1643,10 @@ bool WebGPUGfx::SetRecordedIndexBuffer(u32 buffer_id, u32 format, u32 offset)
+@@ -1606,8 +1645,12 @@ bool WebGPUGfx::SetRecordedIndexBuffer(u32 buffer_id, u32 format, u32 offset)
    return true;
  }
  
 -void WebGPUGfx::AbortRecordedPass()
 +void WebGPUGfx::AbortRecordedPass(GfxAbortSite site)
  {
-+  if (m_cmd_stream.pass_staging())
++  // Only an explicit abort: a poisoned pass counts under the Poisoned cause.
++  // These sites and the nested BeginPass count sum to the Explicit cause.
++  if (m_cmd_stream.pass_staging() && !m_cmd_stream.pass_poisoned())
 +    s_abort_by_site[static_cast<u32>(site)].fetch_add(1, std::memory_order_relaxed);
    if (g_vertex_manager)
      static_cast<VertexManager*>(g_vertex_manager.get())->DiscardPendingGeometryRange();
    m_cmd_stream.AbortPass();
-@@ -1683,7 +1722,7 @@ bool WebGPUGfx::EndPassIfOpen()
+@@ -1683,7 +1726,7 @@ bool WebGPUGfx::EndPassIfOpen()
    if (g_vertex_manager &&
        !static_cast<VertexManager*>(g_vertex_manager.get())->FlushPendingGeometryRange())
    {
@@ -352,7 +460,7 @@ index d1da33c..d21c236 100644
      return false;
    }
    const bool committed = m_cmd_stream.PushEndPass();
-@@ -1729,14 +1768,14 @@ bool WebGPUGfx::BeginPassIfNeeded()
+@@ -1729,14 +1772,14 @@ bool WebGPUGfx::BeginPassIfNeeded()
    {
      if (m_cmd_stream.pass_staging() && !m_cmd_stream.pass_poisoned())
        return true;
@@ -369,7 +477,7 @@ index d1da33c..d21c236 100644
      return false;
    }
    m_pass_open = true;
-@@ -1748,7 +1787,7 @@ bool WebGPUGfx::BeginPassIfNeeded()
+@@ -1748,7 +1791,7 @@ bool WebGPUGfx::BeginPassIfNeeded()
         !m_cmd_stream.PushSetScissor(m_scissor[0], m_scissor[1], m_scissor[2],
                                      m_scissor[3])))
    {
@@ -378,7 +486,7 @@ index d1da33c..d21c236 100644
      return false;
    }
    return true;
-@@ -2426,7 +2465,7 @@ void WebGPUGfx::SetViewport(float x, float y, float width, float height, float n
+@@ -2426,7 +2469,7 @@ void WebGPUGfx::SetViewport(float x, float y, float width, float height, float n
    if (m_pass_open && width > 0 && height > 0)
    {
      if (!m_cmd_stream.PushSetViewport(x, y, width, height, near_depth, far_depth))
@@ -387,7 +495,7 @@ index d1da33c..d21c236 100644
    }
  }
  
-@@ -2673,6 +2712,7 @@ void WebGPUGfx::Draw(u32 base_vertex, u32 num_vertices)
+@@ -2673,6 +2716,7 @@ void WebGPUGfx::Draw(u32 base_vertex, u32 num_vertices)
  {
    if (m_cur_pipeline_id == 0)
    {
@@ -395,7 +503,7 @@ index d1da33c..d21c236 100644
      // 0203: only this draw is skipped. Its bytes stay in the pending
      // geometry range, read by no draw (as with the range off); aborting the
      // pass here dropped every draw already recorded in it.
-@@ -2689,25 +2729,25 @@ void WebGPUGfx::Draw(u32 base_vertex, u32 num_vertices)
+@@ -2689,25 +2733,25 @@ void WebGPUGfx::Draw(u32 base_vertex, u32 num_vertices)
    {
      if (!SetRecordedPipeline(m_cur_pipeline_id))
      {
@@ -425,7 +533,7 @@ index d1da33c..d21c236 100644
      return;
    }
  }
-@@ -2716,6 +2756,8 @@ void WebGPUGfx::DrawIndexed(u32 base_index, u32 num_indices, u32 base_vertex)
+@@ -2716,6 +2760,8 @@ void WebGPUGfx::DrawIndexed(u32 base_index, u32 num_indices, u32 base_vertex)
  {
    if (m_cur_pipeline_id == 0 || num_indices == 0)
    {
@@ -434,7 +542,7 @@ index d1da33c..d21c236 100644
      // 0203: only this draw is skipped. Its bytes stay in the pending
      // geometry range, read by no draw (as with the range off); aborting the
      // pass here dropped every draw already recorded in it.
-@@ -2732,30 +2774,30 @@ void WebGPUGfx::DrawIndexed(u32 base_index, u32 num_indices, u32 base_vertex)
+@@ -2732,30 +2778,30 @@ void WebGPUGfx::DrawIndexed(u32 base_index, u32 num_indices, u32 base_vertex)
    {
      if (!SetRecordedPipeline(m_cur_pipeline_id))
      {

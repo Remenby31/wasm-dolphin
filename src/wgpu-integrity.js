@@ -75,7 +75,9 @@ export function skippedDrawCause(hasPass, hasPipeline, bindGroupsValid, needsVer
 // upload's role (BufferUploadRole). Context, not fatal: batchAborts already
 // is; they say which site to look at.
 export const ABORT_CAUSES = Object.freeze(["RequiredPublication", "Poisoned", "Explicit", "CommitRefused", "Oversize"]);
-export const GFX_ABORT_SITES = Object.freeze(["Scissor", "Viewport", "GeometryFlush", "PassPoisoned", "BeginPass", "PassState", "Pipeline", "Prepare", "BufferId", "SetBuffer", "PushDraw"]);
+// The renderer's sites, then a nested BeginPass (the command stream's): their
+// sum is abortExplicit (a poisoned pass counts under abortPoisoned only).
+export const GFX_ABORT_SITES = Object.freeze(["Scissor", "Viewport", "GeometryFlush", "PassPoisoned", "BeginPass", "PassState", "Pipeline", "Prepare", "BufferId", "SetBuffer", "PushDraw", "Nested"]);
 export const UPLOAD_ROLES = Object.freeze(["Unknown", "Ubo", "Utility", "Vertex", "Index", "TextureAdjacent", "Geometry"]);
 
 const listOf = (s, name) => {

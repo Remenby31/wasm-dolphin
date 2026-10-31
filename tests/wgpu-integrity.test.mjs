@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-import { coreIntegrityOf, createWgpuIntegrity, INTEGRITY_FATAL, MISSING_KEYS, SKIP, skippedDrawCause } from "../src/wgpu-integrity.js";
+import { coreIntegrityOf, createWgpuIntegrity, GFX_ABORT_SITES, INTEGRITY_FATAL, MISSING_KEYS, SKIP, skippedDrawCause } from "../src/wgpu-integrity.js";
 
 const worker = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
 
@@ -58,11 +58,16 @@ test("the core's own counters come from its state stats line, null for what an o
   // 0207: causes, renderer sites, draws skipped, failed uploads; null before 0207
   const old = coreIntegrityOf("wgdrop:0 wgbabort:2 wgboversize:0 wguploadto:0");
   for (const k of ["abortExplicit", "gfxAbortPrepare", "drawSkippedNoPipeline", "uploadAllocFailed", "uploadFailedUbo", "uploadTextureFailed"]) assert.equal(old[k], null, k);
-  const now = coreIntegrityOf("wgdrop:0 wgbabort:3 wgboversize:0 wguploadto:0 wgabortc:1,0,2,0,0 wggfxabort:0,0,0,0,0,0,0,2,0,0,0 wgdrawskip:5 wgupfail:0,0,1,0,0,0,0,0,0 wgubo:1");
+  const now = coreIntegrityOf("wgdrop:0 wgbabort:3 wgboversize:0 wguploadto:0 wgabortc:1,0,2,0,0 wggfxabort:0,0,0,0,0,0,0,1,0,0,0,1 wgdrawskip:5 wgupfail:0,0,1,0,0,0,0,0,0 wgubo:1");
   assert.equal(now.abortRequiredPublication, 1);
   assert.equal(now.abortExplicit, 2);
   assert.equal(now.abortOversize, 0);
-  assert.equal(now.gfxAbortPrepare, 2);
+  assert.equal(now.gfxAbortPrepare, 1);
+  assert.equal(now.gfxAbortNested, 1);
+  // the renderer's sites and the nested BeginPass sum to the explicit cause
+  assert.equal(GFX_ABORT_SITES.reduce((a, n) => a + now[`gfxAbort${n}`], 0), now.abortExplicit);
+  // a core with 0207's first version printed 11 sites: Nested unread
+  assert.equal(coreIntegrityOf("wggfxabort:0,0,0,0,0,0,0,2,0,0,0").gfxAbortNested, null);
   assert.equal(now.gfxAbortScissor, 0);
   assert.equal(now.drawSkippedNoPipeline, 5);
   assert.equal(now.uploadAllocFailed, 0);
