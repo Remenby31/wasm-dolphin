@@ -79,7 +79,7 @@ function createHarness() {
     wgpuGeometryRangeEnabled: false,
     softwareTevHotCaseMode: 0,
     applyWgpuTailGate: noop,
-    wgpuExactCapture: { onLoad: noop },
+    wgpuExactCapture: { onLoad: noop }, wgpuIntegrity: { stateLoad: noop },
     prioritizeAotAfterStateLoad: noop,
     webGpuUboCacheMode: () => 0,
     webGpuUboPackMode: () => 0,

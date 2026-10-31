@@ -622,7 +622,7 @@ index a1f6aa6..5c2a9e0 100644
  // 0204: the geometry content cache (?wgpugeomcache=1; mode bit 1 adds the
  // sampled byte comparison of hits, diagnostics only).
 diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.cpp b/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.cpp
-index b567fed..0407d2f 100644
+index b567fed..fea4533 100644
 --- a/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.cpp
 +++ b/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.cpp
 @@ -7,6 +7,8 @@
@@ -655,16 +655,23 @@ index b567fed..0407d2f 100644
  void VertexManager::DiscardPendingGeometryRange()
  {
    m_pending_geometry_range.bytes.clear();
-@@ -319,6 +335,8 @@ bool VertexManager::FlushPendingGeometryRange()
-       pending.buffer_id == 0 || pending.bytes.size() > kGeometryRangeMaxBytes ||
+@@ -315,10 +331,13 @@ bool VertexManager::FlushPendingGeometryRange()
+     return true;
+ 
+   WebGPUCommandStream& cs = GetCommandStream();
+-  if (!IsGeometryUploadRangeEnabled() || pending.epoch != GetGeometryUploadRangeEpoch() ||
+-      pending.buffer_id == 0 || pending.bytes.size() > kGeometryRangeMaxBytes ||
++  // Read once: the worker may move the epoch between two reads.
++  const bool epoch_moved = pending.epoch != GetGeometryUploadRangeEpoch();
++  if (!IsGeometryUploadRangeEnabled() || epoch_moved || pending.buffer_id == 0 ||
++      pending.bytes.size() > kGeometryRangeMaxBytes ||
        pending.bytes.size() > kGeometryRangeHardBytes)
    {
-+    CountRangeFailure(pending.epoch != GetGeometryUploadRangeEpoch() ? GeometryRangeFailure::Epoch :
-+                                                                       GeometryRangeFailure::Invalid);
++    CountRangeFailure(epoch_moved ? GeometryRangeFailure::Epoch : GeometryRangeFailure::Invalid);
      DiscardPendingGeometryRange();
      cs.FailRequiredPublication();
      return false;
-@@ -334,6 +352,7 @@ bool VertexManager::FlushPendingGeometryRange()
+@@ -334,6 +353,7 @@ bool VertexManager::FlushPendingGeometryRange()
        !cs.PushUploadBuffer(pending.buffer_id, pending.destination_start, source, size,
                             BufferUploadRole::Geometry))
    {
@@ -672,7 +679,7 @@ index b567fed..0407d2f 100644
      DiscardPendingGeometryRange();
      InvalidateGeometryUploadRange();
      InvalidateGeometryUploadPack();
-@@ -358,6 +377,7 @@ bool VertexManager::AppendPendingGeometryRange(u32 buffer_id, u32 destination_of
+@@ -358,6 +378,7 @@ bool VertexManager::AppendPendingGeometryRange(u32 buffer_id, u32 destination_of
        (vertex_bytes != 0 && vertices == nullptr) || (index_bytes != 0 && indices == nullptr) ||
        vertex_bytes > packet_bytes || index_bytes > packet_bytes - vertex_bytes)
    {
@@ -680,7 +687,7 @@ index b567fed..0407d2f 100644
      cs.FailRequiredPublication();
      return false;
    }
-@@ -365,6 +385,7 @@ bool VertexManager::AppendPendingGeometryRange(u32 buffer_id, u32 destination_of
+@@ -365,6 +386,7 @@ bool VertexManager::AppendPendingGeometryRange(u32 buffer_id, u32 destination_of
    PendingGeometryRange& pending = m_pending_geometry_range;
    if (!pending.bytes.empty() && pending.epoch != range_epoch)
    {
@@ -688,7 +695,7 @@ index b567fed..0407d2f 100644
      DiscardPendingGeometryRange();
      cs.FailRequiredPublication();
      return false;
-@@ -449,6 +470,7 @@ void VertexManager::CommitBuffer(u32 num_vertices, u32 vertex_stride, u32 num_in
+@@ -449,6 +471,7 @@ void VertexManager::CommitBuffer(u32 num_vertices, u32 vertex_stride, u32 num_in
      }
      if (discarded_pending_range)
      {
@@ -696,7 +703,7 @@ index b567fed..0407d2f 100644
        cs.FailRequiredPublication();
        return;
      }
-@@ -1528,10 +1550,13 @@ extern "C" EMSCRIPTEN_KEEPALIVE int RunWebGpuVertexManagerGeometryRangeSmoke()
+@@ -1528,10 +1551,13 @@ extern "C" EMSCRIPTEN_KEEPALIVE int RunWebGpuVertexManagerGeometryRangeSmoke()
                                  static_cast<u32>(std::size(indices)), &first_base_vertex,
                                  &first_base_index);
    WebGPUCommandStreamTestPeer::FailConsumer(stream, 0x52414E47u);
@@ -710,7 +717,7 @@ index b567fed..0407d2f 100644
  
    // Re-applying the geometry flags is the worker's save-load epoch seam. A
    // private range from the old state must disappear before a fresh buffer id
-@@ -1552,6 +1577,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE int RunWebGpuVertexManagerGeometryRangeSmoke()
+@@ -1552,6 +1578,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE int RunWebGpuVertexManagerGeometryRangeSmoke()
    if (pre_load_id == 0 || !load_manager.HasPendingGeometryRange())
      return FailVertexManagerSmoke(618, "save-load range fixture did not retain private bytes");
  
@@ -718,7 +725,7 @@ index b567fed..0407d2f 100644
    SetWebGpuGeometryPackEnabled(1);
    VertexManagerTestPeer::Seed(load_manager, vertices_b, sizeof(vertices_b), indices,
                                static_cast<u32>(std::size(indices)), stride);
-@@ -1562,6 +1588,8 @@ extern "C" EMSCRIPTEN_KEEPALIVE int RunWebGpuVertexManagerGeometryRangeSmoke()
+@@ -1562,6 +1589,8 @@ extern "C" EMSCRIPTEN_KEEPALIVE int RunWebGpuVertexManagerGeometryRangeSmoke()
        s_vertex_manager_smoke_fixture.header.write.load(std::memory_order_acquire) != pre_load_write ||
        stream.PushBeginPass(7, 0, 0, 0, 1, 1, 8))
      return FailVertexManagerSmoke(619, "save-load epoch retained or published old placement");

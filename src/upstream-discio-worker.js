@@ -1818,6 +1818,7 @@ async function loadStateFileNow(payload) {
   api?.setWebGpuGeometryPackEnabled?.(wgpuGeometryPackEnabled ? 1 : 0);
   api?.setWebGpuGeometryRangeEnabled?.(wgpuGeometryRangeEnabled ? 1 : 0);
   wgpuExactCapture.onLoad();
+  wgpuIntegrity.stateLoad();
   let rc = 0;
   ppcWasmJitTimingSuspensions += 1;
   try {
@@ -2220,6 +2221,7 @@ async function handleMessage(type, payload) {
       api?.setWebGpuGeometryRangeEnabled?.(wgpuGeometryRangeEnabled ? 1 : 0);
       let loaded = false;
       wgpuExactCapture.onLoad();
+      wgpuIntegrity.stateLoad();
       ppcWasmJitTimingSuspensions += 1;
       try {
         loaded = Boolean(api?.loadState(payload.slot | 0));

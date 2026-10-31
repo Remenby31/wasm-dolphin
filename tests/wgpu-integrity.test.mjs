@@ -42,8 +42,12 @@ test("counters: skips by cause, missing resources by kind, notes, and counters o
   assert.equal(s.uncapturedErrors + s.deviceLosses + s.replayFatal, 3);
   assert.equal(s.droppedRecords, 3);
   assert.ok(!("unknown-name" in s));
-  // every counter the module owns is fatal
-  for (const k of Object.keys(s)) assert.ok(INTEGRITY_FATAL.includes(k), k);
+  // every counter the module owns is fatal, but the loads it counts (context)
+  for (const k of Object.keys(s)) if (k !== "stateLoads") assert.ok(INTEGRITY_FATAL.includes(k), k);
+  assert.equal(s.stateLoads, 0);
+  integrity.stateLoad();
+  assert.equal(integrity.snapshot().stateLoads, 1);
+  assert.ok(!INTEGRITY_FATAL.includes("stateLoads"));
   for (const name of ["skipPipelineFailed", "skipNoPass", "missingColorTarget", "droppedRecords", "batchAborts", "batchOversize", "uploadTimeouts", "stagingUnsafe", "geometryCacheCollisions", "geometryCacheFailed"])
     assert.ok(INTEGRITY_FATAL.includes(name), name);
 });
@@ -81,8 +85,14 @@ test("the core's own counters come from its state stats line, null for what an o
   assert.equal(now.uploadFailedUbo, 1);
   assert.equal(now.uploadFailedGeometry, 0);
   assert.equal(now.uploadTextureFailed, 0);
-  for (const k of Object.keys(now)) if (k.startsWith("abort") || k.startsWith("gfxAbort") || k.startsWith("uploadFailed") || k === "drawSkippedNoPipeline" || k === "uploadAllocFailed" || k === "uploadTextureFailed")
-    assert.ok(!INTEGRITY_FATAL.includes(k), `${k}: detail, not fatal (batchAborts is)`);
+  // causes, sites and ranges lost to an epoch are detail (batchAborts is fatal);
+  // a failed upload or a range given up for another reason is fatal itself
+  for (const k of Object.keys(now)) {
+    if (k.startsWith("abort") || k.startsWith("gfxAbort") || k.startsWith("gfxPoison") || k === "drawSkippedNoPipeline" || k === "rangeFailEpoch")
+      assert.ok(!INTEGRITY_FATAL.includes(k), `${k}: detail, not fatal (batchAborts is)`);
+    if (k.startsWith("uploadFailed") || k === "uploadAllocFailed" || k === "uploadTextureFailed" || k === "rangeFailInvalid" || k === "rangeFailUpload")
+      assert.ok(INTEGRITY_FATAL.includes(k), `${k}: fatal`);
+  }
 });
 
 test("the worker counts every branch that abandons a draw or misses a resource", () => {
@@ -102,6 +112,8 @@ test("the worker counts every branch that abandons a draw or misses a resource",
   assert.match(worker, /if \(!loss\.handled\) return;\n\s+wgpuIntegrity\.note\("deviceLosses"\);/);
   assert.match(worker, /wgpuReplayFatal = \{ scope: String\(scope\), detail: String\(detail \|\| "unknown"\) \};\n\s+wgpuIntegrity\.note\("replayFatal"\);/);
   assert.match(worker, /case "validationReadIntegrity":\n\s+return readWgpuIntegrity\(\);/);
+  // both state-load paths count the load
+  assert.equal([...worker.matchAll(/wgpuExactCapture\.onLoad\(\);\n\s+wgpuIntegrity\.stateLoad\(\);/g)].length, 2);
   // always on: neither metrics=1 nor the harness hooks gate it
   const read = worker.slice(worker.indexOf("function readWgpuIntegrity()"), worker.indexOf("function harnessGeometryCacheStats()"));
   assert.ok(read.length > 0 && !/harnessEnabled|causalMetricsEnabled/.test(read));
