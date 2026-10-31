@@ -1015,3 +1015,20 @@ function isNonnegativeInteger(value) {
 function isPositiveInteger(value) {
   return Number.isSafeInteger(value) && value > 0;
 }
+
+// An upload larger than a staging slot cannot be staged: it goes through
+// queue.writeBuffer/writeTexture instead. The queue applies such a write when
+// called, ahead of every command buffer not yet submitted, so the batch staged
+// so far and the open encoder are submitted first: earlier uploads and draws
+// then run before the write, later ones after it. An open render pass cannot be
+// submitted, so there the upload is refused (the caller fails closed).
+// submitPending returns false when the submission failed; nothing is written.
+export function writeOversizeWgpuUpload({ inPass, submitPending, write } = {}) {
+  if (typeof submitPending !== "function" || typeof write !== "function") {
+    throw new TypeError("submitPending and write callbacks are required");
+  }
+  if (inPass) return false;
+  if (!submitPending()) return false;
+  write();
+  return true;
+}

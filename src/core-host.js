@@ -37,6 +37,8 @@ import {
   requestedWgpuMappedStageTimingStride,
   requestedWgpuMappedStagingSlotCount,
   defaultWgpuMappedStagingSlotCount,
+  requestedWgpuMappedStagingSlotMib,
+  defaultWgpuMappedStagingSlotMib,
   requestedWgpuUploadArenaMiB,
   defaultWgpuUploadTransport,
   requestedWgpuUploadTransport,
@@ -266,6 +268,10 @@ export class EmulatorHost {
     this.wgpuMappedStagingSlotCount = requestedWgpuMappedStagingSlotCount(
       window.location.search,
       defaultWgpuMappedStagingSlotCount(this.wasmEngine)
+    );
+    this.wgpuMappedStagingSlotMib = requestedWgpuMappedStagingSlotMib(
+      window.location.search,
+      defaultWgpuMappedStagingSlotMib(this.wasmEngine)
     );
     this.wgpuMappedStageFast = requestedWgpuMappedStageFast(window.location.search);
     this.wgpuMappedStageTimingStride = requestedWgpuMappedStageTimingStride(
@@ -597,6 +603,7 @@ export class EmulatorHost {
             wgpuUploadArenaMiB: this.wgpuUploadArenaMiB,
             wgpuUploadTransport: this.wgpuUploadTransport,
             wgpuMappedStagingSlotCount: this.wgpuMappedStagingSlotCount,
+            wgpuMappedStagingSlotMib: this.wgpuMappedStagingSlotMib,
             wgpuMappedStageFast: this.wgpuMappedStageFast,
             wgpuMappedStageTimingStride: this.wgpuMappedStageTimingStride,
             wgpuMappedDrainCoalescing: this.wgpuMappedDrainCoalescing,

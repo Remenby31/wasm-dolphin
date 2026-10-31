@@ -75,7 +75,7 @@ import {
   parseWindowsCpuAffinityMask,
 } from "./windows-process-affinity.mjs";
 import { describePrebuiltJitCache } from "./prebuilt-jit-cache-provenance.mjs";
-import { wgpuMappedStagingSlotCountOf } from "../src/wgpu-replay-diagnostics.js";
+import { wgpuMappedStagingSlotCountOf, wgpuMappedStagingSlotMibOf } from "../src/wgpu-replay-diagnostics.js";
 
 const root = process.cwd();
 const cli = parseArgs(process.argv.slice(2));
@@ -1414,6 +1414,17 @@ function summarizeScenario(
       );
     }
   }
+  const requestedMappedStagingSlotMib = scenario.params?.wgpustagingslotmib;
+  if (requestedMappedStagingSlotMib != null) {
+    const expectedSlotBytes = wgpuMappedStagingSlotMibOf(requestedMappedStagingSlotMib) * 1024 * 1024;
+    const activeSlotBytes = observedWgpu?.mappedStaging?.slotBytes;
+    if (activeSlotBytes !== expectedSlotBytes) {
+      failures.push(
+        `WGPU mapped staging slot-size mismatch: requested=${expectedSlotBytes} ` +
+        `active=${activeSlotBytes ?? "unavailable"}`
+      );
+    }
+  }
   if (requestedMappedStageFast != null) {
     const expectedMappedStageFast = String(requestedMappedStageFast) === "1";
     const activeMappedStageFast = observedWgpu?.mappedStagingFastPath;
@@ -1675,7 +1686,7 @@ function selectedScenarios() {
     fastsw: process.env.FASTSW || "1",
     metrics: process.env.METRICS || "1",
   };
-  for (const name of ["disable", "regalloc", "smearcompile", "blockmerge", "shortprefix", "fastmemhoist", "nogamepad", "nojitcache", "xfbfast", "gpucomplete", "inputlatency", "inputphoton", "inputphotonsize", "inputphotonx", "inputphotony", "audiotransport", "ppcprof", "wgpustatecache", "wgpuubocache", "wgpuubometrics", "wgpuuniformfast", "wgpupackageprojection", "wgpuuploadrunprojection", "wgpuubocomputeprojection", "wgpuubocompute", "wgpuownershiptrace", "wgpusemantic", "wgpuubopack", "wgpuubosparse", "wgpugeompack", "wgpugeomrange", "wgpuuploadmb", "wgpuuploadtransport", "wgpustagingslots", "wgpustagefast", "wgpumappedtiming", "wgpudraincoalesce", "wgpurenderprobe", "wgpudirtyranges", "wgpuprodprofile", "wgputailgate", "wgpudiagquiet", "wgpureplayms", "wgpupower", "swtevfast", "swtevshadow"]) {
+  for (const name of ["disable", "regalloc", "smearcompile", "blockmerge", "shortprefix", "fastmemhoist", "nogamepad", "nojitcache", "xfbfast", "gpucomplete", "inputlatency", "inputphoton", "inputphotonsize", "inputphotonx", "inputphotony", "audiotransport", "ppcprof", "wgpustatecache", "wgpuubocache", "wgpuubometrics", "wgpuuniformfast", "wgpupackageprojection", "wgpuuploadrunprojection", "wgpuubocomputeprojection", "wgpuubocompute", "wgpuownershiptrace", "wgpusemantic", "wgpuubopack", "wgpuubosparse", "wgpugeompack", "wgpugeomrange", "wgpuuploadmb", "wgpuuploadtransport", "wgpustagingslots", "wgpustagingslotmib", "wgpustagefast", "wgpumappedtiming", "wgpudraincoalesce", "wgpurenderprobe", "wgpudirtyranges", "wgpuprodprofile", "wgputailgate", "wgpudiagquiet", "wgpureplayms", "wgpupower", "swtevfast", "swtevshadow"]) {
     const envName = name.toUpperCase();
     if (process.env[envName] != null) softwareParams[name] = process.env[envName];
   }
