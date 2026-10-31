@@ -33,8 +33,7 @@ import {
   requestedWgpuStateCache,
   requestedWgpuGeometryPack,
   requestedWgpuGeometryRange,
-  defaultWgpuGeometryCacheMode,
-  requestedWgpuGeometryCacheMode,
+  wgpuGeometryCacheModeFor,
   requestedWgpuMappedStageTimingStride,
   requestedWgpuMappedStagingSlotCount,
   defaultWgpuMappedStagingSlotCount,
@@ -253,12 +252,12 @@ export class EmulatorHost {
     this.wgpuGeometryPack = requestedWgpuGeometryPack(window.location.search, true);
     this.wgpuGeometryRange =
       this.wgpuGeometryPack && requestedWgpuGeometryRange(window.location.search, true);
-    // The geometry content cache (0204, needs the pack): on by default under
-    // V8, ?wgpugeomcache=0|1|2 forces it.
-    // Not with ?wgpuloadfence=1: the fence drops uploads already published,
-    // the cache's included, and its entries would then name missing bytes.
-    this.wgpuGeometryCacheMode = this.wgpuGeometryPack && !this.wgpuLoadEpochFence
-      ? requestedWgpuGeometryCacheMode(window.location.search, defaultWgpuGeometryCacheMode(this.wasmEngine)) : 0;
+    // The geometry content cache (0204): on by default under V8,
+    // ?wgpugeomcache=0|1|2 forces it; needs the pack, never with the fence.
+    this.wgpuGeometryCacheMode = wgpuGeometryCacheModeFor({
+      search: window.location.search, engine: this.wasmEngine,
+      pack: this.wgpuGeometryPack, loadFence: this.wgpuLoadEpochFence
+    });
     this.wgpuUploadArenaMiB = requestedWgpuUploadArenaMiB(window.location.search);
     this.wgpuUploadTransport = requestedWgpuUploadTransport(
       window.location.search,

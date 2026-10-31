@@ -381,14 +381,22 @@ export function defaultWgpuGeometryCacheMode(engine) {
 }
 
 // ?wgpugeomcache=1 forces the cache on, =0 off, =2 on with the sampled byte
-// comparison of hits (diagnostics); else the engine's default. The core's
-// mode: bit 0 on, bit 1 the comparison.
+// comparison of hits (diagnostics); any other value, an empty one
+// (?wgpugeomcache=) included, keeps the engine's default. The core's mode:
+// bit 0 on, bit 1 the comparison.
 export function requestedWgpuGeometryCacheMode(
   search = globalThis.location?.search ?? "",
   fallback = 0
 ) {
   const value = new URLSearchParams(search).get("wgpugeomcache");
   return value === "1" ? 1 : value === "2" ? 3 : value === "0" ? 0 : fallback;
+}
+
+// The mode the page sends the worker: needs the pack, never with
+// ?wgpuloadfence=1 (the fence drops uploads already published, the cache's
+// included, and its entries would then name missing bytes).
+export function wgpuGeometryCacheModeFor({ search = "", engine, pack, loadFence }) {
+  return pack && !loadFence ? requestedWgpuGeometryCacheMode(search, defaultWgpuGeometryCacheMode(engine)) : 0;
 }
 
 export function requestedWgpuUploadArenaMiB(
