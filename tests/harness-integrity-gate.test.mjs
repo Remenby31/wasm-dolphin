@@ -172,3 +172,15 @@ test("race-perf reads liveness around the window and invalidates a frozen steady
   assert.match(race, /newFramesPerSec: \{ mean: newFramesRate\(infoStart, info\), /);
   assert.match(race, /const frozen = o\.phase === "steady" \? frozenReason\(c, \{ minFps: o\.frozenFps \}\) : null;\n\s+if \(frozen\) why\.push\(frozen\);/);
 });
+
+test("replay-gates: a hash per captured frame, and the slot path inside the integrity window", async () => {
+  const gates = await readFile(new URL("../harness/probes/replay-gates.mjs", import.meta.url), "utf8");
+  assert.match(gates, /sha256: createHash\("sha256"\)\.update\(f\.data\)\.digest\("hex"\)/);
+  assert.match(gates, /hashes: Object\.fromEntries\(Object\.entries\(frames\)\.map\(\(\[vi, f\]\) => \[vi, f\.sha256 \?\? null\]\)\)/);
+  assert.match(gates, /"slot-reload": \{ type: "boolean", default: false \}/);
+  // the slot load happens after the integrity window opened, before the captures
+  const start = gates.indexOf("const integrityStart = await readIntegrity(");
+  const slot = gates.indexOf('a.request("loadState", { slot: 1 })');
+  const capture = gates.indexOf("await captureAtVi(session.page");
+  assert.ok(start > 0 && start < slot && slot < capture);
+});

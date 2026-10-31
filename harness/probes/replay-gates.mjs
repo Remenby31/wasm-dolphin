@@ -17,9 +17,16 @@
 //     --query "<base query>" --extra "&wgpureplayms=0" [--runs 4 (visits per side, even)] [--vi 240,600]
 //     [--candidate <dir to serve>] [--lock-wait 14400]
 // One tree serves both sides (only --extra differs): no --baseline.
+// --slot-reload: after the file load, the state goes through the slot path
+// (save slot 1, load slot 1) and frames count from that load; the save runs
+// at a host-time moment, so its frames are compared within a run, not across
+// trees (its integrity is, the slot load inside the window).
+// visits.json keeps each captured frame's sha256 (hashes), so the frames of
+// two trees can be compared exactly from two runs.
 // Exit 1 when a visit failed, a side has no picture or no input reading, or
 // a visit's replay integrity broke (glitch-meter G2, lib/integrity.mjs).
 // Holds the perf lock (HARNESS_PERF_LOCK); a watchdog after it; always exits.
+import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync, existsSync } from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
@@ -32,7 +39,8 @@ import { acquirePerfLock } from "../lib/perf-lock.mjs";
 const { values: o } = parseArgs({ options: {
   iso: { type: "string" }, state: { type: "string" }, port: { type: "string" }, out: { type: "string" },
   query: { type: "string" }, extra: { type: "string" }, runs: { type: "string", default: "4" }, vi: { type: "string", default: "240,600" },
-  candidate: { type: "string" }, "lock-wait": { type: "string", default: "14400" }
+  candidate: { type: "string" }, "lock-wait": { type: "string", default: "14400" },
+  "slot-reload": { type: "boolean", default: false }
 }, strict: true });
 for (const k of ["iso", "state", "port", "out", "query", "extra"]) if (!o[k]) throw new Error(`--${k} is required`);
 if (existsSync(o.out)) throw new Error(`${o.out} exists`);
@@ -59,9 +67,25 @@ try {
       if (!loaded?.loaded) throw new Error(`savestate not loaded: ${JSON.stringify(loaded)}`);
       // glitch-meter G2: the replay's integrity from the load to the visit's end
       const integrityStart = await readIntegrity(session.page, { expected: integrityExpected });
+      // --slot-reload: the same state through the slot path (save to slot 1,
+      // load slot 1), the frames counted from that load and the slot load
+      // inside the integrity window (its frames depend on when the save ran:
+      // compare its integrity, not its pixels, across trees)
+      if (o["slot-reload"]) {
+        const slot = await session.page.evaluate(async () => {
+          const a = window.__host.adapter;
+          const saved = await a.request("saveState", { slot: 1 });
+          const loaded = await a.request("loadState", { slot: 1 });
+          return { saved: Boolean(saved?.saved), loaded: Boolean(loaded?.loaded) };
+        });
+        if (!slot.saved || !slot.loaded) throw new Error(`slot reload failed: ${JSON.stringify(slot)}`);
+        v.slotReload = slot;
+      }
       for (const index of VIS) {
         const f = await captureAtVi(session.page, { index, fromLoad: true, timeoutMs: 60000 });
-        v.frames[index] = f.error ? { error: f.error } : { width: f.width, height: f.height, b64: Buffer.from(f.data).toString("base64") };
+        v.frames[index] = f.error ? { error: f.error } : { width: f.width, height: f.height, b64: Buffer.from(f.data).toString("base64"),
+          // comparable across trees and runs: the same pixels, the same hash
+          sha256: createHash("sha256").update(f.data).digest("hex") };
       }
       await sleep(5000);
       for (const t0 = Date.now(); Date.now() - t0 < 24000;) {
@@ -124,7 +148,8 @@ for (const side of ["base", "candidate"]) {
 }
 mkdirSync(o.out, { recursive: true });
 writeFileSync(path.join(o.out, "summary.json"), JSON.stringify(summary, null, 1) + "\n");
-writeFileSync(path.join(o.out, "visits.json"), JSON.stringify(visits.map(({ frames, ...v }) => v), null, 1) + "\n");
+writeFileSync(path.join(o.out, "visits.json"), JSON.stringify(visits.map(({ frames, ...v }) => ({ ...v,
+  hashes: Object.fromEntries(Object.entries(frames).map(([vi, f]) => [vi, f.sha256 ?? null])) })), null, 1) + "\n");
 // a gate that measured nothing never passes
 // __causalTelemetry.input.visible is never null (without the tracker it is
 // {enabled: false, visibleCount: 0}): a visit counts only with presses seen
