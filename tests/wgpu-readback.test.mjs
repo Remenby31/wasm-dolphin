@@ -99,6 +99,19 @@ test("a copy lands in the heap in its own submission, then its seq is published"
   assert.equal(rb.stats.completed, 1);
 });
 
+// #386: the completion (texels written to the heap, seq published) runs
+// under the caller's busy clock, the worker's replayBusy.
+test("a completion runs inside the busy hook", async () => {
+  const runs = [];
+  const { device, words, rb } = setup({ busy: (fn) => { runs.push(Atomics.load(words, 0)); const r = fn(); runs.push(Atomics.load(words, 0)); return r; } });
+  const done = rb.issue(device.queue, copyOf(1));
+  await flush();
+  assert.deepEqual(runs, [], "not before the map");
+  device.created[0].land();
+  await done;
+  assert.deepEqual(runs, [0, 1], "published inside the hook");
+});
+
 // #125 review: an invalid copy used to map anyway and publish the pooled
 // buffer's old bytes as OK.
 test("a copy the device rejects is LOST and its buffer never read", async () => {

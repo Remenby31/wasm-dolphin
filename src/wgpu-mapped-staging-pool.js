@@ -98,6 +98,10 @@ export function createWgpuMappedStagingPool({
     remapFailures: 0,
     remapLatencyTotalMs: 0,
     remapLatencyMaxMs: 0,
+    // Time this worker spends in the remap callbacks themselves
+    // (getMappedRange: ~0.45 ms per mapped MiB on JSC), outside any drain:
+    // part of the replay worker's occupancy (replayBusy).
+    remapCallbackTotalMs: 0,
     remapLatencyHistogram: new Array(REMAP_LATENCY_BUCKET_BOUNDS_MS.length + 1).fill(0),
     invalidations: 0,
   };
@@ -630,7 +634,9 @@ export function createWgpuMappedStagingPool({
       metrics.remapsStarted += 1;
       return Promise.resolve(slot.buffer.mapAsync(mapMode)).then(() => {
         if (failed || slot.epoch !== generation || slot.state !== "remapping") return false;
+        const callbackStartedAt = now();
         slot.mappedBytes = new Uint8Array(slot.buffer.getMappedRange());
+        metrics.remapCallbackTotalMs += Math.max(0, now() - callbackStartedAt);
         slot.state = "mapped";
         metrics.remapsCompleted += 1;
         const latencyMs = Math.max(0, now() - remapStartedAt);
@@ -781,6 +787,8 @@ export function createWgpuMappedStagingPool({
     rejectSubmission,
     invalidate,
     snapshot,
+    /** Total ms spent in remap callbacks (cheap: no snapshot object). */
+    remapCallbackTotalMs: () => metrics.remapCallbackTotalMs,
   });
 }
 

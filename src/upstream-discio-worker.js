@@ -128,6 +128,7 @@ import { createWgpuSemanticRuntime } from "./wgpu-semantic-runtime.js";
 import { createWgpuFatalReporter, handleWgpuDeviceLoss, wgpuFatalPageReason } from "./wgpu-device-lifecycle.js";
 import { coreIntegrityOf, createWgpuIntegrity, SKIP, skippedDrawCause } from "./wgpu-integrity.js";
 import { createNewFrameCounter } from "./wgpu-new-frames.js";
+import { createBusyClock, createOccupancyMeter, readHeadroomStats } from "./occupancy-stats.js";
 import {
   attemptRetainedWgpuUpload,
   createWgpuMappedStagingPool,
@@ -731,6 +732,16 @@ let visualChangeFps = 0;
 const wgpuNewFrames = createNewFrameCounter();
 let newFramesPerSec = null;
 let newFramesProducedPerSec = null;
+// Occupancy per window (src/occupancy-stats.js): the CPU and GPU threads'
+// busy shares (0113 headroom counters, turned on once per core) and this
+// worker's (workerBusy: its product entry points, see the module); null
+// when unavailable.
+const occupancyMeter = createOccupancyMeter();
+const workerBusy = createBusyClock();
+let occupancyHeadroomModule = null; // the core the counters were turned on in
+let cpuThreadBusy = null;
+let gpuThreadBusy = null;
+let replayBusy = null;
 let visualFrameHash = 0;
 let lastVisualFrameHash = 0;
 let lastOglSwapCount = 0;
@@ -805,6 +816,8 @@ function readbackFor(device) {
     const module = moduleInstance;
     wgpuReadback = new WgpuReadback({
       device,
+      // completions timed for replayBusy
+      busy: (fn) => workerBusy.run(fn),
       heap: () => module.HEAPU8,
       words: () => new Int32Array(module.HEAPU8.buffer)
     });
@@ -1418,7 +1431,9 @@ function wgpuVisualCadenceSnapshot() {
   };
 }
 
-self.addEventListener("message", async (event) => {
+// Timed for replayBusy (its synchronous part: src/occupancy-stats.js).
+self.addEventListener("message", (event) => workerBusy.run(handleWorkerMessage, event));
+async function handleWorkerMessage(event) {
   const data = event.data ?? {};
   // Forward detachedOglFrame messages from Dolphin's GPU pthread to main.
   // The C++ Swap path posts the bitmap from whichever pthread owns the
@@ -1467,7 +1482,7 @@ self.addEventListener("message", async (event) => {
       )
     );
   }
-});
+}
 
 // Patch 0164: the video thread's blocking EFB copies to RAM (harness hooks
 // on): per kind, how long it waited and whether FIFO work was waiting behind.
@@ -3648,7 +3663,8 @@ function timeDiscReads(workerFs) {
   ops.read = function timedRead(stream, buffer, offset, length, position) {
     const startedAt = performance.now();
     try {
-      return read.call(this, stream, buffer, offset, length, position);
+      // a read served here is worker time too (replayBusy)
+      return workerBusy.run(() => read.call(this, stream, buffer, offset, length, position));
     } finally {
       const ms = performance.now() - startedAt;
       discReadService.reads += 1;
@@ -4893,6 +4909,10 @@ function resetPresentationBuffer() {
   wgpuNewFrames.reset();
   newFramesPerSec = null;
   newFramesProducedPerSec = null;
+  occupancyMeter.reset();
+  cpuThreadBusy = null;
+  gpuThreadBusy = null;
+  replayBusy = null;
   visualFrameHash = 0;
   lastVisualFrameHash = 0;
   lastOglSwapCount = 0;
@@ -5375,6 +5395,10 @@ function framePayload({ forceCausalTelemetry = false } = {}) {
     newFramesProducedPerSec,
     newFramesShown: wgpuNewFrames.shownTotal,
     framesOutOfOrder: wgpuNewFrames.outOfOrder,
+    // Shares of the last window, 0..1 or null (src/occupancy-stats.js).
+    cpuThreadBusy,
+    gpuThreadBusy,
+    replayBusy,
     visualChangeFps,
     visualFrameHash,
     visualSampleSource,
@@ -5804,7 +5828,11 @@ function pollInputStateFromSab() {
   }
 }
 
+// Every scheduler of the loop comes here: timed for replayBusy.
 function runPresentationLoop() {
+  return workerBusy.run(runPresentationLoopOnce);
+}
+function runPresentationLoopOnce() {
   const stages = {};
   try {
     loopsSincePresentationFps += 1;
@@ -6499,6 +6527,7 @@ function updatePresentationFps() {
     presentationWindowDropCount = presentationDropsSinceFps;
     visualChangeFps = Math.round((visualChangesSincePresentationFps * 1000) / profileElapsedMs);
     ({ newFramesPerSec, newFramesProducedPerSec } = wgpuNewFrames.window(profileElapsedMs));
+    ({ cpuThreadBusy, gpuThreadBusy, replayBusy } = occupancyMeter.window({ atMs: now, ...readOccupancyCounters() }));
     if (collectMetrics) {
       frameProfileStats = formatProfileWindow(profileElapsedMs);
       lastStructuredProfileWindow = stageWindowFromProfile(profileWindow, profileElapsedMs);
@@ -6518,6 +6547,47 @@ function updatePresentationFps() {
     lastPresentationFpsTime = now;
     checkBootStallWatchdog();
   }
+}
+
+// The counters behind cpuThreadBusy and replayBusy, read once per window.
+// Headroom (0113): off until DolphinWeb_HeadroomStats(n >= 0); turned on
+// once per core while it runs, unless already on (a harness window, never
+// reset under it); then read only (-1). Their cost is one timing per
+// throttle on the CPU thread and per pass with work on the GPU thread
+// (WasmHeadroom.h). Worker time: workerBusy (always on, two clock reads
+// per timed entry) plus the mapped staging pool's remap callbacks
+// (getMappedRange runs outside any drain; ~47 % of the worker on an iPhone).
+// The pool's remap callback time, cumulated across pools (a pool replaced
+// after a device loss or an invalidation keeps counting from the last total).
+let occupancyRemapPool = null;
+let occupancyRemapBaseMs = 0;
+function occupancyRemapMs() {
+  const pool = wgpuMappedStagingPool;
+  if (!pool?.remapCallbackTotalMs) return occupancyRemapBaseMs;
+  if (pool !== occupancyRemapPool) {
+    occupancyRemapBaseMs += occupancyRemapPool?.remapCallbackTotalMs?.() ?? 0;
+    occupancyRemapPool = pool;
+  }
+  return occupancyRemapBaseMs + pool.remapCallbackTotalMs();
+}
+
+function readOccupancyCounters() {
+  const m = moduleInstance;
+  const stats = m?._DolphinWeb_HeadroomStats;
+  let headroom = null;
+  if (typeof stats === "function" && m.HEAPU8 && coreBoot.accepted && api) {
+    headroom = readHeadroomStats(m.HEAPU8.buffer, stats(-1) >>> 0);
+    if (headroom?.on === false && occupancyHeadroomModule !== m) {
+      stats(0);
+      occupancyHeadroomModule = m;
+    }
+  }
+  // The worker's busy time: its timed entry points (workerBusy) and the
+  // pool's remap callbacks (promise callbacks: never inside a timed entry).
+  const busyMs = webGpuCmdRing && renderGpu && !wgpuReplayFatal
+    ? workerBusy.totalMs() + occupancyRemapMs()
+    : null;
+  return { headroom, busyMs };
 }
 
 function checkBootStallWatchdog() {
@@ -9113,7 +9183,14 @@ export function precompileDolphinJitModule(key, input) {
   return outcome;
 }
 
-async function handleDolphinJitCompileRequest(event) {
+// The CPU thread's JIT messages: their synchronous part timed for
+// replayBusy; other pthread messages pass untimed.
+function handleDolphinJitCompileRequest(event) {
+  const type = event.data?.type;
+  if (type !== "dolphin-jit-compile-request" && type !== "dolphin-jit-warm-state") return undefined;
+  return workerBusy.run(handleDolphinJitCompileRequestOnce, event);
+}
+async function handleDolphinJitCompileRequestOnce(event) {
   const data = event.data;
   if (data?.type === "dolphin-jit-warm-state") {
     if (data.state instanceof Uint8Array && dolphinAotCompilerEnabled) getDolphinAotCompiler().setWarmState(data);
@@ -9186,7 +9263,11 @@ let dolphinJitNewCompileCount = 0;
 const dolphinJitPersistedOnly = new Set();
 let dolphinJitCompilePending = 0;
 const dolphinJitVerificationPending = new Set();
-async function handleDolphinJitNewCompile(event) {
+function handleDolphinJitNewCompile(event) {
+  if (event.data?.type !== "dolphin-jit-new-compile") return undefined;
+  return workerBusy.run(handleDolphinJitNewCompileOnce, event);
+}
+async function handleDolphinJitNewCompileOnce(event) {
   const data = event.data;
   if (!data || data.type !== "dolphin-jit-new-compile") return;
   if (!data.hash || !data.bytes) return;
@@ -10122,7 +10203,9 @@ function publishWgpuReadIndex(ring, readIndex) {
 
 function startWgpuReplayPump() {
   if (!wgpuReplayPumpEnabled || wgpuReplayPumpTimer !== null) return;
-  const pump = () => {
+  // Timed for replayBusy (timer and parker wake-ups alike).
+  const pump = () => workerBusy.run(pumpOnce);
+  const pumpOnce = () => {
     wgpuReplayPumpTimer = null;
     if (!wgpuReplayPumpEnabled || !webGpuCmdRing) return;
     if (wgpuReplayPumpDueAt > 0) {
@@ -13580,7 +13663,11 @@ function wgpuVsyncFallbackCheck() {
 // (after the catch-up, in takeForDisplay). True when a frame was shown.
 // `t`, `refreshMs`: the BeginFrame's time and the screen's period, for the
 // game pace (none outside a BeginFrame: the newest frame, the pace restarts).
-function presentWgpuVsyncFrame({ newest = false, hidden = false, t = null, refreshMs = null } = {}) {
+// The rAF tick and the fallback timer come here: timed for replayBusy.
+function presentWgpuVsyncFrame(options) {
+  return workerBusy.run(presentWgpuVsyncFrameOnce, options);
+}
+function presentWgpuVsyncFrameOnce({ newest = false, hidden = false, t = null, refreshMs = null } = {}) {
   if (!renderGpu) {
     wgpuVsync.clear();
     wgpuGamePacer.reset({ arrival: true });
@@ -13719,7 +13806,12 @@ function resetWgpuBackbufferForBoot() {
   wgpuBackbufferSized = false;
 }
 
+// Whoever drains (loop, pump, a promise callback): timed for replayBusy,
+// once when nested.
 function drainWebGpuCmdRing(source = "presentation") {
+  return workerBusy.run(drainWebGpuCmdRingOnce, source);
+}
+function drainWebGpuCmdRingOnce(source = "presentation") {
   if (wgpuReplayFatal) return;
   if (wgpuDiagPerturb.drainEveryMs > 0) {
     const now = performance.now();

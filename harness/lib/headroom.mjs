@@ -8,7 +8,13 @@
 //   headroom    = min(maxSpeedCpu, maxSpeedGpu)
 // The counters come from the core (patch 0113, DolphinWeb_HeadroomStats),
 // reset just before the window and read just after; the guest seconds from
-// the core ticks read at the same two moments.
+// the core ticks read at the same two moments. Since #386 the product turns
+// them on once the core runs and only reads them afterwards (deltas, never
+// a reset: src/occupancy-stats.js): "on" no longer proves this harness
+// reset them, so every reader resets (n >= 0) at the window's start. The
+// reset applies at the CPU thread's next Throttle (within one VI) whether or
+// not the counters were on, and the GPU thread zeroes its own at its next
+// pass; "counters not on" now means a core where nothing turned them on.
 // Layout v1 (96 bytes, little-endian): u32 version, sizeBytes, on, reserved;
 // f64 windowUs (host time since the reset), cpuSleepUs (throttle sleep of
 // the CPU thread), gpuWorkUs (GPU-thread passes that ran the FIFO or pulled
