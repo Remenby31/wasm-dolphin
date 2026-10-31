@@ -1362,7 +1362,7 @@ test("post-load input metadata hashes the canonical script before provenance che
     inputScript,
     sceneLabel: FIXED_BATTLE_FIXTURE.sceneLabel,
     artifactDescriptions: {
-      rom: { sha256: FIXED_BATTLE_FIXTURE.isoSha256 },
+      rom: { sha256: "2".repeat(64) },
       core: { sha256: "1".repeat(64) },
       saveState: { sha256: FIXED_BATTLE_FIXTURE.saveStateSha256 },
     },
@@ -2540,7 +2540,7 @@ function validManifest() {
       inputScriptMode: "none",
     },
     artifacts: {
-      rom: { sha256: FIXED_BATTLE_FIXTURE.isoSha256 },
+      rom: { sha256: "2".repeat(64) },
       core: { sha256: "1".repeat(64) },
       saveState: { sha256: FIXED_BATTLE_FIXTURE.saveStateSha256 },
     },
@@ -2624,4 +2624,15 @@ test("the worker's WGPU runtime config names the engine whose defaults applied",
   const worker = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
   const payload = worker.slice(worker.indexOf("function wgpuRuntimeConfigPayload()"));
   assert.match(payload.slice(0, 800), /schema: "wasm-dolphin\.wgpu-runtime-config\.v1",[\s\S]*?wasmEngine: wasmEngineName,/);
+});
+
+test("the reference disc hash comes from the environment or an untracked config, never the tree", async () => {
+  const { referenceIsoSha256, requireReferenceIsoSha256 } = await import("../tools/perf-artifacts.mjs");
+  const h = "a".repeat(64);
+  assert.equal(referenceIsoSha256({}), null);
+  assert.equal(referenceIsoSha256({ REFERENCE_ISO_SHA256: h.toUpperCase() }), h);
+  assert.equal(referenceIsoSha256({ REFERENCE_FIXTURE: "/x/ref.json" }, () => JSON.stringify({ isoSha256: h })), h);
+  assert.throws(() => referenceIsoSha256({ REFERENCE_FIXTURE: "/x/ref.json" }, () => "{}"), /no isoSha256/);
+  assert.throws(() => referenceIsoSha256({ REFERENCE_FIXTURE: "/x/missing.json" }, () => { throw new Error("ENOENT"); }), /ENOENT/);
+  assert.throws(() => requireReferenceIsoSha256({}), /not configured/);
 });

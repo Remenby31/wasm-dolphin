@@ -21,7 +21,7 @@
   },
   "fixture": {
     "scene": "fixed reference battle",
-    "isoSha256": "1018b65a58ca654056be1611a43e753de5dd5f842ce5266581b29c6a12ce7c67",
+    "isoSha256": "<reference disc SHA-256, not tracked>",
     "saveStateSha256": "620879e2ed3c35248deba9fb2f7b2a39f91f5374d2f6a98d2a2455cb55e156d1",
     "coreWasmSha256": "3af23a252929edb6a714c1ad4a856dc50921aa93eef7a5b921431ebebfd1301a",
     "inputScript": "none",

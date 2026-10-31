@@ -65,7 +65,7 @@ runs rather than treating one counter as ground truth.
 | Timed-run harness commit | `4f60ddcbff3dce8ee5271623b6b078dacadc5cf6` |
 | Later presenter/WGPU harness commit | `562a7a031213ac1042a161b010a4544254455009` |
 | Core artifact | 12,800,707 bytes, SHA-256 `03df79d2eb4be6c1e05d58d79ad4ab9590a9407c19fa5ae70e088401f424af3f` |
-| Game | Reference fighting game, NTSC-U Rev 2 NKit ISO, SHA-256 `1018b65a58ca654056be1611a43e753de5dd5f842ce5266581b29c6a12ce7c67` |
+| Game | Reference fighting game, NTSC-U Rev 2 NKit ISO, SHA-256 `<reference disc SHA-256, not tracked>` |
 | Scene | Direct load into visually confirmed reference battle |
 | Save state | 21,170,115 bytes, SHA-256 `620879e2ed3c35248deba9fb2f7b2a39f91f5374d2f6a98d2a2455cb55e156d1` |
 | Input | None after load; SHA-256 of script is the empty-input hash `e3b0c442…b855` |

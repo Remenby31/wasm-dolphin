@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { createReadStream } from "node:fs";
+import { createReadStream, readFileSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -129,9 +129,37 @@ export function evaluateWgpuRuntimeConfigEvidence({
   return { required: true, runtimeConfig: runtimeConfig ?? null, failures };
 }
 
+// The reference disc's SHA-256 is not in the tree: a commercial disc's hash
+// identifies it. It comes from REFERENCE_ISO_SHA256, or from the isoSha256
+// field of the JSON file named by REFERENCE_FIXTURE (an untracked local
+// config, e.g. ~/salon-bench/ref.json). Null when neither is set.
+export function referenceIsoSha256(env = process.env, read = (file) => readFileSync(file, "utf8")) {
+  const direct = String(env.REFERENCE_ISO_SHA256 ?? "").trim().toLowerCase();
+  if (/^[0-9a-f]{64}$/.test(direct)) return direct;
+  if (!env.REFERENCE_FIXTURE) return null;
+  let config;
+  try {
+    config = JSON.parse(read(env.REFERENCE_FIXTURE));
+  } catch (error) {
+    throw new Error(`REFERENCE_FIXTURE ${env.REFERENCE_FIXTURE}: ${error.message}`);
+  }
+  const hash = String(config?.isoSha256 ?? "").trim().toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(hash)) throw new Error(`REFERENCE_FIXTURE ${env.REFERENCE_FIXTURE}: no isoSha256 (64 hex digits)`);
+  return hash;
+}
+
+// The same, required: a run that verifies the reference disc stops here,
+// before any browser, when the expected hash is not configured.
+export function requireReferenceIsoSha256(env = process.env, read) {
+  const hash = referenceIsoSha256(env, read);
+  if (!hash) {
+    throw new Error("reference disc SHA-256 not configured: set REFERENCE_ISO_SHA256, or REFERENCE_FIXTURE to a JSON file with isoSha256");
+  }
+  return hash;
+}
+
 export const FIXED_BATTLE_FIXTURE = Object.freeze({
   sceneLabel: "fixed reference battle",
-  isoSha256: "1018b65a58ca654056be1611a43e753de5dd5f842ce5266581b29c6a12ce7c67",
   saveStateSha256: "620879e2ed3c35248deba9fb2f7b2a39f91f5374d2f6a98d2a2455cb55e156d1",
 });
 
