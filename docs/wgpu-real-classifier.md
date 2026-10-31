@@ -43,7 +43,7 @@ Event storage and missing-resource ID samples are capped. Counters continue to
 increase after those caps, so the payload remains useful without producing
 shader dumps or an unbounded log. A `loadStateFile` request resets the payload
 to scope `load-state-file`, preventing boot activity from being mistaken for
-evidence about the loaded Kirby/Link scene. New payloads also carry a monotonic
+evidence about the loaded reference-battle scene. New payloads also carry a monotonic
 classifier generation. Header word 3 is exposed as `uploadReadIndex` telemetry
 but this JS diagnostic does not advance it; the producer/consumer upload-lifetime
 protocol must own that release point.
@@ -185,7 +185,7 @@ not current status.
 
 ## Validation discipline
 
-Use the version-matched Kirby/Link battle save state and repeat the same headed
+Use the version-matched reference battle save state and repeat the same headed
 Chrome run. Preserve the raw JSON, URL, repository commit, core artifact hash,
 browser/GPU identity, scene, and duration. Do not infer a rendering or
 performance improvement from the classifier alone; compare canvas hashes,

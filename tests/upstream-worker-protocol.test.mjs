@@ -17,10 +17,10 @@ import {
 } from "../src/upstream-worker-protocol.js";
 
 test("upstream worker sanitizes disc names for WORKERFS paths", () => {
-  assert.equal(sanitizeDiscFileName("Super Smash Bros. Melee.iso"), "Super Smash Bros. Melee.iso");
-  assert.equal(sanitizeDiscFileName("../GALE01.gcm"), ".._GALE01.gcm");
+  assert.equal(sanitizeDiscFileName("Smoke Test Disc.iso"), "Smoke Test Disc.iso");
+  assert.equal(sanitizeDiscFileName("../GXXE01.gcm"), ".._GXXE01.gcm");
   assert.equal(sanitizeDiscFileName(""), "disc.iso");
-  assert.equal(workerFsDiscPath("GALE01.gcm"), "/workerfs/GALE01.gcm");
+  assert.equal(workerFsDiscPath("GXXE01.gcm"), "/workerfs/GXXE01.gcm");
 });
 
 test("upstream core selection is content-addressed and defaults to the pinned baseline", () => {

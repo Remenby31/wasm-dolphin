@@ -24,7 +24,7 @@ unknown is retired and proven on real Dolphin shaders:
   (D31). Naga staticlib `tools/naga-spirv-wgsl/` (Rust).
 
 `?video=webgpu` (Day-16 Software→WGSL-presenter hybrid) is UNTOUCHED
-and still plays Melee — that is the shipping fallback; never break it.
+and still plays the reference game — that is the shipping fallback; never break it.
 `?video=wgpu` is the under-construction real backend (currently shows
 the bridge test pipeline/draw, not game content).
 
@@ -147,7 +147,7 @@ rasteriser. Keep `?video=webgpu` hybrid intact.
 A probe must show, in `console.log`: real Dolphin geometry on the
 canvas screenshot (not the test triangle, not the SW hybrid output),
 `?video=wgpu`, with the SW delegation off (Phase C) — and
-`?video=webgpu` still plays Melee. Capture screenshots; the user
+`?video=webgpu` still plays the reference game. Capture screenshots; the user
 wants a fresh cache-busted `http://127.0.0.1:8081/?...&cb=<ms>` link
 to verify themselves after any build.
 

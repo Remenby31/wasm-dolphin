@@ -129,13 +129,13 @@ export function evaluateWgpuRuntimeConfigEvidence({
   return { required: true, runtimeConfig: runtimeConfig ?? null, failures };
 }
 
-export const FIXED_MELEE_BATTLE_FIXTURE = Object.freeze({
-  sceneLabel: "Melee Kirby vs Link fixed battle",
+export const FIXED_BATTLE_FIXTURE = Object.freeze({
+  sceneLabel: "fixed reference battle",
   isoSha256: "1018b65a58ca654056be1611a43e753de5dd5f842ce5266581b29c6a12ce7c67",
   saveStateSha256: "620879e2ed3c35248deba9fb2f7b2a39f91f5374d2f6a98d2a2455cb55e156d1",
 });
 
-export const FIXED_MELEE_BATTLE_CHECKPOINT = Object.freeze({
+export const FIXED_BATTLE_CHECKPOINT = Object.freeze({
   // Recorded from the paused, exact-state checkpoint. The harness pauses the
   // core before State::LoadAs so these values are tied to save bytes rather
   // than wall-clock delay after loading. Restored in-slice bookkeeping can
@@ -154,23 +154,23 @@ export const FIXED_MELEE_BATTLE_CHECKPOINT = Object.freeze({
   minLoadedCheckpointGeneration: 1,
 });
 
-const FIXED_MELEE_SOFTWARE_XFB_HASH_BY_FASTSW = Object.freeze({
+const FIXED_SOFTWARE_XFB_HASH_BY_FASTSW = Object.freeze({
   0: "55dc4398",
-  1: FIXED_MELEE_BATTLE_CHECKPOINT.xfbHash,
+  1: FIXED_BATTLE_CHECKPOINT.xfbHash,
 });
 
-const FIXED_MELEE_WGPU_XFB_HASH = "6fd97dc5";
+const FIXED_WGPU_XFB_HASH = "6fd97dc5";
 
 export function expectedBattleCheckpointForParams(params = {}) {
   const video = String(params.video || "software").toLowerCase();
   const fastsw = Number.parseInt(String(params.fastsw ?? "1"), 10);
-  let xfbHash = FIXED_MELEE_BATTLE_CHECKPOINT.xfbHash;
+  let xfbHash = FIXED_BATTLE_CHECKPOINT.xfbHash;
   if (video === "software") {
-    xfbHash = FIXED_MELEE_SOFTWARE_XFB_HASH_BY_FASTSW[fastsw] ?? xfbHash;
+    xfbHash = FIXED_SOFTWARE_XFB_HASH_BY_FASTSW[fastsw] ?? xfbHash;
   } else if (video === "wgpu") {
-    xfbHash = FIXED_MELEE_WGPU_XFB_HASH;
+    xfbHash = FIXED_WGPU_XFB_HASH;
   }
-  return { ...FIXED_MELEE_BATTLE_CHECKPOINT, xfbHash };
+  return { ...FIXED_BATTLE_CHECKPOINT, xfbHash };
 }
 
 export const HOST_CORE_ABI_VERSION = 1;
@@ -1014,7 +1014,7 @@ export function parseBattleCheckpoint(framePayload) {
   };
 }
 
-export function assertBattleCheckpoint(checkpoint, expected = FIXED_MELEE_BATTLE_CHECKPOINT) {
+export function assertBattleCheckpoint(checkpoint, expected = FIXED_BATTLE_CHECKPOINT) {
   const required = ["frame", "coreTicks", "ppcPc", "xfbHash", "width", "height"];
   const missing = required.filter((field) => checkpoint?.[field] === null || checkpoint?.[field] === undefined || checkpoint?.[field] === "");
   if (missing.length) throw new Error(`Battle/XFB checkpoint is incomplete: ${missing.join(", ")}`);

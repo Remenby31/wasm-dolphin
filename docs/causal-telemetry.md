@@ -78,7 +78,7 @@ The worker reads a generation-stable snapshot and publishes
 CPU-thread capture and retains `legacyCoreTicks` and `legacyPpcPc` for
 diagnosis. Older artifacts do not expose these functions; their generation is
 zero and validation retains the legacy behavior. Do not loosen the fixed
-Kirby-vs-Link checkpoint to hide a worker-thread tick discrepancy.
+reference-battle checkpoint to hide a worker-thread tick discrepancy.
 
 The current `a239ee47…` core and ABI manifest include these exports. Any future
 source-only change still requires a rebuild and ABI/provenance refresh before

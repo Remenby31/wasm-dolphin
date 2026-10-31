@@ -7,7 +7,7 @@
   "minimumEffectPercent": 0,
   "hypothesis": "Sampled producer phase profiling adds less than 2% fixed-work throughput overhead while preserving equivalent emulated work.",
   "invalidationRules": [
-    "use the verified Kirby-vs-Link fixed battle with SAVE_STATE_AT=0 and no gameplay input",
+    "use the verified reference-battle fixed battle with SAVE_STATE_AT=0 and no gameplay input",
     "both arms require metrics=1 and the same core, save state, browser, presenter, JIT, staging, and renderer settings",
     "the profiled arm must report the fixed v1 producer-profile schema, phase order, positive periods, stable epoch, and monotonic counters",
     "each ABBA/BAAB block must remain below 2% throughput regression",

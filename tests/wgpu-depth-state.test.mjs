@@ -10,7 +10,7 @@ import { gxClearDepthToStored, gxDepthState } from "../src/wgpu-depth-state.js";
 const worker = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
 
 test("a GX draw with the Z compare off never writes depth", () => {
-  // Mario Kart: Double Dash!! draws its sky first with test=0, update=1. GX
+  // A racing game draws its sky first with test=0, update=1. GX
   // ignores the update; WebGPU's "always" compare would still write.
   assert.deepEqual(gxDepthState(0, 1, "less-equal"),
     { depthWriteEnabled: false, depthCompare: "always" });

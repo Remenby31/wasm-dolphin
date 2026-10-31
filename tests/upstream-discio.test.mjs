@@ -27,8 +27,8 @@ test("upstream Dolphin DiscIO bridge mounts a GameCube disc header", async (t) =
   module.FS.mkdir("/games");
 
   const header = new Uint8Array(0x3000);
-  header.set(new TextEncoder().encode("GALE01"), 0);
-  header.set(new TextEncoder().encode("Super Smash Bros. Melee"), 0x20);
+  header.set(new TextEncoder().encode("GXXE01"), 0);
+  header.set(new TextEncoder().encode("Smoke Test Disc"), 0x20);
   header.set([0xc2, 0x33, 0x9f, 0x3d], 0x1c);
   header.set([0x00, 0x00, 0x00, 0x01], 0x458);
   header.set(new TextEncoder().encode("2026/05/05"), 0x2440);
@@ -51,9 +51,9 @@ test("upstream Dolphin DiscIO bridge mounts a GameCube disc header", async (t) =
   writeU32BE(header, 0x2814, 4);
   header.set(new TextEncoder().encode("opening.bnr"), 0x2818);
   header.set(new TextEncoder().encode("BNR1"), 0x2900);
-  module.FS.writeFile("/games/melee.gcm", header);
+  module.FS.writeFile("/games/smoke.gcm", header);
 
-  const mounted = module.ccall("MountDisc", "number", ["string"], ["/games/melee.gcm"]);
+  const mounted = module.ccall("MountDisc", "number", ["string"], ["/games/smoke.gcm"]);
   const getGameId = module.cwrap("GetGameId", "string", []);
   const getGameTitle = module.cwrap("GetGameTitle", "string", []);
   const getPlatform = module.cwrap("GetPlatform", "string", []);
@@ -75,8 +75,8 @@ test("upstream Dolphin DiscIO bridge mounts a GameCube disc header", async (t) =
   const frameBuffer = module.cwrap("FrameBuffer", "number", []);
 
   assert.equal(mounted, 1);
-  assert.equal(getGameId(), "GALE01");
-  assert.equal(getGameTitle(), "Super Smash Bros. Melee");
+  assert.equal(getGameId(), "GXXE01");
+  assert.equal(getGameTitle(), "Smoke Test Disc");
   assert.equal(getPlatform(), "GameCube");
   assert.equal(getApploaderDate(), "2026/05/05");
   assert.equal(getApploaderSize(), 0x50);
@@ -94,7 +94,7 @@ test("upstream Dolphin DiscIO bridge mounts a GameCube disc header", async (t) =
   const pointer = module._malloc(6);
   try {
     assert.equal(readDisc(0, 6, pointer), 6);
-    assert.equal(new TextDecoder().decode(module.HEAPU8.subarray(pointer, pointer + 6)), "GALE01");
+    assert.equal(new TextDecoder().decode(module.HEAPU8.subarray(pointer, pointer + 6)), "GXXE01");
     assert.equal(readDiscFile("opening.bnr", 0, 4, pointer), 4);
     assert.equal(new TextDecoder().decode(module.HEAPU8.subarray(pointer, pointer + 4)), "BNR1");
   } finally {

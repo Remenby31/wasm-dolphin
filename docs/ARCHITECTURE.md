@@ -139,7 +139,7 @@ lock as necessary but not sufficient.
 
 ## Test harnesses
 
-- `tools/menu-progress-validate.mjs` — depth. Drives Melee through a scripted
+- `tools/menu-progress-validate.mjs` — depth. Drives the reference game through a scripted
   route, samples HUD and canvas, captures screenshots and save-state round-trips.
 - `tools/boot-matrix.mjs` — breadth. Boots every disc in a library for a fixed
   window and classifies each. Verdicts are `mount-fail` / `black` / `stalled` /
@@ -183,7 +183,7 @@ measurement taken in a worktree.
 
 Learned the expensive way, and worth keeping:
 
-- **A single run is not evidence for an intermittent failure.** Animal Crossing
+- **A single run is not evidence for an intermittent failure.** A life-sim game
   renders 5/6 runs on one branch and 0/6 on another. Three consecutive good runs
   were once reported as "fixed"; it was not.
 - **Speed is scene-dependent.** The window average and the steady-state tail
@@ -194,15 +194,15 @@ Learned the expensive way, and worth keeping:
 - **Know what a counter counts.** The HUD's `prim/draw` badge is primitives
   over draw calls, both counted at submission. It was read for months as
   "submitted vs landed" and used as evidence that draws were being dropped. It
-  reads 136/379 on a correct Wario World frame and 124/380 on a broken one.
+  reads 136/379 on a correct frame of an action platformer and 124/380 on a broken one.
 - **Check the title that could falsify you, not the one that shows the win.**
   A scissored-clear change was reported as working after being checked only on
-  Mario Kart Wii, whose frame was already broken, so "less broken" read as
-  "fixed". A 45-disc sweep then found it had dropped Wario World from a
+  a Wii racing game, whose frame was already broken, so "less broken" read as
+  "fixed". A 45-disc sweep then found it had dropped the action platformer from a
   detailed throne room at 60 fps to a near-black frame. The same mistake -- a
-  frame rate measured on a menu with no 3D content -- shipped a wrong per-game
-  renderer default earlier the same day.
-- **Two long-standing "renderer" problems were tooling.** The ~50% Melee mount
+  frame rate measured on a menu with no 3D content -- shipped a wrong renderer
+  default earlier the same day.
+- **Two long-standing "renderer" problems were tooling.** The ~50% fighting-game mount
   flakiness (issue #10) was both harnesses classifying the optional JIT-cache
   prewarm status as a fatal mount failure, because its text contains "failed";
   whether a run died depended on whether the 1 Hz poll landed in that window.

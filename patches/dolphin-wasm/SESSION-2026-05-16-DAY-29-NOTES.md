@@ -76,7 +76,7 @@ owns the canvas.
 
 ## State
 
-No regression: `?video=webgpu` hybrid ships Melee unchanged.
+No regression: `?video=webgpu` hybrid ships the reference game unchanged.
 `?video=wgpu`: Software content visible (race above) + real shader
 modules & a real render pipeline built/drawn on the device in the
 background. WIP toward the single big GPU-pipeline commit;

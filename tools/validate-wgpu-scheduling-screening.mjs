@@ -257,7 +257,7 @@ function validateFixture({ manifest, issue }) {
   check(fixture.isoVerified === true && fixture.saveStateVerified === true,
     "FIXTURE_UNVERIFIED", "ISO or save-state hash was not verified", issue);
   check(fixture.saveStateLoaded === true && fixture.battleCheckpoint?.verified === true,
-    "CHECKPOINT_UNVERIFIED", "Kirby-vs-Link save checkpoint was not verified", issue);
+    "CHECKPOINT_UNVERIFIED", "reference-battle save checkpoint was not verified", issue);
   check(manifest.benchmark?.timingStartsAfterVerifiedLoad === true,
     "TIMING_BOUNDARY", "Timing did not begin after verified load", issue);
   check(manifest.benchmark?.inputScriptMode === "post-load-only" &&

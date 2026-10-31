@@ -91,7 +91,7 @@ sourceContractTest("the scissored clear is a renderer capability that defaults O
 
   // Default ON. This is the property that matters: a launch that never calls
   // the setter must still emit ClearRect. If the default ever loses this bit,
-  // Mario Kart Wii silently goes back to a patchwork frame.
+  // a Wii racing game silently goes back to a patchwork frame.
   const dflt = /DOLPHIN_WEB_RENDERER_FEATURE_DEFAULT\s*=\s*([^;]+);/.exec(source);
   assert.ok(dflt, "the default renderer feature mask is not declared");
   assert.match(
@@ -232,7 +232,7 @@ test("a core without the capability still gets ClearRect via the legacy bit", { 
   const worker = await read(workerUrl);
 
   // Host and core version independently. A stale cached core, or a
-  // half-finished rebuild, must not silently mean a black Mario Kart Wii.
+  // half-finished rebuild, must not silently mean a black Wii racing game.
   assert.match(
     worker,
     /const LEGACY_DISABLE_BIT_CLEARRECT_ENABLE = 1 << 24;/,

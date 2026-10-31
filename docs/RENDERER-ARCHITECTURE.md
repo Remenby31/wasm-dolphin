@@ -148,7 +148,7 @@ what clear-to-0.0 plus a flipped compare assumes. A viewport arriving with
 near < far is what reverse-Z looks like *after* that transform, not evidence
 against it.
 
-The measured consequence of inverting it: Mario Kart Wii's world sits at
+The measured consequence of inverting it: a Wii racing game's world sits at
 `z(0.00,0.84)` and its HUD at `z(0.89,0.99)`, so the HUD is nearer. Under the
 "corrected" convention the world occludes the HUD and the pause menu and
 controller overlay disappear from the frame entirely. Restoring the original
@@ -163,7 +163,7 @@ depth ranges which WebGPU cannot express -- was falsified by measurement on
 
 `vpDiagNoteDraw` in the consumer tallies, per draw, the viewport depth range as
 the producer sent it (read *before* the `mn > mx` swap) together with the
-pipeline's depth compare. Mario Kart Wii, `video=wgpu presenter=webgpu`, dumped
+pipeline's depth compare. The Wii racing game, `video=wgpu presenter=webgpu`, dumped
 every 500 presents. A representative in-race frame (present #4000, 764 draws):
 
 ```
@@ -210,10 +210,10 @@ precisely the reported "2D correct, 3D wrong" split. The clear value 0.0 also
 sits outside every observed range except the world band's near edge.
 
 Switching to `GX_NATIVE_DEPTH` (clear 1.0, compare unflipped) visibly changes
-Mario Kart Wii output from washed-out flat regions to saturated textured
-terrain, and leaves Mario Kart: Double Dash rendering correctly (it renders
+the Wii racing game's output from washed-out flat regions to saturated textured
+terrain, and leaves a GameCube racing game rendering correctly (it renders
 correctly under *both* conventions, so it does not discriminate). **It is not a
-complete fix**: MKW still shows large rectangular bands with a hard vertical
+complete fix**: the Wii racing game still shows large rectangular bands with a hard vertical
 seam and an apparently over-zoomed camera, under both conventions. That
 remaining defect is geometry/viewport, not depth.
 
@@ -275,7 +275,7 @@ and compensates globally, in two places that have no upstream counterpart:
 
 **This is a single global convention applied to every draw in every pass.** It
 is correct only if every draw in the frame actually uses the reversed range.
-The `?framecap` trace of one Mario Kart Wii frame shows the opposite: a single
+The `?framecap` trace of one Wii racing game frame shows the opposite: a single
 `BEGINPASS fb#14 (EFB 640x528)` containing roughly 540 draws that mix 3D world
 geometry with 2D HUD. The HUD draws use the identity range and mostly disable
 depth testing, so the flip does not touch them -- they render correctly. The 3D
@@ -306,7 +306,7 @@ It did blank the frame when first added, for two reasons, both since fixed:
    path writes `dcv = 0.0` for the reverse-Z convention in 3.1, so every later
    draw failed the depth test;
 2. the clear triangle is a draw, so its depth was remapped by whatever viewport
-   the game had bound. Mario Kart Wii clears while its HUD viewport
+   the game had bound. The Wii racing game clears while its HUD viewport
    `z(0.89, 0.99)` is active, which wrote 0.89 across the EFB -- nearer than the
    whole world band `z(0.00, 0.84)` -- and rejected every world fragment. It now
    draws through a full-pass `[0, 1]` viewport and restores the game's.
@@ -368,7 +368,7 @@ depth remap in the vertex shader ourselves, which is the same idea without
 upstream's help.
 
 Cheap falsification first, before any of that: log the viewport depth range per
-draw for one MKW frame (`vpDiagNoteDraw`, tallied over the `?framecap=N` frame).
+draw for one Wii racing game frame (`vpDiagNoteDraw`, tallied over the `?framecap=N` frame).
 If a single pass contains both inverted and normal ranges, the diagnosis holds.
 If every draw reports the same range, it does not and this section is wrong.
 

@@ -29,7 +29,7 @@ sourceContractTest("correlated timing retains coherent VI throttle and DVD compl
       ),
       readFile(
         new URL(
-          "../docs/perf-results/melee-core-timing-phase-attribution-template.md",
+          "../docs/perf-results/core-timing-phase-attribution-template.md",
           import.meta.url
         ),
         "utf8"

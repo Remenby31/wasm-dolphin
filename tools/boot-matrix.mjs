@@ -1,6 +1,6 @@
 // Multi-game boot-compatibility matrix.
 //
-// menu-progress-validate.mjs is a deep, Melee-specific route validator. This is
+// menu-progress-validate.mjs is a deep route validator for one reference game. This is
 // the breadth counterpart: point it at a disc library and it boots every
 // supported image in turn, samples the HUD, and classifies each one. The goal
 // is a compatibility table, not a perf measurement — so runs are short and the

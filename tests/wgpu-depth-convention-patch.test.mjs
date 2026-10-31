@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 // SOURCE-CONTRACT test over patch 0068 and the Naga bridge. It cannot render;
-// the visual evidence (Mario Kart: Double Dash!! race and attract demo against
+// the visual evidence (a racing game's race and attract demo against
 // the software renderer) is in the PR. It pins the two decisions that make
 // that evidence hold, so a later patch cannot quietly undo them:
 //

@@ -21,11 +21,11 @@ applied all 60 locked patches and reproduced result tree
 
 ### The comparison problem, and how it was removed
 
-Earlier MKWii comparisons were unsound because the two renderers advance at
+Earlier comparisons on a Wii racing game ("the Wii racer" below) were unsound because the two renderers advance at
 different speeds, so screenshots taken at the same wall-clock second are
 different game screens. Two changes fix that:
 
-- both paths load the same deterministic save state (`__mkw-race.sav`,
+- both paths load the same deterministic save state (`__race.sav`,
   `SAVE_STATE_AT=0`), so they start from an identical machine state;
 - `INPUT_SCRIPT=none` removes the wall-clock-keyed input, which otherwise
   reaches the two paths at different emulated frames;
@@ -40,7 +40,7 @@ the pause camera has not moved.
 | build | renderer | emulated frame | what the canvas shows |
 | --- | --- | ---: | --- |
 | `main` | wgpu | 1413 | patchwork: a black band, a brown blur, one strip of track, hard rectangular seams, no world |
-| this branch | wgpu | 1381 | course, road, red/white barriers, grass, trees, sky, Luigi Circuit signage, Mario's kart, pause overlay |
+| this branch | wgpu | 1381 | course, road, red/white barriers, grass, trees, sky, course signage, the player's kart, pause overlay |
 | this branch | software | 1398 | the same scene, same colours, same placement |
 
 The hardware frame is also stable rather than merely non-black: the inner
@@ -53,7 +53,7 @@ the "Continue Game" selection glow, which is animation, not instability.
 
 Driven from boot on `video=wgpu&presenter=webgpu`, the vehicle-select menu --
 structurally the screen #16 filed, a large 3D model at left over 2D chrome
-with model thumbnails in panes -- renders Mario and his kart in full colour,
+with model thumbnails in panes -- renders the driver and kart in full colour,
 and the kart preview panes render red and cream karts with visible wheels and
 shading. Not silhouettes.
 
@@ -61,7 +61,7 @@ The blue-and-white checker blocks in those menus are the game's checkered-flag
 motif, not transparency: the software path draws the same blocks on its own
 menus.
 
-### Melee regression: none
+### Fighting-game regression: none
 
 Same fixture (`__battle.sav`, `INPUT_SCRIPT=none`, 45 s, `JITWARMUP=700`,
 `FORCEJIT=1`), `video=wgpu&presenter=webgpu`, A/B against a pristine `main`
@@ -72,17 +72,17 @@ tree served from a second port:
 | `main` | 47.03% | 46 | 28.27 |
 | this branch | 47.81% | 46 | 28.86 |
 
-Kirby vs Link on Great Bay renders correctly on both: water, rock faces,
+The fixed reference battle renders correctly on both: water, rock faces,
 character models, damage percentages, timer.
 
 ### What this does not establish
 
-Mario Kart Wii still averages ~44% game speed on the hardware path against
-~100% on software for the same state, so `RMCE01` stays on `software` in
-`src/game-profiles.js` -- now on performance grounds rather than the
-correctness grounds recorded before.
+The Wii racer still averages ~44% game speed on the hardware path against
+~100% on software for the same state, so software remains the better path for
+it -- now on performance grounds rather than the correctness grounds recorded
+before.
 
-The software path crops its own output on some Mario Kart Wii screens (menu
+The software path crops its own output on some of the Wii racer's screens (menu
 dialogs run off the right edge, and the pause overlay is drawn oversized).
 That is a software-path presentation fault, unrelated to this work, and it is
 why the software reference is used to check colour and content rather than
@@ -98,7 +98,7 @@ Three additional renderer defects are fixed:
   Sampling views expose the chain; framebuffer views select one mip/layer.
   Sampled texture copies now normalize source rectangles using the selected
   mip's dimensions. This follows the [WebGPU texture/view contract](https://www.w3.org/TR/webgpu/#textures).
-  Earlier Sunshine, Wario World, Twilight Princess and Star Fox logs contain
+  Earlier logs from the 3D platformer, the action platformer and two other titles contain
   `MipLevel (1) is greater than the number of mip levels (1)` errors.
 - **A clear could miss its rectangle.** The depth-range fix below preserved
   the game's viewport rectangle. A clear outside that viewport consequently
@@ -107,7 +107,7 @@ Three additional renderer defects are fixed:
   redundant-call fast path still applies when all six viewport values already
   match. The earlier claim that retaining the viewport rectangle was enough
   is superseded by this measured coverage failure.
-- **Alpha-only clears were dropped.** Mario Kart Wii's trace contains
+- **Alpha-only clears were dropped.** The Wii racer's trace contains
   128x128 and 608x456 clears with RGB and depth disabled but alpha enabled.
   The producer recorded no enabled channels. ClearRect now carries separate
   RGB, alpha and depth enables; mixed RGB/alpha clears use the draw path even
@@ -123,15 +123,15 @@ The expanded GPU check verifies ten clear cases, including alpha-only
 preserving RGB/depth, RGB-only preserving alpha/depth, depth-only preserving
 RGBA, combined clears and legacy records. All 64 pixels are checked per case.
 
-RETRACTED 2026-09-09. Sunshine's file-select background is still white. It
+RETRACTED 2026-09-09. The 3D platformer's file-select background is still white. It
 was re-checked on this build and on 97a7409 (which has every diagnostic this
 claim was made with), booting from disc and from
-`__sunshine-file-select.sav`: white in all four. The archived sweep frames
-this claim cites, `canvas-t024.png` and `canvas-t041.png` of
-`2026-09-07T03-52-17-254Z/41-super-mario-sunshine-usa`, also show a white
+a file-select save state: white in all four. The archived sweep frames
+this claim cites, `canvas-t024.png` and `canvas-t041.png` of that title's
+directory in the `2026-09-07T03-52-17-254Z` sweep, also show a white
 background -- so the screenshots did not support it when it was written. The
 speed numbers below stand; the beach does not.
-Mario Kart Wii's saved race retained two opaque copied-texture rectangles
+The Wii racer's saved race retained two opaque copied-texture rectangles
 after those two fixes. Independent alpha clears removed them: the final
 scene shows the road, grass, barriers, kart and pause overlay together, matching
 the software reference's scene content. A final trace confirms the 608x456
@@ -141,9 +141,8 @@ changes were confined to intercepted browser responses and are not shipped.
 
 Local evidence: `.omx/render-fix/gpu-mip-smoke.{mjs,json}`,
 `.omx/render-fix/clear-coverage-smoke.{mjs,json}`,
-`.omx/render-fix/sunshine-clear-coverage/`, and
-`.omx/render-fix/mkw-clear-coverage/` (before alpha repair), and
-`.omx/render-fix/mkw-alpha-final/` (after). Tests execute the actual consumer code
+and per-title clear-coverage directories under `.omx/render-fix/` (before
+and after the alpha repair). Tests execute the actual consumer code
 and fail against the previous implementation.
 
 The rebuilt core and ABI hash pin are updated. Snapshot patch 0058 carries
@@ -157,10 +156,9 @@ the saved-state harness also waits for app readiness before uploading a ROM.
 Final verification: `npm run check`, all 858 tests, and
 `npm run verify:provenance` pass. The active browser core hash matches the
 rebuilt artifact (`38808e3affc23dfada3fe2d3492e6fa94980916a24c95e24d9cdcc0c6997619c`),
-with `WebGPU-Real` active and no fallback. Sunshine and Wario World boot
-checks also pass on that final build; screenshots are in
-`.omx/render-fix/sunshine-alpha-final/` and
-`.omx/render-fix/wario-alpha-final/`. This follow-up verified those scenes,
+with `WebGPU-Real` active and no fallback. Boot checks of the 3D platformer
+and the action platformer also pass on that final build; screenshots are under
+`.omx/render-fix/`. This follow-up verified those scenes,
 not a new full-library compatibility sweep.
 
 ## Status: the main defect is fixed
@@ -179,7 +177,7 @@ it mattered. Fixed by judging on core fps instead. Boot counts before that date
 are also suspect: both harnesses read the optional JIT-cache prewarm status as a
 fatal mount failure, producing phantom `mount-fail` verdicts (see issue #10).
 
-Current baseline, `video=wgpu`, 46 discs (Wario World extracted from its zip),
+Current baseline, `video=wgpu`, 46 discs (one extracted from its zip),
 2026-09-07, after the ClearRect viewport fix, `JITWARMUP=60`:
 
 | | value |
@@ -189,67 +187,67 @@ Current baseline, `video=wgpu`, 46 discs (Wario World extracted from its zip),
 | titles at >=80% | 23 |
 
 Report: `.omx/boot-matrix/2026-09-07T03-52-17-254Z/results.md`. The five
-statics: Animal Crossing x2 (issue #11), SoulCalibur 2 Plus and One Piece
-Grand Adventure (both parked on a memory-card dialog, rendering correctly),
-and Sonic Adventure DX (black through its intro, renders its attract scene at
-30s, and the 45s window ends on a later blank transition -- the Naruto/Paper
-Mario pattern, checked three ways below). The two blacks are Resident Evil
-Code: Veronica X and GoldenEye Rogue Agent disc 2, which dies with a worker
-error at frame 105. Screenshot-verified in this sweep: Kirby Air Ride's race
-is in full colour with green grass. (This paragraph also claimed Super Mario
-Sunshine's beach background renders behind the file select. It does not --
-see the retraction above.)
+statics: two discs of a life-sim game (issue #11), a weapon-based fighting
+game and an arena brawler (both parked on a memory-card dialog, rendering
+correctly), and a 3D action game (black through its intro, renders its attract
+scene at 30s, and the 45s window ends on a later blank transition -- the same
+mid-FMV pattern as two titles under "Not bugs", checked three ways below). The
+two blacks are a survival-horror game and disc 2 of a shooter, which dies with
+a worker error at frame 105. Screenshot-verified in this sweep: the air-racing
+game's race is in full colour with green grass. (This paragraph also claimed
+the 3D platformer's beach background renders behind the file select. It does
+not -- see the retraction above.)
 
 Per title, same sweep (hashes = distinct canvas frames in 45s):
 
 | game | verdict | hashes | speed % |
 | --- | --- | ---: | ---: |
-| Animal Crossing (USA, Canada) | static | 3 | 100 |
-| Animal Crossing (USA) | static | 6 | 9 |
-| F-Zero GX (USA) | boots | 39 | 100 |
-| GoldenEye - Rogue Agent (USA) (Disc 2) | black | 1 | 0 |
-| Kirby Air Ride (USA) | boots | 41 | 100 |
-| Legend of Zelda, The - Collector's Edition (USA, Canada) | boots | 38 | 72.5 |
-| Legend of Zelda, The - Four Swords Adventures (USA) | boots | 18 | 100 |
-| Legend of Zelda, The - Ocarina of Time & Master Quest (USA, Canada) | boots | 12 | 100 |
-| Legend of Zelda, The - The Wind Waker (USA, Canada) | boots | 45 | 100 |
-| Legend of Zelda, The - Twilight Princess (USA) | boots | 38 | 100 |
-| Luigi's Mansion (USA, Canada) | boots | 44 | 68.5 |
-| Luigi's Mansion (USA) | boots | 40 | 67.5 |
-| Mario Kart - Double Dash!! (USA) | boots | 30 | 100 |
-| Mario Kart Double Dash (USA) | boots | 40 | 99 |
-| Metal Gear Solid - The Twin Snakes (USA) (Disc 1) | boots | 26 | 37 |
-| Metroid Prime (USA) (Rev 2) | boots | 34 | 36 |
-| Metroid Prime 2 - Echoes (USA, Canada) (Bonus Disc) | boots | 35 | 97 |
-| Naruto - Clash of Ninja 2 (USA) | boots | 27 | 44 |
-| Paper Mario - The Thousand-Year Door (USA) | boots | 20 | 36 |
-| Pikmin (USA) (Rev 1) | boots | 43 | 99 |
-| Pikmin 2 (USA) | boots | 41 | 53 |
-| Pikmin 2 | boots | 34 | 48.5 |
-| Pokemon Box - Ruby & Sapphire (USA) (Rev 1) | boots | 45 | 100 |
-| Pokemon Channel (USA) | boots | 42 | 45 |
-| Pokemon Colosseum (USA) | boots | 28 | 34 |
-| Pokemon XD - Gale of Darkness (USA) | boots | 31 | 36 |
-| Resident Evil - Code - Veronica X (USA) (Disc 1) | black | 5 | 40 |
-| Resident Evil (USA) (Disc 1) | boots | 13 | 100 |
-| Resident Evil 2 (USA) | boots | 18 | 100 |
-| Resident Evil 3 - Nemesis (USA) | boots | 17 | 100 |
-| Resident Evil Zero (USA) (Disc 1) | boots | 20 | 37 |
-| Resident Evil Zero (USA) (Disc 2) | boots | 21 | 37 |
-| Shadow the Hedgehog (USA) (En,Ja,Fr,De,Es,It) | boots | 24 | 37 |
-| Shonen Jump's One Piece - Grand Adventure (USA) | static | 1 | 100 |
-| Sonic Adventure 2 - Battle (USA) (En,Ja,Fr,De,Es) | boots | 27 | 39 |
-| Sonic Adventure DX - Director's Cut (USA) (En,Ja,Fr,De,Es) | static | 7 | 100 |
-| Sonic Heroes (USA) (En,Ja,Fr,De,Es,It) | boots | 42 | 45 |
-| SoulCalibur 2 Plus Gamecube version 0.9.9.7 | static | 10 | 63 |
-| Soulcalibur II (USA) | boots | 10 | 60 |
-| Star Fox Adventures (USA) (Rev 1) | boots | 42 | 28.5 |
-| Super Mario Sunshine (USA) | boots | 25 | 80 |
-| Super Monkey Ball Deluxe [GM2EDX] | boots | 19 | 100 |
-| Super Smash Bros. Melee (USA) (En,Ja) (Rev 2) | boots | 42 | 100 |
-| Super Smash Bros. Melee (USA) (En,Ja) (v1.02) | boots | 41 | 97 |
-| Wario World (USA) | boots | 45 | 100 |
-| Yu-Gi-Oh! The Falsebound Kingdom (USA) | boots | 20 | 100 |
+| life sim, disc A | static | 3 | 100 |
+| life sim, disc B | static | 6 | 9 |
+| futuristic racer | boots | 39 | 100 |
+| shooter (disc 2) | black | 1 | 0 |
+| air-racing game | boots | 41 | 100 |
+| compilation disc | boots | 38 | 72.5 |
+| action-adventure A | boots | 18 | 100 |
+| action-adventure B | boots | 12 | 100 |
+| action-adventure C | boots | 45 | 100 |
+| action-adventure D | boots | 38 | 100 |
+| adventure game, disc A | boots | 44 | 68.5 |
+| adventure game, disc B | boots | 40 | 67.5 |
+| GameCube kart racer, disc A | boots | 30 | 100 |
+| GameCube kart racer, disc B | boots | 40 | 99 |
+| stealth action (disc 1) | boots | 26 | 37 |
+| first-person adventure | boots | 34 | 36 |
+| first-person adventure bonus disc | boots | 35 | 97 |
+| arena fighter | boots | 27 | 44 |
+| RPG A | boots | 20 | 36 |
+| strategy game A | boots | 43 | 99 |
+| strategy game B, disc A | boots | 41 | 53 |
+| strategy game B, disc B | boots | 34 | 48.5 |
+| utility title | boots | 45 | 100 |
+| simulation title | boots | 42 | 45 |
+| RPG B | boots | 28 | 34 |
+| RPG C | boots | 31 | 36 |
+| survival horror A (disc 1) | black | 5 | 40 |
+| survival horror B (disc 1) | boots | 13 | 100 |
+| survival horror C | boots | 18 | 100 |
+| survival horror D | boots | 17 | 100 |
+| survival horror E (disc 1) | boots | 20 | 37 |
+| survival horror E (disc 2) | boots | 21 | 37 |
+| action game A | boots | 24 | 37 |
+| arena brawler | static | 1 | 100 |
+| action game B | boots | 27 | 39 |
+| 3D action game | static | 7 | 100 |
+| action game C | boots | 42 | 45 |
+| weapon fighter, modified build | static | 10 | 63 |
+| weapon fighter | boots | 10 | 60 |
+| action-adventure E | boots | 42 | 28.5 |
+| 3D platformer | boots | 25 | 80 |
+| ball-rolling game | boots | 19 | 100 |
+| fighting game, rev A | boots | 42 | 100 |
+| fighting game, rev B | boots | 41 | 97 |
+| action platformer | boots | 45 | 100 |
+| card strategy game | boots | 20 | 100 |
 
 Previous baseline, 45 discs, before the viewport fix:
 
@@ -260,18 +258,19 @@ Previous baseline, 45 discs, before the viewport fix:
 | titles at >=80% | 17 |
 | mean unique visual fps | 28.4 |
 
-Verified by eye at full speed: Melee (99.5%, character select), Wario World
-(100%, throne room), F-Zero GX (99%). Speed is genuinely per-title, not
+Verified by eye at full speed: the fighting game (99.5%, character select),
+the action platformer (100%, throne room), the futuristic racer (99%). Speed is genuinely per-title, not
 measurement drift -- mean by sweep position is 69/42/46/54/74%, with no trend.
 
 Previous figures, kept for comparison: mean unique visual fps 7.1 software vs
 23.2 hardware, 32 of 45 higher on hardware, 43 vs 41 boots.
 
 Eight titles hold a locked 60 unique fps at ~100% game speed, each
-screenshot-verified: F-Zero GX (8 -> 60 fps, 23% -> 101% speed), Wario World,
-Mario Kart Double Dash, Kirby Air Ride, Pikmin 2, Melee (Rev 2), Pokemon Box.
+screenshot-verified, among them the futuristic racer (8 -> 60 fps, 23% -> 101%
+speed), the action platformer, the GameCube kart racer, the air-racing game
+and the fighting game.
 
-F-Zero GX is the clearest case for the hardware path existing at all: it was
+The futuristic racer is the clearest case for the hardware path existing at all: it was
 the software rasterizer's worst result in the library and is now among the
 best.
 
@@ -279,30 +278,30 @@ best.
 
 | game | verdict | note |
 | --- | --- | --- |
-| Animal Crossing (RVZ + NKit) | static | issue #11, fails on BOTH backends |
-| Resident Evil Code: Veronica X | black | unchanged, uninvestigated |
-| Soulcalibur II | static | **not a defect** - parked on its autosave dialog, rendering correctly |
-| Super Mario Sunshine | boots | file-select background still white; the 2026-09-07 "fixed" claim was retracted 2026-09-09 (see above). Boots and runs at ~100% speed |
+| life sim (RVZ + NKit) | static | issue #11, fails on BOTH backends |
+| survival horror | black | unchanged, uninvestigated |
+| weapon fighter | static | **not a defect** - parked on its autosave dialog, rendering correctly |
+| 3D platformer | boots | file-select background still white; the 2026-09-07 "fixed" claim was retracted 2026-09-09 (see above). Boots and runs at ~100% speed |
 
-Sunshine proved at least one more frame-destroying path existed; it was the
-ClearRect depth going through the viewport, the same defect as Mario Kart
-Wii's black world. Of the three
+The 3D platformer proved at least one more frame-destroying path existed; it
+was the ClearRect depth going through the viewport, the same defect as the Wii
+racer's black world. Of the three
 hypotheses previously "measured away", the first was wrong -- see below.
 
 1. **`target_rc` partial clears. NOT falsified; the original reasoning was too
    broad.** The old argument was that the EFB is 640x528 while games clear to
-   448 high, so every clear is already partial and Wario World issues 7,800 of
+   448 high, so every clear is already partial and the action platformer issues 7,800 of
    them and renders correctly. That holds only for a game with ONE viewport,
    where over-clearing empty rows costs nothing. Instrumenting `ClearRegion`
-   (patch 0055, `WGPUDEEPDIAG=1`) shows Mario Kart Wii issuing clears of
+   (patch 0055, `WGPUDEEPDIAG=1`) shows the Wii racer issuing clears of
    128x128 at (0,0), 256x256 at (176,100), 192x96 at (208,180) and 32x32 at
    (0,456) -- small rects at non-zero offsets, each of which currently wipes
    the whole 640x528 EFB. The game sets a matching scissor on most of them.
    The defect is real (issue #17).
 
    Routing partial clears to VideoCommon's scissored-quad fallback was tried
-   and reverted: it ends and restarts a render pass per clear, and Wario
-   World's ~7,800 clears a frame drop it to a near-black frame at 2.0 visual
+   and reverted: it ends and restarts a render pass per clear, and the action
+   platformer's ~7,800 clears a frame drop it to a near-black frame at 2.0 visual
    fps. A working fix needs a clear that does not tear down the pass.
 
    **Fixed and ON by default (2026-09-06). Opt out with `?wgpuclearrect=0`;
@@ -316,25 +315,25 @@ hypotheses previously "measured away", the first was wrong -- see below.
    1.0 nothing passes the depth test, so every draw after a depth-clearing
    `ClearRect` was rejected. It now uses the same value the `loadOp` path uses.
 
-   With it enabled, Double Dash renders a full correct 3D scene and Mario Kart
-   Wii renders its 2D overlay exactly as on the default path -- where before it
-   produced an entirely black frame. (Mario Kart Wii's 3D world stayed black
+   With it enabled, the GameCube kart racer renders a full correct 3D scene and
+   the Wii racer renders its 2D overlay exactly as on the default path -- where
+   before it produced an entirely black frame. (The Wii racer's 3D world stayed black
    for one more reason, found and fixed on 2026-09-06: the clear triangle's
    depth was going through the game's viewport depth range. See the root-cause
-   section under the Mario Kart Wii heading below.)
+   section under the Wii racer heading below.)
 
    Five-title A/B, 60-70s each, `video=wgpu presenter=webgpu`, clear path off
    then on:
 
    | title | off | on |
    | --- | --- | --- |
-   | Wario World | 70 hashes, 100%, 60.0 fps | 70 hashes, 100%, 60.0 fps |
-   | Melee | 47 hashes, 100% | 41 hashes, 101% |
-   | Double Dash | 56 hashes, 100% | 54 hashes, 100% |
-   | F-Zero GX | 54 hashes, 100% | 55 hashes, 100% |
-   | Pikmin 2 | 24 hashes, 46% | 24 hashes, 47% |
+   | action platformer | 70 hashes, 100%, 60.0 fps | 70 hashes, 100%, 60.0 fps |
+   | fighting game | 47 hashes, 100% | 41 hashes, 101% |
+   | GameCube kart racer | 56 hashes, 100% | 54 hashes, 100% |
+   | futuristic racer | 54 hashes, 100% | 55 hashes, 100% |
+   | strategy game | 24 hashes, 46% | 24 hashes, 47% |
 
-   No regression anywhere. Wario World matters most: it is the title the
+   No regression anywhere. The action platformer matters most: it is the title the
    earlier scissored-quad rewrite dropped to 2.0 visual fps, it issues ~7,800
    clears a frame, and it is untouched at a full 60. Hash counts move within
    scene-timing noise and speeds are unchanged.
@@ -345,32 +344,32 @@ hypotheses previously "measured away", the first was wrong -- see below.
    the log before reading a zero as a result.
 
    The cost of not enabling it is now quantified: the EFB pass is begun 16
-   times in one Mario Kart Wii frame with 4 whole-attachment clears, and only
+   times in one Wii racer frame with 4 whole-attachment clears, and only
    142 of 390 EFB draws land after the last one. **64% of the frame's geometry
    is destroyed by clears that should not be touching it.**
 
    Enabling it costs a little speed rather than gaining any. On the
-   deterministic save states, default-on versus forced-off: Double Dash 28% vs
-   32%, Mario Kart Wii 43% vs 45% -- 4 and 2 points lower, the price of a
+   deterministic save states, default-on versus forced-off: the GameCube kart
+   racer 28% vs 32%, the Wii racer 43% vs 45% -- 4 and 2 points lower, the price of a
    scissored draw per clear instead of a free `loadOp`. The five-title sweep
    above showed no change because those runs are menus and attract modes rather
    than loaded races. Correctness was chosen over the few points; the opt-out
    restores the old behaviour exactly.
 2. **The XFB copy is taken too early.** Falsified. The EFB passes before each
    copy use `loadOp=load`, so content accumulates ACROSS the backbuffer
-   present. Re-aligning a frame as the span between XFB copies, Sunshine's
+   present. Re-aligning a frame as the span between XFB copies, the 3D platformer's
    copy captures ~196 draws including its largest batch. The backbuffer
    present is not the GX frame boundary; draw counts split across it look
    discarded and are not.
 3. **The renderer cannot draw the scene.** Falsified. `DIAG_EFB_TO_CANVAS`
    (JS-only, no rebuild) blits the EFB straight to the canvas and shows
-   Sunshine's complete file-select screen -- beach, palm tree, ocean,
-   seagulls, Mario, file boxes, OPTIONS sign.
+   the 3D platformer's complete file-select screen -- beach, palm tree, ocean,
+   seagulls, the player character, file boxes, OPTIONS sign.
 
 What remains is downstream of the copy: the **XFB blit source rect** (XFB#47
 is a 2560x1024 atlas and the backbuffer is 320x240, so which region is sampled
-matters) or the **copy's own source rect** (Sunshine copies 640x448 where
-Wario copies 512x448, against a 640x528 EFB).
+matters) or the **copy's own source rect** (the 3D platformer copies 640x448
+where the action platformer copies 512x448, against a 640x528 EFB).
 
 Methodological note, learned five times on this bug: **structure does not show
 content.** Sizes, rects, bind targets and draw counts each produced a confident
@@ -390,20 +389,19 @@ structural inference immediately. Measure output, not description.
 
 The verdict counts understate the problem. The real split is by content type:
 
-- **2D and UI render correctly.** Wind Waker's save dialog, Mario Kart's mode
-  select, Sonic Heroes' team select, F-Zero GX's name entry, Twilight Princess
-  and Pikmin 2 memory-card prompts are all correct.
+- **2D and UI render correctly.** Save dialogs, mode- and team-select menus,
+  the futuristic racer's name entry and memory-card prompts are all correct.
 - **3D scene content is missing or wrong.** This is where every defect below
   lives.
 
 Speed is not a compensating win: 10 games faster by more than 5 points, 15
-slower, mean 69.8% -> 61.2%. Large wins (F-Zero GX 23 -> 98) sit beside large
-losses (Shadow the Hedgehog 101 -> 31). Both are scene-dependent; see the
+slower, mean 69.8% -> 61.2%. Large wins (the futuristic racer 23 -> 98) sit
+beside large losses (an action game 101 -> 31). Both are scene-dependent; see the
 measurement note in [ARCHITECTURE.md](ARCHITECTURE.md).
 
-## Wii / Mario Kart Wii: presentation is exonerated (2026-09-01)
+## Wii / the Wii racer: presentation is exonerated (2026-09-01)
 
-Mario Kart Wii renders 2D correctly and 3D as flat rectangles. A whole-frame
+The Wii racer renders 2D correctly and 3D as flat rectangles. A whole-frame
 capture (`?framecap=N`) settles where that comes from.
 
 One frame, present #4000, 586 records:
@@ -438,17 +436,17 @@ real but targets fb#47, which nothing samples for presentation.
 | `?framecap=N` | dumps the Nth present as an ordered pass/draw trace |
 | `?jitverbose=1` | ranks instructions that block JIT compilation |
 
-### Reference rig for Mario Kart Wii (2026-09-03)
+### Reference rig for the Wii racer (2026-09-03)
 
-Every earlier MKW comparison in this file compared two runs driven by the
+Every earlier comparison of this title in this file compared two runs driven by the
 harness's random input script, which diverge -- so they compared different
 scenes. Three retractions came from that. There is now a deterministic rig:
 
 ```bash
-MSYS_NO_PATHCONV=1 BASE_URL="http://127.0.0.1:8080/"   ROM="F:/Emulation/Wii_ISO/Mario Kart Wii (USA) (En,Fr,Es).iso"   VIDEO=wgpu PRESENTER=webgpu   SAVE_STATE_URL="/__mkw-race.sav" SAVE_STATE_AT=40   INPUT_SCRIPT=none DURATION=80   node tools/menu-progress-validate.mjs
+MSYS_NO_PATHCONV=1 BASE_URL="http://127.0.0.1:8080/"   ROM="<Wii disc image>"   VIDEO=wgpu PRESENTER=webgpu   SAVE_STATE_URL="/__race.sav" SAVE_STATE_AT=40   INPUT_SCRIPT=none DURATION=80   node tools/menu-progress-validate.mjs
 ```
 
-`__mkw-race.sav` is an in-race state captured with `SAVE_STATE_CAPTURE_AT`; it
+`__race.sav` is an in-race state captured with `SAVE_STATE_CAPTURE_AT`; it
 is gitignored (`*.sav`), so re-capture it if missing. `INPUT_SCRIPT=none` is
 what makes the scene identical across runs. Swap `VIDEO=software` for the
 reference frame: software renders this state correctly, WebGPU does not, which
@@ -472,7 +470,7 @@ load ops and the game's state restored).
 
 The clear triangle is a draw, so its depth is subject to the viewport depth
 range like any other fragment: `window z = minDepth + z * (maxDepth - minDepth)`.
-Mario Kart Wii issues its full-viewport clear while the HUD viewport
+The Wii racer issues its full-viewport clear while the HUD viewport
 z(0.89,0.99) is active, so the "0.0" reverse-Z clear wrote **0.89** across the
 whole EFB -- a plane nearer than the entire world band z(0.00,0.84). Every world
 fragment then failed `greater-equal` and the world was black; the HUD, at
@@ -489,7 +487,7 @@ fragment then failed `greater-equal` and the world was black; the HUD, at
 The control row is the direct proof of the mechanism. The fix sets the depth
 range of the game's viewport to [0,1] for the clear triangle, keeping its
 rect, and restores the game's range after it. (A first version also widened
-the rect to the full pass; Sonic Adventure DX came out black in the sweep
+the rect to the full pass; the 3D action game came out black in the sweep
 after it, which turned out to be its intro timing rather than the rect --
 identical results with the fix off, on, and rect-preserving -- but the
 narrower form is what shipped since nothing needed the wider rect.) With it the trace reads 0.0 after the clear, world depth writes land, the
@@ -499,22 +497,22 @@ together, on the reverse-Z convention the shader implies. No `GX_NATIVE_DEPTH`
 workaround is needed; it "worked" because its unflipped `less-equal` passed
 the world against the 0.99 the clear wrote under that convention.
 
-Deterministic states, `video=wgpu presenter=webgpu`, before -> after: Mario
-Kart Wii 43% -> 55% game speed, Double Dash 28% -> 34%, and Double Dash's race
-scene is unchanged. The viewport reset is skipped when the game's viewport is
-already the full-pass [0,1] one, since Wario World issues ~7,800 clears a
-frame. Wario World A/B, fix off -> on, 70s each: 63 -> 65 hashes, 80% -> 93%
-average speed, 25 -> 30 present fps, throne room correct both ways. F-Zero GX
-boots to its name-entry screen at 63-86% with 48 distinct frames. (The
-harness's per-sample speed on Wario World alternates 0%/200% while the frame
+Deterministic states, `video=wgpu presenter=webgpu`, before -> after: the Wii
+racer 43% -> 55% game speed, the GameCube kart racer 28% -> 34%, and the kart
+racer's race scene is unchanged. The viewport reset is skipped when the game's viewport is
+already the full-pass [0,1] one, since the action platformer issues ~7,800
+clears a frame. Action platformer A/B, fix off -> on, 70s each: 63 -> 65 hashes, 80% -> 93%
+average speed, 25 -> 30 present fps, throne room correct both ways. The
+futuristic racer boots to its name-entry screen at 63-86% with 48 distinct frames. (The
+harness's per-sample speed on the action platformer alternates 0%/200% while the frame
 counter advances steadily; that is the sampler, so the averages above are the
 numbers to read.)
 
 A second state leak of the same kind, fixed alongside: after the clear
 triangle, ClearRect restored the scissor to the full pass rather than the
 scissor the game had set, so every draw until the game's next scissor change
-ran un-scissored. It now restores the game's last scissor. Mario Kart Wii and
-Wario World render the same with it (38 and 70 hashes, 66% and 94%).
+ran un-scissored. It now restores the game's last scissor. The Wii racer and
+the action platformer render the same with it (38 and 70 hashes, 66% and 94%).
 
 **Why the previous session's depth readback read all zero, and why the first
 two runs of this probe did too, control included:** `mapAsync` was called on
@@ -541,7 +539,7 @@ of measuring the wrong thing, not of a subtle bug.
 
 The clearest repro in the library, and the one to start from.
 
-- **Wario World** — near-empty frame with two small tan rectangles. The software
+- **The action platformer** — near-empty frame with two small tan rectangles. The software
   path renders a fully detailed castle throne room from the same scene. 97% game
   speed, `132/381 draw`.
 
@@ -550,27 +548,27 @@ The clearest repro in the library, and the one to start from.
   `prim/draw` -- `g_stats.this_frame.num_prims` over
   `num_draw_calls` (core/upstream/dolphin_web_discio.cpp) -- both counted at
   SUBMISSION by Dolphin. It carries no information about what reached the EFB.
-  Wario World reads 136/379 when rendering correctly and 124/380 when rendering
+  The action platformer reads 136/379 when rendering correctly and 124/380 when rendering
   a near-black frame, so the metric does not even separate working from broken.
-- **Super Mario Sunshine** — the "File created." dialog renders correctly on
+- **The 3D platformer** — the "File created." dialog renders correctly on
   pure black. The entire beach scene behind it is absent.
 
 Both show the same shape: overlay/UI geometry survives, world geometry does not.
 Draw counts are non-zero, so this is not a submission failure.
 
-### 2. Colour/texture corruption in 3D scenes — FIXED for Luigi's Mansion (same cause)
+### 2. Colour/texture corruption in 3D scenes — FIXED for the adventure game (same cause)
 
-- **Luigi's Mansion** — the mansion interior renders with correct geometry but
+- **The adventure game** — the interior scenes render with correct geometry but
   desaturated to sepia. The software path renders it in full colour.
-- **Kirby Air Ride** — the race scene renders but is heavily pink-shifted; grass
+- **The air-racing game** — the race scene renders but is heavily pink-shifted; grass
   that is green on the software path is pale pink here.
 
 Geometry is right and lighting is plausible, so this points at texture sampling,
 format, or a TEV/blend stage rather than at transform or rasterisation.
 
-### 3. Melee mount is intermittent on the hardware path — OPEN (issue #10)
+### 3. Fighting-game mount is intermittent on the hardware path — OPEN (issue #10)
 
-Across four runs of `video=wgpu` on Super Smash Bros. Melee: two boot normally
+Across four runs of `video=wgpu` on the fighting game: two boot normally
 (96-99% game speed, correct character-select render), two fail with
 `mount-fail` after a 120s timeout. Roughly 50%, on the project's primary target.
 The software path did not fail to mount once across three full sweeps.
@@ -586,7 +584,7 @@ renderer is beating the software rasteriser's unique-frame ceiling, and that
 number currently cannot be measured on the path meant to beat it. Any perf claim
 about `video=wgpu` is unsupported until this is fixed.
 
-### 5. Resident Evil Code: Veronica X renders black — OPEN
+### 5. The survival-horror game renders black — OPEN
 
 Verdict `black` for the whole window. Lower confidence than the others: the
 software run was on a different scene at the 45s mark, so this may be an FMV
@@ -596,31 +594,31 @@ rather than a defect. Confirm against an earlier checkpoint before chasing it.
 
 Recorded so they are not re-investigated:
 
-- **Naruto and Paper Mario** end their window on a blank frame on *both* paths.
+- **An arena fighter and an RPG** end their window on a blank frame on *both* paths.
   They are mid-FMV transition at 45s and render correctly at earlier checkpoints.
-- **SoulCalibur 2 Plus** is `static` because it holds an autosave dialog. The
+- **The weapon-based fighting game** is `static` because it holds an autosave dialog. The
   frame is correct.
 
 ## Earlier investigation priorities (superseded)
 
 These priorities predate the clear fixes above and remain as investigation history:
 
-1. **Super Mario Sunshine's missing background.** The one open rendering
+1. **The 3D platformer's missing background.** The one open rendering
    defect with a clear repro, but FIVE hypotheses have now been measured and
-   rejected (see above, plus "presentation reads the EFB" -- Wario World
+   rejected (see above, plus "presentation reads the EFB" -- the action platformer
    renders correctly with a 0%-lit EFB at present time). Do NOT continue
    instrumenting the pipeline's description. Every wrong reading so far came
    from inferring content from structure: sizes, rects, bind targets, draw
    counts. Read back the BACKBUFFER TEXTURE itself after present, and bisect
    by suppressing individual passes to see which removal changes the image.
-2. **Animal Crossing (#11).** Fails on both backends, so it is not a hardware-
+2. **The life sim (#11).** Fails on both backends, so it is not a hardware-
    path bug. The EFB receives 178-188M colour writes and the presented buffer
    is still exactly zero, so the fault is in the EFB -> XFB copy.
-3. **Melee mount intermittency (#10).** Needs a repeat-count harness; a single
+3. **Fighting-game mount intermittency (#10).** Needs a repeat-count harness; a single
    green run proves nothing.
-4. **Kirby Air Ride colour (#9).** Never re-verified like-for-like -- the
+4. **Air-racing game colour (#9).** Never re-verified like-for-like -- the
    original report was a race scene, the post-fix check reached player select.
-5. **Resident Evil Code: Veronica X.** Lowest confidence that it is a defect
+5. **The survival-horror game.** Lowest confidence that it is a defect
    at all.
 
 Screenshots for every game and checkpoint are written to the sweep output

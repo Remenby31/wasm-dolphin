@@ -8,7 +8,7 @@ import { REQUIRED_WGPU_OWNERSHIP_TRACE_EXPORTS } from "../tools/dolphin-provenan
 import { CAUSAL_TELEMETRY_SCHEMA_VERSION } from "../src/causal-telemetry.js";
 
 import {
-  FIXED_MELEE_BATTLE_FIXTURE,
+  FIXED_BATTLE_FIXTURE,
   WGPU_PRODUCER_PROFILE_PHASE_ORDER,
   WGPU_DRAW_PROFILE_PHASE_ORDER,
   assertBattleCheckpoint,
@@ -1254,12 +1254,12 @@ test("fixture verification rejects missing and hash-mismatched files", async () 
       verifyFileFixture(fixturePath, { label: "battle save", expectedSha256: "0".repeat(64) }),
       /Missing battle save/
     );
-    await writeFile(fixturePath, "Kirby versus Link");
+    await writeFile(fixturePath, "reference battle");
     await assert.rejects(
       verifyFileFixture(fixturePath, { label: "battle save", expectedSha256: "0".repeat(64) }),
       /SHA-256 mismatch/
     );
-    const expectedSha256 = createHash("sha256").update("Kirby versus Link").digest("hex");
+    const expectedSha256 = createHash("sha256").update("reference battle").digest("hex");
     const verified = await verifyFileFixture(fixturePath, { label: "battle save", expectedSha256 });
     assert.equal(verified.verified, true);
     assert.equal(verified.sha256, expectedSha256);
@@ -1360,11 +1360,11 @@ test("post-load input metadata hashes the canonical script before provenance che
     saveStatePath: "unused.sav",
     saveStateAt: 0,
     inputScript,
-    sceneLabel: FIXED_MELEE_BATTLE_FIXTURE.sceneLabel,
+    sceneLabel: FIXED_BATTLE_FIXTURE.sceneLabel,
     artifactDescriptions: {
-      rom: { sha256: FIXED_MELEE_BATTLE_FIXTURE.isoSha256 },
+      rom: { sha256: FIXED_BATTLE_FIXTURE.isoSha256 },
       core: { sha256: "1".repeat(64) },
-      saveState: { sha256: FIXED_MELEE_BATTLE_FIXTURE.saveStateSha256 },
+      saveState: { sha256: FIXED_BATTLE_FIXTURE.saveStateSha256 },
     },
   });
   assert.equal(
@@ -2535,14 +2535,14 @@ function validManifest() {
     browser: { version: "143.0", headed: false },
     benchmark: {
       url: "http://127.0.0.1:8082/?video=software",
-      sceneLabel: FIXED_MELEE_BATTLE_FIXTURE.sceneLabel,
+      sceneLabel: FIXED_BATTLE_FIXTURE.sceneLabel,
       saveStateAt: 0,
       inputScriptMode: "none",
     },
     artifacts: {
-      rom: { sha256: FIXED_MELEE_BATTLE_FIXTURE.isoSha256 },
+      rom: { sha256: FIXED_BATTLE_FIXTURE.isoSha256 },
       core: { sha256: "1".repeat(64) },
-      saveState: { sha256: FIXED_MELEE_BATTLE_FIXTURE.saveStateSha256 },
+      saveState: { sha256: FIXED_BATTLE_FIXTURE.saveStateSha256 },
     },
     fixture: {
       isoVerified: true,

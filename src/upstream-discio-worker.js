@@ -2616,7 +2616,7 @@ async function handleMessage(type, payload) {
       const saveStartedAt = performance.now();
       const rc = api.saveStateFile(path) | 0;
       let prev = -1, stable = 0, size = 0;
-      // up to ~8 s real time (40 × 200 ms); a Melee state is ~tens of
+      // up to ~8 s real time (40 × 200 ms); a game state is ~tens of
       // MB so allow generous time for DoState + zstd on the pthread.
       for (let i = 0; i < 40; i++) {
         await new Promise((r) => setTimeout(r, 200));
@@ -3358,7 +3358,7 @@ async function loadCore({
   // Day-16: `?video=webgpu` runs the Software→WebGPU-presenter hybrid.
   // The C++ Software path writes XFB into s_framebuffer; the existing
   // JS WebGPU presenter uploads + blits those bytes via a real
-  // wgpuRenderPass. Plays Melee end-to-end today.
+  // wgpuRenderPass. Plays a full game end-to-end today.
   if (videoBackend === "WebGPU" && renderGpu) {
     postStatus("WebGPU video backend: Software→WebGPU presenter hybrid (day-16)");
   }
@@ -3587,7 +3587,7 @@ async function loadCore({
   // the cached-interpreter disable mask instead, at bit 24, defaulting to off.
   // Host and core are versioned independently -- a stale cached core, a
   // half-finished rebuild -- and getting this wrong is not a degraded feature
-  // but a black Mario Kart Wii, so fall back rather than assume they match.
+  // but a black Wii racing game, so fall back rather than assume they match.
   const LEGACY_DISABLE_BIT_CLEARRECT_ENABLE = 1 << 24;
   let disableMask = (Number(cachedInterpreterDisableMask) || 0) >>> 0;
   const rendererMaskSupported = Boolean(api.setRendererFeatureMask);
@@ -5594,7 +5594,7 @@ function startPresentationLoop() {
 // already runs in <2ms typical; re-painting the same buffer at 60Hz costs
 // the same as a fresh frame would have. The new-frame presentFrame path
 // is unchanged so latency stays at direct-mode levels; this only fills
-// the visual gaps when Melee internally renders duplicates.
+// the visual gaps when the game internally renders duplicates.
 let _tickRepaintTimer = null;
 function startTickRepaintLoop() {
   if (_tickRepaintTimer) return;
@@ -6144,7 +6144,7 @@ function runPacedPresentation(timestamp = performance.now()) {
 let _firstPaintLogged = false;
 // §28cl last-frame cache for tick-mode re-paints. Updated on every real
 // presentFrame call (NEW content) so the tick timer can re-paint the same
-// content at a steady cadence without waiting for Melee to produce a fresh
+// content at a steady cadence without waiting for the game to produce a fresh
 // xfb. Width/height/pointer/length are exactly what drawFrameToWebGpu /
 // drawFrameToCanvas / drawFrameToWebGl expect — the same call signature
 // presentFrame uses internally.
@@ -7900,7 +7900,7 @@ const DOLPHIN_JIT_IDB_NAME = "dolphin-jit-cache";
 const DOLPHIN_JIT_IDB_STORE = "modules";
 const DOLPHIN_JIT_IDB_META = "metadata";
 const DOLPHIN_JIT_IDB_VERSION = 3;
-// §28u: 8192 was far too small for full Melee — the user's cache
+// §28u: 8192 was far too small for a full game — the user's cache
 // plateaued at ~8135 (cap hit) while still in the menus, so EVERY
 // later 3D scene (intro/2nd cutscene, battle) exceeded the cap →
 // `handleDolphinJitNewCompile` early-returns at line ~2858 → those
@@ -11438,7 +11438,7 @@ function replayCreateBindGroup(id, blobPtr, blobLen) {
         // the draw RENDERS (placeholder texel for the one missing map, not an
         // invisible character). Mirrors the non-filterable substitution below.
         // DIAG: a missing texture renders with a 1x1 placeholder, which looks
-        // exactly like the flat rectangles Mario Kart Wii shows where its 3D
+        // exactly like the flat rectangles a Wii racing game shows where its 3D
         // world should be. Count them, and record which ids.
         self._wgDummyMissing = (self._wgDummyMissing || 0) + 1;
         (self._wgDummyMissingIds = self._wgDummyMissingIds || new Set()).add(resId);
@@ -11692,7 +11692,7 @@ function blitTexture(enc, s, d, sx, sy, sw, sh, dx, dy, dw, dh,
 // DIAGNOSTIC (revertible): after the producer's present, blit the raw
 // EFB colour texture straight onto the canvas, bypassing the XFB-copy
 // + present-blit chain. Isolates "geometry not visible": if the canvas
-// then shows Melee geometry, the EFB is correct and the XFB/present
+// then shows game geometry, the EFB is correct and the XFB/present
 // chain (scale/UV) is the bug; if still uniform, the EFB itself is
 // wrong (transform/depth). Flip to false to restore normal present.
 // §28cx: diagnosis complete — the raw-EFB blit was the FLICKER source.
@@ -12723,7 +12723,7 @@ function diagNoteBackbufferDraw(srcId, vp, sc) {
 // WebGPU's loadOp:clear always clears the whole attachment and ignores
 // setScissorRect, so a sub-rect clear has to be a DRAW. Doing it as a utility
 // draw in the core was tried and reverted -- that path ends and restarts the
-// pass per clear, and Wario World issues ~7,800 a frame. Here the pass stays
+// pass per clear, and a platformer issues ~7,800 a frame. Here the pass stays
 // open: set the scissor, draw one full-screen triangle, restore the scissor.
 //
 // The colour and depth are baked into the shader constant rather than passed in
@@ -12853,7 +12853,7 @@ const DIAG_DEPTH_ALWAYS = false;  // §28ag: bisect done — dark 1P menu is NOT
 // arriving with near < far is what reverse-Z looks like after that 1-x, not
 // evidence against it.
 //
-// Measured consequence of getting it backwards: Mario Kart Wii's world sits at
+// Measured consequence of getting it backwards: a Wii racing game's world sits at
 // z(0.00,0.84) and its HUD at z(0.89,0.99), i.e. the HUD is nearer. With
 // GX_NATIVE_DEPTH the world occludes the HUD and the pause menu and controller
 // overlay vanish entirely; with it false they render and match the software
@@ -15375,7 +15375,7 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
           // correctly -- it simply reports "clear both", which is what it did.
           //
           // Before this, a single bit drove BOTH attachments, so a depth-only
-          // clear also wiped colour. On Wario World that destroyed a fully
+          // clear also wiped colour. In one platformer that destroyed a fully
           // rendered 3D EFB right before the XFB copy, leaving only the 2D
           // overlay on black (issue #8).
           const clearMask = u32[recWord + 6];
@@ -15730,8 +15730,8 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
           }
           if (passFbId === 0 && bgSlot === 1 && self._wgBgTex) {
             currentBackbufferSourceTextureId = self._wgBgTex[bgId] >>> 0;
-            // DIAG: what does the backbuffer blit actually sample? Mario Kart
-            // Wii presents what looks like its minimap scaled to full frame,
+            // DIAG: what does the backbuffer blit actually sample? A Wii racing
+            // game presents what looks like its minimap scaled to full frame,
             // so the question is whether this is the EFB colour texture at all
             // and what size it is. Capped: first few, then occasional, so a
             // long run still shows the in-race state.
@@ -15957,7 +15957,7 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
           // Scissored clear inside the open pass: set the scissor, draw one
           // full-screen triangle with the clear colour/depth baked in, restore
           // the scissor. The pass is NOT torn down, which is what made the
-          // core-side utility-draw version regress Wario World.
+          // core-side utility-draw version regress a platformer.
           if (!pass || passW <= 0) break;
           const cx = Math.min(u32[recWord + 1], passW - 1);
           const cy = Math.min(u32[recWord + 2], passH - 1);
@@ -15994,7 +15994,7 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
           try {
             // The clear triangle's depth goes through the viewport transform
             // like any other fragment: window z = minDepth + z * (maxDepth -
-            // minDepth). Mario Kart Wii's frame-start clear arrives while its
+            // minDepth). a Wii racing game's frame-start clear arrives while its
             // HUD viewport z(0.89,0.99) is active, so a "0.0" clear wrote 0.89
             // across the whole EFB -- a plane NEARER than the entire world
             // band z(0.00,0.84) under reverse-Z. Every world fragment then
@@ -16008,7 +16008,7 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
             // outside the game's viewport otherwise receives no fragments,
             // even when its scissor and depth are correct. Skip redundant
             // viewport calls only for the full-pass [0,1] viewport (important
-            // for Wario World's thousands of clears).
+            // for a platformer's thousands of clears).
             const vpFix = CLEARRECT_FULL_VIEWPORT && lastAppliedViewport &&
               !(lastAppliedViewport[0] === 0 && lastAppliedViewport[1] === 0 &&
                 lastAppliedViewport[2] === passW && lastAppliedViewport[3] === passH &&

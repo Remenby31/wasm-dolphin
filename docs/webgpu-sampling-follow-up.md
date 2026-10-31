@@ -51,7 +51,7 @@ still prevent sampling a writable framebuffer attachment.
   the old path skips the following game draw; the corrected path preserves
   all 70 game draws across 70 clears without additional pipeline commands.
   An absent prior pipeline remains invalid, and all pixels and caches agree.
-- The same saved Mario Kart Wii race was loaded on software and WebGPU,
+- The same saved race in a Wii racing game was loaded on software and WebGPU,
   unpaused, and driven for 120-second runs. Both reach the grass/barrier scene
   with the kart and race HUD visible. WebGPU reports no renderer errors.
   These are scene-content comparisons: simulation speed differs, so they are
@@ -63,15 +63,15 @@ Native changes are in snapshot patches 0061 and 0062; consumer changes are in
 
 Local evidence is under `.omx/render-next/`: `clear-cache-sampler-smoke.json`,
 `depth-gpu-smoke.json`, `depth-shared-helper-before.json`, `focused-final.log`,
-`all-tests.log`, `mkw-software-gameplay/`, and `mkw-hardware-gameplay/`.
+`all-tests.log`, and the software and hardware gameplay capture directories.
 Game-derived captures remain local and are not included in source patches.
 
 ## Remaining visual discrepancy
 
-**Resolved in the subsequent pass:** [Sunshine uniform-source fix](sunshine-uniform-fix.md).
-The investigation below records the state before that fix.
+**Resolved in the subsequent pass** by a uniform-source fix. The investigation
+below records the state before that fix.
 
-Sunshine's file-select background is not reliably correct. The current build
+A 3D platformer's file-select background is not reliably correct. The current build
 produced a white background, but the exact `0955d66` worker plus the previously
 shipped `38808e3a…` core reproduced it at multiple checkpoints and at the end
 of a 70-second control. The current software renderer showed the complete beach
@@ -81,10 +81,10 @@ and this symptom has not been attributed to the new sampling changes.
 Worker-only controls replacing real depth with the old placeholder or forcing
 legacy samplers did not restore the scene. Restoring the old clear cache showed
 3D at one checkpoint but white again later. The independent pipeline-state bug
-was fixed and GPU-tested, but did not resolve Sunshine's baseline discrepancy.
+was fixed and GPU-tested, but did not resolve the platformer's baseline discrepancy.
 
-Evidence: `.omx/render-next/sunshine-controls-summary.json`,
-`sunshine-software-control/`, `sunshine-baseline-0955d66/`, and
+Evidence: the platformer control summary, software-control and
+`0955d66` baseline directories under `.omx/render-next/`, and
 `clear-state-smoke.json`. Baseline worker source and loaded WASM bytes were
 verified. Existing GX depth-copy/depth-write convention workarounds were not
 changed in this pass; the new tests establish physical-depth sampling precision,
@@ -92,8 +92,8 @@ not correctness of every depth-texture effect across the library.
 
 ## Performance profile
 
-A 20.13-second capture across 18 page/worker targets verified unpaused Mario
-Kart Wii, the final core/runtime hashes, advancing frames, JIT enabled, an
+A 20.13-second capture across 18 page/worker targets verified the unpaused Wii
+racing game, the final core/runtime hashes, advancing frames, JIT enabled, an
 unchanged loaded checkpoint, and zero renderer errors before and after.
 Frames advanced from 3077 to 3559. The JIT compiled 249 additional blocks.
 An earlier 180-second warm-up never reached the required quiet period, so
@@ -122,6 +122,6 @@ Several other pthread targets appear parked, so their sampled stack weights
 are not evidence of busy CPUs. No GPU hardware execution timing was captured.
 
 Detailed local evidence and reproducible ignored capture/analyzer scripts:
-`.omx/render-next/profile-mkw.mjs`, `profile-summary.mjs`, and
+the profiling script under `.omx/render-next/`, `profile-summary.mjs`, and
 `profile-validated/active-gameplay/` (including `run.json`, all CPU profiles,
 before/after screenshots, `profile-summary.json`, and `profile-findings.md`).

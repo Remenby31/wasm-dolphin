@@ -10,7 +10,7 @@ per backend. That is medium-confidence evidence, not a GPU-completion profile:
 the current timers cover JavaScript submission work but not asynchronous
 browser/GPU completion. The strongest measured limitation is the cadence at
 which the software GPU produces distinct XFB content. In the fixed
-Kirby-versus-Link battle, the balanced `fastsw=1` path reached 95.4–96.6% game
+reference battle, the balanced `fastsw=1` path reached 95.4–96.6% game
 speed with the JIT disabled and about 57.4–57.8 source/XFB callbacks per second,
 but only 10.7 distinct visual frames per second. The sampled WebGPU-presenter
 JavaScript work was about 0.18–0.21 ms per presentation, and changing only the
@@ -24,7 +24,7 @@ GPU-thread/raster/backlog instrumentation before optimization.
 The true hardware renderer, `video=wgpu`, is not currently a playable
 alternative. A correctly routed smoke test registered the WebGPU command ring
 and processed draw commands, but displayed the built-in color test pattern
-rather than Melee. Real XFB nonzero count, presentation FPS, visual FPS, and
+rather than the game. Real XFB nonzero count, presentation FPS, visual FPS, and
 audio output remained zero.
 
 No emulator, renderer, JIT, or pacing default was changed by this audit.
@@ -65,8 +65,8 @@ runs rather than treating one counter as ground truth.
 | Timed-run harness commit | `4f60ddcbff3dce8ee5271623b6b078dacadc5cf6` |
 | Later presenter/WGPU harness commit | `562a7a031213ac1042a161b010a4544254455009` |
 | Core artifact | 12,800,707 bytes, SHA-256 `03df79d2eb4be6c1e05d58d79ad4ab9590a9407c19fa5ae70e088401f424af3f` |
-| Game | Melee NTSC-U Rev 2 NKit ISO, SHA-256 `1018b65a58ca654056be1611a43e753de5dd5f842ce5266581b29c6a12ce7c67` |
-| Scene | Direct load into visually confirmed Kirby-versus-Link battle |
+| Game | Reference fighting game, NTSC-U Rev 2 NKit ISO, SHA-256 `1018b65a58ca654056be1611a43e753de5dd5f842ce5266581b29c6a12ce7c67` |
+| Scene | Direct load into visually confirmed reference battle |
 | Save state | 21,170,115 bytes, SHA-256 `620879e2ed3c35248deba9fb2f7b2a39f91f5374d2f6a98d2a2455cb55e156d1` |
 | Input | None after load; SHA-256 of script is the empty-input hash `e3b0c442…b855` |
 | Screenshots during timed runs | Disabled |
@@ -81,7 +81,7 @@ http://127.0.0.1:8083/?core=upstream&video=software&cpu=dual&speed=1&presenter=w
 Representative command:
 
 ```powershell
-$env:ROM = "F:\Emulation\super-smash-bros.-melee-usa-en-ja-rev-2.nkit_202203\Super Smash Bros. Melee (USA) (En,Ja) (Rev 2).nkit.iso"
+$env:ROM = "<path to the reference disc image>"
 $env:BASE_URL = "http://127.0.0.1:8083/"
 $env:BROWSER_CHANNEL = "chrome"
 $env:HEADED = "1"
@@ -102,7 +102,7 @@ $env:SAVE_STATE_URL = "/__battle.sav"
 $env:SAVE_STATE_PATH = (Resolve-Path ".\__battle.sav").Path
 $env:SAVE_STATE_AT = "0"
 $env:INPUT_SCRIPT = "none"
-$env:SCENE_LABEL = "kirby-vs-link-fixed-save-nojit-fastsw-1-trial-1"
+$env:SCENE_LABEL = "fixed-save-nojit-fastsw-1-trial-1"
 node tools/menu-progress-validate.mjs --out-dir .omx/perf-audit/fixed-battle-nojit/fastsw-1-trial-1
 ```
 
@@ -141,8 +141,6 @@ Raw local artifacts contain `run-metadata.json`, `summary.json`,
 - `.omx/perf-audit/fixed-battle-presenters-v2/`
 - `.omx/perf-audit/wgpu-route-smoke/`
 
-The committed aggregate is
-[melee-kirby-link-fixed-battle-2026-07-09.csv](perf-results/melee-kirby-link-fixed-battle-2026-07-09.csv).
 Raw `.omx` output is intentionally ignored because it includes large console
 and browser-trace artifacts.
 
@@ -224,7 +222,7 @@ Observed:
 - unique/visual FPS: 0;
 - real XFB nonzero count: 0;
 - audio active samples: 0;
-- canvas: built-in color test pattern, not Melee.
+- canvas: built-in color test pattern, not the game.
 
 This proves route and command production, not a valid Dolphin draw/present
 pipeline. It is a classifier run, not a performance benchmark.
@@ -362,7 +360,7 @@ analysis.
 ### Today: instrumentation and baseline runs
 
 - Land the provenance/raw JSON/CSV changes and this audit.
-- Keep the direct Kirby-versus-Link save load; do not automate character
+- Keep the direct reference-battle save load; do not automate character
   selection for timed runs.
 - Add the missing raster/TEV/GPU-generation counters and WGPU ring-drain timing.
 - Repeat at least five trials per condition in randomized or Latin-square
