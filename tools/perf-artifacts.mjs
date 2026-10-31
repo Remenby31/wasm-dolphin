@@ -7,7 +7,13 @@ import path from "node:path";
 import { JIT_CACHE_ENTRY_KEY_SCHEMA, canonicalCoreFingerprint } from
   "../src/jit-cache-identity.js";
 import { CAUSAL_TELEMETRY_SCHEMA_VERSION } from "../src/causal-telemetry.js";
-import { defaultWgpuMappedStagingSlotCount, defaultWgpuUploadTransport, wgpuMappedStagingSlotCountOf } from "../src/wgpu-replay-diagnostics.js";
+import {
+  defaultWgpuMappedStagingSlotCount,
+  defaultWgpuMappedStagingSlotMib,
+  defaultWgpuUploadTransport,
+  WGPU_MAPPED_STAGING_SLOT_MIB_VALUES,
+  wgpuMappedStagingSlotCountOf
+} from "../src/wgpu-replay-diagnostics.js";
 import { WGPU_UBO_COMPUTE_PROJECTION_SCHEMA } from
   "../src/wgpu-ubo-compute-projection.js";
 import { REQUIRED_WGPU_OWNERSHIP_TRACE_EXPORTS } from "./dolphin-provenance.mjs";
@@ -62,6 +68,9 @@ export function evaluateWgpuRuntimeConfigEvidence({
   const requestedSlots = String(params?.wgpustagingslots ?? "");
   const expectedSlots = /^[3-8]$/.test(requestedSlots)
     ? wgpuMappedStagingSlotCountOf(requestedSlots) : defaultWgpuMappedStagingSlotCount(engine);
+  const requestedSlotMib = Number(params?.wgpustagingslotmib);
+  const expectedSlotBytes = (WGPU_MAPPED_STAGING_SLOT_MIB_VALUES.includes(requestedSlotMib)
+    ? requestedSlotMib : defaultWgpuMappedStagingSlotMib(engine)) * 1024 * 1024;
   const expectedTimingStride = String(params?.wgpumappedtiming) === "64" ? 64 : 1;
   // on by default since 2026-10-29 (src/core-host.js): off only when =0
   const defaultOnFlag = (name) => String(params?.[name] ?? "1") !== "0";
@@ -93,6 +102,10 @@ export function evaluateWgpuRuntimeConfigEvidence({
     expectedUploadTransport === "mapped");
   expect("mapped staging fast path", runtimeConfig?.mappedStagingFastPath, expectedStageFast);
   expect("mapped staging slots", runtimeConfig?.mappedStaging?.slotCount, expectedSlots);
+  // Older artifacts do not report the slot size; they all ran 16 MiB slots.
+  if (runtimeConfig?.mappedStaging?.slotBytes != null || params?.wgpustagingslotmib != null) {
+    expect("mapped staging slot bytes", runtimeConfig?.mappedStaging?.slotBytes, expectedSlotBytes);
+  }
   expect("mapped staging record store", runtimeConfig?.mappedStaging?.recordStore,
     expectedStageFast ? "flat" : "objects");
   expect("mapped timing enabled", runtimeConfig?.mappedStaging?.timing?.enabled,
