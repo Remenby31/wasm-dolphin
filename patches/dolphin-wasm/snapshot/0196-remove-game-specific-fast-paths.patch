@@ -1,0 +1,2634 @@
+Patch 0196: remove the per-game fast paths.
+
+The cached interpreter carried fast paths written for one commercial game at
+fixed guest addresses, on by default: an idle poll loop and a title loop
+rewritten as host loops, five call-branch helpers, three wasm-JIT imports
+(and the inline wasm calls to them), their verify/read helpers, counters,
+stats-line segments and disassembler printers. All of it goes; a bl to those
+addresses is now an ordinary call. Disable bits 0 and 1 are left unused.
+AOT_COMPILER_VERSION 37: block and region modules lose three imports.
+Comments that named games now name the genre.
+
+diff --git a/Source/Core/Common/GL/GLInterface/Emscripten.cpp b/Source/Core/Common/GL/GLInterface/Emscripten.cpp
+--- a/Source/Core/Common/GL/GLInterface/Emscripten.cpp
++++ b/Source/Core/Common/GL/GLInterface/Emscripten.cpp
+@@ -335,7 +335,7 @@ void GLContextEmscripten::Swap()
+   // returns -3 INVALID_TARGET because explicitSwapControl isn't on the
+   // registered context. Without this gate the swap "fails" every frame,
+   // Renderer::Present aborts, GXSetDrawDone never reaches the GPU thread,
+-  // PE_FINISH never raises, and Melee's CPU stays in FastMeleeIdlePollLoop
++  // PE_FINISH never raises, and a game polling for draw-done spins
+   // forever. For direct-JS contexts the OffscreenCanvas auto-mirrors at
+   // task boundary so an explicit commit isn't needed.
+   const int commit_result =
+diff --git a/Source/Core/Common/GL/GLInterface/Emscripten.h b/Source/Core/Common/GL/GLInterface/Emscripten.h
+--- a/Source/Core/Common/GL/GLInterface/Emscripten.h
++++ b/Source/Core/Common/GL/GLInterface/Emscripten.h
+@@ -36,6 +36,6 @@ private:
+   // contexts, emscripten_webgl_commit_frame returns -3 (INVALID_TARGET) because
+   // explicitSwapControl is not on the registered context. Rely on the
+   // OffscreenCanvas auto-mirror at task boundary instead. Without this gate,
+-  // PE_FINISH never fires → Melee CPU stuck in FastMeleeIdlePollLoop forever.
++  // PE_FINISH never fires → a game polling for draw-done spins forever.
+   bool m_context_created_via_direct_js = false;
+ };
+diff --git a/Source/Core/Core/CMakeLists.txt b/Source/Core/Core/CMakeLists.txt
+--- a/Source/Core/Core/CMakeLists.txt
++++ b/Source/Core/Core/CMakeLists.txt
+@@ -946,8 +946,8 @@ if(EMSCRIPTEN AND DOLPHIN_WASM_CORE_SOURCE)
+     # ever mounts. MEMFS survives only because it is the default.
+     "-sEXPORTED_RUNTIME_METHODS=['FS','ccall','cwrap','UTF8ToString','HEAPU8','PThread','WORKERFS','NODEFS']"
+     # Wii NAND seed data. Core::InitializeWiiFileSystemContents() copies
+-    # Data/Sys/Wii into every fresh NAND because some games -- Mario Kart Wii
+-    # is the one called out in that function -- assume the WiiConnect24 files
++    # Data/Sys/Wii into every fresh NAND because some games -- a Wii racing
++    # game is the one called out in that function -- assume the WiiConnect24 files
+     # the System Menu would normally have created are already present, and
+     # fail with "Could not write to/read from Wii system memory" when they are
+     # not. The copy reads File::GetSysDirectory(), which this build fixes at
+diff --git a/Source/Core/Core/HW/DVD/FileMonitor.cpp b/Source/Core/Core/HW/DVD/FileMonitor.cpp
+--- a/Source/Core/Core/HW/DVD/FileMonitor.cpp
++++ b/Source/Core/Core/HW/DVD/FileMonitor.cpp
+@@ -33,7 +33,7 @@ static bool IsSoundFile(const std::string& filename)
+       ".ast",    // Zelda TP, Mario Kart
+       ".brstm",  // Wii Sports, Wario Land, etc.
+       ".dsp",    // Metroid Prime
+-      ".hps",    // SSB Melee
++      ".hps",    // HAL streamed audio
+       ".ogg",    // Tony Hawk's Underground 2
+       ".sad",    // Disaster
+       ".snd",    // Tales of Symphonia
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -135,8 +135,7 @@ EM_JS(int, DolphinWeb_CachedInterpreterCompileWasmBlock,
+        int read_u8_index, int write_u8_index, int read_u16_index, int write_u16_index,
+        int lfs_index, int stfs_index, int lfd_index, int fmr_index, int system_index,
+        int fp_index, int fctiwz_index, int interpret_index, int fastcheck_gpfifo_index,
+-       int fast_os_interrupt_call_index, int fast_melee_input_status_call_index,
+-       int fast_melee_status_call_index, int fast_melee_service_poll_call_index, int fma_index,
++       int fast_os_interrupt_call_index, int fma_index,
+        int ready_bits_ptr, int region_request), {
+   // Day-7 Phase B: cache lookup before WebAssembly.Module compilation.
+   // Module._dolphinJitCache is populated on each pthread by the pre-js
+@@ -248,9 +247,6 @@ EM_JS(int, DolphinWeb_CachedInterpreterCompileWasmBlock,
+           interpret: wasmTable.get(interpret_index),
+           fastcheck_gpfifo: wasmTable.get(fastcheck_gpfifo_index),
+           fast_os_interrupt_call: wasmTable.get(fast_os_interrupt_call_index),
+-          fast_melee_input_status_call: wasmTable.get(fast_melee_input_status_call_index),
+-          fast_melee_status_call: wasmTable.get(fast_melee_status_call_index),
+-          fast_melee_service_poll_call: wasmTable.get(fast_melee_service_poll_call_index),
+           fma: wasmTable.get(fma_index),
+           // Region chaining (patch 0102): a region's exit stub asks the core
+           // for the next region and tail-calls it through the core's table.
+@@ -391,8 +387,7 @@ std::atomic<u32> s_dolphin_web_disable_mask{0};
+ // (and wherever relaxed SIMD is missing or unfused): the plain-f64 path.
+ std::atomic<bool> s_fused_madd{false};
+ 
+-constexpr u32 DOLPHIN_WEB_DISABLE_MELEELOOP   = 1u << 0;  // MeleeIdlePollLoop + MeleeTitleLoop
+-constexpr u32 DOLPHIN_WEB_DISABLE_MELEECALL   = 1u << 1;  // 5 Melee fast call-branch helpers
++// Bits 0 and 1 are unused (patch 0196 removed the helpers they gated).
+ constexpr u32 DOLPHIN_WEB_DISABLE_OSINTERRUPT = 1u << 2;  // OsInterruptFunction + call-branch
+ constexpr u32 DOLPHIN_WEB_DISABLE_DCBXLOOP    = 1u << 3;  // DcbxLoop
+ constexpr u32 DOLPHIN_WEB_DISABLE_FASTBRANCH  = 1u << 4;  // FastBranch + FastBranchBdnz
+@@ -1154,7 +1149,7 @@ void RetryDeferredWasmBlocks(CachedInterpreter& cpu)
+ 
+ bool s_wasm_jit_direct_only = true;
+ u32 s_wasm_direct_tier_reject_count = 0;
+-// §28bj: was 2048 — far below Melee battle's ~6500 hot blocks, so
++// §28bj: was 2048 — far below a fighting-game battle's ~6500 hot blocks, so
+ // the mixed tier compiled only 2048 then stopped while the rest
+ // still fell to the slow interpreter (measured: mixed:2048/2048,
+ // short:2247, battle ~30%). Mixed keeps blocks alive with
+@@ -1236,25 +1231,6 @@ u32 s_fast_byte_mem_store_ops = 0;
+ u32 s_fast_half_mem_load_ops = 0;
+ u32 s_fast_half_mem_store_ops = 0;
+ u32 s_fast_multiword_mem_ops = 0;
+-u32 s_fast_melee_idle_poll_loop_compile_attempts = 0;
+-u32 s_fast_melee_idle_poll_loop_compile_rejects = 0;
+-u32 s_fast_melee_idle_poll_loop_mismatch_address = 0xffffffff;
+-u32 s_fast_melee_idle_poll_loop_mismatch_expected = 0;
+-u32 s_fast_melee_idle_poll_loop_mismatch_actual = 0;
+-u32 s_fast_melee_idle_poll_loop_blocks = 0;
+-u32 s_fast_melee_idle_poll_loop_iterations = 0;
+-u32 s_fast_melee_idle_poll_loop_exits = 0;
+-u32 s_fast_melee_idle_poll_loop_rejects = 0;
+-u32 s_fast_melee_idle_poll_loop_fallbacks = 0;
+-u32 s_fast_melee_idle_poll_loop_throttles = 0;
+-u32 s_fast_melee_title_loop_compile_attempts = 0;
+-u32 s_fast_melee_title_loop_compile_rejects = 0;
+-u32 s_fast_melee_title_loop_mismatch_offset = 0xffffffff;
+-u32 s_fast_melee_title_loop_mismatch_expected = 0;
+-u32 s_fast_melee_title_loop_mismatch_actual = 0;
+-u32 s_fast_melee_title_loop_blocks = 0;
+-u32 s_fast_melee_title_loop_iterations = 0;
+-u32 s_fast_melee_title_loop_rejects = 0;
+ u32 s_fast_os_interrupt_compile_attempts = 0;
+ u32 s_fast_os_interrupt_compile_rejects = 0;
+ u32 s_fast_os_interrupt_mismatch_address = 0xffffffff;
+@@ -1266,39 +1242,6 @@ u32 s_fast_os_interrupt_restore_ops = 0;
+ u32 s_fast_os_interrupt_inline_ops = 0;
+ u32 s_fast_os_interrupt_inline_fallbacks = 0;
+ u32 s_fast_os_interrupt_verified_modes = 0;
+-u32 s_fast_melee_input_status_verify_attempts = 0;
+-u32 s_fast_melee_input_status_verify_rejects = 0;
+-u32 s_fast_melee_input_status_inline_ops = 0;
+-u32 s_fast_melee_input_status_inline_fallbacks = 0;
+-u32 s_fast_melee_input_status_cycles = 0;
+-u32 s_fast_melee_input_status_loadstores = 0;
+-bool s_fast_melee_input_status_verified = false;
+-u32 s_fast_melee_status_fn_verify_attempts = 0;
+-u32 s_fast_melee_status_fn_verify_rejects = 0;
+-u32 s_fast_melee_status_fn_inline_ops = 0;
+-u32 s_fast_melee_status_fn_inline_fallbacks = 0;
+-bool s_fast_melee_status_fn_verified = false;
+-u32 s_fast_melee_service_poll_verify_attempts = 0;
+-u32 s_fast_melee_service_poll_verify_rejects = 0;
+-u32 s_fast_melee_service_poll_inline_ops = 0;
+-u32 s_fast_melee_service_poll_inline_fallbacks = 0;
+-u32 s_fast_melee_service_poll_cycles = 0;
+-u32 s_fast_melee_service_poll_loadstores = 0;
+-bool s_fast_melee_service_poll_verified = false;
+-u32 s_fast_melee_si_poll_verify_attempts = 0;
+-u32 s_fast_melee_si_poll_verify_rejects = 0;
+-u32 s_fast_melee_si_poll_inline_ops = 0;
+-u32 s_fast_melee_si_poll_inline_fallbacks = 0;
+-u32 s_fast_melee_si_poll_cycles = 0;
+-u32 s_fast_melee_si_poll_loadstores = 0;
+-bool s_fast_melee_si_poll_verified = false;
+-u32 s_fast_melee_input_poll_verify_attempts = 0;
+-u32 s_fast_melee_input_poll_verify_rejects = 0;
+-u32 s_fast_melee_input_poll_inline_ops = 0;
+-u32 s_fast_melee_input_poll_inline_fallbacks = 0;
+-u32 s_fast_melee_input_poll_cycles = 0;
+-u32 s_fast_melee_input_poll_loadstores = 0;
+-bool s_fast_melee_input_poll_verified = false;
+ u32 s_fast_branch_ops = 0;
+ u32 s_fast_branch_bcx_ops = 0;
+ u32 s_fast_branch_bx_ops = 0;
+@@ -1311,21 +1254,6 @@ constexpr u32 OS_INTERRUPT_RESTORE = 2;
+ constexpr u32 OS_INTERRUPT_DISABLE_PC = 0x80347364;
+ constexpr u32 OS_INTERRUPT_ENABLE_PC = 0x80347378;
+ constexpr u32 OS_INTERRUPT_RESTORE_PC = 0x8034738c;
+-constexpr u32 MELEE_INPUT_STATUS_PC = 0x8037699c;
+-constexpr u32 MELEE_INPUT_STATUS_BYTE_ADDRESS = 0x804c1f7b;
+-constexpr u32 MELEE_STATUS_FN_PC = 0x80339b4c;
+-constexpr u32 MELEE_STATUS_IDLE_POINTER = 0x804a75e0;
+-constexpr u32 MELEE_SERVICE_POLL_PC = 0x800195d0;
+-constexpr u32 MELEE_SI_POLL_PC = 0x8001cc84;
+-constexpr u32 MELEE_SI_POLL_STATE_ADDRESS = 0x80433328;
+-constexpr u32 MELEE_SI_POLL_PENDING_ADDRESS = 0x80433324;
+-constexpr u32 MELEE_INPUT_POLL_PC = 0x80019894;
+-constexpr u32 MELEE_INPUT_POLL_STATE_BASE = 0x804329f0;
+-constexpr u32 MELEE_IDLE_POLL_LOOP_PC = 0x801a4da8;
+-constexpr u32 MELEE_IDLE_POLL_LOOP_END_PC = 0x801a4db8;
+-constexpr u32 MELEE_IDLE_POLL_LOOP_MAX_BATCH = 256;
+-constexpr u32 MELEE_IDLE_POLL_LOOP_NO_EXIT_THROTTLE_BLOCKS = 8192;
+-constexpr u32 MELEE_STATUS_COMMON_CYCLES = 28;
+ constexpr u32 OS_INTERRUPT_DISABLE_CYCLES = 5;
+ constexpr u32 OS_INTERRUPT_ENABLE_CYCLES = 5;
+ constexpr u32 OS_INTERRUPT_RESTORE_ENABLE_CYCLES = 8;
+@@ -1399,17 +1327,6 @@ std::optional<OsInterruptInlineTarget> GetDirectBranchOsInterruptTarget(UGeckoIn
+   return GetOsInterruptInlineTarget(destination);
+ }
+ 
+-bool IsDirectBranchLinkTo(UGeckoInstruction inst, u32 current_pc, u32 target)
+-{
+-  if (inst.OPCD != 18 || !inst.LK)
+-    return false;
+-
+-  u32 destination = u32(SignExt26(inst.LI << 2));
+-  if (!inst.AA)
+-    destination += current_pc;
+-  return destination == target;
+-}
+-
+ struct PpcBlockProfileEntry
+ {
+   u32 pc = 0;
+@@ -1536,713 +1453,12 @@ bool ExecuteFastOsInterruptInline(PowerPC::PowerPCState& ppc_state,
+   return true;
+ }
+ 
+-bool VerifyMeleeInputStatusFunction()
+-{
+-  if (s_fast_melee_input_status_verified)
+-    return true;
+-
+-  ++s_fast_melee_input_status_verify_attempts;
+-  const std::array<std::pair<u32, u32>, 15> expected = {{
+-      {0x8037699c, 0x7c0802a6},  // mflr r0
+-      {0x803769a0, 0x90010004},  // stw r0, 4(sp)
+-      {0x803769a4, 0x9421ffe8},  // stwu sp, -0x18(sp)
+-      {0x803769a8, 0x93e10014},  // stw r31, 0x14(sp)
+-      {0x803769ac, 0x4bfd09b9},  // bl OSDisableInterrupts
+-      {0x803769b0, 0x3c80804c},  // lis r4, 0x804c
+-      {0x803769b4, 0x38841f78},  // addi r4, r4, 0x1f78
+-      {0x803769b8, 0x8be40003},  // lbz r31, 3(r4)
+-      {0x803769bc, 0x4bfd09d1},  // bl OSRestoreInterrupts
+-      {0x803769c0, 0x7fe3fb78},  // mr r3, r31
+-      {0x803769c4, 0x8001001c},  // lwz r0, 0x1c(sp)
+-      {0x803769c8, 0x83e10014},  // lwz r31, 0x14(sp)
+-      {0x803769cc, 0x38210018},  // addi sp, sp, 0x18
+-      {0x803769d0, 0x7c0803a6},  // mtlr r0
+-      {0x803769d4, 0x4e800020},  // blr
+-  }};
+-
+-  u32 cycles = 0;
+-  u32 loadstores = 0;
+-  auto& mmu = Core::System::GetInstance().GetMMU();
+-  for (const auto& [address, expected_hex] : expected)
+-  {
+-    const auto result = mmu.TryReadInstruction(address);
+-    if (!result.valid || result.hex != expected_hex)
+-    {
+-      ++s_fast_melee_input_status_verify_rejects;
+-      return false;
+-    }
+-
+-    const UGeckoInstruction inst{result.hex};
+-    const GekkoOPInfo* opinfo = PPCTables::GetOpInfo(inst, address);
+-    cycles += opinfo->num_cycles;
+-    if ((opinfo->flags & FL_LOADSTORE) != 0)
+-      ++loadstores;
+-  }
+-
+-  s_fast_melee_input_status_cycles = cycles;
+-  s_fast_melee_input_status_loadstores = loadstores;
+-  s_fast_melee_input_status_verified = true;
+-  return true;
+-}
+-
+-bool TryReadFastMeleeInputStatusByte(PowerPC::PowerPCState& ppc_state, u32* value)
+-{
+-  if (ppc_state.msr.LE)
+-    return false;
+-
+-  auto& memory = Core::System::GetInstance().GetMemory();
+-  u8* ram = memory.GetRAM();
+-  const u32 offset = MELEE_INPUT_STATUS_BYTE_ADDRESS & 0x3fffffff;
+-  const u32 ram_size = memory.GetRamSizeReal();
+-  if (ram == nullptr || offset >= ram_size)
+-    return false;
+-
+-  *value = ram[offset];
+-  return true;
+-}
+-
+-bool ExecuteFastMeleeInputStatusInline(PowerPC::PowerPCState& ppc_state,
+-                                       PowerPC::PowerPCManager& power_pc, u32 current_pc)
+-{
+-  const u32 return_pc = current_pc + sizeof(u32);
+-  LR(ppc_state) = return_pc;
+-
+-  if (!VerifyMeleeInputStatusFunction() || !IsOsInterruptModeVerified(OS_INTERRUPT_DISABLE) ||
+-      !IsOsInterruptModeVerified(OS_INTERRUPT_RESTORE))
+-  {
+-    ppc_state.npc = MELEE_INPUT_STATUS_PC;
+-    ++s_fast_melee_input_status_inline_fallbacks;
+-    return false;
+-  }
+-
+-  u32 status = 0;
+-  if (!TryReadFastMeleeInputStatusByte(ppc_state, &status))
+-  {
+-    ppc_state.npc = MELEE_INPUT_STATUS_PC;
+-    ++s_fast_melee_input_status_inline_fallbacks;
+-    return false;
+-  }
+-
+-  if (!ExecuteFastOsInterruptInline(ppc_state, power_pc, OS_INTERRUPT_DISABLE_PC, 0x803769b0,
+-                                    OS_INTERRUPT_DISABLE, OS_INTERRUPT_DISABLE_CYCLES,
+-                                    OS_INTERRUPT_DISABLE_CYCLES))
+-  {
+-    ppc_state.npc = MELEE_INPUT_STATUS_PC;
+-    ++s_fast_melee_input_status_inline_fallbacks;
+-    return false;
+-  }
+-
+-  const u32 interrupt_state = ppc_state.gpr[3];
+-  ppc_state.gpr[3] = interrupt_state;
+-  if (!ExecuteFastOsInterruptInline(ppc_state, power_pc, OS_INTERRUPT_RESTORE_PC, 0x803769c0,
+-                                    OS_INTERRUPT_RESTORE,
+-                                    OS_INTERRUPT_RESTORE_ENABLE_CYCLES,
+-                                    OS_INTERRUPT_RESTORE_DISABLE_CYCLES))
+-  {
+-    ppc_state.npc = MELEE_INPUT_STATUS_PC;
+-    ++s_fast_melee_input_status_inline_fallbacks;
+-    return false;
+-  }
+-
+-  ppc_state.gpr[3] = status;
+-  ppc_state.pc = return_pc;
+-  ppc_state.npc = return_pc;
+-  ppc_state.downcount -= static_cast<int>(s_fast_melee_input_status_cycles);
+-  UpdatePerformanceMonitorIfNeeded(s_fast_melee_input_status_cycles,
+-                                   s_fast_melee_input_status_loadstores, 0, ppc_state);
+-  ++s_fast_melee_input_status_inline_ops;
+-  return true;
+-}
+-
+-bool VerifyMeleeStatusFunction()
+-{
+-  if (s_fast_melee_status_fn_verified)
+-    return true;
+-
+-  ++s_fast_melee_status_fn_verify_attempts;
+-  const std::array<std::pair<u32, u32>, 43> expected = {{
+-      {0x80339b4c, 0x7c0802a6},  // mflr r0
+-      {0x80339b50, 0x90010004},  // stw r0, 4(sp)
+-      {0x80339b54, 0x9421ffe8},  // stwu sp, -0x18(sp)
+-      {0x80339b58, 0x93e10014},  // stw r31, 0x14(sp)
+-      {0x80339b5c, 0x93c10010},  // stw r30, 0x10(sp)
+-      {0x80339b60, 0x4800d805},  // bl OSDisableInterrupts
+-      {0x80339b64, 0x800dbc10},  // lwz r0, -0x43f0(r13)
+-      {0x80339b68, 0x3bc30000},  // mr r30, r3
+-      {0x80339b6c, 0x2c000000},  // cmpwi r0, 0
+-      {0x80339b70, 0x4182000c},  // beq -> next flag
+-      {0x80339b74, 0x3be0ffff},  // li r31, -1
+-      {0x80339b78, 0x4800005c},  // b -> restore
+-      {0x80339b7c, 0x800dbc08},  // lwz r0, -0x43f8(r13)
+-      {0x80339b80, 0x2c000000},  // cmpwi r0, 0
+-      {0x80339b84, 0x4182000c},  // beq -> status pointer
+-      {0x80339b88, 0x3be00008},  // li r31, 8
+-      {0x80339b8c, 0x48000048},  // b -> restore
+-      {0x80339b90, 0x83edbbf8},  // lwz r31, -0x4408(r13)
+-      {0x80339b94, 0x281f0000},  // cmplwi r31, 0
+-      {0x80339b98, 0x4082000c},  // bne -> pointer check
+-      {0x80339b9c, 0x3be00000},  // li r31, 0
+-      {0x80339ba0, 0x48000034},  // b -> restore
+-      {0x80339ba4, 0x3c60804a},  // lis r3, 0x804a
+-      {0x80339ba8, 0x380375e0},  // addi r0, r3, 0x75e0
+-      {0x80339bac, 0x7c1f0040},  // cmplw r31, r0
+-      {0x80339bb0, 0x4082000c},  // bne -> nested path
+-      {0x80339bb4, 0x3be00000},  // li r31, 0
+-      {0x80339bb8, 0x4800001c},  // b -> restore
+-      {0x80339bbc, 0x4800d7a9},  // bl nested status helper
+-      {0x80339bc0, 0x83ff000c},  // lwz r31, 0xc(r31)
+-      {0x80339bc4, 0x2c1f0003},  // cmpwi r31, 3
+-      {0x80339bc8, 0x40820008},  // bne -> restore
+-      {0x80339bcc, 0x3be00001},  // li r31, 1
+-      {0x80339bd0, 0x4800d7bd},  // bl nested status helper
+-      {0x80339bd4, 0x7fc3f378},  // mr r3, r30
+-      {0x80339bd8, 0x4800d7b5},  // bl OSRestoreInterrupts
+-      {0x80339bdc, 0x8001001c},  // lwz r0, 0x1c(sp)
+-      {0x80339be0, 0x7fe3fb78},  // mr r3, r31
+-      {0x80339be4, 0x83e10014},  // lwz r31, 0x14(sp)
+-      {0x80339be8, 0x83c10010},  // lwz r30, 0x10(sp)
+-      {0x80339bec, 0x7c0803a6},  // mtlr r0
+-      {0x80339bf0, 0x38210018},  // addi sp, sp, 0x18
+-      {0x80339bf4, 0x4e800020},  // blr
+-  }};
+-
+-  auto& mmu = Core::System::GetInstance().GetMMU();
+-  for (const auto& [address, expected_hex] : expected)
+-  {
+-    const auto result = mmu.TryReadInstruction(address);
+-    if (!result.valid || result.hex != expected_hex)
+-    {
+-      ++s_fast_melee_status_fn_verify_rejects;
+-      return false;
+-    }
+-  }
+-
+-  s_fast_melee_status_fn_verified = true;
+-  return true;
+-}
+-
+ // Same mapping as EmitMem1ViewOffset: only the 0x8 and 0xC views are RAM.
+ static u32 Mem1ViewOffset(u32 address)
+ {
+   return (address ^ 0x80000000u) & 0xbfffffffu;
+ }
+ 
+-bool TryReadFastRamU32Address(u32 address, u32* value)
+-{
+-  auto& memory = Core::System::GetInstance().GetMemory();
+-  u8* ram = memory.GetRAM();
+-  const u32 ram_size = memory.GetRamSizeReal();
+-  const u32 offset = Mem1ViewOffset(address);
+-  if (ram == nullptr || offset >= ram_size || ram_size - offset < sizeof(u32))
+-    return false;
+-
+-  *value = (u32{ram[offset]} << 24) | (u32{ram[offset + 1]} << 16) |
+-           (u32{ram[offset + 2]} << 8) | u32{ram[offset + 3]};
+-  return true;
+-}
+-
+-std::optional<u32> TryReadFastMeleeStatusResult(PowerPC::PowerPCState& ppc_state)
+-{
+-  u32 first_flag = 0;
+-  u32 second_flag = 0;
+-  u32 status_pointer = 0;
+-  if (!TryReadFastRamU32Address(ppc_state.gpr[13] - 0x43f0, &first_flag) ||
+-      !TryReadFastRamU32Address(ppc_state.gpr[13] - 0x43f8, &second_flag) ||
+-      !TryReadFastRamU32Address(ppc_state.gpr[13] - 0x4408, &status_pointer))
+-  {
+-    return std::nullopt;
+-  }
+-
+-  if (first_flag != 0)
+-    return 0xffffffff;
+-  if (second_flag != 0)
+-    return 8;
+-  if (status_pointer == 0 || status_pointer == MELEE_STATUS_IDLE_POINTER)
+-    return 0;
+-
+-  u32 status_value = 0;
+-  if (!TryReadFastRamU32Address(status_pointer + 0x0c, &status_value))
+-    return std::nullopt;
+-
+-  return status_value == 3 ? 1 : status_value;
+-}
+-
+-bool ExecuteFastMeleeStatusInline(PowerPC::PowerPCState& ppc_state, u32 current_pc)
+-{
+-  const u32 return_pc = current_pc + sizeof(u32);
+-  LR(ppc_state) = return_pc;
+-
+-  const u32 pending_exceptions =
+-      ppc_state.Exceptions &
+-      (EXCEPTION_EXTERNAL_INT | EXCEPTION_PERFORMANCE_MONITOR | EXCEPTION_DECREMENTER);
+-  if (ppc_state.msr.LE || ppc_state.msr.PR || pending_exceptions != 0 ||
+-      !IsOsInterruptModeVerified(OS_INTERRUPT_DISABLE) ||
+-      !IsOsInterruptModeVerified(OS_INTERRUPT_RESTORE) || !VerifyMeleeStatusFunction())
+-  {
+-    ppc_state.pc = current_pc;
+-    ppc_state.npc = MELEE_STATUS_FN_PC;
+-    ++s_fast_melee_status_fn_inline_fallbacks;
+-    return false;
+-  }
+-
+-  const std::optional<u32> status = TryReadFastMeleeStatusResult(ppc_state);
+-  if (!status)
+-  {
+-    ppc_state.pc = current_pc;
+-    ppc_state.npc = MELEE_STATUS_FN_PC;
+-    ++s_fast_melee_status_fn_inline_fallbacks;
+-    return false;
+-  }
+-
+-  ppc_state.gpr[0] = return_pc;
+-  ppc_state.gpr[3] = *status;
+-  ppc_state.pc = return_pc;
+-  ppc_state.npc = return_pc;
+-  ppc_state.downcount -= static_cast<int>(MELEE_STATUS_COMMON_CYCLES);
+-  UpdatePerformanceMonitorIfNeeded(MELEE_STATUS_COMMON_CYCLES, 4, 0, ppc_state);
+-  ++s_fast_melee_status_fn_inline_ops;
+-  return true;
+-}
+-
+-bool VerifyMeleeSiPollFunction()
+-{
+-  if (s_fast_melee_si_poll_verified)
+-    return true;
+-
+-  ++s_fast_melee_si_poll_verify_attempts;
+-  const std::array<std::pair<u32, u32>, 35> expected = {{
+-      {0x8001cc84, 0x7c0802a6},  // mflr r0
+-      {0x8001cc88, 0x3c608043},  // lis r3, 0x8043
+-      {0x8001cc8c, 0x90010004},  // stw r0, 4(sp)
+-      {0x8001cc90, 0x3ca0803c},  // lis r5, 0x803c
+-      {0x8001cc94, 0x3c80803c},  // lis r4, 0x803c
+-      {0x8001cc98, 0x9421ffd0},  // stwu sp, -0x30(sp)
+-      {0x8001cc9c, 0xbf010010},  // stmw r24, 0x10(sp)
+-      {0x8001cca0, 0x3bc33318},  // addi r30, r3, 0x3318
+-      {0x8001cca4, 0x3c608002},  // lis r3, 0x8002
+-      {0x8001cca8, 0x3bbe0004},  // addi r29, r30, 4
+-      {0x8001ccac, 0x3be5ac5c},  // addi r31, r5, -0x53a4
+-      {0x8001ccb0, 0x3b24ab74},  // addi r25, r4, -0x548c
+-      {0x8001ccb4, 0x3b43cc30},  // addi r26, r3, -0x33d0
+-      {0x8001ccb8, 0x3b9e000c},  // addi r28, r30, 0xc
+-      {0x8001ccbc, 0x3b7e0010},  // addi r27, r30, 0x10
+-      {0x8001ccc0, 0x801b0000},  // lwz r0, 0(r27)
+-      {0x8001ccc4, 0x2c000001},  // cmpwi r0, 1
+-      {0x8001ccc8, 0x4182009c},  // beq -> active path
+-      {0x8001cccc, 0x408000bc},  // bge -> tail
+-      {0x8001ccd0, 0x2c000000},  // cmpwi r0, 0
+-      {0x8001ccd4, 0x40800008},  // bge -> pending check
+-      {0x8001ccdc, 0x801c0000},  // lwz r0, 0(r28)
+-      {0x8001cce0, 0x2c000000},  // cmpwi r0, 0
+-      {0x8001cce4, 0x418200a4},  // beq -> tail
+-      {0x8001cd88, 0x801b0000},  // lwz r0, 0(r27)
+-      {0x8001cd8c, 0x2c000001},  // cmpwi r0, 1
+-      {0x8001cd90, 0x41820010},  // beq -> return
+-      {0x8001cd94, 0x801e000c},  // lwz r0, 0xc(r30)
+-      {0x8001cd98, 0x2c000000},  // cmpwi r0, 0
+-      {0x8001cd9c, 0x4082ff24},  // bne -> loop
+-      {0x8001cda0, 0xbb010010},  // lmw r24, 0x10(sp)
+-      {0x8001cda4, 0x80010034},  // lwz r0, 0x34(sp)
+-      {0x8001cda8, 0x38210030},  // addi sp, sp, 0x30
+-      {0x8001cdac, 0x7c0803a6},  // mtlr r0
+-      {0x8001cdb0, 0x4e800020},  // blr
+-  }};
+-
+-  u32 cycles = 0;
+-  u32 loadstores = 0;
+-  auto& mmu = Core::System::GetInstance().GetMMU();
+-  for (const auto& [address, expected_hex] : expected)
+-  {
+-    const auto result = mmu.TryReadInstruction(address);
+-    if (!result.valid || result.hex != expected_hex)
+-    {
+-      ++s_fast_melee_si_poll_verify_rejects;
+-      return false;
+-    }
+-
+-    const UGeckoInstruction inst{result.hex};
+-    const GekkoOPInfo* opinfo = PPCTables::GetOpInfo(inst, address);
+-    cycles += opinfo->num_cycles;
+-    if ((opinfo->flags & FL_LOADSTORE) != 0)
+-      ++loadstores;
+-  }
+-
+-  s_fast_melee_si_poll_cycles = cycles;
+-  s_fast_melee_si_poll_loadstores = loadstores;
+-  s_fast_melee_si_poll_verified = true;
+-  return true;
+-}
+-
+-bool TryReadFastMeleeSiPollWords(u32* state, u32* pending)
+-{
+-  auto& memory = Core::System::GetInstance().GetMemory();
+-  u8* ram = memory.GetRAM();
+-  const u32 ram_size = memory.GetRamSizeReal();
+-  const u32 state_offset = MELEE_SI_POLL_STATE_ADDRESS & 0x3fffffff;
+-  const u32 pending_offset = MELEE_SI_POLL_PENDING_ADDRESS & 0x3fffffff;
+-  if (ram == nullptr || state_offset >= ram_size || pending_offset >= ram_size ||
+-      ram_size - state_offset < sizeof(u32) || ram_size - pending_offset < sizeof(u32))
+-  {
+-    return false;
+-  }
+-
+-  const auto read_u32_be = [](const u8* base, u32 offset) {
+-    return (u32{base[offset]} << 24) | (u32{base[offset + 1]} << 16) |
+-           (u32{base[offset + 2]} << 8) | u32{base[offset + 3]};
+-  };
+-  *state = read_u32_be(ram, state_offset);
+-  *pending = read_u32_be(ram, pending_offset);
+-  return true;
+-}
+-
+-bool ExecuteFastMeleeSiPollNoEventInline(PowerPC::PowerPCState& ppc_state, u32 current_pc)
+-{
+-  const u32 return_pc = current_pc + sizeof(u32);
+-  LR(ppc_state) = return_pc;
+-
+-  u32 state = 0;
+-  u32 pending = 0;
+-  if (ppc_state.msr.LE || !VerifyMeleeSiPollFunction() ||
+-      !TryReadFastMeleeSiPollWords(&state, &pending) || state != 0 || pending != 0)
+-  {
+-    ppc_state.pc = current_pc;
+-    ppc_state.npc = MELEE_SI_POLL_PC;
+-    ++s_fast_melee_si_poll_inline_fallbacks;
+-    return false;
+-  }
+-
+-  ppc_state.pc = return_pc;
+-  ppc_state.npc = return_pc;
+-  ppc_state.downcount -= static_cast<int>(s_fast_melee_si_poll_cycles);
+-  UpdatePerformanceMonitorIfNeeded(s_fast_melee_si_poll_cycles,
+-                                   s_fast_melee_si_poll_loadstores, 0, ppc_state);
+-  ++s_fast_melee_si_poll_inline_ops;
+-  return true;
+-}
+-
+-bool VerifyMeleeServicePollFunction()
+-{
+-  if (s_fast_melee_service_poll_verified)
+-    return true;
+-
+-  ++s_fast_melee_service_poll_verify_attempts;
+-  const std::array<std::pair<u32, u32>, 30> status_dispatch_expected = {{
+-      {0x80019230, 0x7c0802a6}, {0x80019234, 0x90010004},
+-      {0x80019238, 0x9421fff8}, {0x8001923c, 0x48320911},
+-      {0x80019240, 0x38030001}, {0x80019244, 0x2800000c},
+-      {0x80019248, 0x4181004c}, {0x8001924c, 0x3c60803c},
+-      {0x80019250, 0x3863aaa8}, {0x80019254, 0x5400103a},
+-      {0x80019258, 0x7c03002e}, {0x8001925c, 0x7c0903a6},
+-      {0x80019260, 0x4e800420}, {0x80019264, 0x38600000},
+-      {0x80019268, 0x48000030}, {0x8001926c, 0x38600001},
+-      {0x80019270, 0x48000028}, {0x80019274, 0x38600002},
+-      {0x80019278, 0x48000020}, {0x8001927c, 0x38600003},
+-      {0x80019280, 0x48000018}, {0x80019284, 0x38600004},
+-      {0x80019288, 0x48000010}, {0x8001928c, 0x38600005},
+-      {0x80019290, 0x48000008}, {0x80019294, 0x3860ffff},
+-      {0x80019298, 0x8001000c}, {0x8001929c, 0x38210008},
+-      {0x800192a0, 0x7c0803a6}, {0x800192a4, 0x4e800020},
+-  }};
+-  const std::array<std::pair<u32, u32>, 19> service_poll_expected = {{
+-      {0x800192a8, 0x7c0802a6}, {0x800192ac, 0x3c80803c},
+-      {0x800192b0, 0x90010004}, {0x800192b4, 0x9421ffd0},
+-      {0x800192b8, 0xbf61001c}, {0x800192bc, 0x3bc30000},
+-      {0x800192c0, 0x3b84a708}, {0x800192c4, 0x3be0ffff},
+-      {0x800192c8, 0x4bffff69}, {0x800192cc, 0x3b630000},
+-      {0x800192d0, 0x2c1bffff}, {0x800192d4, 0x41820274},
+-      {0x800192d8, 0x2c1b0005}, {0x800192dc, 0x4182026c},
+-      {0x80019548, 0xbb61001c}, {0x8001954c, 0x80010034},
+-      {0x80019550, 0x38210030}, {0x80019554, 0x7c0803a6},
+-      {0x80019558, 0x4e800020},
+-  }};
+-  const std::array<std::pair<u32, u32>, 11> wrapper_expected = {{
+-      {0x800195d0, 0x7c0802a6}, {0x800195d4, 0x3c608002},
+-      {0x800195d8, 0x90010004}, {0x800195dc, 0x3863955c},
+-      {0x800195e0, 0x9421fff8}, {0x800195e4, 0x4bfffcc5},
+-      {0x800195e8, 0x4800369d}, {0x800195ec, 0x8001000c},
+-      {0x800195f0, 0x38210008}, {0x800195f4, 0x7c0803a6},
+-      {0x800195f8, 0x4e800020},
+-  }};
+-  const std::array<std::pair<u32, u32>, 46> common_cycle_expected = {{
+-      {0x800195d0, 0x7c0802a6}, {0x800195d4, 0x3c608002},
+-      {0x800195d8, 0x90010004}, {0x800195dc, 0x3863955c},
+-      {0x800195e0, 0x9421fff8}, {0x800195e4, 0x4bfffcc5},
+-      {0x800195e8, 0x4800369d}, {0x800195ec, 0x8001000c},
+-      {0x800195f0, 0x38210008}, {0x800195f4, 0x7c0803a6},
+-      {0x800195f8, 0x4e800020}, {0x800192a8, 0x7c0802a6},
+-      {0x800192ac, 0x3c80803c}, {0x800192b0, 0x90010004},
+-      {0x800192b4, 0x9421ffd0}, {0x800192b8, 0xbf61001c},
+-      {0x800192bc, 0x3bc30000}, {0x800192c0, 0x3b84a708},
+-      {0x800192c4, 0x3be0ffff}, {0x800192c8, 0x4bffff69},
+-      {0x800192cc, 0x3b630000}, {0x800192d0, 0x2c1bffff},
+-      {0x800192d4, 0x41820274}, {0x80019548, 0xbb61001c},
+-      {0x8001954c, 0x80010034}, {0x80019550, 0x38210030},
+-      {0x80019554, 0x7c0803a6}, {0x80019558, 0x4e800020},
+-      {0x80019230, 0x7c0802a6}, {0x80019234, 0x90010004},
+-      {0x80019238, 0x9421fff8}, {0x8001923c, 0x48320911},
+-      {0x80019240, 0x38030001}, {0x80019244, 0x2800000c},
+-      {0x80019248, 0x4181004c}, {0x8001924c, 0x3c60803c},
+-      {0x80019250, 0x3863aaa8}, {0x80019254, 0x5400103a},
+-      {0x80019258, 0x7c03002e}, {0x8001925c, 0x7c0903a6},
+-      {0x80019260, 0x4e800420}, {0x80019294, 0x3860ffff},
+-      {0x80019298, 0x8001000c}, {0x8001929c, 0x38210008},
+-      {0x800192a0, 0x7c0803a6}, {0x800192a4, 0x4e800020},
+-  }};
+-
+-  u32 cycles = 0;
+-  u32 loadstores = 0;
+-  auto& mmu = Core::System::GetInstance().GetMMU();
+-  const auto verify_expected = [&](const auto& expected) {
+-    for (const auto& [address, expected_hex] : expected)
+-    {
+-      const auto result = mmu.TryReadInstruction(address);
+-      if (!result.valid || result.hex != expected_hex)
+-        return false;
+-    }
+-    return true;
+-  };
+-  const auto accumulate_expected = [&](const auto& expected) {
+-    for (const auto& [address, expected_hex] : expected)
+-    {
+-      const UGeckoInstruction inst{expected_hex};
+-      const GekkoOPInfo* opinfo = PPCTables::GetOpInfo(inst, address);
+-      cycles += opinfo->num_cycles;
+-      if ((opinfo->flags & FL_LOADSTORE) != 0)
+-        ++loadstores;
+-    }
+-  };
+-
+-  if (!verify_expected(status_dispatch_expected) || !verify_expected(service_poll_expected) ||
+-      !verify_expected(wrapper_expected) || !VerifyMeleeStatusFunction() ||
+-      !VerifyMeleeSiPollFunction())
+-  {
+-    ++s_fast_melee_service_poll_verify_rejects;
+-    return false;
+-  }
+-
+-  accumulate_expected(common_cycle_expected);
+-  s_fast_melee_service_poll_cycles =
+-      cycles + MELEE_STATUS_COMMON_CYCLES + s_fast_melee_si_poll_cycles;
+-  s_fast_melee_service_poll_loadstores = loadstores + 4 + s_fast_melee_si_poll_loadstores;
+-  s_fast_melee_service_poll_verified = true;
+-  return true;
+-}
+-
+-u32 MapFastMeleeStatusDispatchResult(u32 raw_status)
+-{
+-  const u32 index = raw_status + 1;
+-  if (index > 12)
+-    return 0xffffffff;
+-
+-  switch (index)
+-  {
+-  case 0:
+-    return 4;
+-  case 2:
+-    return 5;
+-  case 5:
+-    return 1;
+-  case 6:
+-    return 0;
+-  case 7:
+-    return 2;
+-  case 12:
+-    return 3;
+-  default:
+-    return 0xffffffff;
+-  }
+-}
+-
+-bool ExecuteFastMeleeServicePollInline(PowerPC::PowerPCState& ppc_state, u32 current_pc)
+-{
+-  const u32 return_pc = current_pc + sizeof(u32);
+-  LR(ppc_state) = return_pc;
+-
+-  u32 state = 0;
+-  u32 pending = 0;
+-  const u32 pending_exceptions =
+-      ppc_state.Exceptions &
+-      (EXCEPTION_EXTERNAL_INT | EXCEPTION_PERFORMANCE_MONITOR | EXCEPTION_DECREMENTER);
+-  const std::optional<u32> raw_status = TryReadFastMeleeStatusResult(ppc_state);
+-  const u32 mapped_status = raw_status ? MapFastMeleeStatusDispatchResult(*raw_status) : 0;
+-  const bool status_dispatch_returns_early = raw_status && (mapped_status == 0xffffffff ||
+-                                                            mapped_status == 5);
+-  if (ppc_state.msr.LE || ppc_state.msr.PR || pending_exceptions != 0 ||
+-      !IsOsInterruptModeVerified(OS_INTERRUPT_DISABLE) ||
+-      !IsOsInterruptModeVerified(OS_INTERRUPT_RESTORE) || !VerifyMeleeServicePollFunction() ||
+-      !status_dispatch_returns_early || !TryReadFastMeleeSiPollWords(&state, &pending) ||
+-      state != 0 || pending != 0)
+-  {
+-    ppc_state.pc = current_pc;
+-    ppc_state.npc = MELEE_SERVICE_POLL_PC;
+-    ++s_fast_melee_service_poll_inline_fallbacks;
+-    return false;
+-  }
+-
+-  ppc_state.gpr[0] = return_pc;
+-  ppc_state.gpr[3] = mapped_status;
+-  ppc_state.cr.SetField(0, PowerPC::CR_EQ | (ppc_state.GetXER_SO() ? PowerPC::CR_SO : 0));
+-  ppc_state.pc = return_pc;
+-  ppc_state.npc = return_pc;
+-  ppc_state.downcount -= static_cast<int>(s_fast_melee_service_poll_cycles);
+-  UpdatePerformanceMonitorIfNeeded(s_fast_melee_service_poll_cycles,
+-                                   s_fast_melee_service_poll_loadstores, 0, ppc_state);
+-  ++s_fast_melee_service_poll_inline_ops;
+-  return true;
+-}
+-
+-bool VerifyMeleeInputPollNoChangeFunction()
+-{
+-  if (s_fast_melee_input_poll_verified)
+-    return true;
+-
+-  ++s_fast_melee_input_poll_verify_attempts;
+-  const std::array<std::pair<u32, u32>, 38> expected = {{
+-      {0x80019894, 0x7c0802a6},  // mflr r0
+-      {0x80019898, 0x90010004},  // stw r0, 4(sp)
+-      {0x8001989c, 0x9421fff0},  // stwu sp, -0x10(sp)
+-      {0x800198a0, 0x93e1000c},  // stw r31, 0xc(sp)
+-      {0x800198a4, 0x93c10008},  // stw r30, 8(sp)
+-      {0x800198a8, 0x4832dabd},  // bl OSDisableInterrupts
+-      {0x800198ac, 0x7c7e1b78},  // mr r30, r3
+-      {0x800198b0, 0x4835d0ed},  // bl input status
+-      {0x800198b4, 0x7c7f1b78},  // mr r31, r3
+-      {0x800198b8, 0x4bfffd71},  // bl input housekeeping
+-      {0x800198bc, 0x7fc3f378},  // mr r3, r30
+-      {0x800198c0, 0x4832dacd},  // bl OSRestoreInterrupts
+-      {0x800198c4, 0x7fe3fb78},  // mr r3, r31
+-      {0x800198c8, 0x80010014},  // lwz r0, 0x14(sp)
+-      {0x800198cc, 0x83e1000c},  // lwz r31, 0xc(sp)
+-      {0x800198d0, 0x83c10008},  // lwz r30, 8(sp)
+-      {0x800198d4, 0x38210010},  // addi sp, sp, 0x10
+-      {0x800198d8, 0x7c0803a6},  // mtlr r0
+-      {0x800198dc, 0x4e800020},  // blr
+-      {0x80019628, 0x7c0802a6},  // mflr r0
+-      {0x8001962c, 0x3c608043},  // lis r3, 0x8043
+-      {0x80019630, 0x90010004},  // stw r0, 4(sp)
+-      {0x80019634, 0x9421ffd8},  // stwu sp, -0x28(sp)
+-      {0x80019638, 0xbf610014},  // stmw r27, 0x14(sp)
+-      {0x8001963c, 0x3be329f0},  // addi r31, r3, 0x29f0
+-      {0x80019640, 0x809f0038},  // lwz r4, 0x38(r31)
+-      {0x80019644, 0x801f0000},  // lwz r0, 0(r31)
+-      {0x80019648, 0x80bf003c},  // lwz r5, 0x3c(r31)
+-      {0x8001964c, 0x807f0004},  // lwz r3, 4(r31)
+-      {0x80019650, 0x7c800278},  // xor r0, r4, r0
+-      {0x80019654, 0x7ca31a78},  // xor r3, r5, r3
+-      {0x80019658, 0x7c600379},  // or. r0, r3, r0
+-      {0x8001965c, 0x41820210},  // beq -> no-change return
+-      {0x8001986c, 0xbb610014},  // lmw r27, 0x14(sp)
+-      {0x80019870, 0x8001002c},  // lwz r0, 0x2c(sp)
+-      {0x80019874, 0x38210028},  // addi sp, sp, 0x28
+-      {0x80019878, 0x7c0803a6},  // mtlr r0
+-      {0x8001987c, 0x4e800020},  // blr
+-  }};
+-
+-  u32 cycles = 0;
+-  u32 loadstores = 0;
+-  auto& mmu = Core::System::GetInstance().GetMMU();
+-  for (const auto& [address, expected_hex] : expected)
+-  {
+-    const auto result = mmu.TryReadInstruction(address);
+-    if (!result.valid || result.hex != expected_hex)
+-    {
+-      ++s_fast_melee_input_poll_verify_rejects;
+-      return false;
+-    }
+-
+-    const UGeckoInstruction inst{result.hex};
+-    const GekkoOPInfo* opinfo = PPCTables::GetOpInfo(inst, address);
+-    cycles += opinfo->num_cycles;
+-    if ((opinfo->flags & FL_LOADSTORE) != 0)
+-      ++loadstores;
+-  }
+-
+-  if (!VerifyMeleeInputStatusFunction())
+-  {
+-    ++s_fast_melee_input_poll_verify_rejects;
+-    return false;
+-  }
+-
+-  s_fast_melee_input_poll_cycles =
+-      cycles + s_fast_melee_input_status_cycles + OS_INTERRUPT_DISABLE_CYCLES +
+-      OS_INTERRUPT_DISABLE_CYCLES + OS_INTERRUPT_RESTORE_DISABLE_CYCLES;
+-  s_fast_melee_input_poll_loadstores = loadstores + s_fast_melee_input_status_loadstores;
+-  s_fast_melee_input_poll_verified = true;
+-  return true;
+-}
+-
+-bool TryReadFastMeleeInputPollNoChangeWords(u32* old_high, u32* old_low, u32* new_high,
+-                                            u32* new_low)
+-{
+-  auto& memory = Core::System::GetInstance().GetMemory();
+-  u8* ram = memory.GetRAM();
+-  const u32 ram_size = memory.GetRamSizeReal();
+-  const std::array<u32, 4> offsets = {{
+-      (MELEE_INPUT_POLL_STATE_BASE + 0x00) & 0x3fffffff,
+-      (MELEE_INPUT_POLL_STATE_BASE + 0x04) & 0x3fffffff,
+-      (MELEE_INPUT_POLL_STATE_BASE + 0x38) & 0x3fffffff,
+-      (MELEE_INPUT_POLL_STATE_BASE + 0x3c) & 0x3fffffff,
+-  }};
+-  if (ram == nullptr)
+-    return false;
+-  for (const u32 offset : offsets)
+-  {
+-    if (offset >= ram_size || ram_size - offset < sizeof(u32))
+-      return false;
+-  }
+-
+-  const auto read_u32_be = [](const u8* base, u32 offset) {
+-    return (u32{base[offset]} << 24) | (u32{base[offset + 1]} << 16) |
+-           (u32{base[offset + 2]} << 8) | u32{base[offset + 3]};
+-  };
+-  *old_high = read_u32_be(ram, offsets[0]);
+-  *old_low = read_u32_be(ram, offsets[1]);
+-  *new_high = read_u32_be(ram, offsets[2]);
+-  *new_low = read_u32_be(ram, offsets[3]);
+-  return true;
+-}
+-
+-bool ExecuteFastMeleeInputPollNoChangeInline(PowerPC::PowerPCState& ppc_state, u32 current_pc)
+-{
+-  const u32 return_pc = current_pc + sizeof(u32);
+-  LR(ppc_state) = return_pc;
+-
+-  u32 old_high = 0;
+-  u32 old_low = 0;
+-  u32 new_high = 0;
+-  u32 new_low = 0;
+-  u32 status = 0;
+-  const u32 pending_exceptions =
+-      ppc_state.Exceptions &
+-      (EXCEPTION_EXTERNAL_INT | EXCEPTION_PERFORMANCE_MONITOR | EXCEPTION_DECREMENTER);
+-  if (ppc_state.msr.LE || ppc_state.msr.PR || pending_exceptions != 0 ||
+-      !IsOsInterruptModeVerified(OS_INTERRUPT_DISABLE) ||
+-      !IsOsInterruptModeVerified(OS_INTERRUPT_RESTORE) ||
+-      !VerifyMeleeInputPollNoChangeFunction() ||
+-      !TryReadFastMeleeInputPollNoChangeWords(&old_high, &old_low, &new_high, &new_low) ||
+-      old_high != new_high || old_low != new_low ||
+-      !TryReadFastMeleeInputStatusByte(ppc_state, &status))
+-  {
+-    ppc_state.pc = current_pc;
+-    ppc_state.npc = MELEE_INPUT_POLL_PC;
+-    ++s_fast_melee_input_poll_inline_fallbacks;
+-    return false;
+-  }
+-
+-  const u32 restore_cycles =
+-      (ppc_state.msr.Hex & MSR_EE_MASK) != 0 ? OS_INTERRUPT_RESTORE_ENABLE_CYCLES :
+-                                               OS_INTERRUPT_RESTORE_DISABLE_CYCLES;
+-  const u32 cycles = s_fast_melee_input_poll_cycles + restore_cycles;
+-  ppc_state.cr.SetField(0, PowerPC::CR_EQ | (ppc_state.GetXER_SO() ? PowerPC::CR_SO : 0));
+-  ppc_state.gpr[3] = status;
+-  ppc_state.pc = return_pc;
+-  ppc_state.npc = return_pc;
+-  ppc_state.downcount -= static_cast<int>(cycles);
+-  UpdatePerformanceMonitorIfNeeded(cycles, s_fast_melee_input_poll_loadstores, 0, ppc_state);
+-  ++s_fast_melee_input_poll_inline_ops;
+-  return true;
+-}
+-
+ s32 DecodeConditionalBranchDisplacement(UGeckoInstruction inst)
+ {
+   return static_cast<s32>(static_cast<s16>(inst.BD << 2));
+@@ -2575,47 +1791,6 @@ extern "C" int DolphinWeb_CachedInterpreterFastOsInterruptCall(int state_ptr, u3
+   return 0;
+ }
+ 
+-extern "C" int DolphinWeb_CachedInterpreterFastMeleeInputStatusCall(int state_ptr, u32 current_pc)
+-{
+-  auto& system = Core::System::GetInstance();
+-  auto& ppc_state = *reinterpret_cast<PowerPC::PowerPCState*>(
+-      static_cast<std::uintptr_t>(state_ptr));
+-  ExecuteFastMeleeInputStatusInline(ppc_state, system.GetPowerPC(), current_pc);
+-  return 0;
+-}
+-
+-extern "C" int DolphinWeb_CachedInterpreterFastMeleeStatusCall(int state_ptr, u32 current_pc,
+-                                                               u32 downcount, u32 unused_a,
+-                                                               u32 unused_b)
+-{
+-  (void)unused_a;
+-  (void)unused_b;
+-  auto& ppc_state = *reinterpret_cast<PowerPC::PowerPCState*>(
+-      static_cast<std::uintptr_t>(state_ptr));
+-  if (ExecuteFastMeleeStatusInline(ppc_state, current_pc))
+-    return 0;
+-
+-  ppc_state.downcount -= downcount;
+-  ++s_wasm_helper_halt_count;
+-  return 1;
+-}
+-
+-extern "C" int DolphinWeb_CachedInterpreterFastMeleeServicePollCall(int state_ptr, u32 current_pc,
+-                                                                    u32 downcount, u32 unused_a,
+-                                                                    u32 unused_b)
+-{
+-  (void)unused_a;
+-  (void)unused_b;
+-  auto& ppc_state = *reinterpret_cast<PowerPC::PowerPCState*>(
+-      static_cast<std::uintptr_t>(state_ptr));
+-  if (ExecuteFastMeleeServicePollInline(ppc_state, current_pc))
+-    return 0;
+-
+-  ppc_state.downcount -= downcount;
+-  ++s_wasm_helper_halt_count;
+-  return 1;
+-}
+-
+ u16 ReadRamU16BE(const u8* ram, u32 offset)
+ {
+   return static_cast<u16>((u16{ram[offset]} << 8) | ram[offset + 1]);
+@@ -3254,19 +2429,15 @@ struct WasmStateLayout
+ constexpr u32 WASM_IMPORT_FASTCHECK_GPFIFO_INDEX = 14;
+ constexpr u32 WASM_IMPORT_INTERPRET_INDEX = 13;
+ constexpr u32 WASM_IMPORT_FAST_OS_INTERRUPT_CALL_INDEX = 15;
+-constexpr u32 WASM_IMPORT_FAST_MELEE_INPUT_STATUS_CALL_INDEX = 16;
+-constexpr u32 WASM_IMPORT_FAST_MELEE_STATUS_CALL_INDEX = 17;
+-constexpr u32 WASM_IMPORT_FAST_MELEE_SERVICE_POLL_CALL_INDEX = 18;
+-constexpr u32 WASM_IMPORT_FMA_INDEX = 19;
++constexpr u32 WASM_IMPORT_FMA_INDEX = 16;
+ constexpr u32 WASM_GATHER_PIPE_FLUSH_THRESHOLD =
+     GPFifo::GATHER_PIPE_EXTRA_SIZE - GPFifo::GATHER_PIPE_SIZE;
+ 
+ // Helper imports in index order (the block module's import section).
+-constexpr std::array<const char*, 20> WASM_IMPORT_NAMES = {
++constexpr std::array<const char*, 17> WASM_IMPORT_NAMES = {
+     "read_u32", "write_u32", "read_u8", "write_u8", "read_u16", "write_u16", "lfs",
+     "stfs", "lfd", "fmr", "system", "fp", "fctiwz", "interpret", "fastcheck_gpfifo",
+-    "fast_os_interrupt_call", "fast_melee_input_status_call", "fast_melee_status_call",
+-    "fast_melee_service_poll_call", "fma"};
++    "fast_os_interrupt_call", "fma"};
+ 
+ // Region fragments (P4): while a collector is installed, helper calls are
+ // emitted with a 5-byte padded LEB index and recorded, so the region
+@@ -4297,9 +3468,6 @@ void EmitMcrf(std::vector<u8>& body, const WasmStateLayout& layout, UGeckoInstru
+ void EmitSystemCall(std::vector<u8>& body, const PPCAnalyst::CodeOp& op, u32 downcount);
+ void EmitFastOsInterruptCall(std::vector<u8>& body, u32 current_pc,
+                              const OsInterruptInlineTarget& target);
+-void EmitFastMeleeInputStatusCall(std::vector<u8>& body, u32 current_pc);
+-void EmitFastMeleeStatusCall(std::vector<u8>& body, u32 current_pc, u32 downcount);
+-void EmitFastMeleeServicePollCall(std::vector<u8>& body, u32 current_pc, u32 downcount);
+ 
+ void EmitMfmsr(std::vector<u8>& body, const WasmStateLayout& layout, const PPCAnalyst::CodeOp& op,
+                u32 downcount)
+@@ -4563,7 +3731,7 @@ void EmitBranchToRegister(std::vector<u8>& body, const WasmStateLayout& layout,
+ }
+ 
+ void EmitUnconditionalBranch(std::vector<u8>& body, const WasmStateLayout& layout,
+-                             const PPCAnalyst::CodeOp& op, u32 downcount)
++                             const PPCAnalyst::CodeOp& op)
+ {
+   const UGeckoInstruction inst = op.inst;
+   if (const auto os_interrupt_target = GetDirectBranchOsInterruptTarget(inst, op.address))
+@@ -4571,21 +3739,6 @@ void EmitUnconditionalBranch(std::vector<u8>& body, const WasmStateLayout& layou
+     EmitFastOsInterruptCall(body, op.address, *os_interrupt_target);
+     return;
+   }
+-  if (IsDirectBranchLinkTo(inst, op.address, MELEE_INPUT_STATUS_PC))
+-  {
+-    EmitFastMeleeInputStatusCall(body, op.address);
+-    return;
+-  }
+-  if (IsDirectBranchLinkTo(inst, op.address, MELEE_STATUS_FN_PC))
+-  {
+-    EmitFastMeleeStatusCall(body, op.address, downcount);
+-    return;
+-  }
+-  if (IsDirectBranchLinkTo(inst, op.address, MELEE_SERVICE_POLL_PC))
+-  {
+-    EmitFastMeleeServicePollCall(body, op.address, downcount);
+-    return;
+-  }
+ 
+   if (inst.LK)
+     EmitStoreStateU32Const(body, SprOffset(layout, SPR_LR), op.address + 4);
+@@ -5244,43 +4397,7 @@ void EmitFastOsInterruptCall(std::vector<u8>& body, u32 current_pc,
+   EmitI32Const(body, target.cycles_secondary);
+   EmitCallImport(body, WASM_IMPORT_FAST_OS_INTERRUPT_CALL_INDEX);
+   EmitImportedHaltCheck(body);
+-  EmitRegCacheReloadAll(body);  // interrupt handler may write arbitrary GPRs
+-}
+-
+-void EmitFastMeleeInputStatusCall(std::vector<u8>& body, u32 current_pc)
+-{
+-  EmitRegCacheFlushDirty(body);  // §28cx C1
+-  EmitLocalGet(body, 0);
+-  EmitI32Const(body, current_pc);
+-  EmitCallImport(body, WASM_IMPORT_FAST_MELEE_INPUT_STATUS_CALL_INDEX);
+-  EmitImportedHaltCheck(body);
+-  EmitRegCacheReloadAll(body);  // HLE call may write arbitrary GPRs
+-}
+-
+-void EmitFastMeleeStatusCall(std::vector<u8>& body, u32 current_pc, u32 downcount)
+-{
+-  EmitRegCacheFlushDirty(body);  // §28cx C1
+-  EmitLocalGet(body, 0);
+-  EmitI32Const(body, current_pc);
+-  EmitI32Const(body, downcount);
+-  EmitI32Const(body, 0);
+-  EmitI32Const(body, 0);
+-  EmitCallImport(body, WASM_IMPORT_FAST_MELEE_STATUS_CALL_INDEX);
+-  EmitImportedHaltCheck(body);
+-  EmitRegCacheReloadAll(body);  // HLE call may write arbitrary GPRs
+-}
+-
+-void EmitFastMeleeServicePollCall(std::vector<u8>& body, u32 current_pc, u32 downcount)
+-{
+-  EmitRegCacheFlushDirty(body);  // §28cx C1
+-  EmitLocalGet(body, 0);
+-  EmitI32Const(body, current_pc);
+-  EmitI32Const(body, downcount);
+-  EmitI32Const(body, 0);
+-  EmitI32Const(body, 0);
+-  EmitCallImport(body, WASM_IMPORT_FAST_MELEE_SERVICE_POLL_CALL_INDEX);
+-  EmitImportedHaltCheck(body);
+-  EmitRegCacheReloadAll(body);  // HLE call may write arbitrary GPRs
++  EmitRegCacheReloadAll(body);  // interrupt handler may write arbitrary GPRs
+ }
+ 
+ void EmitFpCall(std::vector<u8>& body, const PPCAnalyst::CodeOp& op, u32 downcount)
+@@ -5294,7 +4411,7 @@ void EmitFpCall(std::vector<u8>& body, const PPCAnalyst::CodeOp& op, u32 downcou
+   EmitCallImport(body, 11);
+   EmitImportedHaltCheck(body);
+   // FP ops write FPRs (+CR/FPSCR), not GPRs — reload only the op's GPR outputs
+-  // (normally none), so the FP-heavy Melee path doesn't pay a full reload.
++  // (normally none), so FP-heavy game code doesn't pay a full reload.
+   EmitRegCacheReloadMask(body, op.regsOut);
+ }
+ 
+@@ -8408,7 +7525,7 @@ bool EmitWasmSupportedIntegerInstruction(std::vector<u8>& body, const WasmStateL
+     return true;
+ 
+   case 18:  // bx
+-    EmitUnconditionalBranch(body, layout, op, downcount);
++    EmitUnconditionalBranch(body, layout, op);
+     return true;
+ 
+   case 19:  // bclrx/bcctrx
+@@ -9085,7 +8202,7 @@ bool EmitWasmSupportedIntegerInstruction(std::vector<u8>& body, const WasmStateL
+ 
+       // Compute new XER.CA using ORIGINAL RA/RB from memory and store it FIRST.
+       // We must not store the result to GprOffset(RD) before this read pair —
+-      // Melee emits `adde rD, rA, rB` with rD == rA (or rB) often enough that
++      // Game code emits `adde rD, rA, rB` with rD == rA (or rB) often enough that
+       // the rD store would otherwise clobber the value we re-read here, giving
+       // a carry computed from (result, RB) instead of (RA, RB). The corrupted
+       // CA then propagates through subsequent adde/subfe and breaks 3D
+@@ -9635,7 +8752,7 @@ bool IsPpcWasmDirectInstructionCandidate(const PPCAnalyst::CodeOp& op)
+   }
+ 
+   // Direct-tier JIT admits FPU only when this file has a specialized emitter or a known hot helper
+-  // fallback. Letting every FPU helper through regresses Melee's title-screen blocks.
++  // fallback. Letting every FPU helper through regresses FP-heavy menu blocks.
+   if ((op.opinfo->flags & FL_USE_FPU) != 0)
+     return IsPpcWasmSpecializedFpuInstruction(inst) || IsPpcWasmDirectHelperFpuInstruction(inst);
+ 
+@@ -10011,7 +9128,7 @@ std::vector<u8> BuildWasmCachedInterpreterBlock(std::span<const PPCAnalyst::Code
+   EmitSection(bytes, 1, types);
+ 
+   std::vector<u8> imports;
+-  imports.push_back(0x15);
++  imports.push_back(0x12);
+   EmitEnvFunctionImport(imports, "read_u32", 1);
+   EmitEnvFunctionImport(imports, "write_u32", 2);
+   EmitEnvFunctionImport(imports, "read_u8", 1);
+@@ -10028,9 +9145,6 @@ std::vector<u8> BuildWasmCachedInterpreterBlock(std::span<const PPCAnalyst::Code
+   EmitEnvFunctionImport(imports, "interpret", 3);
+   EmitEnvFunctionImport(imports, "fastcheck_gpfifo", 2);
+   EmitEnvFunctionImport(imports, "fast_os_interrupt_call", 3);
+-  EmitEnvFunctionImport(imports, "fast_melee_input_status_call", 1);
+-  EmitEnvFunctionImport(imports, "fast_melee_status_call", 3);
+-  EmitEnvFunctionImport(imports, "fast_melee_service_poll_call", 3);
+   EmitEnvFunctionImport(imports, "fma", 4);
+   EmitName(imports, "env");
+   EmitName(imports, "memory");
+@@ -10243,18 +9357,11 @@ int CompileWasmModuleWithKey(const std::vector<u8>& bytes, const std::array<char
+       reinterpret_cast<std::uintptr_t>(&DolphinWeb_CachedInterpreterFastCheckGatherPipe));
+   const auto fast_os_interrupt_call_index = static_cast<int>(
+       reinterpret_cast<std::uintptr_t>(&DolphinWeb_CachedInterpreterFastOsInterruptCall));
+-  const auto fast_melee_input_status_call_index = static_cast<int>(
+-      reinterpret_cast<std::uintptr_t>(&DolphinWeb_CachedInterpreterFastMeleeInputStatusCall));
+-  const auto fast_melee_status_call_index = static_cast<int>(
+-      reinterpret_cast<std::uintptr_t>(&DolphinWeb_CachedInterpreterFastMeleeStatusCall));
+-  const auto fast_melee_service_poll_call_index = static_cast<int>(
+-      reinterpret_cast<std::uintptr_t>(&DolphinWeb_CachedInterpreterFastMeleeServicePollCall));
+   return DolphinWeb_CachedInterpreterCompileWasmBlock(
+       bytes.data(), static_cast<int>(bytes.size()), cache_key.data(), read_u32_index,
+       write_u32_index, read_u8_index, write_u8_index, read_u16_index, write_u16_index, lfs_index,
+       stfs_index, lfd_index, fmr_index, system_index, fp_index, fctiwz_index, interpret_index,
+-      fastcheck_gpfifo_index, fast_os_interrupt_call_index, fast_melee_input_status_call_index,
+-      fast_melee_status_call_index, fast_melee_service_poll_call_index,
++      fastcheck_gpfifo_index, fast_os_interrupt_call_index,
+       static_cast<int>(reinterpret_cast<std::uintptr_t>(&DolphinWeb_CachedInterpreterFma)),
+       ready_bits_ptr,
+       region ? ((DolphinWebDisableMask() & DOLPHIN_WEB_ENABLE_REGION_FRAGMENT_HANDLES) != 0 ? 2 : 1) : 0);
+@@ -12514,22 +11621,6 @@ void CachedInterpreter::ExecuteOneBlock([[maybe_unused]] bool allow_redispatch)
+     }
+     // DOLPHIN_WEB_LEGACY_DISPATCH_ORDER_END
+ #endif
+-    else if (callback == AnyCallbackCast(FastMeleeIdlePollLoop))
+-    {
+-      if (FastMeleeIdlePollLoop(ppc_state,
+-                                *reinterpret_cast<const MeleeIdlePollLoopOperands*>(payload)))
+-        normal_entry = payload + sizeof(MeleeIdlePollLoopOperands);
+-      else
+-        break;
+-    }
+-    else if (callback == AnyCallbackCast(FastMeleeTitleLoop))
+-    {
+-      if (FastMeleeTitleLoop(ppc_state,
+-                             *reinterpret_cast<const MeleeTitleLoopOperands*>(payload)))
+-        normal_entry = payload + sizeof(MeleeTitleLoopOperands);
+-      else
+-        break;
+-    }
+     else if (callback == AnyCallbackCast(FastOsInterruptFunction))
+     {
+       if (FastOsInterruptFunction(ppc_state,
+@@ -12546,30 +11637,6 @@ void CachedInterpreter::ExecuteOneBlock([[maybe_unused]] bool allow_redispatch)
+       else
+         break;
+     }
+-    else if (callback == AnyCallbackCast(FastMeleeInputStatusCallBranch))
+-    {
+-      FastMeleeInputStatusCallBranch(
+-          ppc_state, *reinterpret_cast<const FastInstructionOperands*>(payload));
+-      normal_entry = payload + sizeof(FastInstructionOperands);
+-    }
+-    else if (callback == AnyCallbackCast(FastMeleeStatusFunctionCallBranch))
+-    {
+-      FastMeleeStatusFunctionCallBranch(
+-          ppc_state, *reinterpret_cast<const FastInstructionOperands*>(payload));
+-      normal_entry = payload + sizeof(FastInstructionOperands);
+-    }
+-    else if (callback == AnyCallbackCast(FastMeleeSiPollNoEventCallBranch))
+-    {
+-      FastMeleeSiPollNoEventCallBranch(
+-          ppc_state, *reinterpret_cast<const FastInstructionOperands*>(payload));
+-      normal_entry = payload + sizeof(FastInstructionOperands);
+-    }
+-    else if (callback == AnyCallbackCast(FastMeleeInputPollNoChangeCallBranch))
+-    {
+-      FastMeleeInputPollNoChangeCallBranch(
+-          ppc_state, *reinterpret_cast<const FastInstructionOperands*>(payload));
+-      normal_entry = payload + sizeof(FastInstructionOperands);
+-    }
+     else if (callback == AnyCallbackCast(FastDcbx))
+     {
+       FastDcbx(ppc_state, *reinterpret_cast<const FastInstructionOperands*>(payload));
+@@ -13133,159 +12200,6 @@ static bool IsFastFloatInstruction(UGeckoInstruction inst)
+   return false;
+ }
+ 
+-bool CachedInterpreter::TryWriteMeleeIdlePollLoop(u32 index, PowerPC::PowerPCManager& power_pc)
+-{
+-  if (DolphinWebHelperDisabled(DOLPHIN_WEB_DISABLE_MELEELOOP))
+-    return false;
+-  if (IsDebuggingEnabled() || IsBranchWatchEnabled() || jo.memcheck ||
+-      m_code_buffer[index].address != MELEE_IDLE_POLL_LOOP_PC ||
+-      m_code_buffer[index].inst.hex != 0x4be74829)
+-  {
+-    return false;
+-  }
+-
+-  ++s_fast_melee_idle_poll_loop_compile_attempts;
+-
+-  const std::array<std::pair<u32, u32>, 4> expected = {{
+-      {0x801a4da8, 0x4be74829},  // bl 0x800195d0
+-      {0x801a4dac, 0x4be74ae9},  // bl 0x80019894
+-      {0x801a4db0, 0x547b063f},  // clrlwi. r27, r3, 0x18
+-      {0x801a4db4, 0x4182fff4},  // beq 0x801a4da8
+-  }};
+-
+-  u32 cycles = 0;
+-  u32 loadstores = 0;
+-  auto& mmu = m_system.GetMMU();
+-  for (const auto& [expected_address, expected_hex] : expected)
+-  {
+-    const auto result = mmu.TryReadInstruction(expected_address);
+-    if (!result.valid || result.hex != expected_hex)
+-    {
+-      s_fast_melee_idle_poll_loop_mismatch_address = expected_address;
+-      s_fast_melee_idle_poll_loop_mismatch_expected = expected_hex;
+-      s_fast_melee_idle_poll_loop_mismatch_actual = result.valid ? result.hex : 0xffffffff;
+-      ++s_fast_melee_idle_poll_loop_compile_rejects;
+-      return false;
+-    }
+-
+-    const UGeckoInstruction inst{result.hex};
+-    const GekkoOPInfo* opinfo = PPCTables::GetOpInfo(inst, expected_address);
+-    cycles += opinfo->num_cycles;
+-    if ((opinfo->flags & FL_LOADSTORE) != 0)
+-      ++loadstores;
+-  }
+-
+-  if (cycles == 0)
+-  {
+-    ++s_fast_melee_idle_poll_loop_compile_rejects;
+-    return false;
+-  }
+-
+-#if DOLPHIN_WEB_STATIC_EXIT_LINKS
+-  auto static_links = StaticExitLinks::Fallthrough(MELEE_IDLE_POLL_LOOP_PC);
+-  StaticExitLinks::Add(static_links, MELEE_IDLE_POLL_LOOP_END_PC);
+-  auto* const emitted = reinterpret_cast<MeleeIdlePollLoopOperands*>(
+-      GetWritableCodePtr() + sizeof(AnyCallback));
+-  Write(FastMeleeIdlePollLoop,
+-        {power_pc, MELEE_IDLE_POLL_LOOP_PC, MELEE_IDLE_POLL_LOOP_END_PC, cycles, loadstores,
+-         static_links});
+-  if (!HasWriteFailed())
+-    RegisterStaticExitLinks(&emitted->links);
+-#else
+-#line 8475
+-  Write(FastMeleeIdlePollLoop,
+-        {power_pc, MELEE_IDLE_POLL_LOOP_PC, MELEE_IDLE_POLL_LOOP_END_PC, cycles, loadstores});
+-#endif
+-#line 8477
+-  return true;
+-}
+-
+-bool CachedInterpreter::TryWriteMeleeTitleLoop(u32 index, PowerPC::PowerPCManager& power_pc)
+-{
+-  if (DolphinWebHelperDisabled(DOLPHIN_WEB_DISABLE_MELEELOOP))
+-    return false;
+-
+-  constexpr u32 loop_start = 0x8035ca24;
+-  constexpr u32 loop_end = 0x8035cb38;
+-  constexpr u32 instruction_count = ((loop_end - loop_start) / sizeof(u32)) + 1;
+-
+-  if (IsDebuggingEnabled() || IsBranchWatchEnabled() || IsProfilingEnabled() || jo.memcheck ||
+-      m_code_buffer[index].address != loop_start || m_code_buffer[index].inst.hex != 0xfda06090)
+-  {
+-    return false;
+-  }
+-
+-  ++s_fast_melee_title_loop_compile_attempts;
+-
+-  const auto read_instruction = [&](u32 offset) -> std::optional<UGeckoInstruction> {
+-    const auto result = m_system.GetMMU().TryReadInstruction(loop_start + offset * sizeof(u32));
+-    if (!result.valid)
+-      return std::nullopt;
+-    return UGeckoInstruction{result.hex};
+-  };
+-  const auto matches = [&](u32 offset, u32 expected) {
+-    const auto inst = read_instruction(offset);
+-    if (inst && inst->hex == expected)
+-      return true;
+-    s_fast_melee_title_loop_mismatch_offset = offset;
+-    s_fast_melee_title_loop_mismatch_expected = expected;
+-    s_fast_melee_title_loop_mismatch_actual = inst ? inst->hex : 0xffffffff;
+-    return false;
+-  };
+-
+-  if (!matches(0, 0xfda06090) ||     // fmr f13, f12
+-      !matches(2, 0xc1bc0000) ||     // lfs f13, 0(r28)
+-      !matches(8, 0xed136bfa) ||     // fmadds f8, f19, f15, f13
+-      !matches(27, 0x6fbd8000) ||    // xoris r29, r29, 0x8000
+-      !matches(31, 0x93a10054) ||    // stw r29, 0x0054(sp)
+-      !matches(34, 0x7d31652e) ||    // stfsx f9, r17, r12
+-      !matches(39, 0x7e315c2e) ||    // lfsx f17, r17, r11
+-      !matches(47, 0xedce01b2) ||    // fmuls f14, f14, f6
+-      !matches(61, 0xfdc0701e) ||    // fctiwz f14, f14
+-      !matches(69, 0x4200feec))      // bdnz+ -> 0x8035ca24
+-  {
+-    ++s_fast_melee_title_loop_compile_rejects;
+-    return false;
+-  }
+-
+-  u32 cycles = 0;
+-  u32 loadstores = 0;
+-  u32 fp_inst = 0;
+-  for (u32 offset = 0; offset < instruction_count; ++offset)
+-  {
+-    const auto inst = read_instruction(offset);
+-    if (!inst)
+-    {
+-      ++s_fast_melee_title_loop_compile_rejects;
+-      return false;
+-    }
+-
+-    const GekkoOPInfo* opinfo = PPCTables::GetOpInfo(*inst, loop_start + offset * sizeof(u32));
+-    cycles += opinfo->num_cycles;
+-    if ((opinfo->flags & FL_LOADSTORE) != 0)
+-      ++loadstores;
+-    if ((opinfo->flags & FL_USE_FPU) != 0)
+-      ++fp_inst;
+-  }
+-
+-#if DOLPHIN_WEB_STATIC_EXIT_LINKS
+-  auto static_links = StaticExitLinks::Fallthrough(loop_start);
+-  StaticExitLinks::Add(static_links, loop_end + sizeof(u32));
+-  auto* const emitted = reinterpret_cast<MeleeTitleLoopOperands*>(
+-      GetWritableCodePtr() + sizeof(AnyCallback));
+-  Write(FastMeleeTitleLoop, {power_pc, loop_start, loop_end + sizeof(u32), cycles, loadstores,
+-                             fp_inst, static_links});
+-  if (!HasWriteFailed())
+-    RegisterStaticExitLinks(&emitted->links);
+-#else
+-#line 8548
+-  Write(FastMeleeTitleLoop, {power_pc, loop_start, loop_end + sizeof(u32), cycles, loadstores,
+-                             fp_inst});
+-#endif
+-#line 8550
+-  return true;
+-}
+-
+ bool CachedInterpreter::TryWriteOsInterruptFunction(u32 index, PowerPC::PowerPCManager& power_pc)
+ {
+   if (DolphinWebHelperDisabled(DOLPHIN_WEB_DISABLE_OSINTERRUPT))
+@@ -13487,40 +12401,11 @@ bool CachedInterpreter::TryWriteFastInstruction(const PPCAnalyst::CodeOp& op,
+       }
+       // Fall through to FastBranch if osinterrupt is disabled and that path isn't disabled too.
+     }
+-    if ((disable_mask & DOLPHIN_WEB_DISABLE_MELEECALL) == 0)
+-    {
+-      if (IsDirectBranchLinkTo(op.inst, op.address, MELEE_INPUT_STATUS_PC))
+-      {
+-        Write(FastMeleeInputStatusCallBranch, {power_pc, op.address, op.inst});
+-        return true;
+-      }
+-      if (IsDirectBranchLinkTo(op.inst, op.address, MELEE_STATUS_FN_PC))
+-      {
+-        Write(FastMeleeStatusFunctionCallBranch, {power_pc, op.address, op.inst});
+-        return true;
+-      }
+-      if (IsDirectBranchLinkTo(op.inst, op.address, MELEE_SERVICE_POLL_PC))
+-      {
+-        Write(FastMeleeServicePollCallBranch, {power_pc, op.address, op.inst});
+-        return true;
+-      }
+-      if (IsDirectBranchLinkTo(op.inst, op.address, MELEE_SI_POLL_PC))
+-      {
+-        Write(FastMeleeSiPollNoEventCallBranch, {power_pc, op.address, op.inst});
+-        return true;
+-      }
+-      if (IsDirectBranchLinkTo(op.inst, op.address, MELEE_INPUT_POLL_PC))
+-      {
+-        Write(FastMeleeInputPollNoChangeCallBranch, {power_pc, op.address, op.inst});
+-        return true;
+-      }
+-    }
+-
+     if ((disable_mask & DOLPHIN_WEB_DISABLE_FASTBRANCH) != 0)
+       return false;
+ 
+     // bdnz / bdnz+ : decrement CTR, branch if CTR != 0. The most common counter-loop branch
+-    // in Melee tight loops. BO==16 (no hint), BO==17 (predict-taken hint). LK==0 keeps LR
++    // in game tight loops. BO==16 (no hint), BO==17 (predict-taken hint). LK==0 keeps LR
+     // untouched. BI is irrelevant when BO bit 4 is set, but we constrain BI==0 to match the
+     // canonical assembler form and avoid surprise. The branch target is statically known
+     // (PPCAnalyst already populates op.branchTo), so we precompute it here and skip the BO
+@@ -14542,528 +13427,6 @@ s32 CachedInterpreter::FastFloat(PowerPC::PowerPCState& ppc_state,
+   return sizeof(AnyCallback) + sizeof(operands);
+ }
+ 
+-static bool TryFastAlignedRamOffset(const PowerPC::PowerPCState& ppc_state, const u8* ram,
+-                                    u32 ram_size, u32 address, u32 bytes, u32* offset)
+-{
+-  if (ppc_state.msr.LE || ram == nullptr || (address & 0b11) != 0)
+-    return false;
+-
+-  const u32 candidate = Mem1ViewOffset(address);
+-  if (candidate >= ram_size || ram_size - candidate < bytes)
+-    return false;
+-
+-  *offset = candidate;
+-  return true;
+-}
+-
+-static double LoadFastSingleFromRam(const u8* ram, u32 offset)
+-{
+-  return std::bit_cast<double>(ConvertToDouble(ReadRamU32BE(ram, offset)));
+-}
+-
+-static void StoreFastSingleToRam(u8* ram, u32 offset, double value)
+-{
+-  WriteRamU32BE(ram, offset, ConvertToSingle(std::bit_cast<u64>(value)));
+-}
+-
+-static double FastSingleAdd(PowerPC::PowerPCState& ppc_state, double lhs, double rhs)
+-{
+-  const float result = ForceSingle(ppc_state.fpscr, lhs + rhs);
+-  ppc_state.UpdateFPRFSingle(result);
+-  return result;
+-}
+-
+-static double FastSingleSub(PowerPC::PowerPCState& ppc_state, double lhs, double rhs)
+-{
+-  const float result = ForceSingle(ppc_state.fpscr, lhs - rhs);
+-  ppc_state.UpdateFPRFSingle(result);
+-  return result;
+-}
+-
+-static double FastSingleMul(PowerPC::PowerPCState& ppc_state, double lhs, double rhs)
+-{
+-  const double product = lhs * Force25Bit(rhs);
+-  const float result = ForceSingle(ppc_state.fpscr, product);
+-  ppc_state.fpscr.FI = 0;
+-  ppc_state.fpscr.FR = 0;
+-  ppc_state.UpdateFPRFSingle(result);
+-  return result;
+-}
+-
+-static double FastSingleMAdd(PowerPC::PowerPCState& ppc_state, double lhs, double rhs,
+-                             double addend)
+-{
+-  const double product = lhs * Force25Bit(rhs) + addend;
+-  const float result = ForceSingle(ppc_state.fpscr, product);
+-  ppc_state.fpscr.FI = product != result;
+-  ppc_state.fpscr.FR = 0;
+-  ppc_state.UpdateFPRFSingle(result);
+-  return result;
+-}
+-
+-static double FastSingleNMSub(PowerPC::PowerPCState& ppc_state, double lhs, double rhs,
+-                              double subtrahend)
+-{
+-  const double product = lhs * Force25Bit(rhs) - subtrahend;
+-  const float tmp = ForceSingle(ppc_state.fpscr, product);
+-  const float result = std::isnan(tmp) ? tmp : -tmp;
+-  ppc_state.UpdateFPRFSingle(result);
+-  return result;
+-}
+-
+-static u64 FastFctiwzResult(PowerPC::PowerPCState& ppc_state, double value)
+-{
+-  const double rounded = std::trunc(value);
+-  u32 result = 0;
+-  if (std::isfinite(value) && rounded >= -2147483648.0 && rounded < 2147483648.0)
+-  {
+-    const s32 signed_value = static_cast<s32>(rounded);
+-    result = static_cast<u32>(signed_value);
+-    const double converted = static_cast<double>(signed_value);
+-    if (converted == value)
+-    {
+-      ppc_state.fpscr.ClearFIFR();
+-    }
+-    else
+-    {
+-      SetFastFI(ppc_state, 1);
+-      ppc_state.fpscr.FR = std::fabs(converted) > std::fabs(value);
+-    }
+-  }
+-  else
+-  {
+-    result = std::signbit(value) ? 0x80000000u : 0x7fffffffu;
+-    SetFPException(ppc_state, FPSCR_VXCVI);
+-  }
+-
+-  u64 encoded = 0xfff8000000000000ull | result;
+-  if (result == 0 && std::signbit(value))
+-    encoded |= 0x100000000ull;
+-  return encoded;
+-}
+-
+-s32 CachedInterpreter::FastMeleeIdlePollLoop(PowerPC::PowerPCState& ppc_state,
+-                                             const MeleeIdlePollLoopOperands& operands)
+-{
+-#if DOLPHIN_WEB_STATIC_EXIT_LINKS
+-  const auto* const completed_static_links = &operands.links;
+-#endif
+-#line 9975
+-#if DOLPHIN_WEB_STATIC_EXIT_LINKS
+-  const auto& [power_pc, current_pc, next_pc, instruction_cycles_per_iteration,
+-               instruction_loadstores_per_iteration, static_links] = operands;
+-#else
+-#line 9975
+-  const auto& [power_pc, current_pc, next_pc, instruction_cycles_per_iteration,
+-               instruction_loadstores_per_iteration] = operands;
+-#endif
+-#line 9977
+-  (void)power_pc;
+-  constexpr s32 fallback_size = sizeof(AnyCallback) + sizeof(operands);
+-
+-  const u32 pending_exceptions =
+-      ppc_state.Exceptions &
+-      (EXCEPTION_EXTERNAL_INT | EXCEPTION_PERFORMANCE_MONITOR | EXCEPTION_DECREMENTER);
+-  if (current_pc != MELEE_IDLE_POLL_LOOP_PC || next_pc != MELEE_IDLE_POLL_LOOP_END_PC ||
+-      instruction_cycles_per_iteration == 0 || ppc_state.msr.LE || ppc_state.msr.PR ||
+-      pending_exceptions != 0 || !IsOsInterruptModeVerified(OS_INTERRUPT_DISABLE) ||
+-      !IsOsInterruptModeVerified(OS_INTERRUPT_RESTORE) || !VerifyMeleeServicePollFunction() ||
+-      !VerifyMeleeInputPollNoChangeFunction())
+-  {
+-    ++s_fast_melee_idle_poll_loop_rejects;
+-    return fallback_size;
+-  }
+-
+-  if (s_fast_melee_idle_poll_loop_exits == 0 &&
+-      s_fast_melee_idle_poll_loop_blocks > MELEE_IDLE_POLL_LOOP_NO_EXIT_THROTTLE_BLOCKS)
+-  {
+-    ++s_fast_melee_idle_poll_loop_throttles;
+-    return fallback_size;
+-  }
+-
+-  const u32 restore_cycles =
+-      (ppc_state.msr.Hex & MSR_EE_MASK) != 0 ? OS_INTERRUPT_RESTORE_ENABLE_CYCLES :
+-                                               OS_INTERRUPT_RESTORE_DISABLE_CYCLES;
+-  const u32 cycles_per_iteration = instruction_cycles_per_iteration +
+-                                   s_fast_melee_service_poll_cycles +
+-                                   s_fast_melee_input_poll_cycles + restore_cycles;
+-  const u32 loadstores_per_iteration = instruction_loadstores_per_iteration +
+-                                       s_fast_melee_service_poll_loadstores +
+-                                       s_fast_melee_input_poll_loadstores;
+-  if (cycles_per_iteration == 0)
+-  {
+-    ++s_fast_melee_idle_poll_loop_rejects;
+-    return fallback_size;
+-  }
+-
+-  const u32 max_by_downcount =
+-      ppc_state.downcount > 0 ?
+-          std::max<u32>(1, static_cast<u32>(ppc_state.downcount) / cycles_per_iteration) :
+-          1;
+-  const u32 max_iterations = std::min(max_by_downcount, MELEE_IDLE_POLL_LOOP_MAX_BATCH);
+-
+-  u32 iterations = 0;
+-  u32 final_status = 0;
+-  bool exit_loop = false;
+-  bool guard_failed = false;
+-  for (; iterations < max_iterations; ++iterations)
+-  {
+-    u32 si_state = 0;
+-    u32 si_pending = 0;
+-    const std::optional<u32> raw_status = TryReadFastMeleeStatusResult(ppc_state);
+-    const u32 mapped_status = raw_status ? MapFastMeleeStatusDispatchResult(*raw_status) : 0;
+-    const bool status_dispatch_returns_early =
+-        raw_status && (mapped_status == 0xffffffff || mapped_status == 5);
+-    if (!status_dispatch_returns_early ||
+-        !TryReadFastMeleeSiPollWords(&si_state, &si_pending) || si_state != 0 ||
+-        si_pending != 0)
+-    {
+-      guard_failed = true;
+-      break;
+-    }
+-
+-    u32 old_high = 0;
+-    u32 old_low = 0;
+-    u32 new_high = 0;
+-    u32 new_low = 0;
+-    u32 status = 0;
+-    if (!TryReadFastMeleeInputPollNoChangeWords(&old_high, &old_low, &new_high, &new_low) ||
+-        old_high != new_high || old_low != new_low ||
+-        !TryReadFastMeleeInputStatusByte(ppc_state, &status))
+-    {
+-      guard_failed = true;
+-      break;
+-    }
+-
+-    final_status = status & 0xff;
+-    if (final_status != 0)
+-    {
+-      ++iterations;
+-      exit_loop = true;
+-      break;
+-    }
+-  }
+-
+-  if (iterations == 0)
+-  {
+-    ++s_fast_melee_idle_poll_loop_fallbacks;
+-    return fallback_size;
+-  }
+-
+-  const u32 cycles = cycles_per_iteration * iterations;
+-  const u32 loadstores = loadstores_per_iteration * iterations;
+-  ppc_state.gpr[0] = current_pc + sizeof(u32);
+-  ppc_state.gpr[3] = final_status;
+-  ppc_state.gpr[27] = final_status;
+-  LR(ppc_state) = current_pc + 2 * sizeof(u32);
+-  FastUpdateCR0(ppc_state, final_status);
+-  ppc_state.npc = exit_loop ? next_pc : current_pc;
+-  ppc_state.pc = ppc_state.npc;
+-  ppc_state.downcount -= static_cast<int>(cycles);
+-  UpdatePerformanceMonitorIfNeeded(cycles, loadstores, 0, ppc_state);
+-
+-  ++s_fast_melee_idle_poll_loop_blocks;
+-  s_fast_melee_idle_poll_loop_iterations =
+-      SaturatingAddU32(s_fast_melee_idle_poll_loop_iterations, iterations);
+-  s_fast_melee_service_poll_inline_ops =
+-      SaturatingAddU32(s_fast_melee_service_poll_inline_ops, iterations);
+-  s_fast_melee_input_poll_inline_ops =
+-      SaturatingAddU32(s_fast_melee_input_poll_inline_ops, iterations);
+-  if (exit_loop)
+-    ++s_fast_melee_idle_poll_loop_exits;
+-  if (guard_failed)
+-    ++s_fast_melee_idle_poll_loop_fallbacks;
+-#if DOLPHIN_WEB_STATIC_EXIT_LINKS
+-  StaticExitLinks::Publish(&ppc_state, completed_static_links);
+-#endif
+-#line 10092
+-  return 0;
+-}
+-
+-s32 CachedInterpreter::FastMeleeTitleLoop(PowerPC::PowerPCState& ppc_state,
+-                                          const MeleeTitleLoopOperands& operands)
+-{
+-#if DOLPHIN_WEB_STATIC_EXIT_LINKS
+-  const auto* const completed_static_links = &operands.links;
+-#endif
+-#line 10098
+-#if DOLPHIN_WEB_STATIC_EXIT_LINKS
+-  const auto& [power_pc, current_pc, next_pc, cycle_count_per_iteration,
+-               loadstores_per_iteration, fp_inst_per_iteration, static_links] = operands;
+-#else
+-#line 10098
+-  const auto& [power_pc, current_pc, next_pc, cycle_count_per_iteration,
+-               loadstores_per_iteration, fp_inst_per_iteration] = operands;
+-#endif
+-#line 10100
+-  (void)power_pc;
+-  constexpr s32 fallback_size = sizeof(AnyCallback) + sizeof(operands);
+-
+-  auto& system = Core::System::GetInstance();
+-  u8* ram = system.GetMemory().GetRAM();
+-  const u32 ram_size = system.GetMemory().GetRamSizeReal();
+-  const u32 ctr_initial = CTR(ppc_state);
+-  if (!ppc_state.msr.FP || ppc_state.msr.LE || ram == nullptr || ctr_initial == 0 ||
+-      ctr_initial > 512 || cycle_count_per_iteration == 0 || ppc_state.fpscr.VE != 0)
+-  {
+-    ++s_fast_melee_title_loop_rejects;
+-    return fallback_size;
+-  }
+-
+-  const u32 max_by_downcount =
+-      ppc_state.downcount > 0 ?
+-          std::max<u32>(1, static_cast<u32>(ppc_state.downcount) / cycle_count_per_iteration) :
+-          1;
+-  const u32 iterations = std::min(ctr_initial, max_by_downcount);
+-  const bool cr7_eq = ppc_state.cr.GetBit(30) != 0;
+-
+-  auto check_u32 = [&](u32 address) {
+-    u32 offset = 0;
+-    return TryFastAlignedRamOffset(ppc_state, ram, ram_size, address, sizeof(u32), &offset);
+-  };
+-  auto check_u64 = [&](u32 address) {
+-    u32 offset = 0;
+-    return TryFastAlignedRamOffset(ppc_state, ram, ram_size, address, sizeof(u64), &offset);
+-  };
+-
+-  u32 pre_r3 = ppc_state.gpr[3];
+-  u32 pre_r9 = ppc_state.gpr[9];
+-  u32 pre_r10 = ppc_state.gpr[10];
+-  u32 pre_r11 = ppc_state.gpr[11];
+-  u32 pre_r12 = ppc_state.gpr[12];
+-  u32 pre_r18 = ppc_state.gpr[18];
+-  u32 pre_r19 = ppc_state.gpr[19];
+-  u32 pre_r20 = ppc_state.gpr[20];
+-  u32 pre_r21 = ppc_state.gpr[21];
+-  u32 pre_r28 = ppc_state.gpr[28];
+-  for (u32 i = 0; i < iterations; ++i)
+-  {
+-    if (!cr7_eq && !check_u32(pre_r28))
+-    {
+-      ++s_fast_melee_title_loop_rejects;
+-      return fallback_size;
+-    }
+-
+-    pre_r3 += 4;
+-    if (!check_u32(pre_r3) || !check_u32(pre_r3 - 4) || !check_u32(ppc_state.gpr[1] + 0x54) ||
+-        !check_u64(ppc_state.gpr[1] + 0x50) || !check_u32(ppc_state.gpr[7] + pre_r21) ||
+-        !check_u32(ppc_state.gpr[8] + pre_r19) || !check_u32(ppc_state.gpr[7] + pre_r20) ||
+-        !check_u32(ppc_state.gpr[8] + pre_r18) || !check_u32(ppc_state.gpr[17] + pre_r12) ||
+-        !check_u32(ppc_state.gpr[17] + pre_r11) || !check_u32(ppc_state.gpr[6] + pre_r10) ||
+-        !check_u32(ppc_state.gpr[6] + pre_r9))
+-    {
+-      ++s_fast_melee_title_loop_rejects;
+-      return fallback_size;
+-    }
+-
+-    if (!cr7_eq)
+-    {
+-      pre_r28 += 4;
+-      if (pre_r28 == ppc_state.gpr[22])
+-        pre_r28 = ppc_state.gpr[27];
+-    }
+-
+-    pre_r21 += 4;
+-    pre_r20 += 4;
+-    pre_r19 += 4;
+-    pre_r18 += 4;
+-    if (pre_r21 == ppc_state.gpr[26])
+-      pre_r21 = 0;
+-    if (pre_r20 == ppc_state.gpr[26])
+-      pre_r20 = 0;
+-    if (pre_r19 == ppc_state.gpr[25])
+-      pre_r19 = 0;
+-    if (pre_r18 == ppc_state.gpr[25])
+-      pre_r18 = 0;
+-    pre_r12 += 4;
+-    pre_r11 += 4;
+-    if (pre_r12 == ppc_state.gpr[24])
+-      pre_r12 = 0;
+-    if (pre_r11 == ppc_state.gpr[24])
+-      pre_r11 = 0;
+-    pre_r10 += 4;
+-    pre_r9 += 4;
+-    if (pre_r10 == ppc_state.gpr[23])
+-      pre_r10 = 0;
+-    if (pre_r9 == ppc_state.gpr[23])
+-      pre_r9 = 0;
+-  }
+-
+-  auto offset_u32 = [&](u32 address) {
+-    u32 offset = 0;
+-    const bool ok =
+-        TryFastAlignedRamOffset(ppc_state, ram, ram_size, address, sizeof(u32), &offset);
+-    ASSERT(ok);
+-    return offset;
+-  };
+-  auto offset_u64 = [&](u32 address) {
+-    u32 offset = 0;
+-    const bool ok =
+-        TryFastAlignedRamOffset(ppc_state, ram, ram_size, address, sizeof(u64), &offset);
+-    ASSERT(ok);
+-    return offset;
+-  };
+-
+-  u32 r3 = ppc_state.gpr[3];
+-  u32 r9 = ppc_state.gpr[9];
+-  u32 r10 = ppc_state.gpr[10];
+-  u32 r11 = ppc_state.gpr[11];
+-  u32 r12 = ppc_state.gpr[12];
+-  u32 r18 = ppc_state.gpr[18];
+-  u32 r19 = ppc_state.gpr[19];
+-  u32 r20 = ppc_state.gpr[20];
+-  u32 r21 = ppc_state.gpr[21];
+-  u32 r28 = ppc_state.gpr[28];
+-  u32 r29 = ppc_state.gpr[29];
+-  u32 r31 = ppc_state.gpr[31];
+-
+-  double f2 = ppc_state.ps[2].PS0AsDouble();
+-  double f3 = ppc_state.ps[3].PS0AsDouble();
+-  double f4 = ppc_state.ps[4].PS0AsDouble();
+-  double f5 = ppc_state.ps[5].PS0AsDouble();
+-  double f6 = ppc_state.ps[6].PS0AsDouble();
+-  double f7 = ppc_state.ps[7].PS0AsDouble();
+-  double f8 = ppc_state.ps[8].PS0AsDouble();
+-  double f9 = ppc_state.ps[9].PS0AsDouble();
+-  double f10 = ppc_state.ps[10].PS0AsDouble();
+-  double f11 = ppc_state.ps[11].PS0AsDouble();
+-  double f12 = ppc_state.ps[12].PS0AsDouble();
+-  double f13 = ppc_state.ps[13].PS0AsDouble();
+-  double f14 = ppc_state.ps[14].PS0AsDouble();
+-  double f15 = ppc_state.ps[15].PS0AsDouble();
+-  double f16 = ppc_state.ps[16].PS0AsDouble();
+-  double f17 = ppc_state.ps[17].PS0AsDouble();
+-  double f18 = ppc_state.ps[18].PS0AsDouble();
+-  const double f19 = ppc_state.ps[19].PS0AsDouble();
+-  const double f20 = ppc_state.ps[20].PS0AsDouble();
+-  u64 f14_int = ppc_state.ps[14].PS0AsU64();
+-  u32 ctr = ctr_initial;
+-
+-  for (u32 i = 0; i < iterations; ++i)
+-  {
+-    f13 = f12;
+-    if (!cr7_eq)
+-    {
+-      const u32 address = r28;
+-      f13 = LoadFastSingleFromRam(ram, offset_u32(address));
+-      r28 += 4;
+-      SetFastCompareField(ppc_state, 0, static_cast<s32>(r28), static_cast<s32>(ppc_state.gpr[22]));
+-      StoreFastSingleToRam(ram, offset_u32(address), f12);
+-      if (r28 == ppc_state.gpr[22])
+-        r28 = ppc_state.gpr[27];
+-    }
+-
+-    f8 = FastSingleMAdd(ppc_state, f19, f15, f13);
+-    r3 += 4;
+-    r29 = ReadRamU32BE(ram, offset_u32(r3));
+-    f9 = FastSingleMAdd(ppc_state, f20, f16, f13);
+-    StoreFastSingleToRam(ram, offset_u32(ppc_state.gpr[7] + r21), f8);
+-    r21 += 4;
+-    StoreFastSingleToRam(ram, offset_u32(ppc_state.gpr[8] + r19), f9);
+-    f14 = LoadFastSingleFromRam(ram, offset_u32(ppc_state.gpr[7] + r20));
+-    r20 += 4;
+-    f16 = LoadFastSingleFromRam(ram, offset_u32(ppc_state.gpr[8] + r18));
+-    SetFastCompareField(ppc_state, 0, static_cast<s32>(r21), static_cast<s32>(ppc_state.gpr[26]));
+-    SetFastCompareField(ppc_state, 1, static_cast<s32>(r20), static_cast<s32>(ppc_state.gpr[26]));
+-    r19 += 4;
+-    r18 += 4;
+-    f15 = f14;
+-    f14 = FastSingleAdd(ppc_state, f14, f16);
+-    SetFastCompareField(ppc_state, 5, static_cast<s32>(r19), static_cast<s32>(ppc_state.gpr[25]));
+-    SetFastCompareField(ppc_state, 6, static_cast<s32>(r18), static_cast<s32>(ppc_state.gpr[25]));
+-    if (r21 == ppc_state.gpr[26])
+-      r21 = 0;
+-
+-    r29 ^= 0x80000000u;
+-    f9 = FastSingleMAdd(ppc_state, f2, f17, f14);
+-    if (r20 == ppc_state.gpr[26])
+-      r20 = 0;
+-    WriteRamU32BE(ram, offset_u32(ppc_state.gpr[1] + 0x54), r29);
+-    if (r19 == ppc_state.gpr[25])
+-      r19 = 0;
+-    StoreFastSingleToRam(ram, offset_u32(ppc_state.gpr[17] + r12), f9);
+-    f14 = FastSingleNMSub(ppc_state, f2, f9, f17);
+-    r12 += 4;
+-    if (r18 == ppc_state.gpr[25])
+-      r18 = 0;
+-    f17 = LoadFastSingleFromRam(ram, offset_u32(ppc_state.gpr[17] + r11));
+-    SetFastCompareField(ppc_state, 5, static_cast<s32>(r12), static_cast<s32>(ppc_state.gpr[24]));
+-    r11 += 4;
+-    SetFastCompareField(ppc_state, 6, static_cast<s32>(r11), static_cast<s32>(ppc_state.gpr[24]));
+-    if (r12 == ppc_state.gpr[24])
+-      r12 = 0;
+-    if (r11 == ppc_state.gpr[24])
+-      r11 = 0;
+-
+-    f14 = FastSingleMul(ppc_state, f14, f6);
+-    f10 = std::bit_cast<double>(ReadRamU64BE(ram, offset_u64(ppc_state.gpr[1] + 0x50)));
+-    f14 = FastSingleMAdd(ppc_state, f11, f7, f14);
+-    f9 = FastSingleMAdd(ppc_state, f2, f18, f14);
+-    f7 = f14;
+-    StoreFastSingleToRam(ram, offset_u32(ppc_state.gpr[6] + r10), f9);
+-    f14 = FastSingleNMSub(ppc_state, f2, f9, f18);
+-    f8 = FastSingleMul(ppc_state, f4, f12);
+-    f18 = LoadFastSingleFromRam(ram, offset_u32(ppc_state.gpr[6] + r9));
+-    r10 += 4;
+-    r9 += 4;
+-    f14 = FastSingleMAdd(ppc_state, f3, f14, f8);
+-    SetFastCompareField(ppc_state, 5, static_cast<s32>(r10), static_cast<s32>(ppc_state.gpr[23]));
+-    SetFastCompareField(ppc_state, 6, static_cast<s32>(r9), static_cast<s32>(ppc_state.gpr[23]));
+-    f14_int = FastFctiwzResult(ppc_state, f14);
+-    if (r10 == ppc_state.gpr[23])
+-      r10 = 0;
+-    if (r9 == ppc_state.gpr[23])
+-      r9 = 0;
+-    r31 = 0xfffffffc;
+-    f12 = FastSingleSub(ppc_state, f10, f5);
+-    WriteRamU32BE(ram, offset_u32(r3 + r31), static_cast<u32>(f14_int));
+-
+-    --ctr;
+-  }
+-
+-  ppc_state.gpr[3] = r3;
+-  ppc_state.gpr[9] = r9;
+-  ppc_state.gpr[10] = r10;
+-  ppc_state.gpr[11] = r11;
+-  ppc_state.gpr[12] = r12;
+-  ppc_state.gpr[18] = r18;
+-  ppc_state.gpr[19] = r19;
+-  ppc_state.gpr[20] = r20;
+-  ppc_state.gpr[21] = r21;
+-  ppc_state.gpr[28] = r28;
+-  ppc_state.gpr[29] = r29;
+-  ppc_state.gpr[31] = r31;
+-  CTR(ppc_state) = ctr;
+-
+-  ppc_state.ps[7].SetPS0(f7);
+-  ppc_state.ps[8].Fill(f8);
+-  ppc_state.ps[9].Fill(f9);
+-  ppc_state.ps[10].SetPS0(f10);
+-  ppc_state.ps[12].Fill(f12);
+-  ppc_state.ps[13].SetPS0(f13);
+-  ppc_state.ps[14].SetPS0(f14_int);
+-  ppc_state.ps[15].SetPS0(f15);
+-  ppc_state.ps[16].Fill(f16);
+-  ppc_state.ps[17].Fill(f17);
+-  ppc_state.ps[18].Fill(f18);
+-
+-  const u32 cycles = cycle_count_per_iteration * iterations;
+-  ppc_state.npc = ctr == 0 ? next_pc : current_pc;
+-  ppc_state.pc = ppc_state.npc;
+-  ppc_state.downcount -= static_cast<int>(cycles);
+-  UpdatePerformanceMonitorIfNeeded(cycles, loadstores_per_iteration * iterations,
+-                                   fp_inst_per_iteration * iterations, ppc_state);
+-
+-  ++s_fast_melee_title_loop_blocks;
+-  s_fast_melee_title_loop_iterations =
+-      SaturatingAddU32(s_fast_melee_title_loop_iterations, iterations);
+-#if DOLPHIN_WEB_STATIC_EXIT_LINKS
+-  StaticExitLinks::Publish(&ppc_state, completed_static_links);
+-#endif
+-#line 10361
+-  return 0;
+-}
+-
+ s32 CachedInterpreter::FastOsInterruptFunction(PowerPC::PowerPCState& ppc_state,
+                                                const OsInterruptFunctionOperands& operands)
+ {
+@@ -15164,55 +13527,6 @@ s32 CachedInterpreter::FastOsInterruptCallBranch(PowerPC::PowerPCState& ppc_stat
+   return sizeof(AnyCallback) + sizeof(operands);
+ }
+ 
+-s32 CachedInterpreter::FastMeleeInputStatusCallBranch(PowerPC::PowerPCState& ppc_state,
+-                                                      const FastInstructionOperands& operands)
+-{
+-  const auto& [power_pc, current_pc, inst] = operands;
+-  (void)inst;
+-  ExecuteFastMeleeInputStatusInline(ppc_state, power_pc, current_pc);
+-  return sizeof(AnyCallback) + sizeof(operands);
+-}
+-
+-s32 CachedInterpreter::FastMeleeStatusFunctionCallBranch(
+-    PowerPC::PowerPCState& ppc_state, const FastInstructionOperands& operands)
+-{
+-  const auto& [power_pc, current_pc, inst] = operands;
+-  (void)power_pc;
+-  (void)inst;
+-  ExecuteFastMeleeStatusInline(ppc_state, current_pc);
+-  return sizeof(AnyCallback) + sizeof(operands);
+-}
+-
+-s32 CachedInterpreter::FastMeleeServicePollCallBranch(PowerPC::PowerPCState& ppc_state,
+-                                                      const FastInstructionOperands& operands)
+-{
+-  const auto& [power_pc, current_pc, inst] = operands;
+-  (void)power_pc;
+-  (void)inst;
+-  ExecuteFastMeleeServicePollInline(ppc_state, current_pc);
+-  return sizeof(AnyCallback) + sizeof(operands);
+-}
+-
+-s32 CachedInterpreter::FastMeleeSiPollNoEventCallBranch(PowerPC::PowerPCState& ppc_state,
+-                                                        const FastInstructionOperands& operands)
+-{
+-  const auto& [power_pc, current_pc, inst] = operands;
+-  (void)power_pc;
+-  (void)inst;
+-  ExecuteFastMeleeSiPollNoEventInline(ppc_state, current_pc);
+-  return sizeof(AnyCallback) + sizeof(operands);
+-}
+-
+-s32 CachedInterpreter::FastMeleeInputPollNoChangeCallBranch(
+-    PowerPC::PowerPCState& ppc_state, const FastInstructionOperands& operands)
+-{
+-  const auto& [power_pc, current_pc, inst] = operands;
+-  (void)power_pc;
+-  (void)inst;
+-  ExecuteFastMeleeInputPollNoChangeInline(ppc_state, current_pc);
+-  return sizeof(AnyCallback) + sizeof(operands);
+-}
+-
+ static void ExecuteDcbxCacheOperation(Core::System& system, PowerPC::PowerPCState& ppc_state,
+                                       UGeckoInstruction inst, u32 address)
+ {
+@@ -15406,21 +13720,6 @@ bool CachedInterpreter::TryWriteWasmBlock(u32 nextPC)
+     LogWasmBlockReject("empty", nullptr, 0, js.blockStart, code_block.m_num_instructions);
+     return false;
+   }
+-  if (code_block.m_num_instructions >= 4 &&
+-      m_code_buffer[0].address == MELEE_IDLE_POLL_LOOP_PC &&
+-      m_code_buffer[0].inst.hex == 0x4be74829 &&
+-      m_code_buffer[1].address == 0x801a4dac &&
+-      m_code_buffer[1].inst.hex == 0x4be74ae9 &&
+-      m_code_buffer[2].address == 0x801a4db0 &&
+-      m_code_buffer[2].inst.hex == 0x547b063f &&
+-      m_code_buffer[3].address == 0x801a4db4 &&
+-      m_code_buffer[3].inst.hex == 0x4182fff4)
+-  {
+-    LogWasmBlockReject("melee-idle-poll-loop", m_code_buffer[0].opinfo,
+-                       m_code_buffer[0].inst.hex, m_code_buffer[0].address,
+-                       code_block.m_num_instructions);
+-    return false;
+-  }
+ 
+   ++s_wasm_block_attempt_count;
+   if (!s_wasm_jit_direct_only && s_wasm_block_mixed_compile_count >= MAX_WASM_MIXED_COMPILED_BLOCKS)
+@@ -15768,12 +14067,6 @@ bool CachedInterpreter::TryWriteWasmBlock(u32 nextPC)
+       reinterpret_cast<std::uintptr_t>(&DolphinWeb_CachedInterpreterFastCheckGatherPipe));
+   const auto fast_os_interrupt_call_index = static_cast<int>(
+       reinterpret_cast<std::uintptr_t>(&DolphinWeb_CachedInterpreterFastOsInterruptCall));
+-  const auto fast_melee_input_status_call_index = static_cast<int>(
+-      reinterpret_cast<std::uintptr_t>(&DolphinWeb_CachedInterpreterFastMeleeInputStatusCall));
+-  const auto fast_melee_status_call_index = static_cast<int>(
+-      reinterpret_cast<std::uintptr_t>(&DolphinWeb_CachedInterpreterFastMeleeStatusCall));
+-  const auto fast_melee_service_poll_call_index = static_cast<int>(
+-      reinterpret_cast<std::uintptr_t>(&DolphinWeb_CachedInterpreterFastMeleeServicePollCall));
+   const auto cache_key = DolphinWeb_MakeWasmBlockCacheKey(bytes);
+   if (s_wasm_rejected_block_keys.contains(cache_key.data()))
+   {
+@@ -15791,8 +14084,7 @@ bool CachedInterpreter::TryWriteWasmBlock(u32 nextPC)
+       bytes.data(), static_cast<int>(bytes.size()), cache_key.data(), read_u32_index,
+       write_u32_index, read_u8_index, write_u8_index, read_u16_index, write_u16_index, lfs_index,
+       stfs_index, lfd_index, fmr_index, system_index, fp_index, fctiwz_index, interpret_index,
+-      fastcheck_gpfifo_index, fast_os_interrupt_call_index, fast_melee_input_status_call_index,
+-      fast_melee_status_call_index, fast_melee_service_poll_call_index,
++      fastcheck_gpfifo_index, fast_os_interrupt_call_index,
+       static_cast<int>(reinterpret_cast<std::uintptr_t>(&DolphinWeb_CachedInterpreterFma)),
+       off_thread ? static_cast<int>(DolphinWeb_JitReadyBitsPtr()) : 0, 0);
+   if (handle == -3 || handle == -4)
+@@ -15956,8 +14248,6 @@ bool CachedInterpreter::TryWriteWasmBlock(u32 nextPC)
+       }
+       else
+       {
+-        TryWriteMeleeIdlePollLoop(i, power_pc);
+-        TryWriteMeleeTitleLoop(i, power_pc);
+         TryWriteOsInterruptFunction(i, power_pc);
+         if (!TryWriteDcbxLoop(i, power_pc) && !TryWriteFastInstruction(op, power_pc))
+         {
+@@ -16021,19 +14311,6 @@ void ApplyRequestedWasmPolicy(CachedInterpreter& cpu)
+   if (next_enabled && (!s_wasm_jit_enabled || s_wasm_policy_owner != &cpu))
+   {
+     s_fast_os_interrupt_verified_modes = 0;
+-    s_fast_melee_input_status_verified = false;
+-    s_fast_melee_input_status_cycles = 0;
+-    s_fast_melee_input_status_loadstores = 0;
+-    s_fast_melee_status_fn_verified = false;
+-    s_fast_melee_service_poll_verified = false;
+-    s_fast_melee_service_poll_cycles = 0;
+-    s_fast_melee_service_poll_loadstores = 0;
+-    s_fast_melee_si_poll_verified = false;
+-    s_fast_melee_si_poll_cycles = 0;
+-    s_fast_melee_si_poll_loadstores = 0;
+-    s_fast_melee_input_poll_verified = false;
+-    s_fast_melee_input_poll_cycles = 0;
+-    s_fast_melee_input_poll_loadstores = 0;
+   }
+   s_wasm_jit_enabled = next_enabled;
+   s_wasm_jit_direct_only = requested < 2;
+@@ -16263,7 +14540,6 @@ extern "C" const char* GetPpcWasmHelperStats()
+   static u32 last_refresh_direct_tier_reject_count = 0;
+   static u32 last_refresh_too_short_count = 0;
+   static u32 last_refresh_dcbx_loop_blocks = 0;
+-  static u32 last_refresh_idle_poll_loop_blocks = 0;
+   static u64 last_refresh_fallback_dispatch_total = 0;
+   constexpr u32 STATS_REFRESH_BLOCK_RUNS = 1000;
+   const JitFallbackDispatchStats fallback_dispatch = GetJitFallbackDispatchStats();
+@@ -16278,7 +14554,6 @@ extern "C" const char* GetPpcWasmHelperStats()
+       s_wasm_direct_tier_reject_count == last_refresh_direct_tier_reject_count &&
+       s_wasm_block_too_short_count == last_refresh_too_short_count &&
+       s_fast_dcbx_loop_blocks == last_refresh_dcbx_loop_blocks &&
+-      s_fast_melee_idle_poll_loop_blocks == last_refresh_idle_poll_loop_blocks &&
+       fallback_dispatch_total == last_refresh_fallback_dispatch_total &&
+       static_link_snapshot.sequence == static_link_last_sequence)
+ #else
+@@ -16290,7 +14565,6 @@ extern "C" const char* GetPpcWasmHelperStats()
+       s_wasm_direct_tier_reject_count == last_refresh_direct_tier_reject_count &&
+       s_wasm_block_too_short_count == last_refresh_too_short_count &&
+       s_fast_dcbx_loop_blocks == last_refresh_dcbx_loop_blocks &&
+-      s_fast_melee_idle_poll_loop_blocks == last_refresh_idle_poll_loop_blocks &&
+       fallback_dispatch_total == last_refresh_fallback_dispatch_total)
+ #endif
+ #line 11305
+@@ -16304,7 +14578,6 @@ extern "C" const char* GetPpcWasmHelperStats()
+   last_refresh_direct_tier_reject_count = s_wasm_direct_tier_reject_count;
+   last_refresh_too_short_count = s_wasm_block_too_short_count;
+   last_refresh_dcbx_loop_blocks = s_fast_dcbx_loop_blocks;
+-  last_refresh_idle_poll_loop_blocks = s_fast_melee_idle_poll_loop_blocks;
+   last_refresh_fallback_dispatch_total = fallback_dispatch_total;
+ #if DOLPHIN_WEB_STATIC_EXIT_LINKS && DOLPHIN_WEB_STATIC_EXIT_LINK_STATS
+   static_link_last_sequence = static_link_snapshot.sequence;
+@@ -16528,36 +14801,6 @@ extern "C" const char* GetPpcWasmHelperStats()
+         << " lh:" << s_fast_half_mem_load_ops << " sth:" << s_fast_half_mem_store_ops
+         << " mw:" << s_fast_multiword_mem_ops;
+   }
+-  if (s_fast_melee_title_loop_compile_attempts != 0 || s_fast_melee_title_loop_blocks != 0 ||
+-      s_fast_melee_title_loop_rejects != 0)
+-  {
+-    out << " | meleeloop attempts:" << s_fast_melee_title_loop_compile_attempts
+-        << " crej:" << s_fast_melee_title_loop_compile_rejects
+-        << " mm:" << s_fast_melee_title_loop_mismatch_offset << ":"
+-        << std::hex << s_fast_melee_title_loop_mismatch_expected << "/"
+-        << s_fast_melee_title_loop_mismatch_actual << std::dec
+-        << " blocks:" << s_fast_melee_title_loop_blocks
+-        << " iters:" << s_fast_melee_title_loop_iterations
+-        << " rejects:" << s_fast_melee_title_loop_rejects;
+-  }
+-  if (s_fast_melee_idle_poll_loop_compile_attempts != 0 ||
+-      s_fast_melee_idle_poll_loop_blocks != 0 ||
+-      s_fast_melee_idle_poll_loop_rejects != 0 ||
+-      s_fast_melee_idle_poll_loop_fallbacks != 0 ||
+-      s_fast_melee_idle_poll_loop_throttles != 0)
+-  {
+-    out << " | fastidlepoll attempts:" << s_fast_melee_idle_poll_loop_compile_attempts
+-        << " crej:" << s_fast_melee_idle_poll_loop_compile_rejects
+-        << " mm:" << std::hex << s_fast_melee_idle_poll_loop_mismatch_address << ":"
+-        << s_fast_melee_idle_poll_loop_mismatch_expected << "/"
+-        << s_fast_melee_idle_poll_loop_mismatch_actual << std::dec
+-        << " blocks:" << s_fast_melee_idle_poll_loop_blocks
+-        << " iters:" << s_fast_melee_idle_poll_loop_iterations
+-        << " exits:" << s_fast_melee_idle_poll_loop_exits
+-        << " rejects:" << s_fast_melee_idle_poll_loop_rejects
+-        << " fallback:" << s_fast_melee_idle_poll_loop_fallbacks
+-        << " throttle:" << s_fast_melee_idle_poll_loop_throttles;
+-  }
+   if (s_fast_os_interrupt_compile_attempts != 0 || s_fast_os_interrupt_disable_ops != 0 ||
+       s_fast_os_interrupt_enable_ops != 0 || s_fast_os_interrupt_restore_ops != 0 ||
+       s_fast_os_interrupt_inline_ops != 0 || s_fast_os_interrupt_inline_fallbacks != 0)
+@@ -16572,48 +14815,6 @@ extern "C" const char* GetPpcWasmHelperStats()
+         << " inline:" << s_fast_os_interrupt_inline_ops
+         << " fallback:" << s_fast_os_interrupt_inline_fallbacks;
+   }
+-  if (s_fast_melee_input_status_verify_attempts != 0 ||
+-      s_fast_melee_input_status_inline_ops != 0 ||
+-      s_fast_melee_input_status_inline_fallbacks != 0)
+-  {
+-    out << " | fastpad verify:" << s_fast_melee_input_status_verify_attempts
+-        << "/" << s_fast_melee_input_status_verify_rejects
+-        << " inline:" << s_fast_melee_input_status_inline_ops
+-        << " fallback:" << s_fast_melee_input_status_inline_fallbacks;
+-  }
+-  if (s_fast_melee_status_fn_verify_attempts != 0 || s_fast_melee_status_fn_inline_ops != 0 ||
+-      s_fast_melee_status_fn_inline_fallbacks != 0)
+-  {
+-    out << " | faststatus verify:" << s_fast_melee_status_fn_verify_attempts
+-        << "/" << s_fast_melee_status_fn_verify_rejects
+-        << " inline:" << s_fast_melee_status_fn_inline_ops
+-        << " fallback:" << s_fast_melee_status_fn_inline_fallbacks;
+-  }
+-  if (s_fast_melee_service_poll_verify_attempts != 0 ||
+-      s_fast_melee_service_poll_inline_ops != 0 ||
+-      s_fast_melee_service_poll_inline_fallbacks != 0)
+-  {
+-    out << " | fastservice verify:" << s_fast_melee_service_poll_verify_attempts
+-        << "/" << s_fast_melee_service_poll_verify_rejects
+-        << " inline:" << s_fast_melee_service_poll_inline_ops
+-        << " fallback:" << s_fast_melee_service_poll_inline_fallbacks;
+-  }
+-  if (s_fast_melee_si_poll_verify_attempts != 0 || s_fast_melee_si_poll_inline_ops != 0 ||
+-      s_fast_melee_si_poll_inline_fallbacks != 0)
+-  {
+-    out << " | fastsipoll verify:" << s_fast_melee_si_poll_verify_attempts
+-        << "/" << s_fast_melee_si_poll_verify_rejects
+-        << " inline:" << s_fast_melee_si_poll_inline_ops
+-        << " fallback:" << s_fast_melee_si_poll_inline_fallbacks;
+-  }
+-  if (s_fast_melee_input_poll_verify_attempts != 0 || s_fast_melee_input_poll_inline_ops != 0 ||
+-      s_fast_melee_input_poll_inline_fallbacks != 0)
+-  {
+-    out << " | fastinputpoll verify:" << s_fast_melee_input_poll_verify_attempts
+-        << "/" << s_fast_melee_input_poll_verify_rejects
+-        << " inline:" << s_fast_melee_input_poll_inline_ops
+-        << " fallback:" << s_fast_melee_input_poll_inline_fallbacks;
+-  }
+   if (s_fast_branch_ops != 0)
+   {
+     out << " | fastbranch ops:" << s_fast_branch_ops << " bcx:" << s_fast_branch_bcx_ops
+@@ -18478,8 +16679,9 @@ namespace
+ // 34 (0146): the 0141/0143 paths in fewer bytes (splatted constants, one
+ // helper call per op); 33 is retired (0144, closed). 35 (0147): psq_l and
+ // psq_st float pairs in v128. 36 (0157): regions run with MSR.FP clear,
+-// blocks with FPU ops checked at the head.
+-constexpr u32 AOT_COMPILER_VERSION = 36;
++// blocks with FPU ops checked at the head. 37 (0196): the three per-game
++// call imports are gone (a bl to those addresses is an ordinary call).
++constexpr u32 AOT_COMPILER_VERSION = 37;
+ constexpr u32 AOT_MAX_FRAGMENT_BYTES = 1u << 20;
+ thread_local std::vector<u32> t_aot_out;
+ u8* s_aot_ram = nullptr;
+@@ -19247,8 +17449,6 @@ bool CachedInterpreter::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
+       }
+       else
+       {
+-        TryWriteMeleeIdlePollLoop(i, power_pc);
+-        TryWriteMeleeTitleLoop(i, power_pc);
+         TryWriteOsInterruptFunction(i, power_pc);
+         if (!TryWriteDcbxLoop(i, power_pc) && !TryWriteFastInstruction(op, power_pc))
+         {
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.h b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.h
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.h
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.h
+@@ -82,8 +82,6 @@ private:
+   void LogGeneratedCode() const;
+   bool TryWriteFastInstruction(const PPCAnalyst::CodeOp& op,
+                                PowerPC::PowerPCManager& power_pc);
+-  bool TryWriteMeleeIdlePollLoop(u32 index, PowerPC::PowerPCManager& power_pc);
+-  bool TryWriteMeleeTitleLoop(u32 index, PowerPC::PowerPCManager& power_pc);
+   bool TryWriteOsInterruptFunction(u32 index, PowerPC::PowerPCManager& power_pc);
+   bool TryWriteDcbxLoop(u32 index, PowerPC::PowerPCManager& power_pc);
+ 
+@@ -98,8 +96,6 @@ private:
+   struct InterpretAndCheckExceptionsOperands;
+   struct FastInstructionOperands;
+   struct FastBranchBdnzOperands;
+-  struct MeleeIdlePollLoopOperands;
+-  struct MeleeTitleLoopOperands;
+   struct OsInterruptFunctionOperands;
+   struct DcbxLoopOperands;
+   struct HLEFunctionOperands;
+@@ -155,13 +151,6 @@ private:
+   static s32 FastFloat(PowerPC::PowerPCState& ppc_state,
+                        const FastInstructionOperands& operands);
+   static s32 FastFloat(std::ostream& stream, const FastInstructionOperands& operands);
+-  static s32 FastMeleeIdlePollLoop(PowerPC::PowerPCState& ppc_state,
+-                                   const MeleeIdlePollLoopOperands& operands);
+-  static s32 FastMeleeIdlePollLoop(std::ostream& stream,
+-                                   const MeleeIdlePollLoopOperands& operands);
+-  static s32 FastMeleeTitleLoop(PowerPC::PowerPCState& ppc_state,
+-                                const MeleeTitleLoopOperands& operands);
+-  static s32 FastMeleeTitleLoop(std::ostream& stream, const MeleeTitleLoopOperands& operands);
+   static s32 FastOsInterruptFunction(PowerPC::PowerPCState& ppc_state,
+                                      const OsInterruptFunctionOperands& operands);
+   static s32 FastOsInterruptFunction(std::ostream& stream,
+@@ -170,26 +159,6 @@ private:
+                                        const OsInterruptFunctionOperands& operands);
+   static s32 FastOsInterruptCallBranch(std::ostream& stream,
+                                        const OsInterruptFunctionOperands& operands);
+-  static s32 FastMeleeInputStatusCallBranch(PowerPC::PowerPCState& ppc_state,
+-                                            const FastInstructionOperands& operands);
+-  static s32 FastMeleeInputStatusCallBranch(std::ostream& stream,
+-                                            const FastInstructionOperands& operands);
+-  static s32 FastMeleeStatusFunctionCallBranch(PowerPC::PowerPCState& ppc_state,
+-                                               const FastInstructionOperands& operands);
+-  static s32 FastMeleeStatusFunctionCallBranch(std::ostream& stream,
+-                                               const FastInstructionOperands& operands);
+-  static s32 FastMeleeServicePollCallBranch(PowerPC::PowerPCState& ppc_state,
+-                                            const FastInstructionOperands& operands);
+-  static s32 FastMeleeServicePollCallBranch(std::ostream& stream,
+-                                            const FastInstructionOperands& operands);
+-  static s32 FastMeleeSiPollNoEventCallBranch(PowerPC::PowerPCState& ppc_state,
+-                                              const FastInstructionOperands& operands);
+-  static s32 FastMeleeSiPollNoEventCallBranch(std::ostream& stream,
+-                                              const FastInstructionOperands& operands);
+-  static s32 FastMeleeInputPollNoChangeCallBranch(PowerPC::PowerPCState& ppc_state,
+-                                                  const FastInstructionOperands& operands);
+-  static s32 FastMeleeInputPollNoChangeCallBranch(std::ostream& stream,
+-                                                  const FastInstructionOperands& operands);
+   static s32 FastDcbx(PowerPC::PowerPCState& ppc_state,
+                       const FastInstructionOperands& operands);
+   static s32 FastDcbx(std::ostream& stream, const FastInstructionOperands& operands);
+@@ -270,33 +239,6 @@ struct CachedInterpreter::FastBranchBdnzOperands
+   u32 target_pc;
+ };
+ 
+-struct CachedInterpreter::MeleeIdlePollLoopOperands
+-{
+-  PowerPC::PowerPCManager& power_pc;
+-  u32 current_pc;
+-  u32 next_pc;
+-  u32 instruction_cycles_per_iteration;
+-  u32 instruction_loadstores_per_iteration;
+-#if DOLPHIN_WEB_STATIC_EXIT_LINKS
+-  StaticExitLinks::Descriptor links{};
+-#endif
+-#line 267
+-};
+-
+-struct CachedInterpreter::MeleeTitleLoopOperands
+-{
+-  PowerPC::PowerPCManager& power_pc;
+-  u32 current_pc;
+-  u32 next_pc;
+-  u32 cycle_count_per_iteration;
+-  u32 loadstores_per_iteration;
+-  u32 fp_inst_per_iteration;
+-#if DOLPHIN_WEB_STATIC_EXIT_LINKS
+-  StaticExitLinks::Descriptor links{};
+-#endif
+-#line 277
+-};
+-
+ struct CachedInterpreter::OsInterruptFunctionOperands
+ {
+   PowerPC::PowerPCManager& power_pc;
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter_Disassembler.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter_Disassembler.cpp
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter_Disassembler.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter_Disassembler.cpp
+@@ -182,54 +182,6 @@ s32 CachedInterpreter::FastFloat(std::ostream& stream, const FastInstructionOper
+   return sizeof(AnyCallback) + sizeof(operands);
+ }
+ 
+-s32 CachedInterpreter::FastMeleeIdlePollLoop(std::ostream& stream,
+-                                             const MeleeIdlePollLoopOperands& operands)
+-{
+-#if DOLPHIN_WEB_STATIC_EXIT_LINKS
+-  const auto& [power_pc, current_pc, next_pc, instruction_cycles_per_iteration,
+-               instruction_loadstores_per_iteration, static_links] = operands;
+-#else
+-#line 170
+-  const auto& [power_pc, current_pc, next_pc, instruction_cycles_per_iteration,
+-               instruction_loadstores_per_iteration] = operands;
+-#endif
+-#line 172
+-  fmt::println(stream,
+-               "FastMeleeIdlePollLoop(current_pc=0x{:08x}, next_pc=0x{:08x}, "
+-               "instruction_cycles={}, instruction_loadstores={})",
+-               current_pc, next_pc, instruction_cycles_per_iteration,
+-               instruction_loadstores_per_iteration);
+-#if DOLPHIN_WEB_STATIC_EXIT_LINKS
+-  DisassembleStaticExitLinks(stream, operands.links);
+-#endif
+-#line 177
+-  return sizeof(AnyCallback) + sizeof(operands);
+-}
+-
+-s32 CachedInterpreter::FastMeleeTitleLoop(std::ostream& stream,
+-                                          const MeleeTitleLoopOperands& operands)
+-{
+-#if DOLPHIN_WEB_STATIC_EXIT_LINKS
+-  const auto& [power_pc, current_pc, next_pc, cycle_count_per_iteration,
+-               loadstores_per_iteration, fp_inst_per_iteration, static_links] = operands;
+-#else
+-#line 183
+-  const auto& [power_pc, current_pc, next_pc, cycle_count_per_iteration,
+-               loadstores_per_iteration, fp_inst_per_iteration] = operands;
+-#endif
+-#line 185
+-  fmt::println(stream,
+-               "FastMeleeTitleLoop(current_pc=0x{:08x}, next_pc=0x{:08x}, cycles={}, "
+-               "loadstores={}, fp={})",
+-               current_pc, next_pc, cycle_count_per_iteration, loadstores_per_iteration,
+-               fp_inst_per_iteration);
+-#if DOLPHIN_WEB_STATIC_EXIT_LINKS
+-  DisassembleStaticExitLinks(stream, operands.links);
+-#endif
+-#line 190
+-  return sizeof(AnyCallback) + sizeof(operands);
+-}
+-
+ s32 CachedInterpreter::FastOsInterruptFunction(std::ostream& stream,
+                                                const OsInterruptFunctionOperands& operands)
+ {
+@@ -252,52 +204,6 @@ s32 CachedInterpreter::FastOsInterruptCallBranch(std::ostream& stream,
+   return sizeof(AnyCallback) + sizeof(operands);
+ }
+ 
+-s32 CachedInterpreter::FastMeleeInputStatusCallBranch(std::ostream& stream,
+-                                                      const FastInstructionOperands& operands)
+-{
+-  const auto& [power_pc, current_pc, inst] = operands;
+-  fmt::println(stream, "FastMeleeInputStatusCallBranch(current_pc=0x{:08x}, inst=0x{:08x})",
+-               current_pc, inst.hex);
+-  return sizeof(AnyCallback) + sizeof(operands);
+-}
+-
+-s32 CachedInterpreter::FastMeleeStatusFunctionCallBranch(
+-    std::ostream& stream, const FastInstructionOperands& operands)
+-{
+-  const auto& [power_pc, current_pc, inst] = operands;
+-  fmt::println(stream, "FastMeleeStatusFunctionCallBranch(current_pc=0x{:08x}, inst=0x{:08x})",
+-               current_pc, inst.hex);
+-  return sizeof(AnyCallback) + sizeof(operands);
+-}
+-
+-s32 CachedInterpreter::FastMeleeServicePollCallBranch(std::ostream& stream,
+-                                                      const FastInstructionOperands& operands)
+-{
+-  const auto& [power_pc, current_pc, inst] = operands;
+-  fmt::println(stream, "FastMeleeServicePollCallBranch(current_pc=0x{:08x}, inst=0x{:08x})",
+-               current_pc, inst.hex);
+-  return sizeof(AnyCallback) + sizeof(operands);
+-}
+-
+-s32 CachedInterpreter::FastMeleeSiPollNoEventCallBranch(
+-    std::ostream& stream, const FastInstructionOperands& operands)
+-{
+-  const auto& [power_pc, current_pc, inst] = operands;
+-  fmt::println(stream, "FastMeleeSiPollNoEventCallBranch(current_pc=0x{:08x}, inst=0x{:08x})",
+-               current_pc, inst.hex);
+-  return sizeof(AnyCallback) + sizeof(operands);
+-}
+-
+-s32 CachedInterpreter::FastMeleeInputPollNoChangeCallBranch(
+-    std::ostream& stream, const FastInstructionOperands& operands)
+-{
+-  const auto& [power_pc, current_pc, inst] = operands;
+-  fmt::println(stream,
+-               "FastMeleeInputPollNoChangeCallBranch(current_pc=0x{:08x}, inst=0x{:08x})",
+-               current_pc, inst.hex);
+-  return sizeof(AnyCallback) + sizeof(operands);
+-}
+-
+ s32 CachedInterpreter::FastDcbx(std::ostream& stream, const FastInstructionOperands& operands)
+ {
+   const auto& [power_pc, current_pc, inst] = operands;
+@@ -363,15 +269,8 @@ std::size_t CachedInterpreter::Disassemble(const JitBlock& block, std::ostream&
+       LOOKUP_KV(CachedInterpreter::FastBranch),
+       LOOKUP_KV(CachedInterpreter::FastBranchBdnz),
+       LOOKUP_KV(CachedInterpreter::FastFloat),
+-      LOOKUP_KV(CachedInterpreter::FastMeleeIdlePollLoop),
+-      LOOKUP_KV(CachedInterpreter::FastMeleeTitleLoop),
+       LOOKUP_KV(CachedInterpreter::FastOsInterruptFunction),
+       LOOKUP_KV(CachedInterpreter::FastOsInterruptCallBranch),
+-      LOOKUP_KV(CachedInterpreter::FastMeleeInputStatusCallBranch),
+-      LOOKUP_KV(CachedInterpreter::FastMeleeStatusFunctionCallBranch),
+-      LOOKUP_KV(CachedInterpreter::FastMeleeServicePollCallBranch),
+-      LOOKUP_KV(CachedInterpreter::FastMeleeSiPollNoEventCallBranch),
+-      LOOKUP_KV(CachedInterpreter::FastMeleeInputPollNoChangeCallBranch),
+       LOOKUP_KV(CachedInterpreter::FastDcbx),
+       LOOKUP_KV(CachedInterpreter::FastDcbxLoop),
+ #ifdef __EMSCRIPTEN__
+diff --git a/Source/Core/VideoBackends/Software/Rasterizer.cpp b/Source/Core/VideoBackends/Software/Rasterizer.cpp
+--- a/Source/Core/VideoBackends/Software/Rasterizer.cpp
++++ b/Source/Core/VideoBackends/Software/Rasterizer.cpp
+@@ -171,7 +171,7 @@ static void Draw(s32 x, s32 y, s32 xi, s32 yi)
+   // and relies on the skipped pixels inheriting their neighbor's color via
+   // a post-pass at the end of Draw() below. The skip itself is the speed
+   // win; the inheritance is what keeps shaded/blended surfaces from showing
+-  // through to the clear color (Melee's stage shadows show this clearly).
++  // through to the clear color (stage shadows in a fighting game show this clearly).
+   if (fast_software_raster > 1 && ((x | y) & 3) != 0)
+     return;
+   if (fast_software_raster > 0 && ((x | y) & 1) != 0)
+diff --git a/Source/Core/VideoBackends/Software/TextureSampler.cpp b/Source/Core/VideoBackends/Software/TextureSampler.cpp
+--- a/Source/Core/VideoBackends/Software/TextureSampler.cpp
++++ b/Source/Core/VideoBackends/Software/TextureSampler.cpp
+@@ -205,7 +205,7 @@ void SampleMip(s32 s, s32 t, s32 mip, bool linear, u8 texmap, u8* sample)
+   }
+ 
+   // These two exact cases account for roughly three quarters of sampled texture decode work in
+-  // the fixed Melee battle profile (keys 0xd38a01e and 0xd34a01e). TLUT state is part of those keys
++  // the fixed reference battle profile (keys 0xd38a01e and 0xd34a01e). TLUT state is part of those keys
+   // even though CMPR does not consult a palette. Keep the predicate deliberately narrow so every
+   // unmeasured mode continues through the generic sampler.
+   const bool is_measured_cmpr_hot_case =
+diff --git a/Source/Core/VideoBackends/Software/TextureSamplerHotCase.h b/Source/Core/VideoBackends/Software/TextureSamplerHotCase.h
+--- a/Source/Core/VideoBackends/Software/TextureSamplerHotCase.h
++++ b/Source/Core/VideoBackends/Software/TextureSamplerHotCase.h
+@@ -38,7 +38,7 @@ inline constexpr std::array<u64, 6> MEASURED_I4_LINEAR_CASE_KEYS = {
+     0x05340010, 0x05300010, 0x0d34a010, 0x0d000010, 0x0d280010, 0x0d240010,
+ };
+ 
+-// Exact union of the six I4 cases measured in three fixed-save Melee runs. Do not broaden this
++// Exact union of the six I4 cases measured in three fixed-save reference runs. Do not broaden this
+ // predicate based only on format equivalence: wrap, dimensions, filtering, TLUT register state, and
+ // memory ownership are all deliberately part of the dispatch contract.
+ constexpr bool IsMeasuredI4LinearCase(const I4LinearCaseState& state)
+diff --git a/Source/Core/VideoBackends/WebGPU/TextureCache.h b/Source/Core/VideoBackends/WebGPU/TextureCache.h
+--- a/Source/Core/VideoBackends/WebGPU/TextureCache.h
++++ b/Source/Core/VideoBackends/WebGPU/TextureCache.h
+@@ -12,7 +12,7 @@ namespace WebGPU
+ // Day-14 scaffold onwards, while bSupportsCopyToVram was reported as true -- so
+ // VideoCommon believed every EFB-to-VRAM copy succeeded and the cache entries
+ // were never filled. Anything presented from such an entry showed stale or
+-// unrelated content: Mario Kart Wii presents its XFB from one and displayed
++// unrelated content: a Wii racing game presents its XFB from one and displayed
+ // what looked like its minimap scaled to the full frame.
+ //
+ // The override is gone; TextureCacheBase's real implementation runs instead.
+diff --git a/Source/Core/VideoBackends/WebGPU/VideoBackend.cpp b/Source/Core/VideoBackends/WebGPU/VideoBackend.cpp
+--- a/Source/Core/VideoBackends/WebGPU/VideoBackend.cpp
++++ b/Source/Core/VideoBackends/WebGPU/VideoBackend.cpp
+@@ -77,7 +77,7 @@ void VideoBackend::InitBackendInfo(const WindowSystemInfo& /* wsi */)
+   // only the host knows whether the device has it; it says so through renderer
+   // feature bit 1. Without it, a draw that both blends with source alpha and
+   // writes the destination-alpha constant (GX dst alpha) blends with the
+-  // constant instead of the TEV alpha -- Mario Kart: Double Dash!!'s race
++  // constant instead of the TEV alpha -- a GameCube racing game's race
+   // overlay then veils the whole course. naga-spirv-wgsl maps the SPIR-V
+   // Index decoration of ocol0/ocol1 to @blend_src(0)/@blend_src(1).
+   g_backend_info.bSupportsDualSourceBlend =
+diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.cpp b/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.cpp
+--- a/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.cpp
++++ b/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.cpp
+@@ -31,7 +31,7 @@ u64 GetWebGpuCommandDroppedRecordCount()
+   return s_dropped_record_count.load(std::memory_order_relaxed);
+ }
+ 
+-// Ring capacity. A complex Melee frame is hundreds of GX draws, each
++// Ring capacity. A complex game frame is hundreds of GX draws, each
+ // ~SET_PIPELINE + 3×SET_BIND_GROUP + 2×SET_*_BUFFER + DRAW_INDEXED +
+ // CREATE_BIND_GROUP + UBO upload — easily a few thousand records — and
+ // the consumer (event-loop driven) runs 1-2 frames behind, so multiple
+@@ -50,7 +50,7 @@ u64 GetWebGpuCommandDroppedRecordCount()
+ static constexpr u32 kRingCapacity = 262144;
+ 
+ // Per-frame upload arena. Dolphin's vertex/index/uniform streaming
+-// for a Melee menu frame is a few hundred KB; 32 MB gives the
++// for a typical menu frame is a few hundred KB; 32 MB gives the
+ // consumer (1-2 frames behind) ~tens of frames of recycle headroom
+ // before the bump pointer wraps back over a region it might still be
+ // reading. Mirrors the Day-20 XFB-ring idea (no per-frame malloc).
+diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.h b/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.h
+--- a/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.h
++++ b/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.h
+@@ -126,11 +126,11 @@ enum class CmdOp : u32
+   // Scissored clear INSIDE the open pass. A WebGPU loadOp:clear always clears
+   // the whole attachment and ignores setScissorRect, so a sub-rect clear cannot
+   // be expressed as a clear pass -- this backend used to widen every one to the
+-  // full EFB, destroying everything drawn before it. Mario Kart Wii issues
++  // full EFB, destroying everything drawn before it. A Wii racing game issues
+   // 128x128, 256x256 and 192x96 clears mid-frame.
+   //
+   // Realising it as a utility draw in the core was tried and reverted: that
+-  // path ends and restarts the render pass per clear, and Wario World issues
++  // path ends and restarts the render pass per clear, and a 3D platformer issues
+   // ~7,800 a frame, which blacked it out. The consumer instead sets the scissor
+   // and draws a solid quad without disturbing the pass.
+   //   u0=x u1=y u2=w u3=h  u4=RGBA8 packed  f5=depth  u6=flags
+diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp b/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp
+--- a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp
++++ b/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp
+@@ -51,7 +51,7 @@
+ //
+ // Bit 0: partial and independent-channel EFB clears are emitted as a scissored
+ // solid-quad draw inside the open pass (CmdOp::ClearRect) instead of a
+-// whole-attachment loadOp clear. Mario Kart Wii does not render without it.
++// whole-attachment loadOp clear. A Wii racing game does not render without it.
+ static constexpr unsigned int DOLPHIN_WEB_RENDERER_FEATURE_SCISSORED_CLEAR_RECT = 1u << 0;
+ // Bit 1: the host device has the "dual-source-blending" feature, so pixel
+ // shaders may emit ocol1 and blend factors may name SRC1. Off by default: only
+@@ -1337,8 +1337,8 @@ void WebGPUGfx::ClearRegion(const MathUtil::Rectangle<int>& target_rc, bool colo
+     // EFB. Harmless for a game that clears one viewport covering the frame --
+     // the extra rows hold nothing -- and destructive for a game that clears
+     // panes, because clearing pane 2 also wipes pane 1. The docs dismissed
+-    // this using Wario World, which is single-viewport; that does not settle
+-    // it for a game like Mario Kart Wii.
++    // this using a 3D platformer, which is single-viewport; that does not settle
++    // it for a split-screen racing game.
+     //
+     // Log each DISTINCT (rect, enables) tuple once, so a whole race produces a
+     // handful of lines rather than thousands. What matters is whether any rect
+@@ -1363,7 +1363,7 @@ void WebGPUGfx::ClearRegion(const MathUtil::Rectangle<int>& target_rc, bool colo
+ 
+   // A WebGPU loadOp:clear clears the WHOLE attachment and is NOT affected by
+   // setScissorRect, so a sub-rect clear cannot be expressed as a clear pass at
+-  // all. Mario Kart Wii clears 128x128 and 256x256 offscreen targets mid-frame;
++  // all. A Wii racing game clears 128x128 and 256x256 offscreen targets mid-frame;
+   // realising those as full-EFB clears destroys everything drawn up to that
+   // point, which is what leaves a race frame as a patchwork of stale regions.
+   //
+@@ -1386,15 +1386,15 @@ void WebGPUGfx::ClearRegion(const MathUtil::Rectangle<int>& target_rc, bool colo
+   // Sub-rect clears cannot be expressed as a WebGPU loadOp:clear -- loadOp
+   // clears the whole attachment and ignores setScissorRect -- so this backend
+   // over-clears: a clear requested for 128x128 wipes the whole 640x528 EFB.
+-  // The [cleardiag] probe above confirms Mario Kart Wii issues exactly such
++  // The [cleardiag] probe above confirms a Wii racing game issues exactly such
+   // clears, so the defect is real (issue #17).
+   //
+   // Routing those to VideoCommon's scissored-quad fallback
+   // (AbstractGfx::ClearRegion) was tried and REVERTED. It regresses the
+-  // known-good set: Wario World, previously a detailed throne room at 60
++  // known-good set: a 3D platformer, previously a detailed throne room at 60
+   // unique fps, drops to a near-black frame at 2.0 visual fps with 124/380
+   // draws landing. The fallback ends and restarts a render pass per clear via
+-  // EndUtilityDrawing -> BindEFBFramebuffer, and Wario World issues ~7,800
++  // EndUtilityDrawing -> BindEFBFramebuffer, and that platformer issues ~7,800
+   // clears a frame. Sending the whole-frame clear down it blanks the screen
+   // outright.
+   //
+@@ -1412,7 +1412,7 @@ void WebGPUGfx::ClearRegion(const MathUtil::Rectangle<int>& target_rc, bool colo
+   // (0.9999999403953552) where the loadOp path writes dcv = 0.0 for this
+   // backend's reverse-Z convention, so every later draw failed the depth test;
+   // and the clear triangle's depth was remapped by whatever viewport the game
+-  // had bound, so Mario Kart Wii's HUD viewport z(0.89,0.99) wrote 0.89 across
++  // had bound, so a racing game's HUD viewport z(0.89,0.99) wrote 0.89 across
+   // the EFB and rejected the entire world band z(0.00,0.84). Clearing the
+   // feature bit restores the over-clearing legacy path, which reproduces the
+   // original patchwork frame -- it is a bisection knob, not a fallback.
+diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.h b/Source/Core/VideoBackends/WebGPU/WebGPUGfx.h
+--- a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.h
++++ b/Source/Core/VideoBackends/WebGPU/WebGPUGfx.h
+@@ -294,7 +294,7 @@ private:
+   // CPUCull's SetProjectionMatrix consumes DidProjectionChange() (and
+   // writes constants.projection) before SetConstants runs (§18/§19),
+   // and the same "constant updated on a path that doesn't set dirty"
+-  // family also leaves Melee's 2D-UI posmtx/texmtx stale (§20: menu
++  // family also leaves a 2D UI's posmtx/texmtx stale (§20: menu
+   // backgrounds rendered after §19 but UI quads still collapsed).
+   // Robust general fix: at draw time, re-slice the per-draw VS UBO
+   // whenever the WHOLE VertexShaderConstants block differs from what we
+@@ -328,7 +328,7 @@ private:
+   u32 m_bg2_id = 0;
+   // group1 (textures+samplers) signature→id cache. A single last-sig
+   // slot (the old m_bg1_sig/id) re-emitted CREATE_BIND_GROUP whenever
+-  // consecutive draws used different texture sets — and Melee cycles
++  // consecutive draws used different texture sets — and games cycle
+   // through many per frame, so the ring overflowed (records DROPPED →
+   // missing resources → missBg → geometry never landed). A small
+   // direct-mapped cache makes a recurring signature reuse its id (the
+diff --git a/Source/Core/VideoCommon/TMEM.cpp b/Source/Core/VideoCommon/TMEM.cpp
+--- a/Source/Core/VideoCommon/TMEM.cpp
++++ b/Source/Core/VideoCommon/TMEM.cpp
+@@ -20,7 +20,7 @@
+ //    However, other games like:
+ //      * Sonic Riders
+ //      * Metal Arms: Glitch in the System
+-//      * Godzilla: Destroy All Monsters Melee
++//      * Godzilla: Destroy All Monsters
+ //      * NHL Slapshot
+ //      * Tak and the Power of Juju
+ //      * Night at the Museum: Battle of the Smithsonian
+diff --git a/Source/Core/VideoCommon/VideoConfig.cpp b/Source/Core/VideoCommon/VideoConfig.cpp
+--- a/Source/Core/VideoCommon/VideoConfig.cpp
++++ b/Source/Core/VideoCommon/VideoConfig.cpp
+@@ -191,7 +191,7 @@ void VideoConfig::Refresh()
+     bSkipPresentingDuplicateXFBs = false;
+   // ImmediateXFB was tried here but it disables the ViSwap path that drives
+   // OGL swaps at 60Hz. Without ViSwap, presents only fire on EFB->XFB copies,
+-  // which Melee doesn't issue every frame, collapsing visualFps to ~1Hz. The
++  // which some games don't issue every frame, collapsing visualFps to ~1Hz. The
+   // real cure was the SleepUntil skip in Present.cpp; with that in place,
+   // ViSwap no longer blocks the CPU thread.
+ #endif
