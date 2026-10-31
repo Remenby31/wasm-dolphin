@@ -106,7 +106,8 @@ test("drop meter: a visit played again goes through the gate (power, load) first
   let onBattery = false;
   const mk = (tag) => { const r = () => events.push(`release ${tag}`); r.powerChanged = () => onBattery; return r; };
   let n = 0;
-  const lock = await calmLock({ maxLoad: 100, calmWait: 0, acquire: async () => { n += 1; events.push(`acquire ${n}`); return mk(n); }, wait: async () => ({ ok: true }) });
+  // a fixed load: the machine's own (above 100 under a heavy build) would add a release and acquire of its own
+  const lock = await calmLock({ maxLoad: 100, calmWait: 0, acquire: async () => { n += 1; events.push(`acquire ${n}`); return mk(n); }, wait: async () => ({ ok: true }), load: () => 1 });
   onBattery = true; // unplugged during the visit
   const acquireNow = lock;
   // the next acquire happens once on mains (acquirePerfLock waits for it): modelled as plugged back
