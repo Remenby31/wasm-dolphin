@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-import { defaultWgpuGeometryCacheMode, requestedWgpuGeometryCacheMode } from "../src/wgpu-replay-diagnostics.js";
+import { wasmEngine } from "../src/wasm-engine.js";
+import { defaultWgpuGeometryCacheMode, requestedWgpuGeometryCacheMode, wgpuGeometryCacheModeFor } from "../src/wgpu-replay-diagnostics.js";
 
 // 0204: the geometry content cache (on by default under V8, ?wgpugeomcache=0|1|2).
 const patch = await readFile(
@@ -18,6 +19,34 @@ test("geometry cache default: on under V8 only", () => {
   assert.equal(requestedWgpuGeometryCacheMode("?wgpugeomcache=0", 1), 0, "=0 turns the default off");
   assert.equal(requestedWgpuGeometryCacheMode("?wgpugeomcache=1", 0), 1, "=1 turns it on elsewhere");
   assert.equal(requestedWgpuGeometryCacheMode("?wgpugeomcache=yes", 1), 1, "a non-canonical value keeps the default");
+});
+
+test("the page's mode, from the user agent: on in Chrome, off in Safari and every iOS browser", () => {
+  const UA = {
+    chromeMac: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+    safariMac: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15",
+    safariIos: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1",
+    chromeIos: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/130.0 Mobile/15E148 Safari/604.1",
+    firefox: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:132.0) Gecko/20100101 Firefox/132.0"
+  };
+  const JSC = () => ({ line: true, lineNumber: false });
+  const V8 = () => ({ line: false, lineNumber: false });
+  const SM = () => ({ line: false, lineNumber: true });
+  const mode = (userAgent, probe, search = "", { pack = true, loadFence = false } = {}) =>
+    wgpuGeometryCacheModeFor({ search, engine: wasmEngine({ search, userAgent, probe }), pack, loadFence });
+  assert.equal(mode(UA.chromeMac, V8), 1);
+  assert.equal(mode(UA.safariMac, JSC), 0);
+  assert.equal(mode(UA.safariIos, JSC), 0);
+  assert.equal(mode(UA.chromeIos, JSC), 0, "Chrome on iOS runs JavaScriptCore");
+  assert.equal(mode(UA.chromeIos, V8), 0, "an iOS user agent is never V8");
+  assert.equal(mode(UA.firefox, SM), 0);
+  assert.equal(mode(UA.safariMac, JSC, "?wgpugeomcache=1"), 1, "=1 turns it on under JSC");
+  assert.equal(mode(UA.chromeMac, V8, "?wgpugeomcache=0"), 0);
+  assert.equal(mode(UA.chromeMac, V8, "?wgpugeomcache="), 1, "an empty value keeps the default");
+  assert.equal(mode(UA.safariMac, JSC, "?wgpugeomcache="), 0, "an empty value keeps the default");
+  assert.equal(mode(UA.chromeMac, V8, "?wgpugeomcache=2"), 3);
+  assert.equal(mode(UA.chromeMac, V8, "", { pack: false }), 0, "no pack, no cache");
+  assert.equal(mode(UA.chromeMac, V8, "?wgpugeomcache=1", { loadFence: true }), 0, "never with the load fence");
 });
 
 test("?wgpugeomcache: 1 on, 2 on with the sampled comparison, 0 off", () => {
@@ -41,9 +70,8 @@ test("the cache mode reaches the worker's init message (needs the pack)", async 
   assert.equal(new UpstreamWorkerAdapter({ wgpuGeometryCacheMode: 1 }).wgpuGeometryCacheMode, 0, "no pack, no cache");
   const host = await readFile(new URL("../src/core-host.js", import.meta.url), "utf8");
   assert.match(host, /wgpuGeometryCacheMode: this\.wgpuGeometryCacheMode/);
-  // never with the load fence (it drops published uploads, the cache's too)
-  assert.match(host, /this\.wgpuGeometryCacheMode = this\.wgpuGeometryPack && !this\.wgpuLoadEpochFence\n/);
-  assert.match(host, /requestedWgpuGeometryCacheMode\(window\.location\.search, defaultWgpuGeometryCacheMode\(this\.wasmEngine\)\)/);
+  // the host decides with wgpuGeometryCacheModeFor (tested above from the user agent)
+  assert.match(host, /this\.wgpuGeometryCacheMode = wgpuGeometryCacheModeFor\(\{\n\s+search: window\.location\.search, engine: this\.wasmEngine,\n\s+pack: this\.wgpuGeometryPack, loadFence: this\.wgpuLoadEpochFence\n/);
   assert.ok(host.indexOf("this.wasmEngine =") < host.indexOf("this.wgpuGeometryCacheMode ="), "the engine is known first");
   assert.ok(host.indexOf("this.wgpuLoadEpochFence =") < host.indexOf("this.wgpuGeometryCacheMode ="), "the fence is read first");
   assert.match(worker, /wgpuGeometryCacheMode: payload\.wgpuGeometryCacheMode/);
