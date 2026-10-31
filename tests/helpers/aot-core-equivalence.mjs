@@ -32,7 +32,7 @@ const FMA = { params: ["f64", "f64", "f64", "i32"], results: ["f64"] };
 export const HELPER_SIGNATURES = {
   read_u32: T1, write_u32: T2, read_u8: T1, write_u8: T2, read_u16: T1, write_u16: T2,
   lfs: T3, stfs: T3, lfd: T3, fmr: T3, system: T3, fp: T3, fctiwz: T3, interpret: T3,
-  fastcheck_gpfifo: T2, fast_os_interrupt_call: T3, fma: FMA
+  fastcheck_gpfifo: T2, fma: FMA
 };
 
 export const STOP = 0x80002000; // return address of the call under test: no code there

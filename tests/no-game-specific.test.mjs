@@ -77,10 +77,15 @@ test("the patterns catch what they must and spare what they must", () => {
 // the same rule. Upstream Dolphin's own comments name games, so titles are
 // checked on what the series adds: the lines of `git diff <upstream base>`
 // and the files the series creates. The fixed guest addresses of the per-game
-// fast paths patch 0196 removed must not come back anywhere in Source/.
+// code patch 0196 removed must not come back anywhere in Source/: the fast
+// paths' entry points and data, the OS interrupt routines as one game links
+// them (OSDisable/Enable/RestoreInterrupts, 0x80347364-0x803473ac) and a
+// post-load wedge probe (0x80335e90-0x80335ea4).
+const words = (first, last) => Array.from({ length: (last - first) / 4 + 1 }, (_, i) => first + 4 * i);
 export const REMOVED_GUEST_ADDRESSES = [
   0x8037699c, 0x80339b4c, 0x800195d0, 0x8001cc84, 0x80019894, 0x801a4da8, 0x801a4db8,
-  0x8035ca24, 0x804c1f7b, 0x804a75e0, 0x80433328, 0x80433324, 0x804329f0
+  0x8035ca24, 0x804c1f7b, 0x804a75e0, 0x80433328, 0x80433324, 0x804329f0,
+  ...words(0x80347364, 0x803473ac), ...words(0x80335e90, 0x80335ea4)
 ];
 const GUEST_ADDRESS = new RegExp(
   `\\b0x(?:${REMOVED_GUEST_ADDRESSES.map((a) => a.toString(16).padStart(8, "0")).join("|")})\\b`, "i");

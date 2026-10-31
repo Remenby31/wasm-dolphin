@@ -37,8 +37,7 @@
     "failed fused emission never registers an incomplete operand descriptor"
   ],
   "helpers": [
-    "actual terminal callbacks tolerate direct invocation without execution context",
-    "actual inline call branch preserves LR accounting and selects callee or completed continuation"
+    "actual terminal callbacks tolerate direct invocation without execution context"
   ],
   "gates": [
     "consecutive early FPU and WASM halts cannot reuse the preceding completed descriptor",
