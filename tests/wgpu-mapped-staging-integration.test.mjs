@@ -243,10 +243,16 @@ test("?wgpustagingslotmib=4 reaches the worker's load payload through the adapte
   assert.equal(posted.payload.wgpuMappedStagingSlotMib, 4);
 });
 
-test("both oversize paths go through writeOversizeWgpuUpload and are counted", async () => {
+test("both upload paths take the queue through writeWgpuUploadThroughQueue and are counted", async () => {
   const worker = await readSource("../src/upstream-discio-worker.js");
-  const calls = worker.match(/stageReason === "payload-too-large" &&\s*writeOversizeWgpuUpload\(\{\s*inPass: Boolean\(pass\),\s*submitPending: submitPendingForOversizeUpload,/g) ?? [];
+  const calls = worker.match(/queueWgpuUploadReason\(stageReason, Boolean\(pass\)\);\s*if \(queueReason &&\s*writeWgpuUploadThroughQueue\(\{\s*submitPending: submitPendingForQueueUpload,/g) ?? [];
   assert.equal(calls.length, 2);
-  assert.equal((worker.match(/noteOversizeWgpuUpload\(uploadBytes\)/g) ?? []).length, 2);
+  assert.equal((worker.match(/noteQueueWgpuUpload\(queueReason, uploadBytes\)/g) ?? []).length, 2);
+  // Sparse and compute UBO staging keep their own shadow state: never the queue.
+  assert.match(worker, /const queueReason = stageAccepted \|\| !viaPool/);
+  // Inside a pass only the staged batch is submitted, never the render encoder.
+  assert.match(worker, /if \(enc && !pass\) submitEnc\("staging-oversize"\);\s*else flushMappedUploadsOnly\("staging-oversize"\);/);
   assert.match(worker, /stagingOversize: webGpuCausalStats\.mappedStagingOversizeCount/);
+  assert.match(worker, /stagingPassCapacityQueue: webGpuCausalStats\.mappedStagingPassCapacityQueueCount/);
+  assert.match(worker, /recordWgpuPassUploadBytes\(passUploadBytes\);\s*passUploadBytes = 0;/);
 });

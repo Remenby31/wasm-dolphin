@@ -130,7 +130,8 @@ import { coreIntegrityOf, createWgpuIntegrity, SKIP, skippedDrawCause } from "./
 import {
   attemptRetainedWgpuUpload,
   createWgpuMappedStagingPool,
-  writeOversizeWgpuUpload
+  queueWgpuUploadReason,
+  writeWgpuUploadThroughQueue
 } from "./wgpu-mapped-staging-pool.js";
 import { createWgpuSparseUboCopyForward } from "./wgpu-sparse-ubo-copy-forward.js";
 import { createBindGroupCache } from "./wgpu-bind-group-cache.js";
@@ -502,6 +503,7 @@ function readWgpuIntegrity() {
     stagingUnsafe: webGpuCausalStats.mappedStagingUnsafeCapacityCount || 0,
     stagingCapacityWaits: webGpuCausalStats.mappedStagingCapacityWaitCount || 0,
     stagingOversize: webGpuCausalStats.mappedStagingOversizeCount || 0,
+    stagingPassCapacityQueue: webGpuCausalStats.mappedStagingPassCapacityQueueCount || 0,
     presentRejected: self._wgPresentRejectedLogCount || 0,
     geometryCacheCollisions,
     geometryCacheFailed,
@@ -10211,11 +10213,31 @@ function clearWgpuReplayStateAfterDeviceLoss() {
   }
 }
 
-// An upload larger than a slot went through the queue (always counted: the
-// rate per second tells whether the slot size fits the content).
-function noteOversizeWgpuUpload(bytes) {
-  webGpuCausalStats.mappedStagingOversizeCount += 1;
-  webGpuCausalStats.mappedStagingOversizeBytes += bytes;
+// An upload that took the queue instead of a slot (always counted: the rate
+// per second tells whether the slot size and count fit the content).
+// "oversize": larger than a slot; "pass-capacity": no free slot inside a pass.
+function noteQueueWgpuUpload(reason, bytes) {
+  if (reason === "oversize") {
+    webGpuCausalStats.mappedStagingOversizeCount += 1;
+    webGpuCausalStats.mappedStagingOversizeBytes += bytes;
+  } else {
+    webGpuCausalStats.mappedStagingPassCapacityQueueCount += 1;
+    webGpuCausalStats.mappedStagingPassCapacityQueueBytes += bytes;
+  }
+}
+
+// Upload bytes replayed while one render pass was open: what a pass needs
+// from the slots, since a pass cannot wait for a remap.
+const WGPU_PASS_UPLOAD_BUCKET_BOUNDS_BYTES = Object.freeze(
+  [0, 4, 16, 64, 256, 1024, 2048, 4096, 8192, 16384].map((k) => k * 1024)
+);
+function recordWgpuPassUploadBytes(bytes) {
+  recordBoundedHistogram(
+    webGpuCausalStats.passUploadBytesHistogram,
+    WGPU_PASS_UPLOAD_BUCKET_BOUNDS_BYTES,
+    bytes
+  );
+  webGpuCausalStats.passUploadBytesMax = Math.max(webGpuCausalStats.passUploadBytesMax, bytes);
 }
 
 function ensureWgpuMappedStagingPool(device) {
@@ -13200,6 +13222,11 @@ const webGpuCausalStats = {
   mappedStagingUnsafeCapacityCount: 0,
   mappedStagingOversizeCount: 0,
   mappedStagingOversizeBytes: 0,
+  mappedStagingPassCapacityQueueCount: 0,
+  mappedStagingPassCapacityQueueBytes: 0,
+  passUploadBytesBucketBounds: [...WGPU_PASS_UPLOAD_BUCKET_BOUNDS_BYTES],
+  passUploadBytesHistogram: new Array(WGPU_PASS_UPLOAD_BUCKET_BOUNDS_BYTES.length + 1).fill(0),
+  passUploadBytesMax: 0,
   heldUploadScannedRecords: 0,
   heldUploadScanTotalMs: 0,
   heldUploadScanMaxMs: 0,
@@ -13855,6 +13882,7 @@ function drainWebGpuCmdRing(source = "presentation") {
   const q = dev.queue;
   let enc = null;
   let pass = null;
+  let passUploadBytes = 0;
   let passW = 0;
   let passH = 0;
   let passColorFmt = null;
@@ -14102,10 +14130,14 @@ function drainWebGpuCmdRing(source = "presentation") {
     prepareWgpuMappedDrainSubmission(reason, decisionPrepared);
     return submitPendingWgpuMappedUploads(reason);
   };
-  // Submits the open encoder (or the mapped batch alone) ahead of an upload
-  // too large for a staging slot; see writeOversizeWgpuUpload.
-  const submitPendingForOversizeUpload = () => {
-    if (enc) submitEnc("staging-oversize");
+  // Submits what was staged before an upload that takes the queue (see
+  // writeWgpuUploadThroughQueue). Outside a pass, the open encoder goes too.
+  // Inside one, only the staged batch: it is a command buffer of its own, and
+  // the render command buffer is submitted after it either way, so uploads
+  // stay in program order and still precede the drain's draws, as every
+  // upload of a drain does (and as the queue transport always does).
+  const submitPendingForQueueUpload = () => {
+    if (enc && !pass) submitEnc("staging-oversize");
     else flushMappedUploadsOnly("staging-oversize");
     return !wgpuReplayFatal;
   };
@@ -14179,6 +14211,8 @@ function drainWebGpuCmdRing(source = "presentation") {
   };
   const endPass = (reason = "implicit", recordIndex = read) => {
     if (pass) {
+      recordWgpuPassUploadBytes(passUploadBytes);
+      passUploadBytes = 0;
       const endedFramebufferId = passFbId;
       if (passFbId === 0) {
         lastBackbufferSourceTextureId = currentBackbufferSourceTextureId;
@@ -14724,6 +14758,9 @@ function drainWebGpuCmdRing(source = "presentation") {
                 let retainedAccepted = false;
                 let stageAccepted;
                 let stageReason = null;
+                // Only plain pool staging may fall back to the queue: the
+                // sparse and compute UBO paths keep their own shadow state.
+                let viaPool = false;
                 const destinationOffset = u32[recWord + 2] & ~3;
                 if (stagedUpload) {
                   const stage = (data) => {
@@ -14743,6 +14780,7 @@ function drainWebGpuCmdRing(source = "presentation") {
                       role: uploadRole,
                     });
                     if (sparse?.handled) return sparse;
+                    viaPool = true;
                     if (wgpuMappedStageFastEnabled) {
                       const reason = pool.stageBufferFast(data, buf, destinationOffset);
                       return reason === null
@@ -14780,9 +14818,11 @@ function drainWebGpuCmdRing(source = "presentation") {
                     stageAccepted = sparse.ok;
                     stageReason = sparse.reason ?? null;
                   } else if (wgpuMappedStageFastEnabled) {
+                    viaPool = true;
                     stageReason = pool.stageBufferFast(uploadSource, buf, destinationOffset);
                     stageAccepted = stageReason === null;
                   } else {
+                    viaPool = true;
                     const staged = pool.stageBuffer({
                       data: uploadSource,
                       destination: buf,
@@ -14806,10 +14846,12 @@ function drainWebGpuCmdRing(source = "presentation") {
                 }
                 webGpuCausalStats.mappedStagingCopyCount += stageAccepted ? 1 : 0;
                 webGpuCausalStats.mappedStagingCopyBytes += stageAccepted ? len : 0;
-                if (!stageAccepted && stageReason === "payload-too-large" &&
-                    writeOversizeWgpuUpload({
-                      inPass: Boolean(pass),
-                      submitPending: submitPendingForOversizeUpload,
+                const queueReason = stageAccepted || !viaPool
+                  ? null
+                  : queueWgpuUploadReason(stageReason, Boolean(pass));
+                if (queueReason &&
+                    writeWgpuUploadThroughQueue({
+                      submitPending: submitPendingForQueueUpload,
                       write: () => q.writeBuffer(
                         buf,
                         destinationOffset,
@@ -14817,7 +14859,7 @@ function drainWebGpuCmdRing(source = "presentation") {
                           copyImmediateWgpuBufferUpload(heap, srcP, uploadBytes)
                       ),
                     })) {
-                  noteOversizeWgpuUpload(uploadBytes);
+                  noteQueueWgpuUpload(queueReason, uploadBytes);
                   stageAccepted = true;
                   if (stagedUpload) {
                     ring.stagedUploads.delete(read);
@@ -15083,10 +15125,12 @@ function drainWebGpuCmdRing(source = "presentation") {
                 }
                 webGpuCausalStats.mappedStagingCopyCount += stageAccepted ? 1 : 0;
                 webGpuCausalStats.mappedStagingCopyBytes += stageAccepted ? uploadBytes : 0;
-                if (!stageAccepted && stageReason === "payload-too-large" &&
-                    writeOversizeWgpuUpload({
-                      inPass: Boolean(pass),
-                      submitPending: submitPendingForOversizeUpload,
+                const queueReason = stageAccepted
+                  ? null
+                  : queueWgpuUploadReason(stageReason, Boolean(pass));
+                if (queueReason &&
+                    writeWgpuUploadThroughQueue({
+                      submitPending: submitPendingForQueueUpload,
                       write: () => q.writeTexture(
                         { texture: t.tex, mipLevel: u32[recWord + 6], origin },
                         stagedUpload?.data ?? heapCopy(src, uploadBytes),
@@ -15094,7 +15138,7 @@ function drainWebGpuCmdRing(source = "presentation") {
                         copySize
                       ),
                     })) {
-                  noteOversizeWgpuUpload(uploadBytes);
+                  noteQueueWgpuUpload(queueReason, uploadBytes);
                   stageAccepted = true;
                   if (stagedUpload) {
                     ring.stagedUploads.delete(read);
@@ -17035,6 +17079,12 @@ function drainWebGpuCmdRing(source = "presentation") {
         }
       }
       break;
+    }
+    if (pass && replayRecordAccepted &&
+        (op === WGPU_CMD_OP_UPLOAD_BUFFER || op === WGPU_CMD_OP_UPLOAD_TEXTURE)) {
+      passUploadBytes += op === WGPU_CMD_OP_UPLOAD_BUFFER
+        ? u32[recWord + 4]
+        : Math.imul(u32[recWord + 3], u32[recWord + 5]) >>> 0;
     }
     if (wgpuPassPackageProjectionActive && replayRecordAccepted) {
       const payloadBytes = op === WGPU_CMD_OP_UPLOAD_BUFFER
