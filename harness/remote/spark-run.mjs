@@ -180,15 +180,21 @@ export function benchQuery(query) {
   const q = new URLSearchParams(PRESETS[query] ?? query);
   if (q.get("video") === "wgpu") q.set("video", "null");
   if (q.get("video") === "null" && (q.get("presenter") ?? "webgpu") === "webgpu") q.set("presenter", "2d");
+  // The product (WebGPU) never decodes the XFB; video=null does unless told
+  // (DolphinWeb_OnXfb: 5.9 % of the race's CPU thread, 6.9 % of the heavy
+  // scene's on the bench, 2026-10-31). ?xfbdecode=1 keeps the decode.
+  if (q.get("video") === "null" && !q.has("xfbdecode")) q.set("xfbdecode", "0");
   return q.toString();
 }
 
 // ?xfbdecode=0 (2026-10-27): under video=null the core skips the XFB's
 // YUV->RGBA decode, 6.9 % of the CPU thread on the heavy scene that WebGPU
-// never pays. Opt-in, never added by the bench: a side whose core predates
-// the switch ignores it and keeps decoding, which would read as a ~7 % gain
-// of the other side. Every query that asks for it needs every side to know it
-// (the core's glue carries the Module key in its EM_ASM).
+// never pays. Added by the bench to every video=null query since 2026-10-31
+// (benchQuery; ?xfbdecode=1 keeps the decode). A side whose core predates
+// the switch would ignore it and keep decoding, which would read as a ~7 %
+// gain of the other side: every query that asks for it needs every side to
+// know it (the core's glue carries the Module key in its EM_ASM), else the
+// pair is refused before anything runs (requireXfbSwitch).
 export const XFB_SWITCH_KEY = "dolphinXfbNoDecode";
 // --opt=value as --opt value (node's parseArgs takes both forms), for the
 // options spark-run itself reads or refuses only: an option whose value
