@@ -418,26 +418,34 @@ export function wgpuMappedStagingSlotCountOf(value) {
   return Number.isInteger(n) && n >= 3 && n <= WGPU_MAPPED_STAGING_SLOT_COUNT_MAX ? n : 3;
 }
 
-// The engine's own default: 4 slots under JavaScriptCore (+16 MiB mapped).
-// With 3, Safari's mapped transport waited for a free slot 610-870 times per
-// 55 s of race (4.2-8.3 s in all); with 4, 330-390 times (3.0-3.4 s).
+// JavaScriptCore's staging: more, smaller slots. getMappedRange costs ~0.45 ms
+// per mapped MiB on an iPhone, so a 16 MiB slot cost ~8 ms a remap (47 % of
+// the replay thread in race); the iPhone A/B of 2026-10-31/11-01 chose these
+// (PLACEHOLDER until the verdict: the PR fills in its numbers).
+export const JSC_STAGING_SLOT_MIB = 4;
+export const JSC_STAGING_SLOT_COUNT = 6;
+
+// The engine's own slot count. Under JavaScriptCore, 16 MiB slots used to
+// wait for a free one 610-870 times per 55 s of race with 3 slots, 330-390
+// with 4; small slots fill faster, so JSC keeps more of them.
 export function defaultWgpuMappedStagingSlotCount(engine) {
-  return engine === "jsc" ? 4 : 3;
+  return engine === "jsc" ? JSC_STAGING_SLOT_COUNT : 3;
 }
 
 // Mapped staging slot size in MiB: 16 by default. getMappedRange costs
 // ~0.45 ms per MiB of slot on an iPhone (16 MiB: 7.7 ms a remap, ~58 remaps
 // a second), so a smaller slot remaps cheaper; an upload larger than the
-// slot takes the queue (writeOversizeWgpuUpload). The page, the adapter and
+// slot takes the queue (writeWgpuUploadThroughQueue). The page, the adapter and
 // the worker all read it through this one function.
 export const WGPU_MAPPED_STAGING_SLOT_MIB_VALUES = Object.freeze([2, 4, 8, 16]);
 export function wgpuMappedStagingSlotMibOf(value) {
   const n = Number(value);
   return WGPU_MAPPED_STAGING_SLOT_MIB_VALUES.includes(n) ? n : 16;
 }
-// The engine's own default: 16 everywhere until the iPhone A/B decides JSC's.
-export function defaultWgpuMappedStagingSlotMib(_engine) {
-  return 16;
+// The engine's own slot size: JSC's above, 16 MiB elsewhere (V8 and
+// SpiderMonkey default to the queue transport; mapped there keeps 16).
+export function defaultWgpuMappedStagingSlotMib(engine) {
+  return engine === "jsc" ? JSC_STAGING_SLOT_MIB : 16;
 }
 // ?wgpustagingslotmib=2|4|8|16 forces it, else the engine's default.
 export function requestedWgpuMappedStagingSlotMib(

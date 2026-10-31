@@ -1,0 +1,32 @@
+{
+  "name": "staging-slot",
+  "runs": 2,
+  "warmupSec": 20,
+  "sampleSec": 10,
+  "shotEverySec": 0,
+  "games": [
+    {
+      "id": "kart-race",
+      "iso": "${KART_ISO}",
+      "state": "${KART_STATE}",
+      "measureFromState": true,
+      "localOnly": true,
+      "steps": "local-kart-race-hold.json",
+      "audio": true
+    }
+  ],
+  "configs": [
+    {
+      "id": "jsc-slot16",
+      "preset": "wgpu",
+      "set": { "cpu": "single", "wasmengine": "jsc", "wgpustagingslotmib": "16", "wgpustagingslots": "4", "metrics": "1" }
+    },
+    {
+      "id": "jsc-defaults",
+      "preset": "wgpu",
+      "set": { "cpu": "single", "wasmengine": "jsc", "metrics": "1" }
+    }
+  ],
+  "reference": "jsc-slot16",
+  "loadWaitSec": 90
+}
