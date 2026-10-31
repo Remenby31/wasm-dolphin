@@ -180,7 +180,13 @@ test("replay-gates: a hash per captured frame, and the slot path inside the inte
   assert.match(gates, /"slot-reload": \{ type: "boolean", default: false \}/);
   // the slot load happens after the integrity window opened, before the captures
   const start = gates.indexOf("const integrityStart = await readIntegrity(");
-  const slot = gates.indexOf('a.request("loadState", { slot: 1 })');
+  const slot = gates.indexOf('await step("loadState")');
   const capture = gates.indexOf("await captureAtVi(session.page");
   assert.ok(start > 0 && start < slot && slot < capture);
+});
+
+test("replay-gates: every slot step is bounded and logged", async () => {
+  const gates = await readFile(new URL("../harness/probes/replay-gates.mjs", import.meta.url), "utf8");
+  assert.match(gates, /const r = await workerRequest\(session\.page, type, \{ slot: 1 \}, 60000\);/);
+  assert.doesNotMatch(gates, /a\.request\("(?:save|load)State"/, "no unbounded page call");
 });

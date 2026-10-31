@@ -30,7 +30,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync, existsSync } from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
-import { ensureServer, loadHarnessState, captureAtVi } from "../lib/browser.mjs";
+import { ensureServer, loadHarnessState, captureAtVi, workerRequest } from "../lib/browser.mjs";
 import { integrityBrief, integrityOf, readIntegrity, treeHasIntegrity } from "../lib/integrity.mjs";
 import { openSession } from "../lib/session.mjs";
 import { setPad } from "../lib/gamepad-mock.mjs";
@@ -72,12 +72,17 @@ try {
       // inside the integrity window (its frames depend on when the save ran:
       // compare its integrity, not its pixels, across trees)
       if (o["slot-reload"]) {
-        const slot = await session.page.evaluate(async () => {
-          const a = window.__host.adapter;
-          const saved = await a.request("saveState", { slot: 1 });
-          const loaded = await a.request("loadState", { slot: 1 });
-          return { saved: Boolean(saved?.saved), loaded: Boolean(loaded?.loaded) };
-        });
+        // each step bounded and timed: a slot request that never answers
+        // fails the visit instead of holding the bench (2026-10-31: 49 min)
+        const step = async (type) => {
+          const t0 = Date.now();
+          const r = await workerRequest(session.page, type, { slot: 1 }, 60000);
+          log(`visit ${n} ${side}: ${type} slot 1 ${r?.error ? `failed: ${r.error}` : "ok"} in ${Date.now() - t0} ms`);
+          return r;
+        };
+        const saved = await step("saveState");
+        const loaded = saved?.error ? null : await step("loadState");
+        const slot = { saved: Boolean(saved?.saved), loaded: Boolean(loaded?.loaded) };
         if (!slot.saved || !slot.loaded) throw new Error(`slot reload failed: ${JSON.stringify(slot)}`);
         v.slotReload = slot;
       }
