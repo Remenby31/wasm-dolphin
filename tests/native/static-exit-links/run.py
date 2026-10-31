@@ -63,6 +63,6 @@ result = {
     'referenceViewSha256': callback_report['referenceViewSha256'],
     'candidateViewSha256': callback_report['candidateViewSha256'],
 }
-assert result['passingGroups'] == 52, 'All 52 required native groups must run'
+assert result['passingGroups'] == 49, 'All 49 required native groups must run'
 (work / 'result.json').write_text(json.dumps(result, indent=2) + '\n', encoding='utf8')
 print(json.dumps(result))

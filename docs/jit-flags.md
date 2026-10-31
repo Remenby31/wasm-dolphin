@@ -62,13 +62,12 @@ decimal bitmask, or a `0x` hexadecimal bitmask. Unknown names are logged and
 ignored. Current named categories include:
 
 ```text
-idlepollloop statuscall osinterrupt dcbxloop fastbranch fastfp fastinteger
-fastsystem wasmblock wasmcarry wasmaddc wasmsubfc wasmadde wasmsubfe
-wasmaddze blockredispatch blockmerge regalloc shortprefix smearcompile
+osinterrupt dcbxloop fastbranch fastfp fastinteger fastsystem wasmblock
+wasmcarry wasmaddc wasmsubfc wasmadde wasmsubfe wasmaddze blockredispatch blockmerge regalloc shortprefix smearcompile
 fastmemhoist inlinefma all
 ```
 
-Aliases include `fastinputpoll` for `statuscall` and `fastmem` for
+Bits 0 and 1 are unused since core patch 0196. The alias `fastmem` stands for
 `fastsystem`. Because this surface is for controlled experiments, always save
 the complete URL alongside results.
 

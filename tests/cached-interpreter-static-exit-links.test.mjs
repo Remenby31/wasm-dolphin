@@ -35,14 +35,14 @@ const python = pythonCandidates.find((candidate) => {
   return probe.status === 0 && /^Python 3\./.test((probe.stdout + probe.stderr).trim());
 });
 const nativeSkip = !existsSync(join(sourceDirectory, "CachedInterpreter.cpp"))
-  ? "patched Dolphin vendor sources are unavailable; 52 native groups were not run"
+  ? "patched Dolphin vendor sources are unavailable; 49 native groups were not run"
   : compilerProbe.status !== 0
-    ? "native clang++/CXX toolchain is unavailable; 52 native groups were not run"
+    ? "native clang++/CXX toolchain is unavailable; 49 native groups were not run"
     : !python
-      ? "existing Python 3/emsdk runtime is unavailable; 52 native groups were not run"
+      ? "existing Python 3/emsdk runtime is unavailable; 49 native groups were not run"
       : false;
 
-sourceContractTest("actual promoted static-exit links preserve native behavior across all 52 groups", {
+sourceContractTest("actual promoted static-exit links preserve native behavior across all 49 groups", {
   skip: nativeSkip,
   timeout: 600000,
 }, async (t) => {
@@ -58,7 +58,7 @@ sourceContractTest("actual promoted static-exit links preserve native behavior a
     assert.equal(run.status, 0, [run.error?.message, run.stderr, run.stdout].filter(Boolean).join("\n"));
     const result = JSON.parse(await readFile(join(work, "result.json"), "utf8"));
     assert.equal(result.source, sourceDirectory);
-    assert.equal(result.passingGroups, 52);
+    assert.equal(result.passingGroups, 49);
     assert.equal(result.referenceMode, "explicit macro-0 view of actual promoted vendor source");
     assert.notEqual(result.referenceViewSha256, result.candidateViewSha256,
       "original/candidate differential must not compare the enabled source against itself");

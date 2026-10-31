@@ -38,10 +38,7 @@
   ],
   "helpers": [
     "actual terminal callbacks tolerate direct invocation without execution context",
-    "actual inline call branch preserves LR accounting and selects callee or completed continuation",
-    "actual idle helper normal loop exit partial-work and fallback match baseline",
-    "actual title helper loop exit downcount and rejection preserve state RAM accounting",
-    "failed specialized helper emission publishes no link records"
+    "actual inline call branch preserves LR accounting and selects callee or completed continuation"
   ],
   "gates": [
     "consecutive early FPU and WASM halts cannot reuse the preceding completed descriptor",
