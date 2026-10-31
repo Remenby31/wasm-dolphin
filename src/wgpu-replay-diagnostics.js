@@ -467,6 +467,16 @@ export function requestedWgpuMappedStageTimingStride(
   return new URLSearchParams(search).get("wgpumappedtiming") === "64" ? 64 : 1;
 }
 
+// Dense UBO packets (patch 0029) by default: on under V8 since 2026-10-31
+// (Spark, 7 pairs: speed capped at 100 % both ways, replay worker -21 %,
+// uploads -45 % per frame); off elsewhere until JSC has its own pair (UBO
+// bytes +7-9 %, which Safari's transports may not want).
+export function defaultWgpuUboPack(engine) {
+  return engine === "v8";
+}
+
+// ?wgpuubopack=1|0 forces it on or off, else the engine's default. Never
+// with ?wgpuubocache=1 (the worker forces the legacy slices then).
 export function requestedWgpuUboPack(
   search = globalThis.location?.search ?? "",
   enabledByDefault = false
