@@ -67,17 +67,41 @@ export function skippedDrawCause(hasPass, hasPipeline, bindGroupsValid, needsVer
   return -1;
 }
 
+// Patch 0207's detail, in the core's order: a batch abort's cause
+// (BatchAbortCause), the renderer's abort site (GfxAbortSite), a failed
+// upload's role (BufferUploadRole). Context, not fatal: batchAborts already
+// is; they say which site to look at.
+export const ABORT_CAUSES = Object.freeze(["RequiredPublication", "Poisoned", "Explicit", "CommitRefused", "Oversize"]);
+export const GFX_ABORT_SITES = Object.freeze(["Scissor", "Viewport", "GeometryFlush", "PassPoisoned", "BeginPass", "PassState", "Pipeline", "Prepare", "BufferId", "SetBuffer", "PushDraw"]);
+export const UPLOAD_ROLES = Object.freeze(["Unknown", "Ubo", "Utility", "Vertex", "Index", "TextureAdjacent", "Geometry"]);
+
+const listOf = (s, name) => {
+  const m = new RegExp(`\\b${name}:([\\d,]+)`).exec(s);
+  return m ? m[1].split(",").map(Number) : null;
+};
+const fieldsOf = (values, names, prefix) =>
+  Object.fromEntries(names.map((n, i) => [`${prefix}${n}`, values && i < values.length ? values[i] : null]));
+
 // The core's counters from its state stats line: null for a field the core
 // does not print (an older core), never a 0 it did not report.
 export function coreIntegrityOf(text) {
   const s = String(text ?? "");
   const drop = /\bwgdrop:(\d+)/.exec(s);
   const batch = /\bwgbabort:(\d+)\s+wgboversize:(\d+)\s+wguploadto:(\d+)/.exec(s);
+  const skip = /\bwgdrawskip:(\d+)/.exec(s);
+  // wgupfail: arena, then one per BufferUploadRole, then texture records
+  const upfail = listOf(s, "wgupfail");
   return {
     droppedRecords: drop ? Number(drop[1]) : null,
     batchAborts: batch ? Number(batch[1]) : null,
     batchOversize: batch ? Number(batch[2]) : null,
-    uploadTimeouts: batch ? Number(batch[3]) : null
+    uploadTimeouts: batch ? Number(batch[3]) : null,
+    ...fieldsOf(listOf(s, "wgabortc"), ABORT_CAUSES, "abort"),
+    ...fieldsOf(listOf(s, "wggfxabort"), GFX_ABORT_SITES, "gfxAbort"),
+    drawSkippedNoPipeline: skip ? Number(skip[1]) : null,
+    uploadAllocFailed: upfail ? upfail[0] : null,
+    ...fieldsOf(upfail ? upfail.slice(1, 1 + UPLOAD_ROLES.length) : null, UPLOAD_ROLES, "uploadFailed"),
+    uploadTextureFailed: upfail && upfail.length === UPLOAD_ROLES.length + 2 ? upfail.at(-1) : null
   };
 }
 

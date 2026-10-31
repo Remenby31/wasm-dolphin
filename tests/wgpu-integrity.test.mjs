@@ -49,11 +49,28 @@ test("counters: skips by cause, missing resources by kind, notes, and counters o
 });
 
 test("the core's own counters come from its state stats line, null for what an older core does not print", () => {
-  assert.deepEqual(coreIntegrityOf("wgstate:1 pipe:12 bg:3,4,5 vb:6 ib:7 wgdrop:2 wgbabort:1 wgboversize:0 wguploadto:4"),
+  const pick = (o) => ({ droppedRecords: o.droppedRecords, batchAborts: o.batchAborts, batchOversize: o.batchOversize, uploadTimeouts: o.uploadTimeouts });
+  assert.deepEqual(pick(coreIntegrityOf("wgstate:1 pipe:12 bg:3,4,5 vb:6 ib:7 wgdrop:2 wgbabort:1 wgboversize:0 wguploadto:4")),
     { droppedRecords: 2, batchAborts: 1, batchOversize: 0, uploadTimeouts: 4 });
-  assert.deepEqual(coreIntegrityOf("wgstate:1 pipe:12 bg:3,4,5 vb:6 ib:7 wgdrop:0"),
+  assert.deepEqual(pick(coreIntegrityOf("wgstate:1 pipe:12 bg:3,4,5 vb:6 ib:7 wgdrop:0")),
     { droppedRecords: 0, batchAborts: null, batchOversize: null, uploadTimeouts: null });
-  assert.deepEqual(coreIntegrityOf(undefined), { droppedRecords: null, batchAborts: null, batchOversize: null, uploadTimeouts: null });
+  assert.deepEqual(pick(coreIntegrityOf(undefined)), { droppedRecords: null, batchAborts: null, batchOversize: null, uploadTimeouts: null });
+  // 0207: causes, renderer sites, draws skipped, failed uploads; null before 0207
+  const old = coreIntegrityOf("wgdrop:0 wgbabort:2 wgboversize:0 wguploadto:0");
+  for (const k of ["abortExplicit", "gfxAbortPrepare", "drawSkippedNoPipeline", "uploadAllocFailed", "uploadFailedUbo", "uploadTextureFailed"]) assert.equal(old[k], null, k);
+  const now = coreIntegrityOf("wgdrop:0 wgbabort:3 wgboversize:0 wguploadto:0 wgabortc:1,0,2,0,0 wggfxabort:0,0,0,0,0,0,0,2,0,0,0 wgdrawskip:5 wgupfail:0,0,1,0,0,0,0,0,0 wgubo:1");
+  assert.equal(now.abortRequiredPublication, 1);
+  assert.equal(now.abortExplicit, 2);
+  assert.equal(now.abortOversize, 0);
+  assert.equal(now.gfxAbortPrepare, 2);
+  assert.equal(now.gfxAbortScissor, 0);
+  assert.equal(now.drawSkippedNoPipeline, 5);
+  assert.equal(now.uploadAllocFailed, 0);
+  assert.equal(now.uploadFailedUbo, 1);
+  assert.equal(now.uploadFailedGeometry, 0);
+  assert.equal(now.uploadTextureFailed, 0);
+  for (const k of Object.keys(now)) if (k.startsWith("abort") || k.startsWith("gfxAbort") || k.startsWith("uploadFailed") || k === "drawSkippedNoPipeline" || k === "uploadAllocFailed" || k === "uploadTextureFailed")
+    assert.ok(!INTEGRITY_FATAL.includes(k), `${k}: detail, not fatal (batchAborts is)`);
 });
 
 test("the worker counts every branch that abandons a draw or misses a resource", () => {

@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "f070b9008cd0bf5de294b721626c22b7a8c4e64d7fbfcf5dc0be6acf0f415e25",
+  "patchSeriesSha256": "d71d57329e1f3537eae044d6250bc9bebdf7c44a765e7eaffae56fc5f540ec39",
   "patches": [
     {
       "order": 1,
@@ -1133,6 +1133,14 @@
     },
     {
       "order": 139,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0207-webgpu-integrity-abort-causes.patch",
+      "size": 19086,
+      "sha256": "7be6c6070b1b644af3575da95c336c70b8f846858af982708806f36148bc309b"
+    },
+    {
+      "order": 140,
       "cwd": "Externals/SFML/SFML",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0001-sfml-emscripten-config.patch",
@@ -1140,7 +1148,7 @@
       "sha256": "f82197a21fe982ad83f6ee7bbf5a03839b1cebd4d64da3eab11263842bf61d89"
     },
     {
-      "order": 140,
+      "order": 141,
       "cwd": "Externals/xxhash/xxHash",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0002-xxhash-wasm-simd-scalar.patch",
