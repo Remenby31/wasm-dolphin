@@ -1970,6 +1970,7 @@ const CACHED_INTERPRETER_DISABLE_BITS = {
   inlinefma:       1 << 26, // inline exact FMA; set: the FMA family calls the interpreter's NI_madd_msub
   regionmtmsr:     1 << 27, // 0183 regions go on past a mtmsr that changes only EE (ENABLE polarity; default-on; ?regionmtmsr=0 turns it off)
   regionfragments: 1 << 16, // 0189 region chaining enters the fragment, not the module's dispatcher (ENABLE polarity; default-on; ?regionfragments=0 turns it off)
+  gpint:           1 << 19, // 0195 integer stores to the gather pipe in line, a flush at every 32-byte burst (ENABLE polarity; default-off; ?gpint=1)
   regionchaincache: 1 << 18, // 0187 region chaining looks the next region up in one cache line (ENABLE polarity; default-on; ?regionchaincache=0 turns it off)
   regshape:        1 << 28, // 0184 x64 register shape: at most 4 GPRs per block in locals (ENABLE polarity; default-off; ?regshape=x64)
   // Aliases the plan / TL;DR uses interchangeably:
@@ -2022,6 +2023,7 @@ function requestedCachedInterpreterDisableMask() {
     // ?regshape=x64 do.
     mask &= ~(CACHED_INTERPRETER_DISABLE_BITS.regionmtmsr | CACHED_INTERPRETER_DISABLE_BITS.regshape |
       CACHED_INTERPRETER_DISABLE_BITS.regionchaincache | CACHED_INTERPRETER_DISABLE_BITS.regionfragments);
+    mask &= ~CACHED_INTERPRETER_DISABLE_BITS.gpint;
   }
   // §28bt block re-dispatch: DEFAULT-ON. Rigorously verified +11% warm
   // (4-run non-overlapping same-binary A/B, correctness-clean on battle);
@@ -2087,6 +2089,11 @@ function requestedCachedInterpreterDisableMask() {
   // drop-meter guard clean). Region chaining enters the next fragment through
   // a cached table slot instead of the module's dispatcher.
   // ?regionfragments=0 and ?regionchaincache=0 turn each off.
+  // 0195: default-off while it is measured (the gather pipe chain is ~6.4 %
+  // of the race's CPU thread, research/deep-heavy-gap.md).
+  if (params.get("gpint") === "1") {
+    mask |= CACHED_INTERPRETER_DISABLE_BITS.gpint;
+  }
   if (params.get("regionfragments") !== "0") {
     mask |= CACHED_INTERPRETER_DISABLE_BITS.regionfragments;
   }

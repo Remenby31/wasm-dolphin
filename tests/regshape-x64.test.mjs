@@ -13,6 +13,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import { ORACLE_CODE, bigEndian, loadAotCore, runOracleProgramsAsRegions } from "./helpers/aot-core-equivalence.mjs";
+import { staticConstants, staticNormalizedCode } from "./helpers/static-digest.mjs";
 import { PRODUCTION_DISABLE_MASK, SHORT_PREFIX_MASK, describeDifference, hex, loadOracleCore, makeRng, randomProgram, randomState } from "./helpers/jit-oracle.mjs";
 
 const REGSHAPE_X64 = 1 << 28;
@@ -66,31 +67,6 @@ const MASK_BEFORE_0183 = PRODUCTION_DISABLE_MASK & ~(1 << 27);
 // heap bases have their relocs) that an i32.add or a load or store uses next.
 // Masks in that range (0x1c0000, 0x1ffe00...) go to an i32.and: kept as they
 // are.
-// Every i32.const of the code: [start, end, value, next opcode] (an 0x41 byte that is part
-// of another immediate decodes the same way on every core, so the scan stays
-// deterministic).
-function* i32Consts(code) {
-  for (let i = 0; i < code.length; i += 1) {
-    if (code[i] !== 0x41) continue;
-    let v = 0, shift = 0, j = i + 1, byte = 0;
-    do { byte = code[j++]; v |= (byte & 0x7f) << shift; shift += 7; } while (byte & 0x80 && shift < 35 && j < code.length);
-    if (shift < 32 && (byte & 0x40)) v |= -1 << shift;
-    yield [i, j, v, code[j]];
-  }
-}
-const isStatic = (v, next, { low, high }) => v >= low && v < high && (next === 0x6a || (next >= 0x28 && next <= 0x3e));
-export const staticConstants = (code, range) => [...i32Consts(code)].filter(([, , v, next]) => isStatic(v, next, range)).map(([, , v]) => v);
-export function staticNormalizedCode(code, { low, high, base }) {
-  const out = [];
-  let at = 0;
-  for (const [i, j, v, next] of i32Consts(code)) {
-    if (i < at || !isStatic(v, next, { low, high })) continue;
-    out.push(...code.subarray(at, i), 0x41, ...Buffer.from(`static+${v - base};`));
-    at = j;
-  }
-  out.push(...code.subarray(at));
-  return Uint8Array.from(out);
-}
 // Same digest on the core before 0203 (080da515) and on main de9e2d4a
 // (raw digests c005124c and ce8ff6ca).
 const MODE_OFF_DIGEST = "db66f5e64305dedd62bbb9d885fd2698a15162d4cb8c930f64b83c387774a071";

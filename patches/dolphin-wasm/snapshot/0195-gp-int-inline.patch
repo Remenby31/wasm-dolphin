@@ -1,0 +1,198 @@
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -42,6 +42,7 @@
+ #include "Core/HLE/HLE.h"
+ #include "Core/HW/CPU.h"
+ #include "Core/HW/GPFifo.h"
++#include "Core/HW/ProcessorInterface.h"
+ #include "Core/HW/Memmap.h"
+ #include "Core/HW/SystemTimers.h"
+ #include "Core/Movie.h"
+@@ -434,6 +435,12 @@
+ // eager prologue of every used GPR spilled them (research/deep-x64-region-shape).
+ // Off: blocks and regions are emitted byte for byte as before.
+ constexpr u32 DOLPHIN_WEB_ENABLE_REGSHAPE_X64 = 1u << 28;
++// 0195 (was 0195): ENABLE polarity (default-off; ?gpint=1). An integer store
++// (stw, sth, stb and their forms) outside RAM tests the gather pipe address
++// before the write_u32/u16/u8 import, as the float stores do, and appends to
++// the pipe in line there (then a flush at every 32-byte burst), instead of
++// MMU::Write.
++constexpr u32 DOLPHIN_WEB_ENABLE_GP_INT_INLINE = 1u << 19;
+ // 0187: ENABLE polarity (default-off; ?regionchaincache=1). Region chaining
+ // (RegionChainNext) looks the next region up in one cache line: entry pc,
+ // the region's handle, and the epoch it was filled in. No code changes:
+@@ -2544,6 +2551,38 @@
+   return DolphinWeb_CachedInterpreterCheckProgramOrDsi(ppc_state, current_pc, downcount) ? 1 : 0;
+ }
+ 
++// 0195 tests: where the next burst goes (the CPU FIFO's write pointer).
++extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_GatherPipeFifoForTest()
++{
++  return Core::System::GetInstance().GetProcessorInterface().m_fifo_cpu_write_pointer;
++}
++
++// 0195 tests: the gather pipe's pending bytes (copied to `out`, at most
++// `capacity`) and their count; `reset` 1 sets it up empty first (GPFifo::Init:
++// the test CPU set-up does not run the hardware's init), 2 flushes its whole
++// 32-byte bursts first (GPFifo::FastCheckGatherPipe: the JIT flushes late,
++// the interpreter at every burst; the bytes are the same).
++extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_GatherPipeForTest(int reset, u8* out, u32 capacity)
++{
++  auto& system = Core::System::GetInstance();
++  if (reset == 1)
++  {
++    system.GetGPFifo().Init();
++    // The CPU FIFO the bursts go to: 64 KiB at RAM 1 MiB, written in order.
++    auto& pi = system.GetProcessorInterface();
++    pi.m_fifo_cpu_base = 0x00100000;
++    pi.m_fifo_cpu_end = 0x0010ffe0;
++    pi.m_fifo_cpu_write_pointer = pi.m_fifo_cpu_base;
++  }
++  else if (reset == 2)
++    system.GetGPFifo().FastCheckGatherPipe();
++  const auto& ppc = system.GetPPCState();
++  const u32 count = static_cast<u32>(ppc.gather_pipe_ptr - ppc.gather_pipe_base_ptr);
++  if (out)
++    std::memcpy(out, ppc.gather_pipe_base_ptr, std::min(count, capacity));
++  return count;
++}
++
+ extern "C" void DolphinWeb_CachedInterpreterFastCheckGatherPipe(int state_ptr, u32 unused_a,
+                                                                  u32 unused_b)
+ {
+@@ -5020,6 +5059,87 @@
+   EmitSignExtendI16(body);
+ }
+ 
++bool RegionGuardsActive();  // 0195: t_region_guards, defined further down
++
++// 0195: the slow arm of an integer store (value in local 2, EA in local 1):
++// to the gather pipe in line when the address is the pipe's (the float
++// stores' test, EmitGatherPipeFloatStoreCondition, without MSR.FP: the
++// physical page 0x0C008000 under the standard BATs or in real mode, LE off),
++// else the write import. MMU::Write takes the same page to GPFifo::Write*
++// whatever the alignment; the pipe is flushed at every 32 bytes as
++// GPFifo::Write* does (FastCheckGatherPipe: CheckGatherPipe without the JIT's
++// recompile hint).
++void EmitWriteSlowArm(std::vector<u8>& body, const WasmStateLayout& layout, u32 size,
++                      u32 import_index)
++{
++  const auto call = [&] {
++    EmitLocalGet(body, 0);
++    EmitLocalGet(body, 1);
++    EmitLocalGet(body, 2);
++    EmitCallImport(body, import_index);
++  };
++  if ((DolphinWebDisableMask() & DOLPHIN_WEB_ENABLE_GP_INT_INLINE) == 0)
++  {
++    call();
++    return;
++  }
++  EmitLocalGet(body, 1);
++  EmitI32Const(body, 0x0ffff000);
++  body.push_back(0x71);  // i32.and
++  EmitI32Const(body, GPFifo::GATHER_PIPE_PHYSICAL_ADDRESS);
++  body.push_back(0x46);  // i32.eq
++  if (!RegionGuardsActive())
++  {
++    EmitStateLoadU32(body, layout.msr_offset);
++    EmitI32Const(body, 1);  // LE
++    body.push_back(0x71);
++    body.push_back(0x45);  // i32.eqz
++    body.push_back(0x71);  // i32.and
++  }
++  body.insert(body.end(), {0x04, 0x40});  // if
++  if (size == 4)
++  {
++    EmitStoreU32BigEndianToGatherPipe(body, layout);
++  }
++  else
++  {
++    if (size == 2)
++      EmitBswap16FromLocal(body, 2);
++    else
++      EmitLocalGet(body, 2);
++    EmitLocalSet(body, 3);
++    EmitStateLoadU32(body, layout.gather_pipe_ptr_offset);
++    EmitLocalGet(body, 3);
++    body.push_back(size == 2 ? 0x3b : 0x3a);  // i32.store16 / i32.store8
++    body.push_back(0x00);
++    EmitU32Leb(body, 0);
++    EmitStateStoreU32Prefix(body);
++    EmitStateLoadU32(body, layout.gather_pipe_ptr_offset);
++    EmitI32Const(body, size);
++    body.push_back(0x6a);
++    EmitStateStoreU32Suffix(body, layout.gather_pipe_ptr_offset);
++  }
++  // Flushed at every 32-byte burst, as GPFifo::Write* does (CheckGatherPipe),
++  // not near the end of the pipe's buffer as after a float store: games write
++  // their sync commands (tokens, draw done) with integer stores and then wait
++  // for the GPU, which must have received them (measured: with the late
++  // flush no game frame came, rendering frozen).
++  EmitStateLoadU32(body, layout.gather_pipe_ptr_offset);
++  EmitStateLoadU32(body, layout.gather_pipe_base_ptr_offset);
++  body.push_back(0x6b);  // i32.sub
++  EmitI32Const(body, GPFifo::GATHER_PIPE_SIZE);
++  body.push_back(0x4f);  // i32.ge_u
++  body.insert(body.end(), {0x04, 0x40});  // if
++  EmitLocalGet(body, 0);
++  EmitI32Const(body, 0);
++  EmitI32Const(body, 0);
++  EmitCallImport(body, WASM_IMPORT_FASTCHECK_GPFIFO_INDEX);
++  body.push_back(0x0b);  // end
++  body.push_back(0x05);  // else
++  call();
++  body.push_back(0x0b);  // end
++}
++
+ void EmitWriteU32MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout)
+ {
+   EmitLocalGet(body, 1);
+@@ -5041,10 +5161,7 @@
+   body.push_back(0x00);
+   EmitU32Leb(body, 0);
+   body.push_back(0x05);
+-  EmitLocalGet(body, 0);
+-  EmitLocalGet(body, 1);
+-  EmitLocalGet(body, 2);
+-  EmitCallImport(body, 1);
++  EmitWriteSlowArm(body, layout, 4, 1);  // 0195
+   body.push_back(0x0b);
+ }
+ 
+@@ -5067,10 +5184,7 @@
+   body.push_back(0x00);
+   EmitU32Leb(body, 0);
+   body.push_back(0x05);
+-  EmitLocalGet(body, 0);
+-  EmitLocalGet(body, 1);
+-  EmitLocalGet(body, 2);
+-  EmitCallImport(body, 3);
++  EmitWriteSlowArm(body, layout, 1, 3);  // 0195
+   body.push_back(0x0b);
+ }
+ 
+@@ -5095,10 +5209,7 @@
+   body.push_back(0x00);
+   EmitU32Leb(body, 0);
+   body.push_back(0x05);
+-  EmitLocalGet(body, 0);
+-  EmitLocalGet(body, 1);
+-  EmitLocalGet(body, 2);
+-  EmitCallImport(body, 5);
++  EmitWriteSlowArm(body, layout, 2, 5);  // 0195
+   body.push_back(0x0b);
+ }
+ 
+@@ -5405,6 +5516,10 @@
+ // its ops take them for granted instead of testing them one by one. GQRs
+ // (mtspr GQR is direct) are still tested per op.
+ thread_local bool t_region_guards = false;
++bool RegionGuardsActive()
++{
++  return t_region_guards;
++}
+ 
+ // [] -> [i32]: MSR.FP on and MSR.LE off.
+ void EmitMsrFpOnLittleEndianOff(std::vector<u8>& body, const WasmStateLayout& layout)

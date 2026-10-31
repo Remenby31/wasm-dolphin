@@ -15,6 +15,7 @@ import { planDol } from "../src/aot-plan.js";
 import { assembleRegion, regionModuleEntries } from "../src/aot-region-module.js";
 import { asm, assemble, buildDol } from "./aot-asm.mjs";
 import { HELPER_SIGNATURES, checkCoreSlice, loadAotCore } from "./helpers/aot-core-equivalence.mjs";
+import { PRODUCTION_DISABLE_MASK } from "./helpers/jit-oracle.mjs";
 import { checkBranchHintSection } from "./helpers/branch-hints.mjs";
 
 
@@ -114,13 +115,14 @@ test("a planted translator bug is caught", { skip }, () => {
 // (harness/homebrew/fixtures, rebuilt identically by rebuild-fixtures.sh), so
 // CI runs it on the core it builds.
 const CPUFUZZ = new URL("../harness/homebrew/fixtures/cpufuzz.dol", import.meta.url);
-test("cpufuzz over 4 slices: regions end like the interpreter", {
+// 0195 (?gpint=1, bit 19) as well: integer stores to the gather pipe in line.
+for (const [label, mask] of [["", PRODUCTION_DISABLE_MASK], [", gpint (0195)", PRODUCTION_DISABLE_MASK | (1 << 19)]]) test(`cpufuzz over 4 slices: regions end like the interpreter${label}`, {
   skip: skip || (!existsSync(CPUFUZZ) && "harness/homebrew/fixtures/cpufuzz.dol missing"), timeout: 600000
 }, (t) => {
   const s = setup(readFileSync(CPUFUZZ));
   const total = { functions: 0, translated: 0, checked: 0, equal: 0, regionRuns: 0, regionCycles: 0, interpCycles: 0, ends: {}, mismatches: [], skipped: {} };
   for (let k = 0; k < 4; k++) {
-    const r = checkCoreSlice({ core, ...s, slice: k, slices: 4, maxFunctions: 40 });
+    const r = checkCoreSlice({ core, ...s, slice: k, slices: 4, maxFunctions: 40, mask });
     for (const key of ["functions", "translated", "checked", "equal", "regionRuns", "regionCycles", "interpCycles"]) total[key] += r[key];
     total.mismatches.push(...r.mismatches);
     for (const [why, n] of Object.entries(r.skipped)) total.skipped[why] = (total.skipped[why] ?? 0) + n;

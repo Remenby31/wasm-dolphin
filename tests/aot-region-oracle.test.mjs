@@ -17,7 +17,8 @@ import { PRODUCTION_DISABLE_MASK, SHORT_PREFIX_MASK, makeRng, randomState } from
 
 const core = await loadAotCore();
 const skip = !core?.has("DolphinWeb_AotTestLoadState") && "core without the region test exports (patch 0075)";
-for (const [name, mask] of [["production mask", PRODUCTION_DISABLE_MASK], ["short prefixes", SHORT_PREFIX_MASK]]) {
+// 0195 (?gpint=1, bit 19): integer stores to the gather pipe in line.
+for (const [name, mask] of [["production mask", PRODUCTION_DISABLE_MASK], ["short prefixes", SHORT_PREFIX_MASK], ["production mask, gpint (0195)", PRODUCTION_DISABLE_MASK | (1 << 19)]]) {
   test(`oracle programs as regions, ${name}: interpreter and regions agree, mid-region exits included`, { skip, timeout: 600000 }, (t) => {
     const tally = runOracleProgramsAsRegions(core, { seed: 0x4e9 ^ mask, count: 400, length: 24, mask });
     t.diagnostic(JSON.stringify({ ...tally, mismatches: tally.mismatches.slice(0, 4), mismatchCount: tally.mismatches.length }));

@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "f070b9008cd0bf5de294b721626c22b7a8c4e64d7fbfcf5dc0be6acf0f415e25",
+  "patchSeriesSha256": "d45d25505c74b126e0ac3b993836c2e136774bc3701ede389daf43af22eff4c3",
   "patches": [
     {
       "order": 1,
@@ -1103,12 +1103,20 @@
       "order": 135,
       "cwd": ".",
       "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0195-gp-int-inline.patch",
+      "size": 7537,
+      "sha256": "9a85b31f8e0190f7458fa7073b901d856bc970f337173c99d38d537670f7cb9b"
+    },
+    {
+      "order": 136,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0201-webgpu-destroy-evicted-bind-groups.patch",
       "size": 3127,
       "sha256": "e377cd746a4518e18be8aca99af824f6afa7c64a7e0e2c083907bf37915d43fe"
     },
     {
-      "order": 136,
+      "order": 137,
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0202-webgpu-destroy-freed-textures.patch",
@@ -1116,7 +1124,7 @@
       "sha256": "db2b4aef881a895ba63e88ef71f22e4c582ac14c41ea6b935bc56ee81913c936"
     },
     {
-      "order": 137,
+      "order": 138,
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0203-webgpu-retire-geometry-buffers.patch",
@@ -1124,7 +1132,7 @@
       "sha256": "e383e68a278cd19303de20204d764a1a307e05c5531f224fcc99a0f7e445c878"
     },
     {
-      "order": 138,
+      "order": 139,
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0204-webgpu-geometry-content-cache.patch",
@@ -1132,7 +1140,7 @@
       "sha256": "7448892897ff4c70aa2d2915254e5e2f08645e5163b5aa3d094491e4640382bf"
     },
     {
-      "order": 139,
+      "order": 140,
       "cwd": "Externals/SFML/SFML",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0001-sfml-emscripten-config.patch",
@@ -1140,7 +1148,7 @@
       "sha256": "f82197a21fe982ad83f6ee7bbf5a03839b1cebd4d64da3eab11263842bf61d89"
     },
     {
-      "order": 140,
+      "order": 141,
       "cwd": "Externals/xxhash/xxHash",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0002-xxhash-wasm-simd-scalar.patch",
