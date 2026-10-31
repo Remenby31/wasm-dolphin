@@ -23,7 +23,7 @@ Research project under active development. What is checked, and how:
 
 | Target | State |
 |---|---|
-| Chrome / Edge on desktop (V8) | Main development and measurement target. All harness probes run on Chromium. |
+| Chrome / Edge on desktop (V8) | Main development and measurement target; the harness measures on Chromium. |
 | Safari on macOS and iOS (JavaScriptCore) | Runs, with engine-specific defaults chosen at load time (`src/wasm-engine.js`): mapped upload staging, bind group cache, a function size cap for region modules. A manual CI lane (`.github/workflows/webkit.yml`) boots homebrew `.dol` files in Playwright's WebKit with `aot=1`. iPhone tuning is in progress; no Safari or iPhone measurement results are committed yet. |
 | Firefox (SpiderMonkey) | Detected by the engine probe, not tested. |
 | Chrome on Windows without a GPU | Manual CI lane (`.github/workflows/windows-nogpu.yml`) checks the fallback chain: software renderer, WebGL or 2D presenter. |
