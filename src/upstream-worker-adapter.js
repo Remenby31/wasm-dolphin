@@ -1,6 +1,6 @@
 import { DEFAULT_UPSTREAM_CORE_SHA256 } from "./default-core.js";
 import { widenU32Counter } from "./u32-counter.js";
-import { wgpuMappedStagingSlotCountOf } from "./wgpu-replay-diagnostics.js";
+import { wgpuMappedStagingSlotCountOf, wgpuMappedStagingSlotMibOf } from "./wgpu-replay-diagnostics.js";
 import {
   DEFAULT_UPSTREAM_CORE_URL,
   isOneWayWorkerRequestType,
@@ -176,6 +176,7 @@ export class UpstreamWorkerAdapter {
     wgpuUploadArenaMiB = 32,
     wgpuUploadTransport = "queue",
     wgpuMappedStagingSlotCount = 3,
+    wgpuMappedStagingSlotMib = 16,
     wgpuMappedStageFast = false,
     wgpuMappedStageTimingStride = 1,
     wgpuMappedDrainCoalescing = false,
@@ -329,6 +330,7 @@ export class UpstreamWorkerAdapter {
     this.wgpuUploadArenaMiB = Number(wgpuUploadArenaMiB) === 64 ? 64 : 32;
     this.wgpuUploadTransport = wgpuUploadTransport === "mapped" ? "mapped" : "queue";
     this.wgpuMappedStagingSlotCount = wgpuMappedStagingSlotCountOf(wgpuMappedStagingSlotCount);
+    this.wgpuMappedStagingSlotMib = wgpuMappedStagingSlotMibOf(wgpuMappedStagingSlotMib);
     this.wgpuMappedStageFast = Boolean(wgpuMappedStageFast);
     this.wgpuMappedStageTimingStride = Number(wgpuMappedStageTimingStride) === 64 ? 64 : 1;
     this.wgpuMappedDrainCoalescing = Boolean(wgpuMappedDrainCoalescing);
@@ -587,6 +589,7 @@ export class UpstreamWorkerAdapter {
       wgpuUploadArenaMiB: this.wgpuUploadArenaMiB,
       wgpuUploadTransport: this.wgpuUploadTransport,
       wgpuMappedStagingSlotCount: this.wgpuMappedStagingSlotCount,
+      wgpuMappedStagingSlotMib: this.wgpuMappedStagingSlotMib,
       wgpuMappedStageFast: this.wgpuMappedStageFast,
       wgpuMappedStageTimingStride: this.wgpuMappedStageTimingStride,
       wgpuMappedDrainCoalescing: this.wgpuMappedDrainCoalescing,

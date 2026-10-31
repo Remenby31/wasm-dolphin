@@ -425,6 +425,31 @@ export function defaultWgpuMappedStagingSlotCount(engine) {
   return engine === "jsc" ? 4 : 3;
 }
 
+// Mapped staging slot size in MiB: 16 by default. getMappedRange costs
+// ~0.45 ms per MiB of slot on an iPhone (16 MiB: 7.7 ms a remap, ~58 remaps
+// a second), so a smaller slot remaps cheaper; an upload larger than the
+// slot takes the queue (writeOversizeWgpuUpload). The page, the adapter and
+// the worker all read it through this one function.
+export const WGPU_MAPPED_STAGING_SLOT_MIB_VALUES = Object.freeze([2, 4, 8, 16]);
+export function wgpuMappedStagingSlotMibOf(value) {
+  const n = Number(value);
+  return WGPU_MAPPED_STAGING_SLOT_MIB_VALUES.includes(n) ? n : 16;
+}
+// The engine's own default: 16 everywhere until the iPhone A/B decides JSC's.
+export function defaultWgpuMappedStagingSlotMib(_engine) {
+  return 16;
+}
+// ?wgpustagingslotmib=2|4|8|16 forces it, else the engine's default.
+export function requestedWgpuMappedStagingSlotMib(
+  search = globalThis.location?.search ?? "",
+  fallback = 16
+) {
+  const value = new URLSearchParams(search).get("wgpustagingslotmib");
+  return value !== null && WGPU_MAPPED_STAGING_SLOT_MIB_VALUES.includes(Number(value))
+    ? Number(value)
+    : wgpuMappedStagingSlotMibOf(fallback);
+}
+
 // ?wgpustagingslots=3..8 forces it, else the engine's default.
 export function requestedWgpuMappedStagingSlotCount(
   search = globalThis.location?.search ?? "",

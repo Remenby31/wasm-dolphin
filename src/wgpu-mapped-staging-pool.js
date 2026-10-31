@@ -1015,3 +1015,27 @@ function isNonnegativeInteger(value) {
 function isPositiveInteger(value) {
   return Number.isSafeInteger(value) && value > 0;
 }
+
+// When an upload the pool refused goes through queue.writeBuffer/writeTexture
+// instead: "oversize" when it is larger than a slot, "pass-capacity" when no
+// slot is free inside a render pass (which cannot wait for a remap); null
+// otherwise (outside a pass the replay holds the record until a slot remaps).
+export function queueWgpuUploadReason(stageReason, inPass) {
+  if (stageReason === "payload-too-large") return "oversize";
+  if (stageReason === "no-capacity" && inPass) return "pass-capacity";
+  return null;
+}
+
+// The queue applies writeBuffer/writeTexture when called, ahead of every
+// command buffer not yet submitted. So what was staged before the upload is
+// submitted first (submitPending), then the upload is written: uploads keep
+// program order. submitPending returns false when the submission failed;
+// nothing is written then.
+export function writeWgpuUploadThroughQueue({ submitPending, write } = {}) {
+  if (typeof submitPending !== "function" || typeof write !== "function") {
+    throw new TypeError("submitPending and write callbacks are required");
+  }
+  if (!submitPending()) return false;
+  write();
+  return true;
+}

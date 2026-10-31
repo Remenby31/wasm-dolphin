@@ -240,6 +240,7 @@ for (const [environmentName, queryName] of [
   ["WGPUATOMIC", "wgpuatomic"],
   ["WGPUUPLOADMB", "wgpuuploadmb"],
   ["WGPUSTAGINGSLOTS", "wgpustagingslots"],
+  ["WGPUSTAGINGSLOTMIB", "wgpustagingslotmib"],
   ["WGPUSTAGEFAST", "wgpustagefast"],
   // Sparse UBO copy-forward uploads only the dirty 16-byte ranges of a
   // constant block instead of the whole block. It needs the mapped upload

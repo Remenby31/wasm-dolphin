@@ -138,7 +138,7 @@ test("mapped drain coalescing is opt-in, bounded, and generation-fenced", async 
 test("mapped uploads are copied into a bounded pool and queue writes stay isolated", async () => {
   const worker = await readSource("../src/upstream-discio-worker.js");
   assert.match(worker, /WGPU_MAPPED_STAGING_SLOT_COUNT = 3/);
-  assert.match(worker, /WGPU_MAPPED_STAGING_SLOT_BYTES = 16 \* 1024 \* 1024/);
+  assert.match(worker, /let wgpuMappedStagingSlotBytes = 16 \* 1024 \* 1024/);
   assert.match(worker, /if \(wgpuUploadTransport === "mapped"\) \{[\s\S]*?\.stageBuffer\(\{/);
   assert.match(worker, /if \(wgpuUploadTransport === "mapped"\) \{[\s\S]*?\.stageTexture\(\{/);
   assert.match(worker, /\} else \{[\s\S]*?q\.writeBuffer\(/);
@@ -199,4 +199,62 @@ test("?wgpustagingslots=6 reaches the worker's load payload through the adapter"
   });
   await adapter.load();
   assert.equal(posted.payload.wgpuMappedStagingSlotCount, 6);
+});
+
+test("mapped staging slot size flows from the page to the pool and the artifacts", async () => {
+  const [host, adapter, worker, gate, harness] = await Promise.all([
+    readSource("../src/core-host.js"),
+    readSource("../src/upstream-worker-adapter.js"),
+    readSource("../src/upstream-discio-worker.js"),
+    readSource("../tools/perf-regression-gate.mjs"),
+    readSource("../tools/menu-progress-validate.mjs"),
+  ]);
+  assert.match(host, /requestedWgpuMappedStagingSlotMib\(\s*window\.location\.search,\s*defaultWgpuMappedStagingSlotMib\(this\.wasmEngine\)\s*\)/);
+  assert.match(host, /wgpuMappedStagingSlotMib: this\.wgpuMappedStagingSlotMib/);
+  assert.match(adapter, /this\.wgpuMappedStagingSlotMib = wgpuMappedStagingSlotMibOf\(wgpuMappedStagingSlotMib\)/);
+  assert.match(adapter, /wgpuMappedStagingSlotMib: this\.wgpuMappedStagingSlotMib/);
+  assert.match(worker, /wgpuMappedStagingSlotMib: payload\.wgpuMappedStagingSlotMib/);
+  assert.match(worker, /wgpuMappedStagingSlotMibOf\(requestedWgpuMappedStagingSlotMib\) \* 1024 \* 1024/);
+  assert.match(worker, /slotSize: wgpuMappedStagingSlotBytes/);
+  assert.match(worker, /slotBytes: wgpuMappedStagingSlotBytes/);
+  assert.match(gate, /"wgpustagingslotmib"/);
+  assert.match(gate, /WGPU mapped staging slot-size mismatch/);
+  assert.match(harness, /\["WGPUSTAGINGSLOTMIB", "wgpustagingslotmib"\]/);
+});
+
+test("?wgpustagingslotmib=4 reaches the worker's load payload through the adapter", async (t) => {
+  const { UpstreamWorkerAdapter } = await import("../src/upstream-worker-adapter.js");
+  const { requestedWgpuMappedStagingSlotMib } = await import("../src/wgpu-replay-diagnostics.js");
+  const adapter = new UpstreamWorkerAdapter({ wgpuMappedStagingSlotMib: requestedWgpuMappedStagingSlotMib("?wgpustagingslotmib=4") });
+  let posted = null;
+  adapter.worker = {
+    postMessage(message) {
+      posted = message;
+      queueMicrotask(() => adapter.handleMessage({ id: message.id, ok: true }));
+    }
+  };
+  const originalWindow = globalThis.window;
+  globalThis.window = { location: { href: "http://127.0.0.1:8080/?wgpustagingslotmib=4", search: "?wgpustagingslotmib=4" } };
+  t.after(() => {
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+  });
+  await adapter.load();
+  assert.equal(posted.payload.wgpuMappedStagingSlotMib, 4);
+});
+
+test("both upload paths take the queue through writeWgpuUploadThroughQueue and are counted", async () => {
+  const worker = await readSource("../src/upstream-discio-worker.js");
+  const calls = worker.match(/queueWgpuUploadReason\(stageReason, Boolean\(pass\)\);\s*if \(queueReason &&\s*writeWgpuUploadThroughQueue\(\{\s*submitPending: submitPendingForQueueUpload,/g) ?? [];
+  assert.equal(calls.length, 2);
+  assert.equal((worker.match(/noteQueueWgpuUpload\(queueReason, uploadBytes\)/g) ?? []).length, 2);
+  // Sparse and compute UBO staging keep their own shadow state: never the queue.
+  assert.match(worker, /const queueReason = stageAccepted \|\| !viaPool/);
+  // Inside a pass only the staged batch is submitted, never the render encoder.
+  assert.match(worker, /if \(enc && !pass\) submitEnc\("staging-oversize"\);\s*else flushMappedUploadsOnly\("staging-oversize"\);/);
+  assert.match(worker, /stagingOversize: webGpuCausalStats\.mappedStagingOversizeCount/);
+  assert.match(worker, /stagingPassCapacityQueue: webGpuCausalStats\.mappedStagingPassCapacityQueueCount/);
+  // Per-pass bytes are a metric: nothing per pass without ?metrics=1.
+  assert.match(worker, /if \(causalMetricsEnabled\) \{\s*recordWgpuPassUploadBytes\(passUploadBytes\);\s*passUploadBytes = 0;\s*\}/);
+  assert.match(worker, /if \(causalMetricsEnabled && pass && replayRecordAccepted &&/);
 });

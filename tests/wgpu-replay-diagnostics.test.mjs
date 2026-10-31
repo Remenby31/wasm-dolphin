@@ -37,7 +37,10 @@ import {
   requestedWgpuUniformFast,
   selectAtomicReplayLimit,
   summarizeWgpuReplayRange,
-  wgpuMappedStagingSlotCountOf
+  wgpuMappedStagingSlotCountOf,
+  wgpuMappedStagingSlotMibOf,
+  requestedWgpuMappedStagingSlotMib,
+  defaultWgpuMappedStagingSlotMib
 } from "../src/wgpu-replay-diagnostics.js";
 
 test("mapped staging slots: 4 by default under JavaScriptCore, 3 elsewhere; the parameter wins", () => {
@@ -948,3 +951,17 @@ function incrementingClock() {
   let value = 0;
   return () => ++value;
 }
+
+test("?wgpustagingslotmib takes 2, 4, 8 or 16 and falls back to the engine default", () => {
+  assert.equal(defaultWgpuMappedStagingSlotMib("jsc"), 16);
+  assert.equal(defaultWgpuMappedStagingSlotMib("v8"), 16);
+  for (const n of [2, 4, 8, 16]) {
+    assert.equal(requestedWgpuMappedStagingSlotMib(`?wgpustagingslotmib=${n}`, 16), n);
+    assert.equal(wgpuMappedStagingSlotMibOf(n), n);
+  }
+  assert.equal(requestedWgpuMappedStagingSlotMib("", 4), 4);
+  for (const v of ["1", "3", "32", "junk", "4.5"]) {
+    assert.equal(requestedWgpuMappedStagingSlotMib(`?wgpustagingslotmib=${v}`, 8), 8);
+  }
+  for (const v of [undefined, null, 0, 3, 32, NaN, "x"]) assert.equal(wgpuMappedStagingSlotMibOf(v), 16);
+});

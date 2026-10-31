@@ -54,7 +54,8 @@ import {
   isIntentionalBlankWgpuProbe,
   selectAtomicReplayLimit,
   summarizeWgpuReplayRange,
-  wgpuMappedStagingSlotCountOf
+  wgpuMappedStagingSlotCountOf,
+  wgpuMappedStagingSlotMibOf
 } from "./wgpu-replay-diagnostics.js";
 import {
   WgpuRendererRuntime,
@@ -129,7 +130,9 @@ import { coreIntegrityOf, createWgpuIntegrity, SKIP, skippedDrawCause } from "./
 import { createNewFrameCounter } from "./wgpu-new-frames.js";
 import {
   attemptRetainedWgpuUpload,
-  createWgpuMappedStagingPool
+  createWgpuMappedStagingPool,
+  queueWgpuUploadReason,
+  writeWgpuUploadThroughQueue
 } from "./wgpu-mapped-staging-pool.js";
 import { createWgpuSparseUboCopyForward } from "./wgpu-sparse-ubo-copy-forward.js";
 import { createBindGroupCache } from "./wgpu-bind-group-cache.js";
@@ -500,6 +503,8 @@ function readWgpuIntegrity() {
     ...coreIntegrityOf(api?.getWebGpuStateCacheStats?.()),
     stagingUnsafe: webGpuCausalStats.mappedStagingUnsafeCapacityCount || 0,
     stagingCapacityWaits: webGpuCausalStats.mappedStagingCapacityWaitCount || 0,
+    stagingOversize: webGpuCausalStats.mappedStagingOversizeCount || 0,
+    stagingPassCapacityQueue: webGpuCausalStats.mappedStagingPassCapacityQueueCount || 0,
     presentRejected: self._wgPresentRejectedLogCount || 0,
     framesOutOfOrder: wgpuNewFrames.outOfOrder,
     geometryCacheCollisions,
@@ -775,8 +780,10 @@ let wgpuGeometryCacheMode = 0;
 let wgpuUploadArenaMiB = 32;
 let wgpuUploadTransport = "queue";
 const WGPU_MAPPED_STAGING_SLOT_COUNT = 3;
-const WGPU_MAPPED_STAGING_SLOT_BYTES = 16 * 1024 * 1024;
 let wgpuMappedStagingSlotCount = WGPU_MAPPED_STAGING_SLOT_COUNT;
+// ?wgpustagingslotmib: JSC's getMappedRange costs ~0.45 ms per mapped MiB,
+// so a smaller slot makes every remap cheaper on iOS.
+let wgpuMappedStagingSlotBytes = 16 * 1024 * 1024;
 let wgpuMappedStageFastEnabled = false;
 const WGPU_FAST_STAGE_ACCEPTED = Object.freeze({ ok: true, reason: null });
 let wgpuMappedDrainCoalescingEnabled = false;
@@ -1343,6 +1350,7 @@ function wgpuRuntimeConfigPayload() {
     mappedStaging: {
       enabled: wgpuUploadTransport === "mapped",
       slotCount: wgpuMappedStagingSlotCount,
+      slotBytes: wgpuMappedStagingSlotBytes,
       recordStore: wgpuMappedStageFastEnabled ? "flat" : "objects",
       timing: {
         enabled: causalMetricsEnabled,
@@ -1917,7 +1925,7 @@ async function handleMessage(type, payload) {
       wgpuPassPackageProjectionActive = wgpuPassPackageProjectionRequested &&
         causalMetricsEnabled && payload.videoBackend === "WebGPU-Real";
       wgpuUploadRunProjection = createWgpuUploadRunProjection({
-        maxEnvelopeBytes: WGPU_MAPPED_STAGING_SLOT_BYTES,
+        maxEnvelopeBytes: wgpuMappedStagingSlotMibOf(payload.wgpuMappedStagingSlotMib) * 1024 * 1024,
       });
       wgpuUploadRunProjectionRequested = Boolean(payload.wgpuUploadRunProjection);
       wgpuUploadRunProjectionActive = wgpuUploadRunProjectionRequested &&
@@ -2084,6 +2092,7 @@ async function handleMessage(type, payload) {
         wgpuUploadArenaMiB: payload.wgpuUploadArenaMiB,
         wgpuUploadTransport: payload.wgpuUploadTransport,
         wgpuMappedStagingSlotCount: payload.wgpuMappedStagingSlotCount,
+        wgpuMappedStagingSlotMib: payload.wgpuMappedStagingSlotMib,
         wgpuMappedStageFast: payload.wgpuMappedStageFast,
         wgpuMappedDrainCoalescing: payload.wgpuMappedDrainCoalescing,
         wgpuRendererWorkerProbe: payload.wgpuRendererWorkerProbe,
@@ -2787,6 +2796,7 @@ async function loadCore({
   wgpuUploadTransport: requestedWgpuUploadTransport = "queue",
   wgpuMappedStagingSlotCount: requestedWgpuMappedStagingSlotCount =
     WGPU_MAPPED_STAGING_SLOT_COUNT,
+  wgpuMappedStagingSlotMib: requestedWgpuMappedStagingSlotMib = 16,
   wgpuMappedStageFast: requestedWgpuMappedStageFast = false,
   wgpuMappedDrainCoalescing: requestedWgpuMappedDrainCoalescing = false,
   wgpuRendererWorkerProbe: requestedWgpuRendererWorkerProbe = "off",
@@ -2949,6 +2959,8 @@ async function loadCore({
   wgpuUploadArenaMiB = Number(requestedWgpuUploadArenaMiB) === 64 ? 64 : 32;
   wgpuUploadTransport = requestedWgpuUploadTransport === "mapped" ? "mapped" : "queue";
   wgpuMappedStagingSlotCount = wgpuMappedStagingSlotCountOf(requestedWgpuMappedStagingSlotCount);
+  wgpuMappedStagingSlotBytes =
+    wgpuMappedStagingSlotMibOf(requestedWgpuMappedStagingSlotMib) * 1024 * 1024;
   if (requestedWgpuSparseUbo && wgpuUploadTransport !== "mapped") {
     throw new Error("wgpuubosparse=1 requires wgpuuploadtransport=mapped");
   }
@@ -10220,13 +10232,40 @@ function clearWgpuReplayStateAfterDeviceLoss() {
   }
 }
 
+// An upload that took the queue instead of a slot (always counted: the rate
+// per second tells whether the slot size and count fit the content).
+// "oversize": larger than a slot; "pass-capacity": no free slot inside a pass.
+function noteQueueWgpuUpload(reason, bytes) {
+  if (reason === "oversize") {
+    webGpuCausalStats.mappedStagingOversizeCount += 1;
+    webGpuCausalStats.mappedStagingOversizeBytes += bytes;
+  } else {
+    webGpuCausalStats.mappedStagingPassCapacityQueueCount += 1;
+    webGpuCausalStats.mappedStagingPassCapacityQueueBytes += bytes;
+  }
+}
+
+// Upload bytes replayed while one render pass was open: what a pass needs
+// from the slots, since a pass cannot wait for a remap (?metrics=1 only).
+const WGPU_PASS_UPLOAD_BUCKET_BOUNDS_BYTES = Object.freeze(
+  [0, 4, 16, 64, 256, 1024, 2048, 4096, 8192, 16384].map((k) => k * 1024)
+);
+function recordWgpuPassUploadBytes(bytes) {
+  recordBoundedHistogram(
+    webGpuCausalStats.passUploadBytesHistogram,
+    WGPU_PASS_UPLOAD_BUCKET_BOUNDS_BYTES,
+    bytes
+  );
+  webGpuCausalStats.passUploadBytesMax = Math.max(webGpuCausalStats.passUploadBytesMax, bytes);
+}
+
 function ensureWgpuMappedStagingPool(device) {
   if (wgpuUploadTransport !== "mapped") return null;
   if (!wgpuMappedStagingPool) {
     wgpuMappedStagingPool = createWgpuMappedStagingPool({
       device,
       slotCount: wgpuMappedStagingSlotCount,
-      slotSize: WGPU_MAPPED_STAGING_SLOT_BYTES,
+      slotSize: wgpuMappedStagingSlotBytes,
       // MAP_WRITE | COPY_SRC and GPUMapMode.WRITE. Passing the numeric
       // values keeps the worker test seam independent of WebGPU globals.
       bufferUsage: 0x0002 | 0x0004,
@@ -10385,7 +10424,9 @@ function resetWgpuMappedDrainCoalescing(reason, { clearTelemetry = false } = {})
 }
 
 function mappedDrainForceReason(reason) {
-  if (reason === "staging-capacity") return WGPU_MAPPED_DRAIN_FORCE_REASONS.CAPACITY;
+  if (reason === "staging-capacity" || reason === "staging-oversize") {
+    return WGPU_MAPPED_DRAIN_FORCE_REASONS.CAPACITY;
+  }
   if (reason === "present") return WGPU_MAPPED_DRAIN_FORCE_REASONS.PRESENT;
   if (reason.includes("readback")) return WGPU_MAPPED_DRAIN_FORCE_REASONS.READBACK;
   if (reason === "blit") return WGPU_MAPPED_DRAIN_FORCE_REASONS.BLIT;
@@ -13198,6 +13239,13 @@ const webGpuCausalStats = {
   mappedStagingCapacityWaitMaxMs: 0,
   mappedStagingRemapFailureCount: 0,
   mappedStagingUnsafeCapacityCount: 0,
+  mappedStagingOversizeCount: 0,
+  mappedStagingOversizeBytes: 0,
+  mappedStagingPassCapacityQueueCount: 0,
+  mappedStagingPassCapacityQueueBytes: 0,
+  passUploadBytesBucketBounds: [...WGPU_PASS_UPLOAD_BUCKET_BOUNDS_BYTES],
+  passUploadBytesHistogram: new Array(WGPU_PASS_UPLOAD_BUCKET_BOUNDS_BYTES.length + 1).fill(0),
+  passUploadBytesMax: 0,
   heldUploadScannedRecords: 0,
   heldUploadScanTotalMs: 0,
   heldUploadScanMaxMs: 0,
@@ -13855,6 +13903,7 @@ function drainWebGpuCmdRing(source = "presentation") {
   const q = dev.queue;
   let enc = null;
   let pass = null;
+  let passUploadBytes = 0;
   let passW = 0;
   let passH = 0;
   let passColorFmt = null;
@@ -14102,6 +14151,17 @@ function drainWebGpuCmdRing(source = "presentation") {
     prepareWgpuMappedDrainSubmission(reason, decisionPrepared);
     return submitPendingWgpuMappedUploads(reason);
   };
+  // Submits what was staged before an upload that takes the queue (see
+  // writeWgpuUploadThroughQueue). Outside a pass, the open encoder goes too.
+  // Inside one, only the staged batch: it is a command buffer of its own, and
+  // the render command buffer is submitted after it either way, so uploads
+  // stay in program order and still precede the drain's draws, as every
+  // upload of a drain does (and as the queue transport always does).
+  const submitPendingForQueueUpload = () => {
+    if (enc && !pass) submitEnc("staging-oversize");
+    else flushMappedUploadsOnly("staging-oversize");
+    return !wgpuReplayFatal;
+  };
   let lastSubmitFailureReason = null;
   const submitEnc = (reason = "drain-boundary", decisionPrepared = false) => {
     lastSubmitFailureReason = null;
@@ -14172,6 +14232,10 @@ function drainWebGpuCmdRing(source = "presentation") {
   };
   const endPass = (reason = "implicit", recordIndex = read) => {
     if (pass) {
+      if (causalMetricsEnabled) {
+        recordWgpuPassUploadBytes(passUploadBytes);
+        passUploadBytes = 0;
+      }
       const endedFramebufferId = passFbId;
       if (passFbId === 0) {
         lastBackbufferSourceTextureId = currentBackbufferSourceTextureId;
@@ -14717,6 +14781,9 @@ function drainWebGpuCmdRing(source = "presentation") {
                 let retainedAccepted = false;
                 let stageAccepted;
                 let stageReason = null;
+                // Only plain pool staging may fall back to the queue: the
+                // sparse and compute UBO paths keep their own shadow state.
+                let viaPool = false;
                 const destinationOffset = u32[recWord + 2] & ~3;
                 if (stagedUpload) {
                   const stage = (data) => {
@@ -14736,6 +14803,7 @@ function drainWebGpuCmdRing(source = "presentation") {
                       role: uploadRole,
                     });
                     if (sparse?.handled) return sparse;
+                    viaPool = true;
                     if (wgpuMappedStageFastEnabled) {
                       const reason = pool.stageBufferFast(data, buf, destinationOffset);
                       return reason === null
@@ -14773,9 +14841,11 @@ function drainWebGpuCmdRing(source = "presentation") {
                     stageAccepted = sparse.ok;
                     stageReason = sparse.reason ?? null;
                   } else if (wgpuMappedStageFastEnabled) {
+                    viaPool = true;
                     stageReason = pool.stageBufferFast(uploadSource, buf, destinationOffset);
                     stageAccepted = stageReason === null;
                   } else {
+                    viaPool = true;
                     const staged = pool.stageBuffer({
                       data: uploadSource,
                       destination: buf,
@@ -14799,6 +14869,26 @@ function drainWebGpuCmdRing(source = "presentation") {
                 }
                 webGpuCausalStats.mappedStagingCopyCount += stageAccepted ? 1 : 0;
                 webGpuCausalStats.mappedStagingCopyBytes += stageAccepted ? len : 0;
+                const queueReason = stageAccepted || !viaPool
+                  ? null
+                  : queueWgpuUploadReason(stageReason, Boolean(pass));
+                if (queueReason &&
+                    writeWgpuUploadThroughQueue({
+                      submitPending: submitPendingForQueueUpload,
+                      write: () => q.writeBuffer(
+                        buf,
+                        destinationOffset,
+                        stagedUpload?.data ??
+                          copyImmediateWgpuBufferUpload(heap, srcP, uploadBytes)
+                      ),
+                    })) {
+                  noteQueueWgpuUpload(queueReason, uploadBytes);
+                  stageAccepted = true;
+                  if (stagedUpload) {
+                    ring.stagedUploads.delete(read);
+                    retainedAccepted = true;
+                  }
+                }
                 if (!stageAccepted) {
                   mappedCapacityHold = true;
                   if (stageReason === "no-capacity") {
@@ -15058,6 +15148,26 @@ function drainWebGpuCmdRing(source = "presentation") {
                 }
                 webGpuCausalStats.mappedStagingCopyCount += stageAccepted ? 1 : 0;
                 webGpuCausalStats.mappedStagingCopyBytes += stageAccepted ? uploadBytes : 0;
+                const queueReason = stageAccepted
+                  ? null
+                  : queueWgpuUploadReason(stageReason, Boolean(pass));
+                if (queueReason &&
+                    writeWgpuUploadThroughQueue({
+                      submitPending: submitPendingForQueueUpload,
+                      write: () => q.writeTexture(
+                        { texture: t.tex, mipLevel: u32[recWord + 6], origin },
+                        stagedUpload?.data ?? heapCopy(src, uploadBytes),
+                        { offset: 0, bytesPerRow: bpr, rowsPerImage: h },
+                        copySize
+                      ),
+                    })) {
+                  noteQueueWgpuUpload(queueReason, uploadBytes);
+                  stageAccepted = true;
+                  if (stagedUpload) {
+                    ring.stagedUploads.delete(read);
+                    retainedAccepted = true;
+                  }
+                }
                 if (!stageAccepted) {
                   mappedCapacityHold = true;
                   if (stageReason === "no-capacity") {
@@ -17000,6 +17110,12 @@ function drainWebGpuCmdRing(source = "presentation") {
         }
       }
       break;
+    }
+    if (causalMetricsEnabled && pass && replayRecordAccepted &&
+        (op === WGPU_CMD_OP_UPLOAD_BUFFER || op === WGPU_CMD_OP_UPLOAD_TEXTURE)) {
+      passUploadBytes += op === WGPU_CMD_OP_UPLOAD_BUFFER
+        ? u32[recWord + 4]
+        : Math.imul(u32[recWord + 3], u32[recWord + 5]) >>> 0;
     }
     if (wgpuPassPackageProjectionActive && replayRecordAccepted) {
       const payloadBytes = op === WGPU_CMD_OP_UPLOAD_BUFFER
