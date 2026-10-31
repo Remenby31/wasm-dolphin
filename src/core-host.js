@@ -1417,6 +1417,11 @@ export class EmulatorHost {
       newFramesProducedPerSec: this.mode === "dolphin" ? this.adapter.newFramesProducedPerSec ?? null : null,
       newFramesShown: this.mode === "dolphin" ? this.adapter.newFramesShown ?? null : null,
       framesOutOfOrder: this.mode === "dolphin" ? this.adapter.framesOutOfOrder ?? null : null,
+      // Occupancy of the last 500 ms window, 0..1 or null: the emulated CPU
+      // thread busy (not in its throttle sleep), the replay draining the
+      // WebGPU command ring (src/occupancy-stats.js).
+      cpuThreadBusy: this.mode === "dolphin" ? this.adapter.cpuThreadBusy ?? null : null,
+      replayBusy: this.mode === "dolphin" ? this.adapter.replayBusy ?? null : null,
       visualChangeFps:
         this.mode === "dolphin"
           ? this.visibleSamplerEnabled &&

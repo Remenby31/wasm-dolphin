@@ -128,6 +128,7 @@ import { createWgpuSemanticRuntime } from "./wgpu-semantic-runtime.js";
 import { createWgpuFatalReporter, handleWgpuDeviceLoss, wgpuFatalPageReason } from "./wgpu-device-lifecycle.js";
 import { coreIntegrityOf, createWgpuIntegrity, SKIP, skippedDrawCause } from "./wgpu-integrity.js";
 import { createNewFrameCounter } from "./wgpu-new-frames.js";
+import { createOccupancyMeter, readHeadroomCpu } from "./occupancy-stats.js";
 import {
   attemptRetainedWgpuUpload,
   createWgpuMappedStagingPool,
@@ -731,6 +732,13 @@ let visualChangeFps = 0;
 const wgpuNewFrames = createNewFrameCounter();
 let newFramesPerSec = null;
 let newFramesProducedPerSec = null;
+// Occupancy per window (src/occupancy-stats.js): the CPU thread's busy share
+// (0113 headroom counters, turned on once per core) and this worker's
+// command-ring drain share; null when unavailable.
+const occupancyMeter = createOccupancyMeter();
+let occupancyHeadroomModule = null; // the core the counters were turned on in
+let cpuThreadBusy = null;
+let replayBusy = null;
 let visualFrameHash = 0;
 let lastVisualFrameHash = 0;
 let lastOglSwapCount = 0;
@@ -4893,6 +4901,9 @@ function resetPresentationBuffer() {
   wgpuNewFrames.reset();
   newFramesPerSec = null;
   newFramesProducedPerSec = null;
+  occupancyMeter.reset();
+  cpuThreadBusy = null;
+  replayBusy = null;
   visualFrameHash = 0;
   lastVisualFrameHash = 0;
   lastOglSwapCount = 0;
@@ -5375,6 +5386,9 @@ function framePayload({ forceCausalTelemetry = false } = {}) {
     newFramesProducedPerSec,
     newFramesShown: wgpuNewFrames.shownTotal,
     framesOutOfOrder: wgpuNewFrames.outOfOrder,
+    // Shares of the last window, 0..1 or null (src/occupancy-stats.js).
+    cpuThreadBusy,
+    replayBusy,
     visualChangeFps,
     visualFrameHash,
     visualSampleSource,
@@ -6499,6 +6513,7 @@ function updatePresentationFps() {
     presentationWindowDropCount = presentationDropsSinceFps;
     visualChangeFps = Math.round((visualChangesSincePresentationFps * 1000) / profileElapsedMs);
     ({ newFramesPerSec, newFramesProducedPerSec } = wgpuNewFrames.window(profileElapsedMs));
+    ({ cpuThreadBusy, replayBusy } = occupancyMeter.window({ atMs: now, ...readOccupancyCounters() }));
     if (collectMetrics) {
       frameProfileStats = formatProfileWindow(profileElapsedMs);
       lastStructuredProfileWindow = stageWindowFromProfile(profileWindow, profileElapsedMs);
@@ -6518,6 +6533,30 @@ function updatePresentationFps() {
     lastPresentationFpsTime = now;
     checkBootStallWatchdog();
   }
+}
+
+// The counters behind cpuThreadBusy and replayBusy, read once per window.
+// Headroom (0113): off until DolphinWeb_HeadroomStats(n >= 0); turned on
+// once per core while it runs, unless already on (a harness window, never
+// reset under it); then read only (-1). Their cost is one timing per
+// throttle on the CPU thread and per pass with work on the GPU thread
+// (WasmHeadroom.h). Drain time: collected with the replay budget (default)
+// or causal metrics.
+function readOccupancyCounters() {
+  const m = moduleInstance;
+  const stats = m?._DolphinWeb_HeadroomStats;
+  let cpu = null;
+  if (typeof stats === "function" && m.HEAPU8 && coreBoot.accepted && api) {
+    cpu = readHeadroomCpu(m.HEAPU8.buffer, stats(-1) >>> 0);
+    if (cpu?.on === false && occupancyHeadroomModule !== m) {
+      stats(0);
+      occupancyHeadroomModule = m;
+    }
+  }
+  const drainMs = webGpuCmdRing && renderGpu && !wgpuReplayFatal && (causalMetricsEnabled || wgpuReplayBudgetMs > 0)
+    ? webGpuCausalStats.drainTotalMs
+    : null;
+  return { cpu, drainMs };
 }
 
 function checkBootStallWatchdog() {

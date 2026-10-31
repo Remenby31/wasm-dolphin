@@ -402,6 +402,9 @@ export class UpstreamWorkerAdapter {
     this.newFramesProducedPerSec = null;
     this.newFramesShown = null;
     this.framesOutOfOrder = null;
+    // Occupancy shares of the last window, 0..1; null when unavailable.
+    this.cpuThreadBusy = null;
+    this.replayBusy = null;
     this.visualChangeFps = 0;
     this.visualFrameHash = 0;
     this.visualSampleSource = "none";
@@ -1501,6 +1504,10 @@ export class UpstreamWorkerAdapter {
     }
     // null is a value here (no frame tags), not a missing field.
     for (const key of ["newFramesPerSec", "newFramesProducedPerSec", "newFramesShown", "framesOutOfOrder"]) {
+      if (key in response) this[key] = Number.isFinite(response[key]) ? response[key] : null;
+    }
+    // Same for the occupancy shares (src/occupancy-stats.js): null is a value.
+    for (const key of ["cpuThreadBusy", "replayBusy"]) {
       if (key in response) this[key] = Number.isFinite(response[key]) ? response[key] : null;
     }
     if (Number.isFinite(response.visualChangeFps)) {
