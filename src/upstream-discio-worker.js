@@ -10227,7 +10227,7 @@ function noteQueueWgpuUpload(reason, bytes) {
 }
 
 // Upload bytes replayed while one render pass was open: what a pass needs
-// from the slots, since a pass cannot wait for a remap.
+// from the slots, since a pass cannot wait for a remap (?metrics=1 only).
 const WGPU_PASS_UPLOAD_BUCKET_BOUNDS_BYTES = Object.freeze(
   [0, 4, 16, 64, 256, 1024, 2048, 4096, 8192, 16384].map((k) => k * 1024)
 );
@@ -14211,8 +14211,10 @@ function drainWebGpuCmdRing(source = "presentation") {
   };
   const endPass = (reason = "implicit", recordIndex = read) => {
     if (pass) {
-      recordWgpuPassUploadBytes(passUploadBytes);
-      passUploadBytes = 0;
+      if (causalMetricsEnabled) {
+        recordWgpuPassUploadBytes(passUploadBytes);
+        passUploadBytes = 0;
+      }
       const endedFramebufferId = passFbId;
       if (passFbId === 0) {
         lastBackbufferSourceTextureId = currentBackbufferSourceTextureId;
@@ -17080,7 +17082,7 @@ function drainWebGpuCmdRing(source = "presentation") {
       }
       break;
     }
-    if (pass && replayRecordAccepted &&
+    if (causalMetricsEnabled && pass && replayRecordAccepted &&
         (op === WGPU_CMD_OP_UPLOAD_BUFFER || op === WGPU_CMD_OP_UPLOAD_TEXTURE)) {
       passUploadBytes += op === WGPU_CMD_OP_UPLOAD_BUFFER
         ? u32[recWord + 4]

@@ -254,5 +254,7 @@ test("both upload paths take the queue through writeWgpuUploadThroughQueue and a
   assert.match(worker, /if \(enc && !pass\) submitEnc\("staging-oversize"\);\s*else flushMappedUploadsOnly\("staging-oversize"\);/);
   assert.match(worker, /stagingOversize: webGpuCausalStats\.mappedStagingOversizeCount/);
   assert.match(worker, /stagingPassCapacityQueue: webGpuCausalStats\.mappedStagingPassCapacityQueueCount/);
-  assert.match(worker, /recordWgpuPassUploadBytes\(passUploadBytes\);\s*passUploadBytes = 0;/);
+  // Per-pass bytes are a metric: nothing per pass without ?metrics=1.
+  assert.match(worker, /if \(causalMetricsEnabled\) \{\s*recordWgpuPassUploadBytes\(passUploadBytes\);\s*passUploadBytes = 0;\s*\}/);
+  assert.match(worker, /if \(causalMetricsEnabled && pass && replayRecordAccepted &&/);
 });
