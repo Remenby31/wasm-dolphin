@@ -6,7 +6,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { integrityBrief, integrityOf, parseIntegrityAllow, POSTLOAD_TOLERATED, readIntegrity, treeHasIntegrity } from "../harness/lib/integrity.mjs";
+import { integrityBrief, integrityOf, parseIntegrityAllow, readIntegrity, treeHasIntegrity } from "../harness/lib/integrity.mjs";
 import { exitCodeOf, integrityFailures } from "../harness/probes/drop-meter.mjs";
 
 const clean = { id: 1, skipPipelineFailed: 0, skipBindGroup: 0, skipNoPass: 0, missingColorTarget: 0, droppedRecords: 0, batchAborts: 0, uploadTimeouts: 0, presents: 100, stagingCapacityWaits: 0 };
@@ -27,14 +27,36 @@ test("integrity over a window: deltas, the fatal counters that moved, the allowe
   assert.equal(integrityBrief(integrityOf(clean, clean)), "");
 });
 
-test("until 0207, a post-load window reports a batch abort without failing on it; nothing else is exempt", () => {
-  assert.deepEqual(POSTLOAD_TOLERATED, ["batchAborts"]);
-  const end = { ...clean, batchAborts: 1 };
-  assert.deepEqual(integrityOf(clean, end).fatal, ["batchAborts 1"], "fatal in a steady window");
-  const post = integrityOf(clean, end, { postload: true });
-  assert.deepEqual(post.fatal, []);
-  assert.deepEqual(post.allowed, ["batchAborts 1"]);
-  assert.deepEqual(integrityOf(clean, { ...end, uploadTimeouts: 1 }, { postload: true }).fatal, ["uploadTimeouts 1"]);
+test("a load-epoch abort is excused only in a post-load window that saw the load, one per load", () => {
+  const base = { ...clean, batchAborts: 0, rangeFailEpoch: 0, stateLoads: 0 };
+  const at = (d) => ({ ...base, ...d });
+  // the Spark case: a window holding one load, one pass lost to its epoch
+  const load = integrityOf(base, at({ batchAborts: 1, rangeFailEpoch: 1, stateLoads: 1 }), { postload: true });
+  assert.deepEqual(load.fatal, []);
+  assert.deepEqual(load.allowed, ["batchAborts 1"]);
+  // not a post-load window, or a window that did not see the load: fatal
+  assert.deepEqual(integrityOf(base, at({ batchAborts: 1, rangeFailEpoch: 1, stateLoads: 1 })).fatal, ["batchAborts 1"]);
+  assert.deepEqual(integrityOf(base, at({ batchAborts: 1, rangeFailEpoch: 1 }), { postload: true }).fatal, ["batchAborts 1"]);
+  // two epoch losses for one load (the bump before and after): one abort excused at most
+  assert.deepEqual(integrityOf(base, at({ batchAborts: 2, rangeFailEpoch: 2, stateLoads: 1 }), { postload: true }).fatal, ["batchAborts 2"]);
+  // more aborts than epoch losses: fatal
+  assert.deepEqual(integrityOf(base, at({ batchAborts: 2, rangeFailEpoch: 1, stateLoads: 2 }), { postload: true }).fatal, ["batchAborts 2"]);
+  // no epoch loss with a 0207 core: nothing to excuse
+  assert.deepEqual(integrityOf(base, at({ batchAborts: 1, stateLoads: 1 }), { postload: true }).fatal, ["batchAborts 1"]);
+  // a core before 0207 (no rangeFailEpoch): the loads alone cap it
+  const old = { ...clean, batchAborts: 0, stateLoads: 0 };
+  assert.deepEqual(integrityOf(old, { ...old, batchAborts: 1, stateLoads: 1 }, { postload: true }).fatal, []);
+  assert.deepEqual(integrityOf(old, { ...old, batchAborts: 2, stateLoads: 1 }, { postload: true }).fatal, ["batchAborts 2"]);
+});
+
+test("an excused abort never hides a failed upload or a range given up for another reason", () => {
+  const base = { ...clean, batchAborts: 0, rangeFailEpoch: 0, stateLoads: 0, uploadAllocFailed: 0, uploadFailedGeometry: 0, uploadTextureFailed: 0, rangeFailInvalid: 0, rangeFailUpload: 0 };
+  const load = { batchAborts: 1, rangeFailEpoch: 1, stateLoads: 1 };
+  for (const k of ["uploadAllocFailed", "uploadFailedGeometry", "uploadTextureFailed", "rangeFailInvalid", "rangeFailUpload"]) {
+    const i = integrityOf(base, { ...base, ...load, [k]: 1 }, { postload: true });
+    assert.deepEqual(i.fatal, [`${k} 1`], k);
+    assert.deepEqual(i.allowed, ["batchAborts 1"], k);
+  }
 });
 
 // a page whose worker answers `reply` (or whose evaluate throws `reply`)

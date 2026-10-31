@@ -44,12 +44,21 @@ export const MISSING_KEYS = Object.freeze({
 });
 
 export const CORE_KEYS = Object.freeze(["droppedRecords", "batchAborts", "batchOversize", "uploadTimeouts"]);
+// 0207: an upload that failed or a geometry range given up for a reason
+// other than a load's placement epoch: a picture known wrong, fatal like a
+// lost pass (they may share one abort with an expected epoch loss).
+export const CORE_FAILURE_KEYS = Object.freeze([
+  "uploadAllocFailed", "uploadFailedUnknown", "uploadFailedUbo", "uploadFailedUtility", "uploadFailedVertex",
+  "uploadFailedIndex", "uploadFailedTextureAdjacent", "uploadFailedGeometry", "uploadTextureFailed",
+  "rangeFailInvalid", "rangeFailUpload"
+]);
 
 // Fatal: any non-zero delta over a measured window fails the run.
 export const INTEGRITY_FATAL = Object.freeze([
   ...SKIP_KEYS,
   ...new Set(Object.values(MISSING_KEYS)),
   ...CORE_KEYS,
+  ...CORE_FAILURE_KEYS,
   "missingOther",
   "uncapturedErrors",
   "deviceLosses",
@@ -73,10 +82,19 @@ export function skippedDrawCause(hasPass, hasPipeline, bindGroupsValid, needsVer
 // Patch 0207's detail, in the core's order: a batch abort's cause
 // (BatchAbortCause), the renderer's abort site (GfxAbortSite), a failed
 // upload's role (BufferUploadRole). Context, not fatal: batchAborts already
-// is; they say which site to look at.
+// is; they say which site to look at (failed uploads and ranges given up for
+// another reason than the epoch are fatal: CORE_FAILURE_KEYS).
 export const ABORT_CAUSES = Object.freeze(["RequiredPublication", "Poisoned", "Explicit", "CommitRefused", "Oversize"]);
-export const GFX_ABORT_SITES = Object.freeze(["Scissor", "Viewport", "GeometryFlush", "PassPoisoned", "BeginPass", "PassState", "Pipeline", "Prepare", "BufferId", "SetBuffer", "PushDraw"]);
+// The renderer's sites, then a nested BeginPass (the command stream's): their
+// sum is abortExplicit. A pass already poisoned when the renderer abandons it
+// counts under abortPoisoned and by site in gfxPoison* (no nested there); the
+// rest of abortPoisoned are passes PushEndPass found poisoned.
+export const GFX_ABORT_SITES = Object.freeze(["Scissor", "Viewport", "GeometryFlush", "PassPoisoned", "BeginPass", "PassState", "Pipeline", "Prepare", "BufferId", "SetBuffer", "PushDraw", "Nested"]);
 export const UPLOAD_ROLES = Object.freeze(["Unknown", "Ubo", "Utility", "Vertex", "Index", "TextureAdjacent", "Geometry"]);
+// Pending geometry ranges given up (wgrangefail): a placement epoch moved
+// under them (a save load: the abort that follows is expected), an invalid
+// range, their upload failed.
+export const RANGE_FAILURES = Object.freeze(["Epoch", "Invalid", "Upload"]);
 
 const listOf = (s, name) => {
   const m = new RegExp(`\\b${name}:([\\d,]+)`).exec(s);
@@ -101,6 +119,9 @@ export function coreIntegrityOf(text) {
     uploadTimeouts: batch ? Number(batch[3]) : null,
     ...fieldsOf(listOf(s, "wgabortc"), ABORT_CAUSES, "abort"),
     ...fieldsOf(listOf(s, "wggfxabort"), GFX_ABORT_SITES, "gfxAbort"),
+    // the renderer's site of a pass that was already poisoned (abortPoisoned)
+    ...fieldsOf(listOf(s, "wggfxpoison"), GFX_ABORT_SITES.slice(0, -1), "gfxPoison"),
+    ...fieldsOf(listOf(s, "wgrangefail"), RANGE_FAILURES, "rangeFail"),
     drawSkippedNoPipeline: skip ? Number(skip[1]) : null,
     uploadAllocFailed: upfail ? upfail[0] : null,
     ...fieldsOf(upfail ? upfail.slice(1, 1 + UPLOAD_ROLES.length) : null, UPLOAD_ROLES, "uploadFailed"),
@@ -111,6 +132,9 @@ export function coreIntegrityOf(text) {
 export function createWgpuIntegrity() {
   const skips = new Float64Array(SKIP_KEYS.length);
   const counts = { missingOther: 0, uncapturedErrors: 0, deviceLosses: 0, replayFatal: 0 };
+  // context, not fatal: state loads this worker ran (the integrity gate
+  // excuses at most one load-epoch abort per load, lib/integrity.mjs)
+  let stateLoads = 0;
   for (const k of new Set(Object.values(MISSING_KEYS))) counts[k] = 0;
   return {
     skip(cause) {
@@ -122,12 +146,15 @@ export function createWgpuIntegrity() {
     note(name) {
       if (name in counts) counts[name] += 1;
     },
+    stateLoad() {
+      stateLoads += 1;
+    },
     // extra: counters owned elsewhere (the core, the staging pool, the
     // geometry cache), read at the same moment
     snapshot(extra = {}) {
       const out = {};
       SKIP_KEYS.forEach((k, i) => { out[k] = skips[i]; });
-      return { ...out, ...counts, ...extra };
+      return { ...out, ...counts, stateLoads, ...extra };
     }
   };
 }

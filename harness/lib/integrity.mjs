@@ -39,12 +39,13 @@ export async function readIntegrity(page, { expected = true } = {}) {
   return { unread: OLD_WORKER.test(message) ? `the tree has the counters but its worker does not answer: ${message}` : message };
 }
 
-// TODO(2026-10-31, until patch 0207): a window right after a state load may
-// see one batch aborted by the load's placement epoch (Spark, Chrome: 1 in 4
-// post-load windows, no upload timeout). There batchAborts is reported, not
-// fatal. 0207 gives aborts by cause: then only the load-epoch cause is exempt
-// and this exception goes (PROGRAM.md, chutes).
-export const POSTLOAD_TOLERATED = Object.freeze(["batchAborts"]);
+// A state load moves the geometry placement epoch: a pending geometry range
+// is given up and the pass that held it aborted (patch 0207, wgrangefail
+// epoch; Spark, Chrome: one per load with geomcache=0). Excused only in a
+// window that saw the load (the worker counts them: stateLoads), at most one
+// abort per load and no more than the epoch losses (a core before 0207 does
+// not count those: the loads alone cap it). Any other abort, and any failed
+// upload or range given up for another reason, stays fatal.
 
 // Over a window: the delta of every counter and the fatal ones that moved,
 // but those allowed (a counter an older core does not print is null: no
@@ -60,7 +61,9 @@ export function integrityOf(start, end, { allow = [], postload = false } = {}) {
     delta[k] = end[k] - start[k];
   }
   const moved = INTEGRITY_FATAL.filter((k) => delta[k] > 0);
-  if (postload) allow = [...allow, ...POSTLOAD_TOLERATED];
+  const loads = delta.stateLoads ?? 0;
+  const excusable = postload && loads > 0 ? Math.min(loads, delta.rangeFailEpoch ?? loads) : 0;
+  if (delta.batchAborts > 0 && delta.batchAborts <= excusable) allow = [...allow, "batchAborts"];
   return {
     delta,
     fatal: moved.filter((k) => !allow.includes(k)).map((k) => `${k} ${delta[k]}`),

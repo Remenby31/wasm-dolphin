@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-import { coreIntegrityOf, createWgpuIntegrity, INTEGRITY_FATAL, MISSING_KEYS, SKIP, skippedDrawCause } from "../src/wgpu-integrity.js";
+import { coreIntegrityOf, createWgpuIntegrity, GFX_ABORT_SITES, INTEGRITY_FATAL, MISSING_KEYS, SKIP, skippedDrawCause } from "../src/wgpu-integrity.js";
 
 const worker = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
 
@@ -42,8 +42,12 @@ test("counters: skips by cause, missing resources by kind, notes, and counters o
   assert.equal(s.uncapturedErrors + s.deviceLosses + s.replayFatal, 3);
   assert.equal(s.droppedRecords, 3);
   assert.ok(!("unknown-name" in s));
-  // every counter the module owns is fatal
-  for (const k of Object.keys(s)) assert.ok(INTEGRITY_FATAL.includes(k), k);
+  // every counter the module owns is fatal, but the loads it counts (context)
+  for (const k of Object.keys(s)) if (k !== "stateLoads") assert.ok(INTEGRITY_FATAL.includes(k), k);
+  assert.equal(s.stateLoads, 0);
+  integrity.stateLoad();
+  assert.equal(integrity.snapshot().stateLoads, 1);
+  assert.ok(!INTEGRITY_FATAL.includes("stateLoads"));
   for (const name of ["skipPipelineFailed", "skipNoPass", "missingColorTarget", "droppedRecords", "batchAborts", "batchOversize", "uploadTimeouts", "stagingUnsafe", "geometryCacheCollisions", "geometryCacheFailed"])
     assert.ok(INTEGRITY_FATAL.includes(name), name);
 });
@@ -58,19 +62,37 @@ test("the core's own counters come from its state stats line, null for what an o
   // 0207: causes, renderer sites, draws skipped, failed uploads; null before 0207
   const old = coreIntegrityOf("wgdrop:0 wgbabort:2 wgboversize:0 wguploadto:0");
   for (const k of ["abortExplicit", "gfxAbortPrepare", "drawSkippedNoPipeline", "uploadAllocFailed", "uploadFailedUbo", "uploadTextureFailed"]) assert.equal(old[k], null, k);
-  const now = coreIntegrityOf("wgdrop:0 wgbabort:3 wgboversize:0 wguploadto:0 wgabortc:1,0,2,0,0 wggfxabort:0,0,0,0,0,0,0,2,0,0,0 wgdrawskip:5 wgupfail:0,0,1,0,0,0,0,0,0 wgubo:1");
+  const now = coreIntegrityOf("wgdrop:0 wgbabort:3 wgboversize:0 wguploadto:0 wgabortc:1,0,2,0,0 wggfxabort:0,0,0,0,0,0,0,1,0,0,0,1 wggfxpoison:0,0,1,0,0,0,0,0,0,0,0 wgrangefail:1,0,0 wgdrawskip:5 wgupfail:0,0,1,0,0,0,0,0,0 wgubo:1");
   assert.equal(now.abortRequiredPublication, 1);
   assert.equal(now.abortExplicit, 2);
   assert.equal(now.abortOversize, 0);
-  assert.equal(now.gfxAbortPrepare, 2);
+  assert.equal(now.gfxAbortPrepare, 1);
+  assert.equal(now.gfxAbortNested, 1);
+  // a poisoned pass the renderer abandoned: its site apart (the Spark load case)
+  assert.equal(now.gfxPoisonGeometryFlush, 1);
+  assert.ok(!("gfxPoisonNested" in now), "no nested site among poisoned passes");
+  assert.equal(now.rangeFailEpoch, 1);
+  assert.equal(now.rangeFailInvalid, 0);
+  assert.equal(now.rangeFailUpload, 0);
+  assert.equal(coreIntegrityOf("wgbabort:1 wgboversize:0 wguploadto:0").rangeFailEpoch, null, "before the follow-up: unread");
+  // the renderer's sites and the nested BeginPass sum to the explicit cause
+  assert.equal(GFX_ABORT_SITES.reduce((a, n) => a + now[`gfxAbort${n}`], 0), now.abortExplicit);
+  // a core with 0207's first version printed 11 sites: Nested unread
+  assert.equal(coreIntegrityOf("wggfxabort:0,0,0,0,0,0,0,2,0,0,0").gfxAbortNested, null);
   assert.equal(now.gfxAbortScissor, 0);
   assert.equal(now.drawSkippedNoPipeline, 5);
   assert.equal(now.uploadAllocFailed, 0);
   assert.equal(now.uploadFailedUbo, 1);
   assert.equal(now.uploadFailedGeometry, 0);
   assert.equal(now.uploadTextureFailed, 0);
-  for (const k of Object.keys(now)) if (k.startsWith("abort") || k.startsWith("gfxAbort") || k.startsWith("uploadFailed") || k === "drawSkippedNoPipeline" || k === "uploadAllocFailed" || k === "uploadTextureFailed")
-    assert.ok(!INTEGRITY_FATAL.includes(k), `${k}: detail, not fatal (batchAborts is)`);
+  // causes, sites and ranges lost to an epoch are detail (batchAborts is fatal);
+  // a failed upload or a range given up for another reason is fatal itself
+  for (const k of Object.keys(now)) {
+    if (k.startsWith("abort") || k.startsWith("gfxAbort") || k.startsWith("gfxPoison") || k === "drawSkippedNoPipeline" || k === "rangeFailEpoch")
+      assert.ok(!INTEGRITY_FATAL.includes(k), `${k}: detail, not fatal (batchAborts is)`);
+    if (k.startsWith("uploadFailed") || k === "uploadAllocFailed" || k === "uploadTextureFailed" || k === "rangeFailInvalid" || k === "rangeFailUpload")
+      assert.ok(INTEGRITY_FATAL.includes(k), `${k}: fatal`);
+  }
 });
 
 test("the worker counts every branch that abandons a draw or misses a resource", () => {
@@ -90,6 +112,8 @@ test("the worker counts every branch that abandons a draw or misses a resource",
   assert.match(worker, /if \(!loss\.handled\) return;\n\s+wgpuIntegrity\.note\("deviceLosses"\);/);
   assert.match(worker, /wgpuReplayFatal = \{ scope: String\(scope\), detail: String\(detail \|\| "unknown"\) \};\n\s+wgpuIntegrity\.note\("replayFatal"\);/);
   assert.match(worker, /case "validationReadIntegrity":\n\s+return readWgpuIntegrity\(\);/);
+  // both state-load paths count the load
+  assert.equal([...worker.matchAll(/wgpuExactCapture\.onLoad\(\);\n\s+wgpuIntegrity\.stateLoad\(\);/g)].length, 2);
   // always on: neither metrics=1 nor the harness hooks gate it
   const read = worker.slice(worker.indexOf("function readWgpuIntegrity()"), worker.indexOf("function harnessGeometryCacheStats()"));
   assert.ok(read.length > 0 && !/harnessEnabled|causalMetricsEnabled/.test(read));

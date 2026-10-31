@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "d09fe7dcf619005a9dd2d2fc63aa9f14f75a0b99be70b3e9b231f3ba7662979a",
+  "patchSeriesSha256": "14654e0c34c7eee057a6200b8f4647346f4b42f5c909ceaec6b39f3fae4ddd44",
   "patches": [
     {
       "order": 1,
@@ -1136,8 +1136,8 @@
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0207-webgpu-integrity-abort-causes.patch",
-      "size": 19086,
-      "sha256": "7be6c6070b1b644af3575da95c336c70b8f846858af982708806f36148bc309b"
+      "size": 31579,
+      "sha256": "32905b569939bf3aeec1052f959e8d41b4ea8a47e2f445188cb718f4e54a8ae1"
     },
     {
       "order": 140,
