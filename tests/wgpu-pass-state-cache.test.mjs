@@ -625,6 +625,17 @@ sourceContractTest("opt-in geometry packing uses one transactional upload and a 
   );
   assert.match(gfxSource, /s_geometry_upload_pack_epoch\.fetch_add\(1, std::memory_order_release\)/);
   assert.match(coreCmake, /'_SetWebGpuGeometryPackEnabled'/);
-  assert.match(worker, /case "loadState":[\s\S]*?setWebGpuGeometryPackEnabled[\s\S]*?api\?\.loadState[\s\S]*?setWebGpuGeometryPackEnabled/);
-  assert.match(worker, /api\.loadStateFile\(path\)[\s\S]*?setTimeout\(r, 1200\)[\s\S]*?setWebGpuGeometryPackEnabled/);
+  // The placement epoch moves once, before the load; moving it again after
+  // the load gave up a pass of post-load draws. Only a load fence (which may
+  // discard the fresh buffer's create) moves it again after a file load.
+  const slotLoad = worker.slice(worker.indexOf('case "loadState": {'), worker.indexOf('case "validationSetCorePaused"'));
+  assert.match(slotLoad, /setWebGpuGeometryPackEnabled[\s\S]*?api\?\.loadState\(/);
+  assert.doesNotMatch(slotLoad.slice(slotLoad.indexOf("api?.loadState(")), /setWebGpuGeometryPackEnabled|setWebGpuGeometryRangeEnabled/);
+  const fileLoad = worker.slice(worker.indexOf("const loadFenceArmed = wgpuLoadFenceActive;"), worker.indexOf('verifyWgpuProducerProfileActivation("save-state reload")'));
+  assert.match(fileLoad, /setWebGpuGeometryPackEnabled[\s\S]*?api\.loadStateFile\(path\)/);
+  const afterFile = fileLoad.slice(fileLoad.indexOf("api.loadStateFile(path)"));
+  assert.match(afterFile, /setTimeout\(r, 1200\)[\s\S]*?if \(loadFenceArmed\) \{\n\s+api\?\.setWebGpuGeometryPackEnabled\?\.\(wgpuGeometryPackEnabled \? 1 : 0\);\n\s+api\?\.setWebGpuGeometryRangeEnabled\?\.\(wgpuGeometryRangeEnabled \? 1 : 0\);\n\s+\}/);
+  assert.equal((afterFile.match(/setWebGpuGeometryPackEnabled/g) ?? []).length, 1, "after a file load, only under the fence");
+  // the fence is read as armed for this load, before the epoch moves
+  assert.ok(worker.indexOf("wgpuLoadFenceActive = wgpuLoadEpochFence &&") < worker.indexOf("const loadFenceArmed = wgpuLoadFenceActive;"));
 });

@@ -1824,6 +1824,10 @@ async function loadStateFileNow(payload) {
       (loadRingBoundary?.summary?.openPassDepth > 0 || hasHeldReplay);
   }
   const beforeState = api?.getCoreStateName?.() ?? "";
+  // The load fence (?wgpuloadfence=1) armed for this load: it may discard,
+  // with the pass it ends, records published after the epoch below, the
+  // create of the fresh geometry buffer included.
+  const loadFenceArmed = wgpuLoadFenceActive;
   api?.setWebGpuUploadArenaMiB?.(wgpuUploadArenaMiB, collectMetrics ? 1 : 0);
   api?.setWebGpuProducerProfileEnabled?.(wgpuProducerProfileRequested ? 1 : 0);
   api?.setWebGpuDrawProfileEnabled?.(wgpuDrawProfileRequested ? 1 : 0);
@@ -1853,8 +1857,15 @@ async function loadStateFileNow(payload) {
   applyWgpuTailGate("save-state reload");
   api?.setWebGpuUboCacheEnabled?.(webGpuUboCacheMode());
   api?.setWebGpuUboPackEnabled?.(webGpuUboPackMode());
-  api?.setWebGpuGeometryPackEnabled?.(wgpuGeometryPackEnabled ? 1 : 0);
-  api?.setWebGpuGeometryRangeEnabled?.(wgpuGeometryRangeEnabled ? 1 : 0);
+  // The geometry placement epoch moved before the load (above). Moving it
+  // again here, ~1.2 s of live emulation later, gave up a pending range of
+  // post-load draws: a pass lost on screen (Spark, geomcache=0: 4 runs in 6,
+  // none without it). Only a load fence, which may have discarded the fresh
+  // buffer's create, needs a second fresh buffer.
+  if (loadFenceArmed) {
+    api?.setWebGpuGeometryPackEnabled?.(wgpuGeometryPackEnabled ? 1 : 0);
+    api?.setWebGpuGeometryRangeEnabled?.(wgpuGeometryRangeEnabled ? 1 : 0);
+  }
   api?.setSoftwareTevHotCaseMode?.(softwareTevHotCaseMode);
   if (wgpuProducerProfileRequested || wgpuDrawProfileRequested) {
     verifyWgpuProducerProfileActivation("save-state reload");
@@ -2251,8 +2262,8 @@ async function handleMessage(type, payload) {
       applyWgpuTailGate("slot state reload");
       api?.setWebGpuUboCacheEnabled?.(webGpuUboCacheMode());
       api?.setWebGpuUboPackEnabled?.(webGpuUboPackMode());
-      api?.setWebGpuGeometryPackEnabled?.(wgpuGeometryPackEnabled ? 1 : 0);
-      api?.setWebGpuGeometryRangeEnabled?.(wgpuGeometryRangeEnabled ? 1 : 0);
+      // The geometry epoch moved before the load: not again (it would give up
+      // a pass of post-load draws). No load fence on this path.
       api?.setSoftwareTevHotCaseMode?.(softwareTevHotCaseMode);
       if (wgpuProducerProfileRequested || wgpuDrawProfileRequested) {
         verifyWgpuProducerProfileActivation("slot state reload");
