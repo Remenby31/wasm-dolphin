@@ -47,7 +47,7 @@ function harness() {
     GPUTextureUsage: { TEXTURE_BINDING: 4, COPY_DST: 2 },
     moduleInstance: { HEAPU8: new Uint8Array(4096) },
     self: { _wgBg1N: 100 }, console: { log() {} },
-    wgpuReplayClassifier: null, DIAG_DUMMY_TINT: false, DIAG_DEPTH_TRACE: false,
+    wgpuReplayClassifier: null, noteMissingResource() {}, DIAG_DUMMY_TINT: false, DIAG_DEPTH_TRACE: false,
     // main gates the viewport dump with vpDiagDone (true == finished/off),
     // where this work originally used a vpDiagEnabled flag.
     vpDiagDone: true,
