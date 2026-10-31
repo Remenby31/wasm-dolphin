@@ -373,14 +373,22 @@ export function requestedWgpuGeometryRange(
   return Boolean(enabledByDefault);
 }
 
-// ?wgpugeomcache=1: the geometry content cache (patch 0204), off by default;
-// =2 adds the sampled byte comparison of hits (diagnostics). The core's mode:
-// bit 0 on, bit 1 the comparison.
+// The geometry content cache (patch 0204) by default: on under V8 since
+// 2026-10-31 (Spark drop-meter, 6 pairs: no regression, the race's display
+// excess 2,042 -> 1,626 ms); off elsewhere until JSC has its own pair.
+export function defaultWgpuGeometryCacheMode(engine) {
+  return engine === "v8" ? 1 : 0;
+}
+
+// ?wgpugeomcache=1 forces the cache on, =0 off, =2 on with the sampled byte
+// comparison of hits (diagnostics); else the engine's default. The core's
+// mode: bit 0 on, bit 1 the comparison.
 export function requestedWgpuGeometryCacheMode(
-  search = globalThis.location?.search ?? ""
+  search = globalThis.location?.search ?? "",
+  fallback = 0
 ) {
   const value = new URLSearchParams(search).get("wgpugeomcache");
-  return value === "1" ? 1 : value === "2" ? 3 : 0;
+  return value === "1" ? 1 : value === "2" ? 3 : value === "0" ? 0 : fallback;
 }
 
 export function requestedWgpuUploadArenaMiB(

@@ -2,16 +2,25 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-import { requestedWgpuGeometryCacheMode } from "../src/wgpu-replay-diagnostics.js";
+import { defaultWgpuGeometryCacheMode, requestedWgpuGeometryCacheMode } from "../src/wgpu-replay-diagnostics.js";
 
-// 0204: the geometry content cache (?wgpugeomcache=1, off by default).
+// 0204: the geometry content cache (on by default under V8, ?wgpugeomcache=0|1|2).
 const patch = await readFile(
   new URL("../patches/dolphin-wasm/snapshot/0204-webgpu-geometry-content-cache.patch", import.meta.url),
   "utf8"
 );
 const worker = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
 
-test("?wgpugeomcache: off by default, 1 on, 2 on with the sampled comparison", () => {
+test("geometry cache default: on under V8 only", () => {
+  assert.equal(defaultWgpuGeometryCacheMode("v8"), 1);
+  for (const engine of ["jsc", "spidermonkey", "unknown"]) assert.equal(defaultWgpuGeometryCacheMode(engine), 0, engine);
+  assert.equal(requestedWgpuGeometryCacheMode("", 1), 1, "the engine's default");
+  assert.equal(requestedWgpuGeometryCacheMode("?wgpugeomcache=0", 1), 0, "=0 turns the default off");
+  assert.equal(requestedWgpuGeometryCacheMode("?wgpugeomcache=1", 0), 1, "=1 turns it on elsewhere");
+  assert.equal(requestedWgpuGeometryCacheMode("?wgpugeomcache=yes", 1), 1, "a non-canonical value keeps the default");
+});
+
+test("?wgpugeomcache: 1 on, 2 on with the sampled comparison, 0 off", () => {
   assert.equal(requestedWgpuGeometryCacheMode(""), 0);
   assert.equal(requestedWgpuGeometryCacheMode("?wgpugeomcache=1"), 1);
   assert.equal(requestedWgpuGeometryCacheMode("?wgpugeomcache=2"), 3);
@@ -34,6 +43,8 @@ test("the cache mode reaches the worker's init message (needs the pack)", async 
   assert.match(host, /wgpuGeometryCacheMode: this\.wgpuGeometryCacheMode/);
   // never with the load fence (it drops published uploads, the cache's too)
   assert.match(host, /this\.wgpuGeometryCacheMode = this\.wgpuGeometryPack && !this\.wgpuLoadEpochFence\n/);
+  assert.match(host, /requestedWgpuGeometryCacheMode\(window\.location\.search, defaultWgpuGeometryCacheMode\(this\.wasmEngine\)\)/);
+  assert.ok(host.indexOf("this.wasmEngine =") < host.indexOf("this.wgpuGeometryCacheMode ="), "the engine is known first");
   assert.ok(host.indexOf("this.wgpuLoadEpochFence =") < host.indexOf("this.wgpuGeometryCacheMode ="), "the fence is read first");
   assert.match(worker, /wgpuGeometryCacheMode: payload\.wgpuGeometryCacheMode/);
 });
