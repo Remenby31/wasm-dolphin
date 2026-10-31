@@ -34,6 +34,9 @@ export const FRAME_FIELDS = Object.freeze({
   // Patch 0208: new XFBs on the canvas, per second (the worker's 500 ms
   // window) and since boot; null without frame tags (an older core).
   newFps: "newFramesPerSec",
+  // new XFBs the core produced per second (0208; null with video=null: the
+  // tag rides on the WebGPU present only)
+  newProduced: "newFramesProducedPerSec",
   newShown: "newFramesShown"
 });
 

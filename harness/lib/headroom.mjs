@@ -35,6 +35,7 @@
 // maxSpeedCpu leaves the CPU's waits out (sleep and FlushGpu): what limits it
 // then is the GPU, which maxSpeedGpu covers.
 import { round } from "./stats.mjs";
+import { xfbDecodeOff } from "./matrix.mjs";
 
 export const HEADROOM_VERSION = 1;
 export const HEADROOM_BYTES = 96;
@@ -132,11 +133,27 @@ export function invalidReasons(rec, { target = null, framesPerViRef = null, paci
 // changes a second): at speed >= 95 %, a window whose picture changes fewer
 // than minFps times a second (the median of its visualChangeFps readings,
 // start, middle, end) is FROZEN. Reasons: null when alive or unread.
+// With video=null&xfbdecode=0 the core decodes no picture (visualChangeFps
+// reads 0 whatever happens): the reading is then the new frames the core
+// produced (patch 0208, newFramesProducedPerSec) when it is available, and
+// otherwise none ("unread", never FROZEN): the 0208 tag rides on the WebGPU
+// present, so video=null has none today, and liveness rests on the speed
+// itself, which is the core's tick progress.
 export const FROZEN_FPS = 10;
-export function frozenReason(rec, { minFps = FROZEN_FPS, minSpeed = 95 } = {}) {
-  const fps = (rec?.visualFps ?? []).filter((v) => typeof v === "number").sort((a, b) => a - b);
-  if (!fps.length || !(rec.speed >= minSpeed)) return null;
-  const mid = fps[fps.length >> 1];
+const medianOf = (values) => {
+  const v = (values ?? []).filter((x) => typeof x === "number").sort((a, b) => a - b);
+  return v.length ? v[v.length >> 1] : null;
+};
+export function frozenReason(rec, { minFps = FROZEN_FPS, minSpeed = 95, query = null } = {}) {
+  if (!(rec?.speed >= minSpeed)) return null;
+  if (query != null && xfbDecodeOff(query)) {
+    const produced = rec.newFramesProducedPerSec?.readings ?? [];
+    const mid = medianOf(produced);
+    if (mid == null) return null;
+    return mid < minFps ? `FROZEN: the core produces ${mid} new frames a second (< ${minFps}) at speed ${rec.speed} % (readings ${produced.join("/")})` : null;
+  }
+  const mid = medianOf(rec.visualFps);
+  if (mid == null) return null;
   return mid < minFps ? `FROZEN: the picture changes ${mid} times a second (< ${minFps}) at speed ${rec.speed} % (readings ${rec.visualFps.join("/")})` : null;
 }
 

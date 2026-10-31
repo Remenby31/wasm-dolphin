@@ -170,7 +170,10 @@ test("race-perf reads liveness around the window and invalidates a frozen steady
   assert.match(race, /visualFps\.push\(info\?\.vis \?\? null\);/);
   // the same readings give the new frames shown (patch 0208), the reference
   assert.match(race, /newFramesPerSec: \{ mean: newFramesRate\(infoStart, info\), /);
-  assert.match(race, /const frozen = o\.phase === "steady" \? frozenReason\(c, \{ minFps: o\.frozenFps \}\) : null;\n\s+if \(frozen\) why\.push\(frozen\);/);
+  assert.match(race, /const frozen = o\.phase === "steady" \? frozenReason\(c, \{ minFps: o\.frozenFps, query: sides\[n\]\.query \?\? o\.query \}\) : null;\n\s+if \(frozen\) why\.push\(frozen\);/);
+  // The produced-frames readings travel with each run (0208), for the
+  // video=null&xfbdecode=0 case.
+  assert.match(race, /newFramesProducedPerSec: \{ readings: newProduced \}/);
 });
 
 test("replay-gates: a hash per captured frame, and the slot path inside the integrity window", async () => {
@@ -189,4 +192,24 @@ test("replay-gates: every slot step is bounded and logged", async () => {
   const gates = await readFile(new URL("../harness/probes/replay-gates.mjs", import.meta.url), "utf8");
   assert.match(gates, /const r = await workerRequest\(session\.page, type, \{ slot: 1 \}, 60000\);/);
   assert.doesNotMatch(gates, /a\.request\("(?:save|load)State"/, "no unbounded page call");
+});
+
+// video=null&xfbdecode=0 decodes no picture: visualChangeFps reads 0 whatever
+// happens (2026-11-01: every Spark --headroom pair was FROZEN). Three cases.
+test("liveness without a decoded picture: produced frames, else unread", async () => {
+  const { frozenReason } = await import("../harness/lib/headroom.mjs");
+  const query = "core=upstream&video=null&presenter=2d&speed=1&xfbdecode=0";
+  // 1. the core reports the new frames it produced (0208): judged on them
+  assert.equal(frozenReason({ speed: 100, visualFps: [0, 0, 0], newFramesProducedPerSec: { readings: [58, 60, 59] } }, { query }), null);
+  assert.match(frozenReason({ speed: 100, visualFps: [0, 0, 0], newFramesProducedPerSec: { readings: [0, 1, 0] } }, { query }),
+    /^FROZEN: the core produces 0 new frames a second \(< 10\) at speed 100 %/);
+  // 2. no produced-frames reading (video=null today: the tag rides on the
+  // WebGPU present): unread, never FROZEN; liveness is the speed (core ticks)
+  assert.equal(frozenReason({ speed: 100, visualFps: [0, 0, 0], newFramesProducedPerSec: { readings: [null, null, null] } }, { query }), null);
+  assert.equal(frozenReason({ speed: 100, visualFps: [0, 0, 0] }, { query }), null);
+  // 3. a decoded picture (xfbdecode=1, or any renderer): visualChangeFps as before
+  assert.match(frozenReason({ speed: 100, visualFps: [0, 0, 0], newFramesProducedPerSec: { readings: [60, 60, 60] } },
+    { query: query.replace("xfbdecode=0", "xfbdecode=1") }), /^FROZEN: the picture changes 0 times/);
+  assert.match(frozenReason({ speed: 100, visualFps: [0, 0, 0] }), /^FROZEN: the picture changes 0 times/);
+  assert.match(frozenReason({ speed: 100, visualFps: [0, 0, 0] }, { query: "core=upstream&video=wgpu&speed=1" }), /^FROZEN: the picture changes 0 times/);
 });

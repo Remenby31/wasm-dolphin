@@ -366,6 +366,7 @@ export async function measure(session, o) {
     const infoStart = await readFrameInfo(page).catch(() => null);
     const visualFps = [infoStart?.vis ?? null];
     const newFps = [infoStart?.newFps ?? null];
+    const newProduced = [infoStart?.newProduced ?? null];
     const t0 = await page.evaluate(() => performance.timeOrigin + performance.now());
     // The window: node timers only. The rings (VI 8192, presents 16384)
     // hold far more than a window, so nothing is read until it ends.
@@ -407,11 +408,13 @@ export async function measure(session, o) {
         const mid = await readFrameInfo(page).catch(() => null);
         visualFps.push(mid?.vis ?? null);
         newFps.push(mid?.newFps ?? null);
+        newProduced.push(mid?.newProduced ?? null);
       }
     }
     const info = await readFrameInfo(page);
     visualFps.push(info?.vis ?? null);
     newFps.push(info?.newFps ?? null);
+    newProduced.push(info?.newProduced ?? null);
     const hrEnd = hrStart && !hrStart.error ? await headroomRead(page) : null;
     const readsEnd = await workerReads(page, o.workerRead);
     const integrityEnd = await readIntegrity(page, { expected: o.integrityExpected });
@@ -512,6 +515,9 @@ export async function measure(session, o) {
       // 0208; null without frame tags), its mean over the window and the
       // median of the readings.
       newFramesPerSec: { mean: newFramesRate(infoStart, info), median: newFps.some((v) => v != null) ? round(median(newFps.filter((v) => v != null)), 1) : null, readings: newFps },
+      // the new frames the core produced (0208), the liveness reading when
+      // the picture is not decoded (video=null&xfbdecode=0)
+      newFramesProducedPerSec: { readings: newProduced },
       presents: pres.presents, viOutputs: timeline.vi.length,
       // --display: what the screen showed (one worker rAF per BeginFrame).
       ...(o.display ? { display: displayStats(timeline) } : {}),
@@ -1094,7 +1100,7 @@ async function main() {
     if (!c) continue;
     const why = invalidReasons(c, { target: querySpeed(sides[n].query ?? o.query) === "unlimited" ? null : querySpeed(sides[n].query ?? o.query), framesPerViRef: o.framesPerViRef, pacing: pacingExpectation(sides[n].query ?? o.query, { decoupledUnlimited: o.decoupledUnlimited }) });
     if (c.integrity?.fatal?.length) why.push(`integrity: ${c.integrity.fatal.join(", ")}`);
-    const frozen = o.phase === "steady" ? frozenReason(c, { minFps: o.frozenFps }) : null;
+    const frozen = o.phase === "steady" ? frozenReason(c, { minFps: o.frozenFps, query: sides[n].query ?? o.query }) : null;
     if (frozen) why.push(frozen);
     if (why.length) c.invalid = why;
   }
