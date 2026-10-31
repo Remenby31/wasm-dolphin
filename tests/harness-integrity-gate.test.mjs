@@ -27,7 +27,22 @@ test("integrity over a window: deltas, the fatal counters that moved, the allowe
   assert.equal(integrityBrief(integrityOf(clean, clean)), "");
 });
 
-test("until 0207, a post-load window reports a batch abort without failing on it; nothing else is exempt", () => {
+test("0207: batch aborts up to the load-epoch range discards are expected; any beyond is fatal, in any window", () => {
+  const with0207 = { ...clean, batchAborts: 0, rangeFailEpoch: 0 };
+  // the Spark case: one pass with pre-load draws aborted at the load
+  const load = integrityOf(with0207, { ...with0207, batchAborts: 1, rangeFailEpoch: 1 });
+  assert.deepEqual(load.fatal, []);
+  assert.deepEqual(load.allowed, ["batchAborts 1"]);
+  // one more abort than the epoch explains: fatal, post-load or not
+  for (const postload of [false, true])
+    assert.deepEqual(integrityOf(with0207, { ...with0207, batchAborts: 2, rangeFailEpoch: 1 }, { postload }).fatal, ["batchAborts 2"]);
+  // no epoch at all: fatal even right after a load
+  assert.deepEqual(integrityOf(with0207, { ...with0207, batchAborts: 1 }, { postload: true }).fatal, ["batchAborts 1"]);
+  // the epoch never exempts anything else
+  assert.deepEqual(integrityOf(with0207, { ...with0207, batchAborts: 1, rangeFailEpoch: 1, uploadTimeouts: 1 }).fatal, ["uploadTimeouts 1"]);
+});
+
+test("a core before 0207 cannot name an abort: a post-load window reports it, a steady one fails", () => {
   assert.deepEqual(POSTLOAD_TOLERATED, ["batchAborts"]);
   const end = { ...clean, batchAborts: 1 };
   assert.deepEqual(integrityOf(clean, end).fatal, ["batchAborts 1"], "fatal in a steady window");

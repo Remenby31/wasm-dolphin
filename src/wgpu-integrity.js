@@ -76,9 +76,15 @@ export function skippedDrawCause(hasPass, hasPipeline, bindGroupsValid, needsVer
 // is; they say which site to look at.
 export const ABORT_CAUSES = Object.freeze(["RequiredPublication", "Poisoned", "Explicit", "CommitRefused", "Oversize"]);
 // The renderer's sites, then a nested BeginPass (the command stream's): their
-// sum is abortExplicit (a poisoned pass counts under abortPoisoned only).
+// sum is abortExplicit. A pass already poisoned when the renderer abandons it
+// counts under abortPoisoned and by site in gfxPoison* (no nested there); the
+// rest of abortPoisoned are passes PushEndPass found poisoned.
 export const GFX_ABORT_SITES = Object.freeze(["Scissor", "Viewport", "GeometryFlush", "PassPoisoned", "BeginPass", "PassState", "Pipeline", "Prepare", "BufferId", "SetBuffer", "PushDraw", "Nested"]);
 export const UPLOAD_ROLES = Object.freeze(["Unknown", "Ubo", "Utility", "Vertex", "Index", "TextureAdjacent", "Geometry"]);
+// Pending geometry ranges given up (wgrangefail): a placement epoch moved
+// under them (a save load: the abort that follows is expected), an invalid
+// range, their upload failed.
+export const RANGE_FAILURES = Object.freeze(["Epoch", "Invalid", "Upload"]);
 
 const listOf = (s, name) => {
   const m = new RegExp(`\\b${name}:([\\d,]+)`).exec(s);
@@ -103,6 +109,9 @@ export function coreIntegrityOf(text) {
     uploadTimeouts: batch ? Number(batch[3]) : null,
     ...fieldsOf(listOf(s, "wgabortc"), ABORT_CAUSES, "abort"),
     ...fieldsOf(listOf(s, "wggfxabort"), GFX_ABORT_SITES, "gfxAbort"),
+    // the renderer's site of a pass that was already poisoned (abortPoisoned)
+    ...fieldsOf(listOf(s, "wggfxpoison"), GFX_ABORT_SITES.slice(0, -1), "gfxPoison"),
+    ...fieldsOf(listOf(s, "wgrangefail"), RANGE_FAILURES, "rangeFail"),
     drawSkippedNoPipeline: skip ? Number(skip[1]) : null,
     uploadAllocFailed: upfail ? upfail[0] : null,
     ...fieldsOf(upfail ? upfail.slice(1, 1 + UPLOAD_ROLES.length) : null, UPLOAD_ROLES, "uploadFailed"),

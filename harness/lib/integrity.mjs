@@ -39,11 +39,12 @@ export async function readIntegrity(page, { expected = true } = {}) {
   return { unread: OLD_WORKER.test(message) ? `the tree has the counters but its worker does not answer: ${message}` : message };
 }
 
-// TODO(2026-10-31, until patch 0207): a window right after a state load may
-// see one batch aborted by the load's placement epoch (Spark, Chrome: 1 in 4
-// post-load windows, no upload timeout). There batchAborts is reported, not
-// fatal. 0207 gives aborts by cause: then only the load-epoch cause is exempt
-// and this exception goes (PROGRAM.md, chutes).
+// A state load or a reset moves the geometry placement epoch: a pending
+// geometry range from before it is given up, and the pass that held it (only
+// pre-load draws) is aborted (patch 0207, wgrangefail epoch; Spark, Chrome:
+// one per load with geomcache=0). Those aborts are expected; any batch abort
+// beyond them stays fatal. A core before 0207 cannot say which an abort was:
+// there, a post-load window reports batchAborts without failing on it.
 export const POSTLOAD_TOLERATED = Object.freeze(["batchAborts"]);
 
 // Over a window: the delta of every counter and the fatal ones that moved,
@@ -60,7 +61,13 @@ export function integrityOf(start, end, { allow = [], postload = false } = {}) {
     delta[k] = end[k] - start[k];
   }
   const moved = INTEGRITY_FATAL.filter((k) => delta[k] > 0);
-  if (postload) allow = [...allow, ...POSTLOAD_TOLERATED];
+  const epochAborts = typeof delta.rangeFailEpoch === "number" ? delta.rangeFailEpoch : null;
+  if (epochAborts != null) {
+    // 0207: the load-epoch aborts are expected, the rest is fatal
+    if (delta.batchAborts > 0 && delta.batchAborts <= epochAborts) allow = [...allow, "batchAborts"];
+  } else if (postload) {
+    allow = [...allow, ...POSTLOAD_TOLERATED];
+  }
   return {
     delta,
     fatal: moved.filter((k) => !allow.includes(k)).map((k) => `${k} ${delta[k]}`),

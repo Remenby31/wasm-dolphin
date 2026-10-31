@@ -372,10 +372,10 @@ index ac5e615..9886fcd 100644
    void DestroyRetiredGeometryBuffers();
    void ResetRecordedPassState();
 diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp b/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp
-index d1da33c..2828581 100644
+index d1da33c..069ed76 100644
 --- a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp
 +++ b/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp
-@@ -437,6 +437,37 @@ void RecordUboPacketOpportunity(u32 change_mask, const std::array<u32, 3>& paylo
+@@ -437,6 +437,52 @@ void RecordUboPacketOpportunity(u32 change_mask, const std::array<u32, 3>& paylo
    s_ubo_packet_aligned_bytes.fetch_add(aligned_bytes, std::memory_order_relaxed);
  }
  
@@ -383,6 +383,7 @@ index d1da33c..2828581 100644
 +// pass), and the draws it skipped for want of a pipeline (0203: the draw
 +// alone, the pass kept; the element is missing from that frame).
 +static std::array<std::atomic<u64>, static_cast<u32>(GfxAbortSite::Count)> s_abort_by_site{};
++static std::array<std::atomic<u64>, static_cast<u32>(GfxAbortSite::Count)> s_poison_by_site{};
 +static std::atomic<u64> s_draw_skipped_no_pipeline{0};
 +
 +// 0207: comma-separated counters for the stats line.
@@ -402,6 +403,20 @@ index d1da33c..2828581 100644
 +  out += "," + std::to_string(GetCommandStream().GetNestedBeginAbortCount());
 +  return out;
 +}
++static std::string PoisonSites()
++{
++  std::string out;
++  for (u32 i = 0; i < static_cast<u32>(GfxAbortSite::Count); ++i)
++    out += (i ? "," : "") + std::to_string(s_poison_by_site[i].load(std::memory_order_relaxed));
++  return out;
++}
++static std::string RangeFailures()
++{
++  std::string out;
++  for (u32 i = 0; i < static_cast<u32>(GeometryRangeFailure::Count); ++i)
++    out += (i ? "," : "") + std::to_string(GetGeometryRangeFailureCount(static_cast<GeometryRangeFailure>(i)));
++  return out;
++}
 +static std::string UploadFailedRoles()
 +{
 +  std::string out;
@@ -413,22 +428,24 @@ index d1da33c..2828581 100644
  extern "C" EMSCRIPTEN_KEEPALIVE const char* GetWebGpuStateCacheStats()
  {
    static std::string stats;
-@@ -452,6 +483,14 @@ extern "C" EMSCRIPTEN_KEEPALIVE const char* GetWebGpuStateCacheStats()
+@@ -452,6 +498,16 @@ extern "C" EMSCRIPTEN_KEEPALIVE const char* GetWebGpuStateCacheStats()
        << " wgbabort:" << GetCommandStream().GetBatchAbortCount()
        << " wgboversize:" << GetCommandStream().GetBatchOversizeCount()
        << " wguploadto:" << GetCommandStream().GetUploadTimeoutCount()
 +      // 0207: aborts by cause (BatchAbortCause order), the renderer's by
-+      // site (GfxAbortSite order, then nested BeginPass), failed uploads (arena; buffer
++      // site (GfxAbortSite order, then nested BeginPass) and of passes already poisoned (wggfxpoison), geometry ranges given up (wgrangefail), failed uploads (arena; buffer
 +      // records by BufferUploadRole; texture records)
 +      << " wgabortc:" << AbortCauses()
 +      << " wggfxabort:" << AbortSites()
++      << " wggfxpoison:" << PoisonSites()
++      << " wgrangefail:" << RangeFailures()
 +      << " wgdrawskip:" << s_draw_skipped_no_pipeline.load(std::memory_order_relaxed)
 +      << " wgupfail:" << GetCommandStream().GetUploadAllocFailedCount() << "," << UploadFailedRoles()
 +      << "," << GetCommandStream().GetUploadTextureFailedCount()
        << " wgubo:" << ((s_ubo_control_mode.load(std::memory_order_relaxed) & 1u) ? 1 : 0)
        << " wgubometrics:"
        << (s_ubo_cache_metrics_enabled.load(std::memory_order_relaxed) ? 1 : 0)
-@@ -1498,7 +1537,7 @@ void WebGPUGfx::SetScissorRect(const MathUtil::Rectangle<int>& rc)
+@@ -1498,7 +1554,7 @@ void WebGPUGfx::SetScissorRect(const MathUtil::Rectangle<int>& rc)
    if (m_pass_open && m_scissor[2] > 0 && m_scissor[3] > 0)
    {
      if (!m_cmd_stream.PushSetScissor(m_scissor[0], m_scissor[1], m_scissor[2], m_scissor[3]))
@@ -437,21 +454,25 @@ index d1da33c..2828581 100644
    }
  }
  
-@@ -1606,8 +1645,12 @@ bool WebGPUGfx::SetRecordedIndexBuffer(u32 buffer_id, u32 format, u32 offset)
+@@ -1606,8 +1662,16 @@ bool WebGPUGfx::SetRecordedIndexBuffer(u32 buffer_id, u32 format, u32 offset)
    return true;
  }
  
 -void WebGPUGfx::AbortRecordedPass()
 +void WebGPUGfx::AbortRecordedPass(GfxAbortSite site)
  {
-+  // Only an explicit abort: a poisoned pass counts under the Poisoned cause.
-+  // These sites and the nested BeginPass count sum to the Explicit cause.
-+  if (m_cmd_stream.pass_staging() && !m_cmd_stream.pass_poisoned())
-+    s_abort_by_site[static_cast<u32>(site)].fetch_add(1, std::memory_order_relaxed);
++  // An explicit abort counts by site in wggfxabort (with the nested BeginPass
++  // they sum to the Explicit cause); a pass already poisoned, which counts
++  // under the Poisoned cause, counts by site in wggfxpoison.
++  if (m_cmd_stream.pass_staging())
++  {
++    auto& by_site = m_cmd_stream.pass_poisoned() ? s_poison_by_site : s_abort_by_site;
++    by_site[static_cast<u32>(site)].fetch_add(1, std::memory_order_relaxed);
++  }
    if (g_vertex_manager)
      static_cast<VertexManager*>(g_vertex_manager.get())->DiscardPendingGeometryRange();
    m_cmd_stream.AbortPass();
-@@ -1683,7 +1726,7 @@ bool WebGPUGfx::EndPassIfOpen()
+@@ -1683,7 +1747,7 @@ bool WebGPUGfx::EndPassIfOpen()
    if (g_vertex_manager &&
        !static_cast<VertexManager*>(g_vertex_manager.get())->FlushPendingGeometryRange())
    {
@@ -460,7 +481,7 @@ index d1da33c..2828581 100644
      return false;
    }
    const bool committed = m_cmd_stream.PushEndPass();
-@@ -1729,14 +1772,14 @@ bool WebGPUGfx::BeginPassIfNeeded()
+@@ -1729,14 +1793,14 @@ bool WebGPUGfx::BeginPassIfNeeded()
    {
      if (m_cmd_stream.pass_staging() && !m_cmd_stream.pass_poisoned())
        return true;
@@ -477,7 +498,7 @@ index d1da33c..2828581 100644
      return false;
    }
    m_pass_open = true;
-@@ -1748,7 +1791,7 @@ bool WebGPUGfx::BeginPassIfNeeded()
+@@ -1748,7 +1812,7 @@ bool WebGPUGfx::BeginPassIfNeeded()
         !m_cmd_stream.PushSetScissor(m_scissor[0], m_scissor[1], m_scissor[2],
                                      m_scissor[3])))
    {
@@ -486,7 +507,7 @@ index d1da33c..2828581 100644
      return false;
    }
    return true;
-@@ -2426,7 +2469,7 @@ void WebGPUGfx::SetViewport(float x, float y, float width, float height, float n
+@@ -2426,7 +2490,7 @@ void WebGPUGfx::SetViewport(float x, float y, float width, float height, float n
    if (m_pass_open && width > 0 && height > 0)
    {
      if (!m_cmd_stream.PushSetViewport(x, y, width, height, near_depth, far_depth))
@@ -495,7 +516,7 @@ index d1da33c..2828581 100644
    }
  }
  
-@@ -2673,6 +2716,7 @@ void WebGPUGfx::Draw(u32 base_vertex, u32 num_vertices)
+@@ -2673,6 +2737,7 @@ void WebGPUGfx::Draw(u32 base_vertex, u32 num_vertices)
  {
    if (m_cur_pipeline_id == 0)
    {
@@ -503,7 +524,7 @@ index d1da33c..2828581 100644
      // 0203: only this draw is skipped. Its bytes stay in the pending
      // geometry range, read by no draw (as with the range off); aborting the
      // pass here dropped every draw already recorded in it.
-@@ -2689,25 +2733,25 @@ void WebGPUGfx::Draw(u32 base_vertex, u32 num_vertices)
+@@ -2689,25 +2754,25 @@ void WebGPUGfx::Draw(u32 base_vertex, u32 num_vertices)
    {
      if (!SetRecordedPipeline(m_cur_pipeline_id))
      {
@@ -533,7 +554,7 @@ index d1da33c..2828581 100644
      return;
    }
  }
-@@ -2716,6 +2760,8 @@ void WebGPUGfx::DrawIndexed(u32 base_index, u32 num_indices, u32 base_vertex)
+@@ -2716,6 +2781,8 @@ void WebGPUGfx::DrawIndexed(u32 base_index, u32 num_indices, u32 base_vertex)
  {
    if (m_cur_pipeline_id == 0 || num_indices == 0)
    {
@@ -542,7 +563,7 @@ index d1da33c..2828581 100644
      // 0203: only this draw is skipped. Its bytes stay in the pending
      // geometry range, read by no draw (as with the range off); aborting the
      // pass here dropped every draw already recorded in it.
-@@ -2732,30 +2778,30 @@ void WebGPUGfx::DrawIndexed(u32 base_index, u32 num_indices, u32 base_vertex)
+@@ -2732,30 +2799,30 @@ void WebGPUGfx::DrawIndexed(u32 base_index, u32 num_indices, u32 base_vertex)
    {
      if (!SetRecordedPipeline(m_cur_pipeline_id))
      {
@@ -578,3 +599,131 @@ index d1da33c..2828581 100644
      return;
    }
  }
+diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.h b/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.h
+index a1f6aa6..5c2a9e0 100644
+--- a/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.h
++++ b/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.h
+@@ -19,6 +19,17 @@ u64 GetGeometryUploadPackEpoch();
+ void InvalidateGeometryUploadPack();
+ bool IsGeometryUploadRangeEnabled();
+ u64 GetGeometryUploadRangeEpoch();
++// 0207: pending geometry ranges given up (wgrangefail:, in this order):
++// 0 a placement epoch moved under them (a save load, a reset), 1 an invalid
++// range, 2 their upload failed. Each one fails the owning pass.
++enum class GeometryRangeFailure : u32
++{
++  Epoch = 0,
++  Invalid = 1,
++  Upload = 2,
++  Count = 3,
++};
++u64 GetGeometryRangeFailureCount(GeometryRangeFailure kind);
+ void InvalidateGeometryUploadRange();
+ // 0204: the geometry content cache (?wgpugeomcache=1; mode bit 1 adds the
+ // sampled byte comparison of hits, diagnostics only).
+diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.cpp b/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.cpp
+index b567fed..0407d2f 100644
+--- a/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.cpp
++++ b/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.cpp
+@@ -7,6 +7,8 @@
+ #include <cstring>
+ #include <optional>
+ #include <iterator>
++#include <array>
++#include <atomic>
+ #include <limits>
+ 
+ #include <emscripten/emscripten.h>
+@@ -298,6 +300,20 @@ void VertexManager::DestroyRetiredGeometryBuffers()
+   m_retired_geometry_buffers.erase(kept, m_retired_geometry_buffers.end());
+ }
+ 
++namespace
++{
++std::array<std::atomic<u64>, static_cast<u32>(GeometryRangeFailure::Count)> s_range_failures{};
++void CountRangeFailure(GeometryRangeFailure kind)
++{
++  s_range_failures[static_cast<u32>(kind)].fetch_add(1, std::memory_order_relaxed);
++}
++}  // namespace
++
++u64 GetGeometryRangeFailureCount(GeometryRangeFailure kind)
++{
++  return s_range_failures[static_cast<u32>(kind)].load(std::memory_order_relaxed);
++}
++
+ void VertexManager::DiscardPendingGeometryRange()
+ {
+   m_pending_geometry_range.bytes.clear();
+@@ -319,6 +335,8 @@ bool VertexManager::FlushPendingGeometryRange()
+       pending.buffer_id == 0 || pending.bytes.size() > kGeometryRangeMaxBytes ||
+       pending.bytes.size() > kGeometryRangeHardBytes)
+   {
++    CountRangeFailure(pending.epoch != GetGeometryUploadRangeEpoch() ? GeometryRangeFailure::Epoch :
++                                                                       GeometryRangeFailure::Invalid);
+     DiscardPendingGeometryRange();
+     cs.FailRequiredPublication();
+     return false;
+@@ -334,6 +352,7 @@ bool VertexManager::FlushPendingGeometryRange()
+       !cs.PushUploadBuffer(pending.buffer_id, pending.destination_start, source, size,
+                            BufferUploadRole::Geometry))
+   {
++    CountRangeFailure(GeometryRangeFailure::Upload);
+     DiscardPendingGeometryRange();
+     InvalidateGeometryUploadRange();
+     InvalidateGeometryUploadPack();
+@@ -358,6 +377,7 @@ bool VertexManager::AppendPendingGeometryRange(u32 buffer_id, u32 destination_of
+       (vertex_bytes != 0 && vertices == nullptr) || (index_bytes != 0 && indices == nullptr) ||
+       vertex_bytes > packet_bytes || index_bytes > packet_bytes - vertex_bytes)
+   {
++    CountRangeFailure(GeometryRangeFailure::Invalid);
+     cs.FailRequiredPublication();
+     return false;
+   }
+@@ -365,6 +385,7 @@ bool VertexManager::AppendPendingGeometryRange(u32 buffer_id, u32 destination_of
+   PendingGeometryRange& pending = m_pending_geometry_range;
+   if (!pending.bytes.empty() && pending.epoch != range_epoch)
+   {
++    CountRangeFailure(GeometryRangeFailure::Epoch);
+     DiscardPendingGeometryRange();
+     cs.FailRequiredPublication();
+     return false;
+@@ -449,6 +470,7 @@ void VertexManager::CommitBuffer(u32 num_vertices, u32 vertex_stride, u32 num_in
+     }
+     if (discarded_pending_range)
+     {
++      CountRangeFailure(GeometryRangeFailure::Epoch);
+       cs.FailRequiredPublication();
+       return;
+     }
+@@ -1528,10 +1550,13 @@ extern "C" EMSCRIPTEN_KEEPALIVE int RunWebGpuVertexManagerGeometryRangeSmoke()
+                                 static_cast<u32>(std::size(indices)), &first_base_vertex,
+                                 &first_base_index);
+   WebGPUCommandStreamTestPeer::FailConsumer(stream, 0x52414E47u);
++  const u64 upload_failures_before = GetGeometryRangeFailureCount(GeometryRangeFailure::Upload);
+   if (rollback_manager.FlushPendingGeometryRange() ||
+       VertexManagerTestPeer::PendingRangeSize(rollback_manager) != 0 ||
+       stream.PushBeginPass(7, 0, 0, 0, 1, 1, 8))
+     return FailVertexManagerSmoke(616, "failed range flush did not rollback and poison pass");
++  if (GetGeometryRangeFailureCount(GeometryRangeFailure::Upload) != upload_failures_before + 1)
++    return FailVertexManagerSmoke(621, "0207: a range upload failure was not counted");
+ 
+   // Re-applying the geometry flags is the worker's save-load epoch seam. A
+   // private range from the old state must disappear before a fresh buffer id
+@@ -1552,6 +1577,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE int RunWebGpuVertexManagerGeometryRangeSmoke()
+   if (pre_load_id == 0 || !load_manager.HasPendingGeometryRange())
+     return FailVertexManagerSmoke(618, "save-load range fixture did not retain private bytes");
+ 
++  const u64 epoch_failures_before = GetGeometryRangeFailureCount(GeometryRangeFailure::Epoch);
+   SetWebGpuGeometryPackEnabled(1);
+   VertexManagerTestPeer::Seed(load_manager, vertices_b, sizeof(vertices_b), indices,
+                               static_cast<u32>(std::size(indices)), stride);
+@@ -1562,6 +1588,8 @@ extern "C" EMSCRIPTEN_KEEPALIVE int RunWebGpuVertexManagerGeometryRangeSmoke()
+       s_vertex_manager_smoke_fixture.header.write.load(std::memory_order_acquire) != pre_load_write ||
+       stream.PushBeginPass(7, 0, 0, 0, 1, 1, 8))
+     return FailVertexManagerSmoke(619, "save-load epoch retained or published old placement");
++  if (GetGeometryRangeFailureCount(GeometryRangeFailure::Epoch) != epoch_failures_before + 1)
++    return FailVertexManagerSmoke(622, "0207: a range dropped by a save-load epoch was not counted");
+ 
+   VertexManagerTestPeer::Seed(load_manager, vertices_b, sizeof(vertices_b), indices,
+                               static_cast<u32>(std::size(indices)), stride);

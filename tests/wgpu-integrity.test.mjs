@@ -58,12 +58,19 @@ test("the core's own counters come from its state stats line, null for what an o
   // 0207: causes, renderer sites, draws skipped, failed uploads; null before 0207
   const old = coreIntegrityOf("wgdrop:0 wgbabort:2 wgboversize:0 wguploadto:0");
   for (const k of ["abortExplicit", "gfxAbortPrepare", "drawSkippedNoPipeline", "uploadAllocFailed", "uploadFailedUbo", "uploadTextureFailed"]) assert.equal(old[k], null, k);
-  const now = coreIntegrityOf("wgdrop:0 wgbabort:3 wgboversize:0 wguploadto:0 wgabortc:1,0,2,0,0 wggfxabort:0,0,0,0,0,0,0,1,0,0,0,1 wgdrawskip:5 wgupfail:0,0,1,0,0,0,0,0,0 wgubo:1");
+  const now = coreIntegrityOf("wgdrop:0 wgbabort:3 wgboversize:0 wguploadto:0 wgabortc:1,0,2,0,0 wggfxabort:0,0,0,0,0,0,0,1,0,0,0,1 wggfxpoison:0,0,1,0,0,0,0,0,0,0,0 wgrangefail:1,0,0 wgdrawskip:5 wgupfail:0,0,1,0,0,0,0,0,0 wgubo:1");
   assert.equal(now.abortRequiredPublication, 1);
   assert.equal(now.abortExplicit, 2);
   assert.equal(now.abortOversize, 0);
   assert.equal(now.gfxAbortPrepare, 1);
   assert.equal(now.gfxAbortNested, 1);
+  // a poisoned pass the renderer abandoned: its site apart (the Spark load case)
+  assert.equal(now.gfxPoisonGeometryFlush, 1);
+  assert.ok(!("gfxPoisonNested" in now), "no nested site among poisoned passes");
+  assert.equal(now.rangeFailEpoch, 1);
+  assert.equal(now.rangeFailInvalid, 0);
+  assert.equal(now.rangeFailUpload, 0);
+  assert.equal(coreIntegrityOf("wgbabort:1 wgboversize:0 wguploadto:0").rangeFailEpoch, null, "before the follow-up: unread");
   // the renderer's sites and the nested BeginPass sum to the explicit cause
   assert.equal(GFX_ABORT_SITES.reduce((a, n) => a + now[`gfxAbort${n}`], 0), now.abortExplicit);
   // a core with 0207's first version printed 11 sites: Nested unread
