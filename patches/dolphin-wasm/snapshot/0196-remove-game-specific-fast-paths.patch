@@ -354,10 +354,11 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  struct PpcBlockProfileEntry
  {
    u32 pc = 0;
-@@ -1465,782 +1294,12 @@ void UpdatePerformanceMonitorIfNeeded(u32 cycles, u32 num_load_stores, u32 num_f
+@@ -1464,783 +1293,13 @@ void UpdatePerformanceMonitorIfNeeded(u32 cycles, u32 num_load_stores, u32 num_f
+                                       PowerPC::PowerPCState& ppc_state)
  {
    if ((ppc_state.feature_flags & FEATURE_FLAG_PERFMON) != 0)
-     PowerPC::UpdatePerformanceMonitor(cycles, num_load_stores, num_fp_inst, ppc_state);
+-    PowerPC::UpdatePerformanceMonitor(cycles, num_load_stores, num_fp_inst, ppc_state);
 -}
 -
 -bool ExecuteFastOsInterruptInline(PowerPC::PowerPCState& ppc_state,
@@ -1121,6 +1122,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 -    ++s_fast_melee_input_poll_inline_fallbacks;
 -    return false;
 -  }
++    PowerPC::UpdatePerformanceMonitor(cycles, num_load_stores, num_fp_inst, ppc_state);
 +}
  
 -  const u32 restore_cycles =
@@ -1477,11 +1479,10 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      else if (callback == AnyCallbackCast(FastDcbx))
      {
        FastDcbx(ppc_state, *reinterpret_cast<const FastInstructionOperands*>(payload));
-@@ -13080,329 +11926,57 @@ static bool IsFastPureIntegerInstruction(UGeckoInstruction inst)
-     case 151:  // stwx
+@@ -13081,328 +11927,56 @@ static bool IsFastPureIntegerInstruction(UGeckoInstruction inst)
      case 183:  // stwux
      case 266:  // addx
--    case 316:  // xorx
+     case 316:  // xorx
 -    case 444:  // orx
 -      return !inst.OE;
 -    default:
@@ -1737,7 +1738,6 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 -        !matches(0x80347374, 0x4e800020))    // blr
 -    {
 -      ++s_fast_os_interrupt_compile_rejects;
-+    case 316:  // xorx
 +    case 444:  // orx
 +      return !inst.OE;
 +    default:
@@ -2631,10 +2631,12 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
          if (!TryWriteDcbxLoop(i, power_pc) && !TryWriteFastInstruction(op, power_pc))
          {
            s_mem_block_counts.Interpreted(op);
-@@ -16020,20 +13856,6 @@ void ApplyRequestedWasmPolicy(CachedInterpreter& cpu)
+@@ -16018,23 +13854,6 @@ void ApplyRequestedWasmPolicy(CachedInterpreter& cpu)
+       requested == s_applied_wasm_policy.load(std::memory_order_relaxed))
+     return;
    const bool next_enabled = requested != 0;
-   if (next_enabled && (!s_wasm_jit_enabled || s_wasm_policy_owner != &cpu))
-   {
+-  if (next_enabled && (!s_wasm_jit_enabled || s_wasm_policy_owner != &cpu))
+-  {
 -    s_fast_os_interrupt_verified_modes = 0;
 -    s_fast_melee_input_status_verified = false;
 -    s_fast_melee_input_status_cycles = 0;
@@ -2649,10 +2651,11 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 -    s_fast_melee_input_poll_verified = false;
 -    s_fast_melee_input_poll_cycles = 0;
 -    s_fast_melee_input_poll_loadstores = 0;
-   }
+-  }
    s_wasm_jit_enabled = next_enabled;
    s_wasm_jit_direct_only = requested < 2;
-@@ -16263,7 +14085,6 @@ extern "C" const char* GetPpcWasmHelperStats()
+   // Drop code generated under the previous policy, including pre-JIT fallbacks
+@@ -16263,7 +14082,6 @@ extern "C" const char* GetPpcWasmHelperStats()
    static u32 last_refresh_direct_tier_reject_count = 0;
    static u32 last_refresh_too_short_count = 0;
    static u32 last_refresh_dcbx_loop_blocks = 0;
@@ -2660,7 +2663,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    static u64 last_refresh_fallback_dispatch_total = 0;
    constexpr u32 STATS_REFRESH_BLOCK_RUNS = 1000;
    const JitFallbackDispatchStats fallback_dispatch = GetJitFallbackDispatchStats();
-@@ -16278,7 +14099,6 @@ extern "C" const char* GetPpcWasmHelperStats()
+@@ -16278,7 +14096,6 @@ extern "C" const char* GetPpcWasmHelperStats()
        s_wasm_direct_tier_reject_count == last_refresh_direct_tier_reject_count &&
        s_wasm_block_too_short_count == last_refresh_too_short_count &&
        s_fast_dcbx_loop_blocks == last_refresh_dcbx_loop_blocks &&
@@ -2668,7 +2671,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
        fallback_dispatch_total == last_refresh_fallback_dispatch_total &&
        static_link_snapshot.sequence == static_link_last_sequence)
  #else
-@@ -16290,7 +14110,6 @@ extern "C" const char* GetPpcWasmHelperStats()
+@@ -16290,7 +14107,6 @@ extern "C" const char* GetPpcWasmHelperStats()
        s_wasm_direct_tier_reject_count == last_refresh_direct_tier_reject_count &&
        s_wasm_block_too_short_count == last_refresh_too_short_count &&
        s_fast_dcbx_loop_blocks == last_refresh_dcbx_loop_blocks &&
@@ -2676,7 +2679,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
        fallback_dispatch_total == last_refresh_fallback_dispatch_total)
  #endif
  #line 11305
-@@ -16304,7 +14123,6 @@ extern "C" const char* GetPpcWasmHelperStats()
+@@ -16304,7 +14120,6 @@ extern "C" const char* GetPpcWasmHelperStats()
    last_refresh_direct_tier_reject_count = s_wasm_direct_tier_reject_count;
    last_refresh_too_short_count = s_wasm_block_too_short_count;
    last_refresh_dcbx_loop_blocks = s_fast_dcbx_loop_blocks;
@@ -2684,7 +2687,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    last_refresh_fallback_dispatch_total = fallback_dispatch_total;
  #if DOLPHIN_WEB_STATIC_EXIT_LINKS && DOLPHIN_WEB_STATIC_EXIT_LINK_STATS
    static_link_last_sequence = static_link_snapshot.sequence;
-@@ -16528,92 +14346,6 @@ extern "C" const char* GetPpcWasmHelperStats()
+@@ -16528,92 +14343,6 @@ extern "C" const char* GetPpcWasmHelperStats()
          << " lh:" << s_fast_half_mem_load_ops << " sth:" << s_fast_half_mem_store_ops
          << " mw:" << s_fast_multiword_mem_ops;
    }
@@ -2777,7 +2780,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    if (s_fast_branch_ops != 0)
    {
      out << " | fastbranch ops:" << s_fast_branch_ops << " bcx:" << s_fast_branch_bcx_ops
-@@ -18478,8 +16210,9 @@ namespace
+@@ -18478,8 +16207,9 @@ namespace
  // 34 (0146): the 0141/0143 paths in fewer bytes (splatted constants, one
  // helper call per op); 33 is retired (0144, closed). 35 (0147): psq_l and
  // psq_st float pairs in v128. 36 (0157): regions run with MSR.FP clear,
@@ -2789,7 +2792,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  constexpr u32 AOT_MAX_FRAGMENT_BYTES = 1u << 20;
  thread_local std::vector<u32> t_aot_out;
  u8* s_aot_ram = nullptr;
-@@ -19247,9 +16980,6 @@ bool CachedInterpreter::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
+@@ -19247,9 +16977,6 @@ bool CachedInterpreter::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
        }
        else
        {
