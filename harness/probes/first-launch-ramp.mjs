@@ -85,7 +85,25 @@ async function readXfb(page, reset = -1) {
   const r = await workerRequest(page, "validationReadHeadroomStats", { reset }, 5000).catch((e) => ({ error: String(e.message || e) }));
   if (r?.error || !r?.bytes) return { error: r?.error ?? "no reply" };
   const s = consistentHeadroomRead(decodeHeadroomStats(r.bytes), decodeHeadroomStats(r.again));
-  return s.error ? s : { xfb: s.xfbCopies, on: s.on };
+  return s.error ? s : { xfb: s.xfbCopies, on: s.on, windowUs: s.windowUs };
+}
+
+// Zero the XFB counter and wait until the core applied it (at its next
+// Throttle, once per VI): the window went back under its value before the
+// reset. "on" proves nothing since the engine keeps these counters on in
+// product (occupancy stats).
+export async function resetXfb(read, { timeoutMs = 2000, stepMs = 50, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
+  const before = await read(-1);
+  if (before.error) return before;
+  const r = await read(0);
+  if (r.error) return r;
+  for (let waited = 0; waited <= timeoutMs; waited += stepMs) {
+    const x = await read(-1);
+    if (x.error) return x;
+    if (x.on && (!before.on || x.windowUs < before.windowUs)) return { applied: true };
+    await sleep(stepMs);
+  }
+  return { error: `XFB counter reset not applied within ${timeoutMs} ms` };
 }
 
 // One visit's region facts from what the drain read (pure: tested). events:
@@ -179,7 +197,7 @@ async function measureVisit(o, server, profileDir) {
     const t0 = Date.now();
     await bootIso(page, { url: `${server.base}?${o.query}`, iso: o.iso, timeoutMs: 120000 });
     record.bootMs = Date.now() - t0;
-    const xfbOn = await readXfb(page, 0);
+    const xfbOn = await resetXfb((reset) => readXfb(page, reset));
     record.xfbCounter = xfbOn.error ?? "on";
     const chunks = [], regions = [], loads = [], frames = [], aotEvents = [];
     const ticksNow = async () => Number((await workerRequest(page, "validationReadCoreProgress", {}, 5000).catch(() => null))?.coreTicks ?? NaN);
@@ -196,7 +214,7 @@ async function measureVisit(o, server, profileDir) {
         }
         if (!xfbOn.error) {
           const x = await readXfb(page);
-          if (!x.error && x.on) frames.push({ t: Date.now(), xfb: x.xfb });
+          if (!x.error) frames.push({ t: Date.now(), xfb: x.xfb });
         }
         loads.push(os.loadavg()[0]);
         await page.waitForTimeout(1000);

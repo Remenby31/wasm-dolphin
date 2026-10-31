@@ -146,3 +146,19 @@ test("first-launch-ramp --region-chain: the region cycle share per visit goes in
   assert.equal(sum[0].regionCycleShare, 0.85);
   assert.equal(sum[0].regionStops, 200);
 });
+
+test("first-launch-ramp waits until the core applied its XFB reset (counters may already be on)", async () => {
+  const { resetXfb } = await import("../harness/probes/first-launch-ramp.mjs");
+  const sleep = async () => {};
+  // On before (the engine's occupancy stats): applied once the window went back.
+  let reads = [{ on: true, windowUs: 9e6 }, { on: true, windowUs: 9e6 }, { on: true, windowUs: 9.1e6 }, { on: true, windowUs: 16000 }];
+  let read = async () => reads.shift();
+  assert.deepEqual(await resetXfb(read, { sleep }), { applied: true });
+  // Off before: on is enough.
+  reads = [{ on: false, windowUs: 0 }, { on: false, windowUs: 0 }, { on: true, windowUs: 16000 }];
+  read = async () => reads.shift();
+  assert.deepEqual(await resetXfb(read, { sleep }), { applied: true });
+  // Never applied: an error, not stale totals.
+  read = async () => ({ on: true, windowUs: 9e6 });
+  assert.match((await resetXfb(read, { sleep, timeoutMs: 100, stepMs: 50 })).error, /not applied/);
+});
