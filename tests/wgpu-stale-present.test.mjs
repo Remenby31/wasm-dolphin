@@ -67,7 +67,7 @@ test("the replay feeds the detector at every write and present, and reports it",
   assert.match(host, /stalePresents: this\.mode === "dolphin" \? this\.adapter\.stalePresents \?\? null : null,/);
 });
 
-test("patch 0211: a dual-core VI swap ahead of its copy holds the last picture, at most twice in a row", async () => {
+test("patch 0211: a dual-core VI swap ahead of its copy holds the last picture, at most 4 times in a row", async () => {
   const patch = await read("../patches/dolphin-wasm/snapshot/0211-stale-xfb-shows-last-picture.patch");
   // the race's own condition: the GPU thread has not consumed the FIFO written before the VI
   assert.match(patch, /\+            m_gpu_chunks_consumed\.fetch_add\(1, std::memory_order_release\);/);
@@ -76,7 +76,7 @@ test("patch 0211: a dual-core VI swap ahead of its copy holds the last picture, 
   assert.match(patch, /\+      fifo_target != 0 &&\n\+      Core::System::GetInstance\(\)\.GetFifo\(\)\.GpuChunksConsumed\(\) < fifo_target;/);
   // held only then, for an older entry already shown, and at most twice in a row
   assert.match(patch, /\+    const bool stale = may_hold && m_last_shown_entry && id < old_xfb_id &&\n\+                       old_xfb_id != std::numeric_limits<u64>::max\(\) && shown_before &&\n\+                       m_stale_holds_in_a_row < MAX_STALE_HOLDS_IN_A_ROW;/);
-  assert.match(patch, /\+constexpr u32 MAX_STALE_HOLDS_IN_A_ROW = 2;/);
+  assert.match(patch, /\+constexpr u32 MAX_STALE_HOLDS_IN_A_ROW = 4;/);
   // an immediate swap never holds: FetchXFB's may_hold defaults to false and only ViSwap passes it
   assert.match(patch, /\+                bool may_hold = false\);/);
   assert.match(patch, /\+  bool is_duplicate = FetchXFB\(xfb_addr, fb_width, fb_stride, fb_height, ticks, may_hold\);/);

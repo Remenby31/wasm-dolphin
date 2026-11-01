@@ -51,7 +51,7 @@ index 9d69055..cdee507 100644
    CoreTiming::EventType* m_event_sync_gpu = nullptr;
  
 diff --git a/Source/Core/VideoCommon/Present.cpp b/Source/Core/VideoCommon/Present.cpp
-index 0c58fad..2e11194 100644
+index 0c58fad..3795ab3 100644
 --- a/Source/Core/VideoCommon/Present.cpp
 +++ b/Source/Core/VideoCommon/Present.cpp
 @@ -3,12 +3,20 @@
@@ -90,7 +90,7 @@ index 0c58fad..2e11194 100644
 -bool Presenter::FetchXFB(u32 xfb_addr, u32 fb_width, u32 fb_stride, u32 fb_height, u64 ticks)
 +// Patch 0211: at most this many holds in a row; a game that shows one of its
 +// finished buffers again without a new copy is then shown as it asks.
-+constexpr u32 MAX_STALE_HOLDS_IN_A_ROW = 2;
++constexpr u32 MAX_STALE_HOLDS_IN_A_ROW = 4;
 +
 +void Presenter::ForgetShownXfbs()
 +{
