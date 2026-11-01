@@ -379,14 +379,14 @@ test("spark-run --queue: each ticket's wait and estimate, a waiting ticket past 
 // script from SPARK_PROBE, refusing any other name.
 test("spark-run --probe: the probe goes in SPARK_PROBE, race-perf stays the default, other names refused", async () => {
   const { SPARK_PROBES } = await import("../harness/remote/spark-run.mjs");
-  assert.deepEqual(SPARK_PROBES, ["race-perf", "drop-meter", "replay-gates"]);
+  assert.deepEqual(SPARK_PROBES, ["race-perf", "drop-meter", "replay-gates", "parcours"]);
   assert.doesNotMatch(launchCommand({ harnessDir: "/h/k", outDir: "/h/r/d/n", raceArgs: [] }), /SPARK_PROBE/);
   const cmd = launchCommand({ harnessDir: "/h/k", outDir: "/h/r/d/n", raceArgs: ["--display"], headed: ":2", probe: "drop-meter" });
   assert.match(cmd, /\{ SPARK_PROBE='drop-meter' HARNESS_DISPLAY=x11 DISPLAY=':2' /);
-  assert.throws(() => launchCommand({ harnessDir: "/h/k", outDir: "/h/r/d/n", raceArgs: [], probe: "../../evil" }), /one of race-perf, drop-meter, replay-gates/);
+  assert.throws(() => launchCommand({ harnessDir: "/h/k", outDir: "/h/r/d/n", raceArgs: [], probe: "../../evil" }), /one of race-perf, drop-meter, replay-gates, parcours/);
   const { readFile } = await import("node:fs/promises");
   const race = await readFile(new URL("../harness/remote/spark-race.sh", import.meta.url), "utf8");
-  assert.match(race, /case \$probe in\n\s+race-perf\|drop-meter\|replay-gates\) ;;/);
+  assert.match(race, /case \$probe in\n\s+race-perf\|drop-meter\|replay-gates\|parcours\) ;;/);
   assert.match(race, /node "harness\/probes\/\$probe\.mjs" "\$@" --port "\$port" --out "\$out"/);
   for (const p of SPARK_PROBES) assert.ok((await readFile(new URL(`../harness/probes/${p}.mjs`, import.meta.url), "utf8")).length > 0, `${p}.mjs exists`);
 });
@@ -413,7 +413,29 @@ test("spark-run --probe drop-meter|replay-gates: --headed, an explicit wgpu --qu
   assert.match(gates, /!v\.input\?\.enabled \|\| !v\.input\.visibleCount/);
   assert.match(gates, /!summary\.input\[side\]\.presses/);
   assert.match(run, /probe === "replay-gates" && \(values\.baseline \|\| splitEquals\(positionals\)\.includes\("--baseline-query"\)\)\) throw/);
-  assert.match(run, /if \(summary\.probe === "replay-gates" \|\| summary\.probe === "drop-meter"\) \{/, "race-perf keeps its paired-change lines");
+  assert.match(run, /if \(summary\.probe === "replay-gates" \|\| summary\.probe === "drop-meter" \|\| summary\.probe === "parcours"\) \{/, "race-perf keeps its paired-change lines");
+});
+
+// parcours (2026-11-01): a pad film from the boot, pushed like a savestate;
+// a presentation probe (--headed, an explicit wgpu --query) like drop-meter.
+test("spark-run --probe parcours: --film required and pushed, never --state; set by spark-run, not after --", async () => {
+  const { checkProbeInputs, checkPresentationProbe } = await import("../harness/remote/spark-run.mjs");
+  assert.throws(() => checkProbeInputs("parcours", { state: null, film: null }), /needs --film/);
+  assert.throws(() => checkProbeInputs("parcours", { state: "x.sav", film: "f.json" }), /no --state/);
+  assert.doesNotThrow(() => checkProbeInputs("parcours", { state: null, film: "f.json" }));
+  assert.throws(() => checkProbeInputs("race-perf", { state: "x.sav", film: "f.json" }), /--probe parcours only/);
+  assert.throws(() => checkProbeInputs("race-perf", { state: null, film: null }), /usage/);
+  assert.doesNotThrow(() => checkProbeInputs("drop-meter", { state: null, film: null }));
+  const q = "core=upstream&video=wgpu&presenter=webgpu&cpu=dual";
+  assert.throws(() => checkPresentationProbe("parcours", ["--query", q], benchRaceArgs(["--query", q]).args, null), /needs --headed/);
+  const cmd = launchCommand({ harnessDir: "/h/k", outDir: "/h/r/d/n", raceArgs: ["--film", "/h/roms/f.film.json"], headed: ":2", probe: "parcours" });
+  assert.match(cmd, /\{ SPARK_PROBE='parcours' HARNESS_DISPLAY=x11 DISPLAY=':2' /);
+  const run = readFileSync(new URL("../harness/remote/spark-run.mjs", import.meta.url), "utf8");
+  assert.match(run, /for \(const f of \["--iso", "--state", "--film", "--out"/, "--film after -- refused");
+  assert.match(run, /\.\.\.\(film \? \["--film", abs\(film\)\] : \[\]\)/);
+  assert.match(run, /umask 077; cat > \$\{dest\}\.tmp[^\n]*\n[^\n]*film pushed as roms/, "the film is pushed private, like a savestate");
+  const probe = readFileSync(new URL("../harness/probes/parcours.mjs", import.meta.url), "utf8");
+  assert.match(probe, /"lock-wait": \{ type: "string"/, "the probe takes the bench's --lock-wait");
 });
 
 test("spark-queue estimates: replay-gates and drop-meter by their own shape", async () => {
@@ -422,6 +444,7 @@ test("spark-queue estimates: replay-gates and drop-meter by their own shape", as
   assert.equal(estimateMin("pair", ["--runs", "4", "--visits", "2", "--baseline", "/b"]), 24);
   assert.equal(estimateMin("pair", ["--runs", "4", "--visits", "2"]), 12);
   assert.equal(estimateMin("pair", ["--runs", "6", "--warmup", "20", "--secs", "10"]), 5, "race-perf as before (6 × (20 + 10 + 20) s)");
+  assert.equal(estimateMin("pair", ["--runs", "3", "--film", "/f", "--baseline", "/b"]), 36, "parcours: ~6 min a run and side");
 });
 
 // 2026-10-29, the user's decision: the Spark is shared, cpus 0-9 are

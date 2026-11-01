@@ -10,7 +10,7 @@
 //   node harness/remote/spark-run.mjs --candidate <ref|dir> [--baseline <ref|dir>]
 //     --state <local .sav> [--name n] [--runs 6] [--lane auto|a|b] [--host spark] [--detach]
 //     [--keep-video] [--headed :2 [--xauth /run/salon-xorg/xauth] | --headless]
-//     [--probe race-perf | drop-meter | replay-gates]
+//     [--probe race-perf | drop-meter | replay-gates | parcours [--film <local film.json>]]
 //     (the load gate: lib/bench-load.mjs; a --max-load given only caps it) [--noise <date>/<drop-meter A/A on the bench>]
 //     (lane a only, cpus 10-19: since 2026-10-29 cpus 0-9 are Excalibur's, no --lane b, --screen or --multi)
 //     [-- <the probe's options: --query, --warmup, --secs, --max-load, …>]
@@ -304,8 +304,8 @@ export function benchNoiseArgs(noise, resultsDir) {
 }
 
 // The Spark command that starts the pair detached and returns at once.
-export const SPARK_PROBES = ["race-perf", "drop-meter", "replay-gates"];
-// drop-meter and replay-gates judge the presentation (?wgpureplayms is read
+export const SPARK_PROBES = ["race-perf", "drop-meter", "replay-gates", "parcours"];
+// drop-meter, replay-gates and parcours judge the presentation (?wgpureplayms is read
 // by the wgpu path only): headless, the bench turns video=wgpu into
 // video=null (benchQuery) and such a gate would pass without exercising
 // anything. They need --headed, an explicit --query (no default: race-perf's
@@ -320,6 +320,30 @@ export function checkPresentationProbe(probe, rawArgs, benchArgs, headed) {
   }
   const extra = raw.indexOf("--extra");
   if (extra >= 0 && new URLSearchParams(raw[extra + 1] ?? "").has("video")) throw new Error("--extra must not change video= (it escapes the bench's query check)");
+}
+// parcours plays a pad film from the boot (no savestate): the film is local
+// data (never in the repo), pushed like a savestate (mode 600, named by its
+// hash) next to the disc and passed as --film.
+export function pushFilm(host, file) {
+  const bytes = readFileSync(file);
+  const name = `${path.basename(file, ".json")}-${createHash("sha256").update(bytes).digest("hex").slice(0, 12)}.film.json`;
+  const dest = `${BENCH}/roms/${name}`;
+  if (ssh(host, `test -f ${dest}`, { quiet: true }).status !== 0) {
+    ssh(host, `set -e; umask 077; cat > ${dest}.tmp; mv ${dest}.tmp ${dest}`, { input: bytes });
+    console.log(`[spark-run] film pushed as roms/${name}`);
+  }
+  return dest;
+}
+// What each probe needs from the Mac: race-perf and replay-gates a
+// savestate, parcours a film, drop-meter neither (its scenario from the boot).
+export function checkProbeInputs(probe, { state, film }) {
+  if (probe === "parcours") {
+    if (!film) throw new Error("--probe parcours needs --film <local film.json> (lib/pad-film.mjs)");
+    if (state) throw new Error("--probe parcours boots the disc: no --state");
+    return;
+  }
+  if (film) throw new Error(`--film: --probe parcours only`);
+  if (!state && probe !== "drop-meter") throw new Error("usage: spark-run.mjs --candidate <ref|dir> [--baseline <ref|dir>] --state <local .sav> [--name n] [--runs 6] [--detach] [--probe race-perf|drop-meter|replay-gates|parcours] [-- probe options]");
 }
 // --loaded: a correctness run (replay-gates: exact pictures, integrity,
 // flicker) does not wait for the lane's cores to be free of other people's
@@ -562,7 +586,8 @@ function fetchResult(host, { date, name, meta, exit }) {
       if (summary.cycleEffects) console.log(`[spark-run] host CYCLES per guest cycle vs arm 0 (lower is better, decides when it parts from the instructions): ${show(summary.cycleEffects)}; residual ${summary.cycleEffects.residualSd} %`);
       return exit;
     }
-    if (summary.probe === "replay-gates" || summary.probe === "drop-meter") {
+    if (summary.probe === "replay-gates" || summary.probe === "drop-meter" || summary.probe === "parcours") {
+      for (const l of summary.probe === "parcours" ? summary.human ?? [] : []) console.log(`[spark-run] ${l}`);
       console.log(`[spark-run] ${summary.probe ?? "summary"} -> ${local}`);
       return exit;
     }
@@ -583,7 +608,7 @@ async function main() {
       headed: { type: "string" }, headless: { type: "boolean", default: false }, xauth: { type: "string", default: BENCH_XAUTHORITY },
       detach: { type: "boolean", default: false }, fetch: { type: "string" }, build: { type: "string" },
       "multi-lanes": { type: "string" }, queue: { type: "boolean", default: false },
-      probe: { type: "string", default: "race-perf" }, noise: { type: "string" }, screen: { type: "boolean", default: false },
+      probe: { type: "string", default: "race-perf" }, film: { type: "string" }, noise: { type: "string" }, screen: { type: "boolean", default: false },
       loaded: { type: "boolean", default: false }
     },
     allowPositionals: true
@@ -610,9 +635,11 @@ async function main() {
   if (!SPARK_PROBES.includes(values.probe)) throw new Error(`--probe ${values.probe}: one of ${SPARK_PROBES.join(", ")}`);
   if (values.loaded && !LOADED_PROBES.includes(values.probe)) throw new Error(`--loaded: correctness runs only (${LOADED_PROBES.join(", ")}); a speed measure keeps its load gate`);
   values.candidate = values.candidate[0];
-  // drop-meter runs its full scenario from the boot without a savestate
-  if (!values.candidate || (!values.state && values.probe !== "drop-meter")) throw new Error("usage: spark-run.mjs --candidate <ref|dir> [--baseline <ref|dir>] --state <local .sav> [--name n] [--runs 6] [--detach] [--probe race-perf|drop-meter|replay-gates] [-- probe options]");
-  for (const f of ["--iso", "--state", "--out", "--port", "--runs", "--candidate", "--baseline", "--core-candidate", "--noise"]) {
+  // drop-meter runs its full scenario from the boot without a savestate,
+  // parcours its film
+  if (!values.candidate) throw new Error("usage: spark-run.mjs --candidate <ref|dir> [--baseline <ref|dir>] --state <local .sav> [--name n] [--runs 6] [--detach] [--probe race-perf|drop-meter|replay-gates|parcours] [-- probe options]");
+  checkProbeInputs(values.probe, { state: values.state, film: values.film });
+  for (const f of ["--iso", "--state", "--film", "--out", "--port", "--runs", "--candidate", "--baseline", "--core-candidate", "--noise"]) {
     if (positionals.includes(f)) throw new Error(`${f} is set by spark-run, not after --`);
   }
   if (values.noise && values.probe !== "drop-meter") throw new Error("--noise: drop-meter's A/A, --probe drop-meter only");
@@ -627,6 +654,7 @@ async function main() {
   const candidate = await pushSide(host, values.candidate);
   const baseline = values.baseline ? (values.baseline === values.candidate ? candidate : await pushSide(host, values.baseline)) : null;
   const state = values.state ? pushState(host, path.resolve(values.state)) : null;
+  const film = values.film ? pushFilm(host, path.resolve(values.film)) : null;
   const iso = benchDisc(host, values.iso);
   const home = ssh(host, "printf %s \"$HOME\"").out;
   const abs = (p) => `${home}/${p}`;
@@ -638,7 +666,7 @@ async function main() {
   for (const s of bench.swaps) console.log(`[spark-run] ${s.option} on the bench: ${s.to} (was ${s.from})`);
   requireXfbSwitch(host, bench.args, [candidate, ...(baseline ? [baseline] : [])]);
   const raceArgs = [
-    "--iso", abs(iso), ...(state ? ["--state", abs(state)] : []), "--runs", values.runs,
+    "--iso", abs(iso), ...(state ? ["--state", abs(state)] : []), ...(film ? ["--film", abs(film)] : []), "--runs", values.runs,
     "--candidate", abs(candidate.dest), ...(baseline ? ["--baseline", abs(baseline.dest)] : []),
     ...benchNoiseArgs(values.noise, abs(`${BENCH}/results`)), ...bench.args
   ];

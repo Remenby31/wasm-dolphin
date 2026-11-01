@@ -2,7 +2,7 @@
 # Copyright 2026 wasm-dolphin contributors
 # SPDX-License-Identifier: MIT
 # Spark side of spark-run.mjs: one race-perf (or SPARK_PROBE: drop-meter,
-# replay-gates), detached from the ssh session that started it. Run from a
+# replay-gates, parcours), detached from the ssh session that started it. Run from a
 # pushed harness tree under ~/salon-bench/harness.
 #   spark-race.sh <out dir> <lane: a | b | auto> -- <probe args…>
 # Writes <out dir>.log (all output), <out dir>.lane and <out dir>.exit
@@ -20,7 +20,7 @@ want=$2
 shift 3
 probe=${SPARK_PROBE:-race-perf}
 case $probe in
-  race-perf|drop-meter|replay-gates) ;;
+  race-perf|drop-meter|replay-gates|parcours) ;;
   *) echo "[spark-race] unknown probe $probe" >> "$out.log"; echo 2 > "$out.exit"; exit 2 ;;
 esac
 B="$HOME/salon-bench"

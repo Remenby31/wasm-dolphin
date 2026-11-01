@@ -134,6 +134,8 @@ export function estimateMin(kind, args = []) {
   const sides = args.includes("--baseline") ? 2 : 1;
   // replay-gates (--extra): ~1.3 min a visit, --runs visits a side
   if (args.includes("--extra")) return Math.round(opt("runs", 4) * 2 * 1.3);
+  // parcours (--film): ~6 min a run (boot to the results and back), a side
+  if (args.includes("--film")) return Math.round(opt("runs", 1) * sides * 6);
   // drop-meter (--visits): ~1.5 min a visit (boot, scenario or state, cold and warm)
   if (args.includes("--visits")) return Math.round(opt("runs", 4) * sides * opt("visits", 2) * 1.5);
   return Math.round((opt("runs", 4) * sides * (opt("warmup", 25) + opt("secs", 20) + 20)) / 60);

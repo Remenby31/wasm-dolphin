@@ -434,6 +434,85 @@ node harness/probes/drop-meter.mjs --false-positives <A/A dir>:candidate --noise
 node harness/probes/drop-meter.mjs --analyze <dir> --native <native-ref.json>
 ```
 
+## Parcours (the whole play-through)
+
+`harness/probes/parcours.mjs` measures emulation speed and what the player
+sees everywhere a player goes, not only on race savestates: it boots the
+disc with no savestate and plays a pad film through the title, the menus, a
+selection, a load, a full game round, its results and back to a menu. Once
+a second (nothing per frame) it reads `__lastFrameInfo` (speed, new frames
+shown and produced, occupancy of the CPU thread, GPU thread and replay
+worker, the replay's draws), the drop sampler at 1 s (core ticks, disc
+bytes, EFB→XFB copies), the timeline (every present and VI output) and the
+replay's integrity counters. `lib/parcours.mjs` (pure) derives per second
+the speed (guest/host time from the core ticks), new frames per second,
+smoothness (new frames against the game's cadence, learnt as the site
+learns it: VI/n snapped, below the VI rate only with occupancy margin, else
+the VI rate), present hitches over 50 and 100 ms, and summarises each phase
+and each film section: min, p5 and median of speed, new frames and
+smoothness, the 3 worst seconds, hitches, integrity, occupancy, seconds.
+
+Phases come from generic signals only (thresholds in `lib/parcours.mjs`),
+each lasting at least 2 s (a shorter run joins the phase before it):
+`boot` before the first new frame; `loading` when the disc reads ≥ 2.5 MiB/s
+while new frames fall under 90 % of the cadence; `cinematic` for new frames
+without EFB→XFB copies, or with a disc stream (≥ 0.5 MiB/s) and almost no
+draws (< 30 a frame: a movie decoded on the CPU and drawn as a quad, which
+the GPU still copies); `game` against `menu` by the replay's draws per frame
+made (≥ 200 by default; a film may set its own, `detect.gameDrawsPerFrame`).
+Draws per frame are a weak signal: a lighter game mode can draw as little as
+a menu, and then only the film's own threshold (data) separates them.
+
+A film (local data, never in the repo, like the disc):
+
+```json
+{ "unit": "poll", "ports": [0, 1], "end": 34760, "detect": { "gameDrawsPerFrame": 200 },
+  "steps": [
+    { "at": 120, "port": 0, "mask": 1, "stick": [128, 128] },
+    { "at": 1558, "phase": "menu", "label": "title", "timeoutSec": 60 },
+    { "at": 5657, "port": 0, "auto": { "amp": 60, "periodPolls": 180, "recoverPolls": 300, "bias": 0 } } ] }
+```
+
+`at` counts the game's own SI polls (the lowest port's), so a replay presses
+the same buttons at the same frames whatever the speed (salon's
+measure-safari format, `harness/lib/pad-film-worker.js`, a worker writing
+the core's direct pad block one poll ahead, ports 0-3). In dual core a
+replay drifts after a minute or so, hence RESYNC markers: at a marker the
+film holds (neutral pad; a port under the autopilot keeps driving) until the
+phase found matches, or `timeoutSec` (default `--marker-timeout`) passes:
+then the run is INCOMPLETE and never counts. `auto` drives a game round (A
+held, the stick a sine around 128 + bias; when the picture stands still,
+element screenshots compared every 2 s, B and the stick the other way) until
+the port's next pad step. A run is COMPLETE when every marker was reached in
+order and the phases found contain the markers' phases in that order.
+
+```sh
+# a first film without a human: a host-time step list (lib/steps.mjs kinds,
+# Playwright key names mapped like the engine's keyboard, plus
+# { "mark": "menu", "label": "title" } and { "auto": 240, "until": "menu" }),
+# recorded on the polls it took effect; --shots keeps a picture per mark
+node harness/probes/parcours.mjs --iso disc.iso --port N --record steps.json --film-out film.json --shots [--shot-every 5]
+# replayed: summary.json (per second, per phase, per section, completed,
+# probe version, machine, power, load), timeline-<side>-<run>.png (speed and
+# new frames against time, phases as coloured bands, markers)
+node harness/probes/parcours.mjs --iso disc.iso --port N --film film.json [--query "cpu=single…"]
+# A/A, then A/B: runs alternate the sides; each phase kind (kind:game) and
+# section (section:race) is compared on its own, never by timestamp
+node harness/probes/parcours.mjs --iso disc.iso --port N --film film.json --runs 6
+node harness/probes/parcours.mjs --iso disc.iso --port N --film film.json --runs 6 --baseline origin/main --noise <A/A dir>/summary.json
+```
+
+The query is the product's (`cpu=dual`) unless `--query` says otherwise. A
+timing measure: load gate and mains only, the perf lock (`--no-lock` under
+`lib/lock-run.mjs`); a watchdog started once the lock is held ends a probe
+that overruns. Exit 0 complete, 1 a run failed or did not complete, 2 a
+regression or a broken integrity, 3 no verdict. On the Spark:
+`spark-run.mjs --probe parcours --film <local film.json> --headed :2 -- --query "<product query>"`
+(the film is pushed private next to the disc). `lib/parcours.mjs` takes
+samples from any source: the iPhone through the Safari agent's
+measure-safari can feed it the same fields (its film player is this one's
+origin).
+
 ## KPI probes and report
 
 The program's KPIs (PROGRAM.md, « KPI du programme ») that race-perf does not
