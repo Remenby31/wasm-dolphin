@@ -40,22 +40,44 @@ export async function runCoreControl({
   now = () => Date.now()
 }) {
   const id = request(op, path) | 0;
-  if (id === -1) throw new Error(`${what}: ${CORE_CONTROL_STUCK}`);
-  if (id <= 0) throw new Error(`${what}: the emulator refused the request`);
+  if (id === -1) throw controlError(`${what}: ${CORE_CONTROL_STUCK}`, "stuck");
+  if (id <= 0) throw controlError(`${what}: the emulator refused the request`, "refused");
   const deadline = now() + timeoutMs;
   let late = false;
   for (;;) {
     const rc = result(id) | 0;
     if (rc === 1 || rc === 2) return { id, late: late || rc === 2 };
     if (rc === -1 || rc === -3) {
-      throw new Error(`${what}: the emulator could not do it${rc === -3 ? " (it gave up late)" : ""}`);
+      throw controlError(`${what}: the emulator could not do it${rc === -3 ? " (it gave up late)" : ""}`, "failed");
     }
     if (rc === -2) late = true;
     if (now() >= deadline) {
       abandon(id);
-      throw new Error(`${what}: the emulator did not finish within ${Math.round(timeoutMs / 1000)} s; ` +
-        CORE_CONTROL_GAVE_UP);
+      throw controlError(`${what}: the emulator did not finish within ${Math.round(timeoutMs / 1000)} s; ` +
+        CORE_CONTROL_GAVE_UP, "timeout");
     }
     await sleep(pollMs);
+  }
+}
+
+// error.code: "refused" (no runtime yet, a bad request), "failed" (the core
+// could not: a pause while the game still boots), "timeout" (given up after
+// the worker's limit), "stuck" (refused behind a request given up on).
+function controlError(message, code) {
+  return Object.assign(new Error(message), { code });
+}
+
+// Pause and resume keep the answer of the synchronous SetCorePaused they
+// replace (0209): 1 when the core reached the state, 0 when it refused or
+// could not, as while a game still boots (callers retry until it holds:
+// throwing there left a salon game running behind its loading screen,
+// 2026-11-01). A time limit or a stuck thread still throws.
+export async function setPausedThroughControl(control, paused) {
+  try {
+    await control(paused ? CORE_CONTROL_OPS.pause : CORE_CONTROL_OPS.resume, "", paused ? "pause" : "resume");
+    return 1;
+  } catch (error) {
+    if (error?.code === "refused" || error?.code === "failed") return 0;
+    throw error;
   }
 }
