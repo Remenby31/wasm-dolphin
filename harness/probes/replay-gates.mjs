@@ -244,6 +244,8 @@ function frameDiff(a, b) {
 const frameOf = (x) => ({ width: x.width, height: x.height, data: Buffer.from(x.b64, "base64") });
 const median = (a) => { const s = [...a].sort((x, y) => x - y); return s.length ? s[s.length >> 1] : null; };
 const summary = { probe: "replay-gates", extra: o.extra, order, picture: {}, input: {},
+  // spark-run --loaded: the lane's cores were not waited free (a correctness run)
+  ...(process.env.SPARK_LOADED === "1" ? { loaded: true } : {}),
   integrity: visits.filter((v) => v.integrity?.fatal?.length).map((v) => ({ visit: v.n, side: v.side, fatal: v.integrity.fatal })) };
 {
   const read = visits.map((v) => v.pthreads).filter((p) => Number.isFinite(p?.running));
