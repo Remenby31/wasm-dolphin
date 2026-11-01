@@ -16,11 +16,15 @@
 // frame, the new one is dropped (the next one is fresher anyway).
 //
 // The stream keeps its own size: at internal resolution N (patch 0168) the
-// canvas is 640N x 480N and changes size with every switch. A wider canvas is
-// first drawn into a STREAM_WIDTH-wide canvas (a GPU blit with filtering),
-// so the encoder always gets 640x480, whatever the scale.
+// canvas is 640N x 480N and changes size with every switch. A larger canvas
+// is first drawn into a STREAM_HEIGHT-line canvas (a GPU blit with
+// filtering), its width following the picture's aspect: 640x480 in 4:3,
+// 854x480 in 16:9 (patch 0178), whatever the scale; never wider than
+// STREAM_MAX_WIDTH.
 
 export const STREAM_WIDTH = 640;
+export const STREAM_HEIGHT = 480;
+export const STREAM_MAX_WIDTH = 854;
 const MAX_SIZES = 8;
 
 export class StreamCapture {
@@ -29,12 +33,14 @@ export class StreamCapture {
     now = () => performance.now(),
     VideoFrameImpl = globalThis.VideoFrame,
     createCanvas = (w, h) => new OffscreenCanvas(w, h),
-    streamWidth = STREAM_WIDTH
+    streamWidth = STREAM_MAX_WIDTH,
+    streamHeight = STREAM_HEIGHT
   } = {}) {
     this.now = now;
     this.VideoFrameImpl = VideoFrameImpl;
     this.createCanvas = createCanvas;
     this.streamWidth = streamWidth;
+    this.streamHeight = streamHeight;
     this.scaler = null;
     this.writer = null;
     this.stats = StreamCapture.emptyStats();
@@ -120,7 +126,7 @@ export class StreamCapture {
   }
 
   // A canvas just presented (WebGPU or WebGL backbuffer), brought down to
-  // the stream's width first when it is wider.
+  // the stream's size first when it is larger.
   offerCanvas(canvas, coreFrame) {
     if (!canvas || !this.ready()) return;
     const startedAt = this.now();
@@ -137,9 +143,11 @@ export class StreamCapture {
   }
 
   streamSource(canvas) {
-    if (!(canvas.width > this.streamWidth)) return canvas;
-    const width = this.streamWidth;
-    const height = Math.round(canvas.height * width / canvas.width);
+    const scale = Math.min(1, this.streamHeight / canvas.height, this.streamWidth / canvas.width);
+    if (!(scale < 1)) return canvas;
+    // Even sizes: the encoders want them (854x480 for 16:9).
+    const width = Math.max(2, Math.round(canvas.width * scale / 2) * 2);
+    const height = Math.max(2, Math.round(canvas.height * scale / 2) * 2);
     if (!this.scaler || this.scaler.canvas.width !== width || this.scaler.canvas.height !== height) {
       const scaled = this.createCanvas(width, height);
       const ctx = scaled.getContext("2d", { alpha: false });
