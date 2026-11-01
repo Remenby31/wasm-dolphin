@@ -94,7 +94,8 @@ test("the worker records presents only while the harness watches, and replay-gat
   assert.match(gates, /flicker: \{ type: "string", default: "0" \}/);
   assert.match(gates, /const found = findFlicker\(distinctRuns\(watch\), \{ cols: watch\.cols, rows: watch\.rows \}\);/);
   assert.match(worker, /if \(harnessFlicker\.active\) harnessFlicker\.noteOp\(op\);\n\s+let replayRecordAccepted = true;/);
-  assert.match(gates, /if \(!found\.triples\) throw new Error\(`flicker watch: no triple to judge/);
+  // nothing to judge: fatal on cpu=single only, reported on cpu=dual
+  assert.match(gates, /if \(!found\.triples\) \{\n\s+const why = `flicker watch: no triple to judge[^\n]*\n\s+if \(flickerFatal\(o\.query, `\$\{o\.query\}\$\{o\.extra\}`\)\) throw new Error\(why\);\n\s+v\.flicker\.unjudged = why;/);
   assert.match(gates, /process\.exit\(failed\.length \|\| empty\.length \|\| summary\.integrity\.length \|\| flickerFails \? 1 : 0\);/);
   assert.match(gates, /!summary\.integrity\.length && !flickerFails \? 0 : 1\);/);
   assert.match(gates, /summary\.flickerFatal = flickerFatal\(o\.query, `\$\{o\.query\}\$\{o\.extra\}`\);\nconst flickerFails = summary\.flickerFatal \? summary\.flicker\.length : 0;/);

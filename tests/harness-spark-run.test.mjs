@@ -523,7 +523,7 @@ test("spark-run --loaded: correctness runs skip the cores wait, speed probes kee
   assert.ok(!launchCommand({ harnessDir: "/h", outDir: "/r/x", raceArgs: [], probe: "replay-gates" }).includes("SPARK_LOADED"));
   for (const probe of ["race-perf", "drop-meter"]) assert.throws(() => launchCommand({ harnessDir: "/h", outDir: "/r/x", raceArgs: [], probe, loaded: true }), /correctness probes only/);
   const race = await readFile(new URL("../harness/remote/spark-race.sh", import.meta.url), "utf8");
-  assert.match(race, /if \[ "\$\{SPARK_LOADED:-0\}" = 1 \]; then[\s\S]*spark-queue\.mjs wait --pid \$\$ --kind pair --lanes "\$want" --name "\$\(basename "\$out"\)" -- "\$@"\)\n\s+else/);
+  assert.match(race, /if \[ "\$\{SPARK_LOADED:-0\}" = 1 \] && \[ "\$probe" = replay-gates \]; then[\s\S]*spark-queue\.mjs wait --pid \$\$ --kind pair --lanes "\$want" --name "\$\(basename "\$out"\)" -- "\$@"\)\n\s+else/);
   const gates = await readFile(new URL("../harness/probes/replay-gates.mjs", import.meta.url), "utf8");
   assert.match(gates, /\.\.\.\(process\.env\.SPARK_LOADED === "1" \? \{ loaded: true \} : \{\}\),/);
 });

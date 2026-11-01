@@ -12,6 +12,9 @@
 // other than to it:
 //   min(d(A,B), d(B,C)) >= floor   and   d(A,C) <= ratio * min(d(A,B), d(B,C))
 // d: mean absolute luma difference (0-255) over the signature.
+// A game's own blinking (an invincibility flash, a menu cursor, a
+// transparency drawn every other frame) matches the rule too: watch scenes
+// without it (replay-gates --flicker says which).
 
 export const FLICKER_FLOOR = 1.0;
 

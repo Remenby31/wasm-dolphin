@@ -38,7 +38,7 @@ export PATH="$B/node/bin:$PATH"
   # <out>.cores.
   # SPARK_LOADED=1 (spark-run --loaded, replay-gates only): a correctness
   # run takes its turn without waiting for the cores to be free.
-  if [ "${SPARK_LOADED:-0}" = 1 ]; then
+  if [ "${SPARK_LOADED:-0}" = 1 ] && [ "$probe" = replay-gates ]; then
     echo "[spark-race] loaded: the lane's cores are not waited free (correctness run)"
     node harness/remote/spark-cores.mjs check --cpus "${SPARK_CHROME_CPUS:-15-19},${SPARK_NODE_CPUS:-10-14}" --exclude-tree $$ > "$out.cores" 2>&1
     lane=$(node harness/remote/spark-queue.mjs wait --pid $$ --kind pair --lanes "$want" --name "$(basename "$out")" -- "$@")

@@ -41,8 +41,14 @@
 // input phase (the frames are the measure).
 // --flicker S (glitch-meter G4, lib/flicker.mjs): after the frames, S
 // seconds of presented pictures (sampled rows) watched for one that comes
-// and goes (A-B-A); one found fails (exit 1) and keeps its three pictures
-// as out/flicker-visit<n>-<k>.png.
+// and goes (A-B-A); one found keeps its three pictures as
+// out/flicker-visit<n>-<k>.png. Fatal (exit 1) in cpu=single only; in
+// cpu=dual counted per visit (summary.flickerPerVisit), as is a watch with
+// nothing to judge. Pick the scene: content that blinks on purpose (an
+// invincibility flash, a menu cursor, a transparency drawn every other
+// frame) is an A-B-A too. The race and 2P states have none (Mac and Spark
+// cpu=single: 0, the closest clean ratio 0.803); a new scene needs a clean
+// cpu=single run first.
 // visits.json keeps each captured frame's sha256 (hashes), so the frames of
 // two trees can be compared exactly from two runs.
 // Exit 1 when a visit failed, a side has no picture or no input reading, or
@@ -198,7 +204,14 @@ try {
           distinct: found.distinct, triples: found.triples, closestRatio: found.closestRatio,
           flagged: found.flagged.map(({ frames, ...t }) => t) };
         log(`visit ${n} ${side}: flicker ${watch.presents} presents, ${found.distinct} distinct, ${found.triples} triples, closest ratio ${found.closestRatio}, ${found.flagged.length} A-B-A`);
-        if (!found.triples) throw new Error(`flicker watch: no triple to judge (${watch.kept} sampled presents, ${watch.gaps} gaps)`);
+        // nothing to judge (a still scene, or gaps on a loaded bench): fails
+        // the visit only where A-B-A is fatal; in cpu=dual it is reported
+        if (!found.triples) {
+          const why = `flicker watch: no triple to judge (${watch.kept} sampled presents, ${watch.gaps} gaps)`;
+          if (flickerFatal(o.query, `${o.query}${o.extra}`)) throw new Error(why);
+          v.flicker.unjudged = why;
+          log(`visit ${n} ${side}: ${why} (reported, cpu=dual)`);
+        }
       }
       // --exact: the frames are the measure, no input phase
       if (!o.exact) {
