@@ -407,7 +407,7 @@ test("spark-run --probe drop-meter|replay-gates: --headed, an explicit wgpu --qu
   assert.match(run, /positionals\.includes\("--no-lock"\)\) throw/);
   const gates = await readFile(new URL("../harness/probes/replay-gates.mjs", import.meta.url), "utf8");
   assert.doesNotMatch(gates, /baseline-query|baseline: \{/, "both sides from one tree: no --baseline");
-  assert.match(gates, /process\.exit\(failed\.length \|\| empty\.length \|\| summary\.integrity\.length \? 1 : 0\)/);
+  assert.match(gates, /process\.exit\(failed\.length \|\| empty\.length \|\| summary\.integrity\.length \|\| summary\.flicker\.length \? 1 : 0\)/);
   // review of 768b7be1: a reading needs the tracker on and presses seen
   assert.match(gates, /!v\.input\?\.enabled \|\| !v\.input\.visibleCount/);
   assert.match(gates, /!summary\.input\[side\]\.presses/);
