@@ -7,7 +7,8 @@
 //
 // One raw sample a second (the probe reads them, nothing per frame):
 //   t         host ms (timeOrigin + now) of the page's reading
-//   info      __lastFrameInfo: speed (gameSpeed %), newFps, producedFps,
+//   info      __lastFrameInfo: speed (gameSpeed %), newFps and producedFps
+//             (the worker's 500 ms window),
 //             newShown (new frames shown since boot, cumulative), outOfOrder
 //             (cumulative), cpuBusy, gpuBusy, replayBusy (occupancy of the
 //             worker's last 500 ms window, 0..1), draws (the replay's draws
@@ -102,8 +103,11 @@ export function deriveSeconds(samples, { tps = null } = {}) {
       };
     }
     if (c && (!prevCounters || c.t > prevCounters.t)) prevCounters = c;
+    // the worker's own rate (its 500 ms stats window): the cumulative count
+    // moves once per stats post, so its difference over one page second
+    // swings by a post's worth (~45 / ~75 at 60); the count only without it
     const shown = delta(ia.newShown, ib.newShown);
-    const newFps = shown != null ? shown / dt : num(ib.newFps);
+    const newFps = num(ib.newFps) ?? (shown != null ? shown / dt : null);
     const producedFps = num(ib.producedFps);
     const speed = carried?.speed ?? num(ib.speed);
     const draws = delta(ia.draws, ib.draws);
