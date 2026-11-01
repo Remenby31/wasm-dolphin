@@ -118,7 +118,9 @@ export function createCoreLifecycle({
     beforeTransition(paused);
     let state = before;
     try {
-      if (!setCorePaused(paused ? 1 : 0)) {
+      // awaited: on a core with the control pthread (0209) the pause runs
+      // there, the worker keeping the replay going meanwhile
+      if (!(await setCorePaused(paused ? 1 : 0))) {
         throw new Error(`${action}: SetCorePaused refused (core ${stateName()})`);
       }
       state = await waitFor((s) => s === wanted, timeoutMs, action, wanted);
@@ -154,7 +156,7 @@ export function createCoreLifecycle({
       } catch (error) {
         persistErrors.push(String(error?.message || error));
       }
-      stopCore();
+      await stopCore();
       const state = await waitFor(
         (s) => s === CORE_STATES.uninitialized,
         stopTimeoutMs,

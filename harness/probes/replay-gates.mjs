@@ -17,6 +17,8 @@
 //     --query "<base query>" --extra "&wgpureplayms=0" [--runs 4 (visits per side, even)] [--vi 240,600]
 //     [--candidate <dir to serve>] [--lock-wait 14400]
 // One tree serves both sides (only --extra differs): no --baseline.
+// --slot-saves N: N slot saves in a row after the load, each bounded at 60 s;
+// any that fails or never answers fails the visit.
 // --slot-reload: after the file load, the state goes through the slot path
 // (save slot 1, load slot 1) and frames count from that load; the save runs
 // at a host-time moment, so its frames are compared within a run, not across
@@ -40,7 +42,7 @@ const { values: o } = parseArgs({ options: {
   iso: { type: "string" }, state: { type: "string" }, port: { type: "string" }, out: { type: "string" },
   query: { type: "string" }, extra: { type: "string" }, runs: { type: "string", default: "4" }, vi: { type: "string", default: "240,600" },
   candidate: { type: "string" }, "lock-wait": { type: "string", default: "14400" },
-  "slot-reload": { type: "boolean", default: false }
+  "slot-reload": { type: "boolean", default: false }, "slot-saves": { type: "string", default: "0" }
 }, strict: true });
 for (const k of ["iso", "state", "port", "out", "query", "extra"]) if (!o[k]) throw new Error(`--${k} is required`);
 if (existsSync(o.out)) throw new Error(`${o.out} exists`);
@@ -71,6 +73,21 @@ try {
       // load slot 1), the frames counted from that load and the slot load
       // inside the integrity window (its frames depend on when the save ran:
       // compare its integrity, not its pixels, across trees)
+      // --slot-saves N: N slot saves in a row (no load), each bounded; one
+      // that never answers fails the visit (the deadlock 0209 removed)
+      if (Number(o["slot-saves"]) > 0) {
+        v.saves = [];
+        for (let k = 0; k < Number(o["slot-saves"]); k += 1) {
+          const t0 = Date.now();
+          const r = await workerRequest(session.page, "saveState", { slot: 1 }, 60000);
+          const ms = Date.now() - t0;
+          v.saves.push({ ms, saved: Boolean(r?.saved), error: r?.error ?? null });
+          log(`visit ${n} ${side}: save ${k + 1} ${r?.saved ? "ok" : `FAILED (${r?.error})`} in ${ms} ms`);
+          await new Promise((res) => setTimeout(res, 2000));
+        }
+        const failed = v.saves.filter((x) => !x.saved).length;
+        if (failed) throw new Error(`${failed} of ${v.saves.length} slot saves failed`);
+      }
       if (o["slot-reload"]) {
         // each step bounded and timed: a slot request that never answers
         // fails the visit instead of holding the bench (2026-10-31: 49 min)

@@ -213,3 +213,10 @@ test("liveness without a decoded picture: produced frames, else unread", async (
   assert.match(frozenReason({ speed: 100, visualFps: [0, 0, 0] }), /^FROZEN: the picture changes 0 times/);
   assert.match(frozenReason({ speed: 100, visualFps: [0, 0, 0] }, { query: "core=upstream&video=wgpu&speed=1" }), /^FROZEN: the picture changes 0 times/);
 });
+
+test("replay-gates --slot-saves: N bounded slot saves, a failure fails the visit", async () => {
+  const gates = await readFile(new URL("../harness/probes/replay-gates.mjs", import.meta.url), "utf8");
+  assert.match(gates, /"slot-saves": \{ type: "string", default: "0" \}/);
+  assert.match(gates, /const r = await workerRequest\(session\.page, "saveState", \{ slot: 1 \}, 60000\);/);
+  assert.match(gates, /if \(failed\) throw new Error\(`\$\{failed\} of \$\{v\.saves\.length\} slot saves failed`\);/);
+});
