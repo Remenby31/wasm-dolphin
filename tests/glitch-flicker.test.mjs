@@ -87,7 +87,7 @@ test("the strip shows the three pictures side by side", () => {
 
 test("the worker records presents only while the harness watches, and replay-gates --flicker judges them", async () => {
   const worker = await read("../src/upstream-discio-worker.js");
-  assert.match(worker, /if \(harnessFlicker\.active\) harnessFlicker\.onPresent\(readbackWgpuPresentSignature, wgpuExactCapture\.currentLoad\(\)\);/);
+  assert.match(worker, /if \(harnessFlicker\.active\) harnessFlicker\.onPresent\(readbackWgpuPresentSignature, wgpuExactCapture\.currentLoad\(\),\n\s+wgpuPresentedSource \? \{ texture: wgpuPresentedSource\.textureId \?\? null, rect: wgpuPresentedSource\.rect \?\? null \} : null\);/);
   assert.match(worker, /case "validationFlickerWatch":\n\s+return harnessFlickerRequest\(payload\);/);
   assert.match(worker, /if \(!harnessEnabled\) return \{ error: "harness hooks are off" \};\n\s+if \(action === "start"\) \{\n\s+if \(!\(harnessVideoBackend === "WebGPU-Real" \|\| harnessVideoBackend === "WebGPU"\)\) return \{ error: `flicker watch/);
   const gates = await read("../harness/probes/replay-gates.mjs");

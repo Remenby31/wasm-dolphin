@@ -43,7 +43,7 @@ export function distinctRuns(watch, decode = (b64) => new Uint8Array(Buffer.from
       for (const [k, n] of Object.entries(f.ops ?? {})) last.ops[k] = (last.ops[k] ?? 0) + n;
       continue;
     }
-    run.push({ seq: f.seq, at: f.at, vi: f.vi ?? null, ops: { ...(f.ops ?? {}) }, sig, presents: 1 });
+    run.push({ seq: f.seq, at: f.at, vi: f.vi ?? null, source: f.source ?? null, ops: { ...(f.ops ?? {}) }, sig, presents: 1 });
   }
   if (run.length) runs.push(run);
   return runs;
@@ -88,7 +88,7 @@ export function findFlicker(runs, { floor = FLICKER_FLOOR, ratio = FLICKER_RATIO
         flagged.push({ seqA: a.seq, seqB: b.seq, seqC: c.seq, viA: a.vi, viB: b.vi, viC: c.vi, atB: b.at, presentsB: b.presents,
           ab: round(ab), bc: round(bc), ac: round(ac), ratio: round(r),
           region: cols && rows ? changedRegion(a.sig, b.sig, cols, rows) : null,
-          ops: { A: a.ops, B: b.ops, C: c.ops }, frames: [a, b, c] });
+          ops: { A: a.ops, B: b.ops, C: c.ops }, sources: { A: a.source, B: b.source, C: c.source }, frames: [a, b, c] });
       }
     }
   }
