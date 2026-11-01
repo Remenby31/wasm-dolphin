@@ -20,6 +20,7 @@ import { createDisplayFilter, displayFilterFits, displayFilterOutputSize, normal
 import { gxClearDepthToStored, gxDepthState } from "./wgpu-depth-state.js";
 import { clampSourceRect, createWgpuExactCapture, packReadbackRows } from "./wgpu-exact-capture.js";
 import { createUniqueFrameCounter, hashRows, sampleRowOffsets } from "./harness-unique-frames.js";
+import { createFlickerRecorder, lumaSignature, SIGNATURE_ROWS } from "./harness-flicker.js";
 import { decodePrebuiltCache } from "./prebuilt-jit-cache-format.js";
 import {
   AOT_COMPILER_WORKER_NAME,
@@ -1738,6 +1739,42 @@ function readbackWgpuPresentRowsHash() {
   });
 }
 
+// Glitch-meter G4 (harness only, src/harness-flicker.js): each present's
+// sampled rows, as luma, while the harness watches for flicker.
+const harnessFlicker = createFlickerRecorder();
+function readbackWgpuPresentSignature() {
+  const shown = wgpuPresentedSource;
+  const entry = shown?.textureId ? webGpuObjects.textures.get(shown.textureId) : null;
+  if (!entry || !renderGpu || !shown.rect) throw new Error("no presented WebGPU texture to sample");
+  const rect = clampSourceRect(shown.rect, entry.tex.width, entry.tex.height);
+  if (!rect) throw new Error("presented rectangle lies outside its texture");
+  const rows = sampleRowOffsets(rect.h, SIGNATURE_ROWS);
+  const bytesPerRow = Math.ceil(rect.w * 4 / 256) * 256;
+  const dev = renderGpu.device;
+  const buffer = dev.createBuffer({ size: bytesPerRow * rows.length, usage: 0x1 | 0x8 });
+  const encoder = dev.createCommandEncoder({ label: "harness-flicker" });
+  rows.forEach((row, i) => encoder.copyTextureToBuffer({ texture: entry.tex, origin: { x: rect.x, y: rect.y + row, z: 0 } },
+    { buffer, offset: i * bytesPerRow, bytesPerRow }, { width: rect.w, height: 1, depthOrArrayLayers: 1 }));
+  dev.queue.submit([encoder.finish()]);
+  return buffer.mapAsync(0x1).then(() => {
+    const sig = lumaSignature(new Uint8Array(buffer.getMappedRange()), rect.w, rows.length, bytesPerRow, entry.format === "bgra8unorm");
+    buffer.unmap();
+    buffer.destroy();
+    return sig;
+  });
+}
+
+async function harnessFlickerRequest({ action } = {}) {
+  if (!harnessEnabled) return { error: "harness hooks are off" };
+  if (action === "start") {
+    if (!(harnessVideoBackend === "WebGPU-Real" || harnessVideoBackend === "WebGPU")) return { error: `flicker watch: WebGPU presents only (backend ${harnessVideoBackend ?? "unknown"})` };
+    harnessFlicker.start();
+    return { started: true };
+  }
+  if (action === "stop") return harnessFlicker.stop();
+  return { error: `flicker watch: action ${action}` };
+}
+
 async function harnessUniqueFramesRequest({ action } = {}) {
   if (!harnessEnabled) return { error: "harness hooks are off" };
   if (action === "start") {
@@ -2361,6 +2398,8 @@ async function handleMessage(type, payload) {
         ...(aotTestHeapShiftBytes ? { heapShift: coreBoot.attempted ? "too-late" : "before-boot" } : {}) };
     case "validationReadTimeline":
       return readHarnessTimeline();
+    case "validationFlickerWatch":
+      return harnessFlickerRequest(payload);
     case "validationUniqueFrames":
       return harnessUniqueFramesRequest(payload);
     case "validationPcSampler":
@@ -14750,6 +14789,7 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
     const replayOpStartedAt = causalMetricsEnabled
       ? wgpuReplayOpMetrics.beginReplay(op)
       : null;
+    if (harnessFlicker.active) harnessFlicker.noteOp(op);
     let replayRecordAccepted = true;
     try {
       switch (op) {
@@ -17147,6 +17187,8 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
           wgpuNextPresentSource = null;
           wgpuExactCapture.onPresent(readbackWgpuPresentSource);
           if (harnessUniqueFrames.active) harnessUniqueFrames.onPresent(readbackWgpuPresentRowsHash);
+          if (harnessFlicker.active) harnessFlicker.onPresent(readbackWgpuPresentSignature, wgpuExactCapture.currentLoad(),
+            wgpuPresentedSource ? { texture: wgpuPresentedSource.textureId ?? null, rect: wgpuPresentedSource.rect ?? null } : null);
           scheduleDetachedWgpuBitmap(q);
           webGpuExecStats.present++;
           if (webGpuExecStats.present - webGpuExecStats.lastLog >= 120) {
