@@ -23,6 +23,12 @@
 // (save slot 1, load slot 1) and frames count from that load; the save runs
 // at a host-time moment, so its frames are compared within a run, not across
 // trees (its integrity is, the slot load inside the window).
+// --quickload: after the frames, a quick save and load (slot 2, the load
+// ~50 ms after the save, as a player's quickload): the core then holds no
+// swap on the last picture (patch 0211, staleXfbHeld) for the next 60 VIs.
+// A load restores the texture cache's entry ids; the XFB ids the presenter
+// remembered from before it named other pictures and held the pre-load one.
+// Run it where the GPU thread keeps up (the Mac): there a hold has no cause.
 // --bad-state-load: after the file load, import a state that passes every
 // page-side check (this game, this version, the payload's start) but ends
 // right after the RAM, and load it: Dolphin fails it and undoes the load.
@@ -60,7 +66,7 @@ const { values: o } = parseArgs({ options: {
   query: { type: "string" }, extra: { type: "string" }, runs: { type: "string", default: "4" }, vi: { type: "string", default: "240,600" },
   candidate: { type: "string" }, "lock-wait": { type: "string", default: "14400" },
   "slot-reload": { type: "boolean", default: false }, "slot-saves": { type: "string", default: "0" },
-  "bad-state-load": { type: "boolean", default: false },
+  "bad-state-load": { type: "boolean", default: false }, quickload: { type: "boolean", default: false },
   exact: { type: "boolean", default: false }
 }, strict: true });
 for (const k of ["iso", "state", "port", "out", "query", ...(o.exact ? [] : ["extra"])]) if (!o[k]) throw new Error(`--${k} is required`);
@@ -179,6 +185,21 @@ try {
         v.frames[index] = f.error ? { error: f.error } : { width: f.width, height: f.height, b64: Buffer.from(f.data).toString("base64"),
           // comparable across trees and runs: the same pixels, the same hash
           sha256: createHash("sha256").update(f.data).digest("hex") };
+      }
+      if (o.quickload) {
+        const held = async () => (await workerRequest(session.page, "validationReadIntegrity", {}, 10000))?.staleXfbHeld ?? null;
+        const saved = await workerRequest(session.page, "saveState", { slot: 2 }, 60000);
+        if (!saved?.saved) throw new Error(`quickload: the save failed: ${saved?.error ?? "no answer"}`);
+        await sleep(50);
+        const before = await held();
+        const loaded = await workerRequest(session.page, "loadState", { slot: 2 }, 60000);
+        if (!loaded?.loaded) throw new Error(`quickload: the load failed: ${loaded?.error ?? "no answer"}`);
+        const after60 = await captureAtVi(session.page, { index: 60, fromLoad: true, timeoutMs: 60000 });
+        const after = await held();
+        v.quickload = { heldBefore: before, heldAfter: after, held: before === null || after === null ? null : after - before, capture: after60.error ?? "ok" };
+        log(`visit ${n} ${side}: quickload ${JSON.stringify(v.quickload)}`);
+        if (v.quickload.held === null) throw new Error("quickload: staleXfbHeld unread (a core before 0211?)");
+        if (v.quickload.held > 0) throw new Error(`quickload: ${v.quickload.held} swap(s) held on the last picture right after the load`);
       }
       // --exact: the frames are the measure, no input phase
       if (!o.exact) {
