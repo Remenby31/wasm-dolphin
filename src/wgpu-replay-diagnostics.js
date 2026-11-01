@@ -420,10 +420,11 @@ export function wgpuMappedStagingSlotCountOf(value) {
 
 // JavaScriptCore's staging: more, smaller slots. getMappedRange costs ~0.45 ms
 // per mapped MiB on an iPhone, so a 16 MiB slot cost ~8 ms a remap (47 % of
-// the replay thread in race); the iPhone A/B of 2026-10-31/11-01 chose these
-// (PLACEHOLDER until the verdict: the PR fills in its numbers).
+// the replay thread in race). The iPhone A/B of 2026-11-01 (race): 4 MiB x 8
+// took new frames from 2 to 42 a second (median) at the same game speed, and
+// slot waits from 199 (16 MiB x 4) to 20.
 export const JSC_STAGING_SLOT_MIB = 4;
-export const JSC_STAGING_SLOT_COUNT = 6;
+export const JSC_STAGING_SLOT_COUNT = 8;
 
 // The engine's own slot count. Under JavaScriptCore, 16 MiB slots used to
 // wait for a free one 610-870 times per 55 s of race with 3 slots, 330-390

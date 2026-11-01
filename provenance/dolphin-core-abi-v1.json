@@ -188,8 +188,8 @@
     {
       "path": "src/wgpu-replay-diagnostics.js",
       "hashMode": "lf-normalized",
-      "size": 44877,
-      "sha256": "5d7c83b5515d45d235b65616908e78c4d5bea4d2a206d50d759467eb1ecc77ec"
+      "size": 45431,
+      "sha256": "f4b3c67a0c5a602b7716f6cc31f797deca588be9fc53079141bfba4f67409300"
     },
     {
       "path": "src/wgpu-replay-quiescence.js",
