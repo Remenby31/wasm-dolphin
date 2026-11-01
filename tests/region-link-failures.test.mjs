@@ -79,8 +79,10 @@ test("import type and validation failures are fatal in the integrity gate, out o
   const verdict = integrityOf(start, end);
   assert.deepEqual(verdict.fatal, ["regionLinkValidation 2"]);
   assert.equal(verdict.delta.regionLinkOther, 1);
-  // a baseline tree without the counters: no delta, never fatal
-  assert.deepEqual(integrityOf({ stateLoads: 0 }, { stateLoads: 0, regionLinkValidation: 5 }).fatal, []);
+  // a baseline tree without the counters: nothing read, never fatal
+  assert.deepEqual(integrityOf({ stateLoads: 0 }, { stateLoads: 0 }).fatal, []);
+  // refusals counted before the window (at boot) are fatal on their total
+  assert.deepEqual(integrityOf({ stateLoads: 0 }, { stateLoads: 0, regionLinkValidation: 5 }).fatal, ["regionLinkValidation 5 since boot"]);
 });
 
 const workerUrl = new URL("../src/upstream-discio-worker.js", import.meta.url);

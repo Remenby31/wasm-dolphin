@@ -237,4 +237,22 @@ test("replay-gates reads the pthreads in use at each visit's end", async () => {
   const gates = await readFile(new URL("../harness/probes/replay-gates.mjs", import.meta.url), "utf8");
   assert.match(gates, /v\.pthreads = await workerRequest\(session\.page, "validationReadPthreads", \{\}, 10000\)/);
   assert.match(gates, /summary\.pthreads = read\.length \? \{ maxRunning:/);
+
+// A region module refused at boot (its first compile, before the window)
+// fails the run too: the 0196 import-table bug refused regions there and the
+// window's deltas stayed 0.
+test("region link refusals are fatal on their total since boot", async () => {
+  const { integrityOf, SINCE_BOOT_FATAL } = await import("../harness/lib/integrity.mjs");
+  assert.deepEqual([...SINCE_BOOT_FATAL], ["regionLinkImportType", "regionLinkValidation"]);
+  const zero = { regionLinkImportType: 0, regionLinkValidation: 0, regionLinkOther: 0 };
+  // refused before the window: delta 0, total 3 -> fatal
+  assert.deepEqual(integrityOf({ ...zero, regionLinkImportType: 3 }, { ...zero, regionLinkImportType: 3 }).fatal, ["regionLinkImportType 3 since boot"]);
+  // refused in the window: reported by its delta
+  assert.deepEqual(integrityOf(zero, { ...zero, regionLinkValidation: 1 }).fatal, ["regionLinkValidation 1"]);
+  // an engine out of memory (regionLinkOther) stays non-fatal, even since boot
+  assert.deepEqual(integrityOf({ ...zero, regionLinkOther: 2 }, { ...zero, regionLinkOther: 2 }).fatal, []);
+  // a core without the counters: nothing to read, never fatal
+  assert.deepEqual(integrityOf({ skipNoPass: 0 }, { skipNoPass: 0 }).fatal, []);
+  // allowed explicitly: moved to allowed
+  assert.deepEqual(integrityOf({ ...zero, regionLinkValidation: 1 }, { ...zero, regionLinkValidation: 1 }, { allow: ["regionLinkValidation"] }).allowed, ["regionLinkValidation 1 since boot"]);
 });

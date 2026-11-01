@@ -47,6 +47,10 @@ export async function readIntegrity(page, { expected = true } = {}) {
 // not count those: the loads alone cap it). Any other abort, and any failed
 // upload or range given up for another reason, stays fatal.
 
+// Fatal on their total since boot, not only on the window's delta.
+export const SINCE_BOOT_FATAL = Object.freeze(["regionLinkImportType", "regionLinkValidation"]);
+const countOf = (k, delta, end) => (delta[k] > 0 ? `${k} ${delta[k]}` : `${k} ${end[k]} since boot`);
+
 // Over a window: the delta of every counter and the fatal ones that moved,
 // but those allowed (a counter an older core does not print is null: no
 // delta, never fatal). postload: a window that starts at a state load.
@@ -61,13 +65,17 @@ export function integrityOf(start, end, { allow = [], postload = false } = {}) {
     delta[k] = end[k] - start[k];
   }
   const moved = INTEGRITY_FATAL.filter((k) => delta[k] > 0);
+  // A region module the engine refused at boot (its first compile, before
+  // any window) counts too: the window reads these totals since boot, with
+  // the same fatal rule (the 0196 import-table bug refused regions there).
+  for (const k of SINCE_BOOT_FATAL) if (!moved.includes(k) && end[k] > 0) moved.push(k);
   const loads = delta.stateLoads ?? 0;
   const excusable = postload && loads > 0 ? Math.min(loads, delta.rangeFailEpoch ?? loads) : 0;
   if (delta.batchAborts > 0 && delta.batchAborts <= excusable) allow = [...allow, "batchAborts"];
   return {
     delta,
-    fatal: moved.filter((k) => !allow.includes(k)).map((k) => `${k} ${delta[k]}`),
-    allowed: moved.filter((k) => allow.includes(k)).map((k) => `${k} ${delta[k]}`)
+    fatal: moved.filter((k) => !allow.includes(k)).map((k) => countOf(k, delta, end)),
+    allowed: moved.filter((k) => allow.includes(k)).map((k) => countOf(k, delta, end))
   };
 }
 
