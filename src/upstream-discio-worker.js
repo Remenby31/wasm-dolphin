@@ -1359,6 +1359,11 @@ function wgpuRuntimeConfigPayload() {
     producerUboPackAvailable: Boolean(api?.setWebGpuUboPackEnabled),
     geometryPackEnabled: wgpuGeometryPackEnabled,
     geometryRangeEnabled: wgpuGeometryRangeEnabled,
+    // 0204's content cache (0 off, 1 on, 2 on with sampled byte checks) and
+    // the bind group cache (wgpubgcache): what the G3 oracle's reference
+    // checks it really turned off.
+    geometryCacheMode: wgpuGeometryCacheMode,
+    bindGroupCacheEnabled: Boolean(webGpuObjects.bindGroupCache),
     producerGeometryRangeAvailable: Boolean(api?.setWebGpuGeometryRangeEnabled),
     mappedStagingFastPath: wgpuMappedStageFastEnabled,
     mappedStaging: {

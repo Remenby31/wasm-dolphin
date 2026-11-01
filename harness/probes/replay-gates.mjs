@@ -31,6 +31,14 @@
 // still count from the file load. Else the visit fails.
 // Each visit ends with the pthreads in use against the pool
 // (validationReadPthreads; summary.pthreads: the most seen running).
+// --exact (glitch-meter G3, lib/glitch-oracle.mjs): the deterministic
+// oracle. cpu=single and video=wgpu required; base is the reference (every
+// WebGPU cache and grouping off, each switch read back from the replay's
+// runtime config), candidate the default (+ --extra). Per VI the reference
+// must give one hash across its visits and every default visit that same
+// hash: 0 pixels apart. A difference fails (exit 1) and keeps the reference,
+// the default and their difference (x8) as out/mismatch-<VI>-*.png. No
+// input phase (the frames are the measure).
 // visits.json keeps each captured frame's sha256 (hashes), so the frames of
 // two trees can be compared exactly from two runs.
 // Exit 1 when a visit failed, a side has no picture or no input reading, or
@@ -42,7 +50,8 @@ import path from "node:path";
 import { parseArgs } from "node:util";
 import { ensureServer, loadHarnessState, captureAtVi, workerRequest } from "../lib/browser.mjs";
 import { integrityBrief, integrityOf, readIntegrity, treeHasIntegrity } from "../lib/integrity.mjs";
-import { openSession } from "../lib/session.mjs";
+import { openSession, savePng } from "../lib/session.mjs";
+import { diffFrame, exactVerdict, oracleQueryError, referenceQuery, referenceSwitchesOn } from "../lib/glitch-oracle.mjs";
 import { setPad } from "../lib/gamepad-mock.mjs";
 import { acquirePerfLock } from "../lib/perf-lock.mjs";
 
@@ -51,9 +60,15 @@ const { values: o } = parseArgs({ options: {
   query: { type: "string" }, extra: { type: "string" }, runs: { type: "string", default: "4" }, vi: { type: "string", default: "240,600" },
   candidate: { type: "string" }, "lock-wait": { type: "string", default: "14400" },
   "slot-reload": { type: "boolean", default: false }, "slot-saves": { type: "string", default: "0" },
-  "bad-state-load": { type: "boolean", default: false }
+  "bad-state-load": { type: "boolean", default: false },
+  exact: { type: "boolean", default: false }
 }, strict: true });
-for (const k of ["iso", "state", "port", "out", "query", "extra"]) if (!o[k]) throw new Error(`--${k} is required`);
+for (const k of ["iso", "state", "port", "out", "query", ...(o.exact ? [] : ["extra"])]) if (!o[k]) throw new Error(`--${k} is required`);
+o.extra ??= "";
+if (o.exact) {
+  const why = oracleQueryError(o.query);
+  if (why) throw new Error(why);
+}
 if (existsSync(o.out)) throw new Error(`${o.out} exists`);
 const root = path.resolve(o.candidate ?? path.join(import.meta.dirname, "..", ".."));
 const perSide = Math.max(2, Number(o.runs) + (Number(o.runs) % 2));
@@ -76,7 +91,9 @@ function badStateHeader() {
 const visits = [];
 try {
   for (const [n, side] of order.entries()) {
-    const query = `${o.query}&inputlatency=1&metrics=1${side === "candidate" ? o.extra : ""}`;
+    const query = o.exact
+      ? (side === "base" ? `${referenceQuery(o.query)}&metrics=1` : `${o.query}&metrics=1${o.extra}`)
+      : `${o.query}&inputlatency=1&metrics=1${side === "candidate" ? o.extra : ""}`;
     const session = await openSession({ base: server.base, server, query, iso: o.iso, gamepads: { connected: 1 }, routes: { "**/__harness_state.sav": o.state } });
     const v = { n, side, frames: {}, input: null };
     try {
@@ -147,21 +164,34 @@ try {
           throw new Error(`a state the core cannot apply must be refused: ${JSON.stringify(v.badLoad)}`);
         }
       }
+      if (o.exact) {
+        // what the replay really runs: a reference with a switch still on
+        // compares nothing
+        const diag = await workerRequest(session.page, "rendererDiagnostics", {}, 10000);
+        v.runtimeConfig = diag?.runtimeConfig ?? null;
+        if (side === "base") {
+          const on = referenceSwitchesOn(v.runtimeConfig);
+          if (on.length) throw new Error(`the reference still runs: ${on.join(", ")}`);
+        }
+      }
       for (const index of VIS) {
         const f = await captureAtVi(session.page, { index, fromLoad: true, timeoutMs: 60000 });
         v.frames[index] = f.error ? { error: f.error } : { width: f.width, height: f.height, b64: Buffer.from(f.data).toString("base64"),
           // comparable across trees and runs: the same pixels, the same hash
           sha256: createHash("sha256").update(f.data).digest("hex") };
       }
-      await sleep(5000);
-      for (const t0 = Date.now(); Date.now() - t0 < 24000;) {
-        await setPad(session.page, 0, { pressed: ["A"] });
-        await sleep(34);
-        await setPad(session.page, 0, {});
-        await sleep(366);
+      // --exact: the frames are the measure, no input phase
+      if (!o.exact) {
+        await sleep(5000);
+        for (const t0 = Date.now(); Date.now() - t0 < 24000;) {
+          await setPad(session.page, 0, { pressed: ["A"] });
+          await sleep(34);
+          await setPad(session.page, 0, {});
+          await sleep(366);
+        }
+        await sleep(1000);
+        v.input = await session.page.evaluate(() => window.__causalTelemetry?.input?.visible ?? null);
       }
-      await sleep(1000);
-      v.input = await session.page.evaluate(() => window.__causalTelemetry?.input?.visible ?? null);
       v.integrity = integrityOf(integrityStart, await readIntegrity(session.page, { expected: integrityExpected }), { postload: true });
       v.pthreads = await workerRequest(session.page, "validationReadPthreads", {}, 10000).catch((e) => ({ error: String(e?.message || e) }));
     } catch (e) {
@@ -222,6 +252,28 @@ mkdirSync(o.out, { recursive: true });
 writeFileSync(path.join(o.out, "summary.json"), JSON.stringify(summary, null, 1) + "\n");
 writeFileSync(path.join(o.out, "visits.json"), JSON.stringify(visits.map(({ frames, ...v }) => ({ ...v,
   hashes: Object.fromEntries(Object.entries(frames).map(([vi, f]) => [vi, f.sha256 ?? null])) })), null, 1) + "\n");
+// --exact: the oracle's verdict, and the pictures of every difference
+if (o.exact) {
+  const hashed = visits.map((v) => ({ side: v.side, hashes: Object.fromEntries(Object.entries(v.frames).map(([vi, f]) => [vi, f.sha256 ?? null])) }));
+  const verdict = exactVerdict(hashed, VIS.map(String));
+  for (const row of verdict.rows.filter((r) => r.mismatches > 0)) {
+    const ref = visits.find((v) => v.side === "base" && v.frames[row.vi]?.sha256 === row.reference);
+    const bad = visits.find((v) => v.side === "candidate" && v.frames[row.vi]?.b64 && v.frames[row.vi].sha256 !== row.reference);
+    const a = frameOf(ref.frames[row.vi]), b = frameOf(bad.frames[row.vi]);
+    const diff = diffFrame(a, b);
+    row.pixels = diff.pixels;
+    savePng(a, path.join(o.out, `mismatch-${row.vi}-reference.png`));
+    savePng(b, path.join(o.out, `mismatch-${row.vi}-default-visit${bad.n}.png`));
+    savePng(diff, path.join(o.out, `mismatch-${row.vi}-diff-x8.png`));
+  }
+  summary.exact = verdict;
+  writeFileSync(path.join(o.out, "summary.json"), JSON.stringify(summary, null, 1) + "\n");
+  for (const row of verdict.rows) log(`exact VI ${row.vi}: ${row.missing ? "MISSING" : row.unstable ? "REFERENCE UNSTABLE" : row.mismatches ? `DIFFERS in ${row.mismatches} visit(s), ${row.pixels} px` : "0 px"}`);
+  const errors = visits.filter((v) => v.error);
+  for (const v of errors) log(`visit ${v.n} ${v.side}: ${v.error}`);
+  log(verdict.pass && !errors.length && !summary.integrity.length ? "EXACT: the default renders the reference's pixels at every VI" : `EXACT FAILED: ${[...verdict.failures, ...errors.map((v) => `visit ${v.n}: ${v.error}`)].join("; ")}`);
+  process.exit(verdict.pass && !errors.length && !summary.integrity.length ? 0 : 1);
+}
 // a gate that measured nothing never passes
 // __causalTelemetry.input.visible is never null (without the tracker it is
 // {enabled: false, visibleCount: 0}): a visit counts only with presses seen
