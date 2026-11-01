@@ -69,6 +69,12 @@ export const INTEGRITY_FATAL = Object.freeze([
   "framesOutOfOrder"
 ]);
 
+// Reported, never fatal (yet): counted and shown in every run's integrity.
+// stalePresents: a present of a new frame showing a texture not rewritten
+// since it was last shown (src/wgpu-stale-present.js), the late-XFB jump
+// back; fatal once the core shows the last picture instead (patch 0211).
+export const INTEGRITY_REPORTED = Object.freeze(["stalePresents"]);
+
 // The first missing resource of a skipped draw (SKIP), or -1 when it has all.
 export function skippedDrawCause(hasPass, hasPipeline, bindGroupsValid, needsVertexBuffer, vertexBufferValid, indexed, indexBufferValid) {
   if (!hasPass) return SKIP.NO_PASS;

@@ -129,6 +129,7 @@ import { createWgpuFatalReporter, handleWgpuDeviceLoss, wgpuFatalPageReason } fr
 import { coreIntegrityOf, createWgpuIntegrity, SKIP, skippedDrawCause } from "./wgpu-integrity.js";
 import { CORE_CONTROL_OPS, runCoreControl, setPausedThroughControl } from "./core-control.js";
 import { createNewFrameCounter } from "./wgpu-new-frames.js";
+import { createStalePresentDetector } from "./wgpu-stale-present.js";
 import { createBusyClock, createOccupancyMeter, readHeadroomStats } from "./occupancy-stats.js";
 import {
   attemptRetainedWgpuUpload,
@@ -509,6 +510,7 @@ function readWgpuIntegrity() {
     stagingPassCapacityQueue: webGpuCausalStats.mappedStagingPassCapacityQueueCount || 0,
     presentRejected: self._wgPresentRejectedLogCount || 0,
     framesOutOfOrder: wgpuNewFrames.outOfOrder,
+    stalePresents: wgpuStalePresent.stale,
     geometryCacheCollisions,
     geometryCacheFailed,
     presents: webGpuExecStats.present
@@ -731,6 +733,9 @@ let visualChangeFps = 0;
 // Patch 0208 (src/wgpu-new-frames.js): new XFBs shown and queued per second,
 // per window; null without frame tags (an older core, the software renderer).
 const wgpuNewFrames = createNewFrameCounter();
+// Presents of a new frame showing a texture not written since it was last
+// shown (src/wgpu-stale-present.js): the late-XFB jump back, on any device.
+const wgpuStalePresent = createStalePresentDetector();
 let newFramesPerSec = null;
 let newFramesProducedPerSec = null;
 // Occupancy per window (src/occupancy-stats.js): the CPU and GPU threads'
@@ -5479,6 +5484,9 @@ function framePayload({ forceCausalTelemetry = false } = {}) {
     newFramesProducedPerSec,
     newFramesShown: wgpuNewFrames.shownTotal,
     framesOutOfOrder: wgpuNewFrames.outOfOrder,
+    // presents of a new frame showing a texture not rewritten since its last
+    // present (src/wgpu-stale-present.js; lifetime, null without tags)
+    stalePresents: wgpuStalePresent.stale,
     // Shares of the last window, 0..1 or null (src/occupancy-stats.js).
     cpuThreadBusy,
     gpuThreadBusy,
@@ -15206,6 +15214,7 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
         case WGPU_CMD_OP_CREATE_TEXTURE: {
           const id = u32[recWord + 1];
           if (!webGpuObjects.textures.has(id)) {
+            wgpuStalePresent.created(id);
             const fmt = WGPU_TEX_FORMAT[u32[recWord + 4]] || "rgba8unorm";
             const layers = Math.max(1, u32[recWord + 6] || 1);
             const tex = dev.createTexture({
@@ -15243,6 +15252,7 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
             );
           }
           const t = webGpuObjects.textures.get(textureId);
+          wgpuStalePresent.wrote(textureId);
           const uploadSource = stagedUpload?.data ??
             new Uint8Array(moduleInstance.HEAPU8.buffer, src, uploadBytes);
           let mappedStageAccepted = false;
@@ -15583,6 +15593,7 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
               noteMissingResource("color-texture", fbId);
               break;
             }
+            wgpuStalePresent.wrote(fbId);
             colorView = ct.tex.createView({ dimension: "2d", mipLevelCount: 1,
               baseArrayLayer: 0, arrayLayerCount: 1 });
             passW = ct.tex.width;
@@ -17107,6 +17118,7 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
             wgpuNewFrames.shown(presentFrameTag, presentFrameTagEpoch);
             recordPresentedFrame(api?.getFrame?.() ?? 0, wgpuExactCapture.currentBoot());
           }
+          wgpuStalePresent.present(wgpuLastBackbufferSourceTextureId, presentFrameTag, presentFrameTagEpoch);
           wgpuPresentedSource = {
             textureId: wgpuLastBackbufferSourceTextureId, rect: wgpuNextPresentSource
           };
@@ -17181,6 +17193,7 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
           if (!s) noteMissingResource("blit-source", sourceId);
           if (!d) noteMissingResource("blit-destination", destinationId);
           if (s && d) {
+            wgpuStalePresent.wrote(destinationId);
             if (!vpDiagDone) {
               vpDiagBlitDst.set(destinationId, (vpDiagBlitDst.get(destinationId) || 0) + 1);
             }
