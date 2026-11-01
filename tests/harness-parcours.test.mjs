@@ -390,3 +390,48 @@ test("probe: a run analysed from its raw record, its summary lines and exit code
   assert.equal(rec.completion.completed, true);
   assert.deepEqual(rec.reached.map((r) => r.label), ["title", "race"]);
 });
+
+// --- the autopilot's eyes ---------------------------------------------------------
+
+// A synthetic view: sky, then a road band [roadL, roadR] (columns) on grass,
+// the player's vehicle in the middle.
+function sceneOf(w, h, roadL, roadR) {
+  const d = new Uint8Array(w * h * 4);
+  for (let y = 0; y < h; y += 1) for (let x = 0; x < w; x += 1) {
+    const c = y < h * 0.35 ? [90, 140, 250] : x >= roadL && x <= roadR ? [110, 110, 115] : [40, 160, 40];
+    const car = y > h * 0.45 && y < h * 0.8 && x > w * 0.42 && x < w * 0.6;
+    d.set(car ? [200, 30, 30, 255] : [...c, 255], (y * w + x) * 4);
+  }
+  return d;
+}
+
+test("edge follower: steers towards the middle of the road it sees, away from the side where it ends; nothing without a road ahead", async () => {
+  const { steerFromPixels } = await import("../harness/lib/edge-follower.mjs");
+  const W = 128, H = 96;
+  const centred = steerFromPixels(sceneOf(W, H, 20, 108), W, H);
+  assert.ok(Math.abs(centred.x - 128) <= 12, `centred road: ${centred.x}`);
+  const right = steerFromPixels(sceneOf(W, H, 45, 120), W, H);
+  assert.ok(right.x > 150, `road going right: ${right.x}`);
+  const left = steerFromPixels(sceneOf(W, H, 5, 85), W, H);
+  assert.ok(left.x < 106, `road going left: ${left.x}`);
+  // no one colour ahead (a wall's pattern, a menu): no steering, the sine drives
+  const busy = sceneOf(W, H, 20, 108);
+  for (let x = 0; x < W; x += 1) for (const y of [Math.floor(0.4 * H)]) busy.set([[255, 0, 0, 255], [0, 255, 0, 255], [0, 0, 255, 255]][x % 3], (y * W + x) * 4);
+  assert.equal(steerFromPixels(busy, W, H).x, null);
+  // a split screen: the bottom half's view only
+  const two = new Uint8Array(W * H * 2 * 4);
+  two.set(sceneOf(W, H, 5, 85), 0);
+  two.set(sceneOf(W, H, 45, 120), W * H * 4);
+  assert.ok(steerFromPixels(two, W, H * 2, [0, 0.5, 1, 1]).x > 150);
+  assert.ok(steerFromPixels(two, W, H * 2, [0, 0, 1, 0.5]).x < 106);
+});
+
+test("film player: the picture's steering replaces the sine under the autopilot, the way out still wins", () => {
+  const w = loadWorker();
+  const p = w.createPlayer({ unit: "poll", port: 0, end: 100, steps: [{ at: 1, auto: { recoverPolls: 5 } }] });
+  assert.equal(p.onPoll(1, { released: 0, stuck: 0, steer: { 0: 200 } }).writes[0][1].stick[0], 200);
+  assert.equal(p.onPoll(2, { released: 0, stuck: 0, steer: { 0: 60 } }).writes[0][1].stick[0], 60);
+  const out = p.onPoll(3, { released: 0, stuck: 1, steer: { 0: 60 } });
+  assert.equal(out.writes[0][1].mask, 2, "B: backing off");
+  assert.notEqual(p.onPoll(4, { released: 0, stuck: 1, steer: { 0: null } }).writes.length ? 1 : 0, 2);
+});

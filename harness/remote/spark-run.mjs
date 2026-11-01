@@ -326,10 +326,11 @@ export function checkPresentationProbe(probe, rawArgs, benchArgs, headed) {
 // hash) next to the disc and passed as --film.
 export function pushFilm(host, file) {
   const bytes = readFileSync(file);
-  const name = `${path.basename(file, ".json")}-${createHash("sha256").update(bytes).digest("hex").slice(0, 12)}.film.json`;
+  // a local file name may hold anything: a safe name, and quoted remotely
+  const name = `${safeName(path.basename(file, ".json"))}-${createHash("sha256").update(bytes).digest("hex").slice(0, 12)}.film.json`;
   const dest = `${BENCH}/roms/${name}`;
-  if (ssh(host, `test -f ${dest}`, { quiet: true }).status !== 0) {
-    ssh(host, `set -e; umask 077; cat > ${dest}.tmp; mv ${dest}.tmp ${dest}`, { input: bytes });
+  if (ssh(host, `test -f ${sh(dest)}`, { quiet: true }).status !== 0) {
+    ssh(host, `set -e; umask 077; cat > ${sh(`${dest}.tmp`)}; mv ${sh(`${dest}.tmp`)} ${sh(dest)}`, { input: bytes });
     console.log(`[spark-run] film pushed as roms/${name}`);
   }
   return dest;
