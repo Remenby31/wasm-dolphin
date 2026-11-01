@@ -2410,6 +2410,8 @@ async function handleMessage(type, payload) {
       return harnessPacingConfig();
     case "validationReadIntegrity":
       return readWgpuIntegrity();
+    case "validationReadPthreads":
+      return readPthreadUse();
     case "validationReadGeometryCache":
       return harnessGeometryCacheStats();
     case "validationReadJitRegionStats":
@@ -3894,8 +3896,11 @@ function bindApi(module) {
   // event loop (the worker keeps draining the ring meanwhile).
   const requestCoreControl = optionalCwrap("RequestCoreControl", "number", ["number", "string"]);
   const coreControlResult = optionalCwrap("CoreControlResult", "number", ["number"]);
+  const coreControlAbandon = optionalCwrap("CoreControlAbandon", null, ["number"]);
   const coreControl = requestCoreControl && coreControlResult
-    ? (op, path, what) => runCoreControl({ request: requestCoreControl, result: coreControlResult, op, path, what })
+    ? (op, path, what) => runCoreControl({
+      request: requestCoreControl, result: coreControlResult, abandon: coreControlAbandon ?? undefined, op, path, what
+    })
     : null;
 
   return {
@@ -9498,6 +9503,20 @@ async function waitForDolphinJitPthreadBarrier(timeoutMs = 30_000) {
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   return false;
+}
+
+// The core's pthreads against its pool (-sPTHREAD_POOL_SIZE=16 in the build
+// patch): running are in use now (CPU, GPU, control 0209, audio, JIT ...),
+// allocated counts the pool plus any worker Emscripten had to add past it,
+// which starts late (a pthread past the pool waits for a new Worker).
+export const PTHREAD_POOL_SIZE = 16;
+
+function readPthreadUse() {
+  const pthread = moduleInstance?.PThread;
+  if (!pthread) return { error: "Module.PThread unavailable" };
+  const running = (pthread.runningWorkers || []).length;
+  const unused = (pthread.unusedWorkers || []).length;
+  return { running, unused, allocated: running + unused, poolSize: PTHREAD_POOL_SIZE, margin: PTHREAD_POOL_SIZE - running };
 }
 
 export async function installDolphinPthreadChannels(

@@ -220,3 +220,21 @@ test("replay-gates --slot-saves: N bounded slot saves, a failure fails the visit
   assert.match(gates, /const r = await workerRequest\(session\.page, "saveState", \{ slot: 1 \}, 60000\);/);
   assert.match(gates, /if \(failed\) throw new Error\(`\$\{failed\} of \$\{v\.saves\.length\} slot saves failed`\);/);
 });
+
+test("replay-gates --bad-state-load: a state Dolphin fails and undoes must be refused, the visit fails otherwise", async () => {
+  const gates = await readFile(new URL("../harness/probes/replay-gates.mjs", import.meta.url), "utf8");
+  assert.match(gates, /"bad-state-load": \{ type: "boolean", default: false \}/);
+  // past the page's checks: this game's headers, uncompressed, the payload's start right
+  assert.match(gates, /view\.setUint16\(base \+ 2, 0, true\);/);
+  assert.match(gates, /view\.setUint32\(head\.length \+ 1, 0x1800000, true\);/);
+  assert.match(gates, /window\.__host\.adapter\.request\("importSaveState", \{ bytes: truncatedState\(header\), load: true \}\)/);
+  assert.match(gates, /if \(!\/did not load the save state\/\.test\(v\.badLoad\.error \?\? ""\)\) \{\n\s+throw new Error/);
+  // bounded, like every slot step
+  assert.match(gates, /badStateHeader\(\)\), 90000, "bad state load"\)/);
+});
+
+test("replay-gates reads the pthreads in use at each visit's end", async () => {
+  const gates = await readFile(new URL("../harness/probes/replay-gates.mjs", import.meta.url), "utf8");
+  assert.match(gates, /v\.pthreads = await workerRequest\(session\.page, "validationReadPthreads", \{\}, 10000\)/);
+  assert.match(gates, /summary\.pthreads = read\.length \? \{ maxRunning:/);
+});

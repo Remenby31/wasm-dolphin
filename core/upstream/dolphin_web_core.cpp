@@ -9,6 +9,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <mutex>
 #include <chrono>
@@ -16,6 +17,7 @@
 #include <deque>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <functional>
 #include <memory>
 #include <span>
@@ -954,14 +956,23 @@ void EnsureRuntime()
   // needed for this construct.
   State::SetOnAfterLoadCallback([]() {
     auto& system = Core::System::GetInstance();
-    const std::uint64_t loaded_ticks = system.GetCoreTiming().GetTicks();
-    s_last_loaded_ticks_low.store(static_cast<std::uint32_t>(loaded_ticks),
-                                  std::memory_order_relaxed);
-    s_last_loaded_ticks_high.store(static_cast<std::uint32_t>(loaded_ticks >> 32),
-                                   std::memory_order_relaxed);
-    s_last_loaded_ppc_pc.store(system.GetPPCState().pc, std::memory_order_relaxed);
-    s_last_loaded_checkpoint_generation.fetch_add(1, std::memory_order_release);
-    DolphinWeb_HarnessOnStateLoaded();
+    // Patch 0210: the callback runs whatever the outcome; only a load that
+    // applied the state counts as loaded (a file of another game or version,
+    // or a load undone after a failure, never reads "Loaded"). The epoch and
+    // the GPU wake below stay unconditional: needed after an undo, which
+    // replayed DoState too; for a file never read (no DoState ran), one more
+    // epoch and a wake of a running GPU loop, both harmless.
+    if (State::LastLoadApplied())
+    {
+      const std::uint64_t loaded_ticks = system.GetCoreTiming().GetTicks();
+      s_last_loaded_ticks_low.store(static_cast<std::uint32_t>(loaded_ticks),
+                                    std::memory_order_relaxed);
+      s_last_loaded_ticks_high.store(static_cast<std::uint32_t>(loaded_ticks >> 32),
+                                     std::memory_order_relaxed);
+      s_last_loaded_ppc_pc.store(system.GetPPCState().pc, std::memory_order_relaxed);
+      s_last_loaded_checkpoint_generation.fetch_add(1, std::memory_order_release);
+      DolphinWeb_HarnessOnStateLoaded();
+    }
     // Publish the semantic epoch only after State::Load has applied and the
     // checkpoint is observable. The GPU wake below then guarantees that the
     // first producer command in the new epoch belongs to the restored state.
@@ -1426,10 +1437,29 @@ int BootDisc(const char* path)
   return booted ? 1 : 0;
 }
 
+// Host jobs run one dispatcher at a time: the worker pumps them
+// (PumpHostJobs), and Core::Stop dumps the left-over ones on whichever thread
+// stops the core (the control pthread, 0209). HostDispatchJobs runs each job
+// outside its queue lock, so two dispatchers would run jobs side by side. The
+// worker never waits for the other one: it skips a pump while a stop holds the
+// dispatch (the stop runs the jobs queued meanwhile), and keeps draining the
+// GPU ring, which the stop may be waiting for.
+std::mutex s_host_dispatch_mutex;
+
+void DispatchHostJobs()
+{
+  std::unique_lock lock(s_host_dispatch_mutex, std::try_to_lock);
+  if (lock.owns_lock())
+    Core::HostDispatchJobs(Core::System::GetInstance());
+}
+
 void StopCore()
 {
   if (s_runtime_initialized)
+  {
+    std::lock_guard dispatch(s_host_dispatch_mutex);
     Core::Stop(Core::System::GetInstance());
+  }
   SetCoreStatus("Stopped");
 }
 
@@ -1439,7 +1469,7 @@ int SetCorePaused(int paused)
     return 0;
 
   Core::SetState(Core::System::GetInstance(), paused ? Core::State::Paused : Core::State::Running);
-  Core::HostDispatchJobs(Core::System::GetInstance());
+  DispatchHostJobs();
   SetCoreStatus(paused ? "Paused" : "Running");
   return 1;
 }
@@ -1529,7 +1559,7 @@ int ResetCore()
 
   Core::QueueHostJob(
       [](Core::System& system) { system.GetProcessorInterface().ResetButton_Tap(); });
-  Core::HostDispatchJobs(Core::System::GetInstance());
+  DispatchHostJobs();
   SetCoreStatus("Reset requested");
   return 1;
 }
@@ -1540,7 +1570,7 @@ int SaveCoreState(int slot)
     return 0;
 
   State::Save(Core::System::GetInstance(), slot);
-  Core::HostDispatchJobs(Core::System::GetInstance());
+  DispatchHostJobs();
   SetCoreStatus("Save state requested");
   return 1;
 }
@@ -1551,7 +1581,7 @@ int LoadCoreState(int slot)
     return 0;
 
   State::Load(Core::System::GetInstance(), slot);
-  Core::HostDispatchJobs(Core::System::GetInstance());
+  DispatchHostJobs();
   SetCoreStatus("Load state requested");
   return 1;
 }
@@ -1569,7 +1599,7 @@ int LoadStateFile(const char* path)
     return 0;
 
   State::LoadAs(Core::System::GetInstance(), std::string(path));
-  Core::HostDispatchJobs(Core::System::GetInstance());
+  DispatchHostJobs();
   SetCoreStatus("Load state from file requested");
   return 1;
 }
@@ -1591,7 +1621,7 @@ int SaveStateFile(const char* path)
   // wall-time under the worker poll (§23 size=0). Caller pumps frames
   // until the CPU thread runs the queued job; then the file is whole.
   State::SaveToFileSync(Core::System::GetInstance(), std::string(path));
-  Core::HostDispatchJobs(Core::System::GetInstance());
+  DispatchHostJobs();
   SetCoreStatus("Save state to file requested");
   return 1;
 }
@@ -1599,7 +1629,7 @@ int SaveStateFile(const char* path)
 void PumpHostJobs()
 {
   if (s_runtime_initialized)
-    Core::HostDispatchJobs(Core::System::GetInstance());
+    DispatchHostJobs();
 }
 
 // ---- 0209: requests that pause the CPU thread, off the caller's thread ----
@@ -1637,8 +1667,8 @@ struct CoreControlJob
   std::string path;
 };
 
-// A request's outcome so far, and when it is late (from when it was asked:
-// one queued behind a stuck request is late too).
+// A request's outcome so far, and when it is late: its own time counted from
+// when the thread starts it (never late while it waits its turn).
 struct CoreControlState
 {
   int rc;
@@ -1651,6 +1681,13 @@ std::deque<CoreControlJob> s_control_queue;
 std::unordered_map<int, CoreControlState> s_control_results;
 int s_control_next_id = 1;
 bool s_control_started = false;
+// The request the thread runs (0: none). Once the worker gave up on it
+// (CoreControlAbandon, past the worker's own 60 s), the thread is stuck and
+// new requests are refused at once (RequestCoreControl -1). A request only
+// late on the core's time is not stuck: it may still end (rc 2).
+int s_control_running_id = 0;
+// Requests the worker gave up on while they ran: their end is not kept.
+std::unordered_set<int> s_control_abandoned;
 
 int CoreControlTimeoutMs(CoreControlOp op)
 {
@@ -1685,6 +1722,16 @@ bool RunCoreControl(const CoreControlJob& job)
   {
     if (!Core::IsRunning(system))
       return false;
+    SetCoreStatus("Saving state");
+    // The slot's previous file moves aside first: a save that writes nothing
+    // must not read as saved from the old file, and gets it back.
+    const std::string previous = job.path + ".prev";
+    const bool had_previous = File::Exists(job.path);
+    if (had_previous && !File::Rename(job.path, previous))
+    {
+      SetCoreStatus("Save state failed");
+      return false;
+    }
     auto written = std::make_shared<std::atomic<bool>>(false);
     // On the CPU thread, SaveToFileSync runs inline: the file is whole when
     // the job returns.
@@ -1693,7 +1740,16 @@ bool RunCoreControl(const CoreControlJob& job)
       written->store(true, std::memory_order_release);
     });
     wait_until([&] { return written->load(std::memory_order_acquire); });
-    return File::GetSize(job.path) > 0;
+    const bool saved = File::Exists(job.path) && File::GetSize(job.path) > 0;
+    if (had_previous)
+    {
+      if (saved)
+        File::Delete(previous);
+      else
+        File::Rename(previous, job.path);
+    }
+    SetCoreStatus(saved ? "State saved" : "Save state failed");
+    return saved;
   }
   case CoreControlOp::LoadFile:
   {
@@ -1701,15 +1757,20 @@ bool RunCoreControl(const CoreControlJob& job)
       return false;
     const std::uint32_t before =
         s_last_loaded_checkpoint_generation.load(std::memory_order_acquire);
+    SetCoreStatus("Loading state");
     auto ran = std::make_shared<std::atomic<bool>>(false);
     // On the CPU thread, LoadAs runs LoadAsFromCore inline; the after-load
-    // callback (generation +1) runs at its end when the state was applied.
+    // callback runs at its end, and moves the generation only when the state
+    // was applied (patch 0210).
     Core::RunOnCPUThread(system, [&system, path = job.path, ran] {
       State::LoadAs(system, path);
       ran->store(true, std::memory_order_release);
     });
     wait_until([&] { return ran->load(std::memory_order_acquire); });
-    return s_last_loaded_checkpoint_generation.load(std::memory_order_acquire) != before;
+    const bool loaded =
+        s_last_loaded_checkpoint_generation.load(std::memory_order_acquire) != before;
+    SetCoreStatus(loaded ? "State loaded" : "Load state failed");
+    return loaded;
   }
   case CoreControlOp::Pause:
   case CoreControlOp::Resume:
@@ -1718,19 +1779,34 @@ bool RunCoreControl(const CoreControlJob& job)
     const Core::State wanted = pause ? Core::State::Paused : Core::State::Running;
     const Core::State state = Core::GetState(system);
     if (state == wanted)
+    {
+      SetCoreStatus(pause ? "Paused" : "Running");
       return true;
+    }
     if (state != Core::State::Running && state != Core::State::Paused)
       return false;
     // SetStepping waits here (not on the worker) for the CPU thread to stop.
     Core::SetState(system, wanted);
-    return Core::GetState(system) == wanted;
+    const bool reached = Core::GetState(system) == wanted;
+    if (reached)
+      SetCoreStatus(pause ? "Paused" : "Running");
+    return reached;
   }
   case CoreControlOp::Stop:
   {
     if (Core::GetState(system) == Core::State::Uninitialized)
+    {
+      SetCoreStatus("Stopped");
       return true;
-    Core::Stop(system);
+    }
+    {
+      // Core::Stop runs the left-over host jobs here: never beside the
+      // worker's PumpHostJobs (DispatchHostJobs).
+      std::lock_guard dispatch(s_host_dispatch_mutex);
+      Core::Stop(system);
+    }
     wait_until([&] { return Core::GetState(system) == Core::State::Uninitialized; });
+    SetCoreStatus("Stopped");
     return true;
   }
   }
@@ -1747,9 +1823,18 @@ void CoreControlThread()
       s_control_cv.wait(lock, [] { return !s_control_queue.empty(); });
       job = std::move(s_control_queue.front());
       s_control_queue.pop_front();
+      s_control_running_id = job.id;
+      s_control_results[job.id].deadline =
+          std::chrono::steady_clock::now() + std::chrono::milliseconds(CoreControlTimeoutMs(job.op));
     }
     const bool ok = RunCoreControl(job);
     std::lock_guard lock(s_control_mutex);
+    s_control_running_id = 0;
+    if (s_control_abandoned.erase(job.id))
+    {
+      s_control_results.erase(job.id);
+      continue;
+    }
     auto& state = s_control_results[job.id];
     const bool late = std::chrono::steady_clock::now() >= state.deadline;
     state.rc = late ? (ok ? 2 : -3) : (ok ? 1 : -1);
@@ -1758,8 +1843,9 @@ void CoreControlThread()
 }  // namespace
 
 // Queues a request (op: 1 save to `path`, 2 load from `path`, 3 pause,
-// 4 resume, 5 stop) and returns its id at once, or 0 when refused (no
-// runtime, unknown op, no path for a save or load).
+// 4 resume, 5 stop) and returns its id at once; 0 when refused (no runtime,
+// unknown op, no path for a save or load); -1 when the thread is stuck on a
+// request the worker gave up on (nothing more can run: reload the page).
 #ifdef __EMSCRIPTEN__
 EMSCRIPTEN_KEEPALIVE
 #endif
@@ -1772,21 +1858,40 @@ int RequestCoreControl(int op, const char* path)
   if (needs_path && (path == nullptr || *path == '\0'))
     return 0;
   std::lock_guard lock(s_control_mutex);
+  if (s_control_running_id != 0 && s_control_abandoned.count(s_control_running_id) != 0)
+    return -1;
   if (!s_control_started)
   {
     std::thread(CoreControlThread).detach();
     s_control_started = true;
   }
   const int id = s_control_next_id++;
-  s_control_results[id] = {0, std::chrono::steady_clock::now() +
-                                  std::chrono::milliseconds(CoreControlTimeoutMs(control_op))};
+  // not late while queued: its time starts with it (CoreControlThread)
+  s_control_results[id] = {0, std::chrono::steady_clock::time_point::max()};
   s_control_queue.push_back({id, control_op, needs_path ? std::string(path) : std::string()});
   s_control_cv.notify_one();
   return id;
 }
 
+// A Dolphin save slot (StateSaves/<game id>.sNN, as State::Save/Load name
+// it), for the page that runs the core without the worker
+// (upstream-main-thread-adapter.js): op 1 save, 2 load; the id as above.
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int RequestCoreControlSlot(int op, int slot)
+{
+  if (!s_runtime_initialized || slot < 0 || slot > 99 || (op != 1 && op != 2))
+    return 0;
+  char suffix[8];
+  std::snprintf(suffix, sizeof(suffix), ".s%02d", slot);
+  const std::string path =
+      File::GetUserPath(D_STATESAVES_IDX) + SConfig::GetInstance().GetGameID() + suffix;
+  return RequestCoreControl(op, path.c_str());
+}
+
 // A request's state (see above); an unknown id reads -1. A final result is
-// forgotten once read.
+// forgotten once read, or once given up (CoreControlAbandon).
 #ifdef __EMSCRIPTEN__
 EMSCRIPTEN_KEEPALIVE
 #endif
@@ -1801,6 +1906,24 @@ int CoreControlResult(int id)
     return std::chrono::steady_clock::now() >= it->second.deadline ? -2 : 0;
   s_control_results.erase(it);
   return rc;
+}
+
+// The worker gave up on a request (its own time ran out): a queued one never
+// runs, a running one ends without keeping its result, a final one is
+// forgotten. Nothing is left behind in the results.
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+void CoreControlAbandon(int id)
+{
+  std::lock_guard lock(s_control_mutex);
+  const auto queued = std::find_if(s_control_queue.begin(), s_control_queue.end(),
+                                   [id](const CoreControlJob& job) { return job.id == id; });
+  if (queued != s_control_queue.end())
+    s_control_queue.erase(queued);
+  else if (id == s_control_running_id)
+    s_control_abandoned.insert(id);
+  s_control_results.erase(id);
 }
 
 int GetCoreState()

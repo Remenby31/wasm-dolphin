@@ -1,4 +1,5 @@
 import { DEFAULT_UPSTREAM_CORE_SHA256 } from "./default-core.js";
+import { CORE_CONTROL_OPS, runCoreControl } from "./core-control.js";
 import { widenU32Counter } from "./u32-counter.js";
 import { parseDolHeader } from "./dol.js";
 import { PadPortRequests } from "./input-transport.js";
@@ -159,6 +160,12 @@ export class UpstreamMainThreadAdapter {
       setXfbFastPaths: optionalCwrap("SetXfbFastPaths", "number", ["number"]),
       bootDisc: optionalCwrap("BootDisc", "number", ["string"]),
       setCorePaused: optionalCwrap("SetCorePaused", "number", ["number"]),
+      // 0209: pause, resume and slot saves/loads on the core's control
+      // pthread (they wait for the GPU thread, whose GL calls this page runs)
+      requestCoreControl: optionalCwrap("RequestCoreControl", "number", ["number", "string"]),
+      requestCoreControlSlot: optionalCwrap("RequestCoreControlSlot", "number", ["number", "number"]),
+      coreControlResult: optionalCwrap("CoreControlResult", "number", ["number"]),
+      coreControlAbandon: optionalCwrap("CoreControlAbandon", null, ["number"]),
       resetCore: optionalCwrap("ResetCore", "number", []),
       saveCoreState: optionalCwrap("SaveCoreState", "number", ["number"]),
       loadCoreState: optionalCwrap("LoadCoreState", "number", ["number"]),
@@ -536,11 +543,35 @@ export class UpstreamMainThreadAdapter {
   }
 
   start() {
-    this.api?.setCorePaused?.(0);
+    return this.setCorePaused(false);
   }
 
   pause() {
-    this.api?.setCorePaused?.(1);
+    return this.setCorePaused(true);
+  }
+
+  // 0209: a pause waits for the CPU thread, behind the GPU thread, whose GL
+  // calls run on this page: awaited from the event loop on the core's control
+  // pthread, never inside a synchronous call (a core without it: as before).
+  setCorePaused(paused) {
+    const api = this.api;
+    if (api?.requestCoreControl && api?.coreControlResult) {
+      return runCoreControl({
+        request: api.requestCoreControl, result: api.coreControlResult, abandon: api.coreControlAbandon ?? undefined,
+        op: paused ? CORE_CONTROL_OPS.pause : CORE_CONTROL_OPS.resume, what: paused ? "pause" : "resume"
+      }).then(() => 1, (error) => { this.onStatus?.(error.message); return 0; });
+    }
+    return api?.setCorePaused?.(paused ? 1 : 0);
+  }
+
+  // A Dolphin slot through the control pthread (saved: the CPU thread wrote
+  // the file; loaded: the core applied it), else the synchronous exports.
+  slotRequest(op, slot, what) {
+    const api = this.api;
+    return runCoreControl({
+      request: (kind) => api.requestCoreControlSlot(kind, slot | 0), result: api.coreControlResult,
+      abandon: api.coreControlAbandon ?? undefined, op, what
+    }).then(() => 1, (error) => { this.onStatus?.(error.message); return 0; });
   }
 
   reset() {
@@ -550,10 +581,16 @@ export class UpstreamMainThreadAdapter {
   }
 
   saveState(slot) {
+    if (this.api?.requestCoreControlSlot && this.api?.coreControlResult) {
+      return this.slotRequest(CORE_CONTROL_OPS.saveFile, slot, `Save slot ${slot}`);
+    }
     return this.api?.saveCoreState?.(slot | 0) || this.api?.saveState(slot | 0);
   }
 
   loadState(slot) {
+    if (this.api?.requestCoreControlSlot && this.api?.coreControlResult) {
+      return this.slotRequest(CORE_CONTROL_OPS.loadFile, slot, `Load slot ${slot}`);
+    }
     return this.api?.loadCoreState?.(slot | 0) || this.api?.loadState(slot | 0);
   }
 }

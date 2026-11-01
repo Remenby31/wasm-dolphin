@@ -23,13 +23,21 @@
 // (save slot 1, load slot 1) and frames count from that load; the save runs
 // at a host-time moment, so its frames are compared within a run, not across
 // trees (its integrity is, the slot load inside the window).
+// --bad-state-load: after the file load, import a state that passes every
+// page-side check (this game, this version, the payload's start) but ends
+// right after the RAM, and load it: Dolphin fails it and undoes the load.
+// The worker must refuse it (patch 0210: a load the core did not apply never
+// counts as loaded, nor restarts the VI count) and the frames that follow
+// still count from the file load. Else the visit fails.
+// Each visit ends with the pthreads in use against the pool
+// (validationReadPthreads; summary.pthreads: the most seen running).
 // visits.json keeps each captured frame's sha256 (hashes), so the frames of
 // two trees can be compared exactly from two runs.
 // Exit 1 when a visit failed, a side has no picture or no input reading, or
 // a visit's replay integrity broke (glitch-meter G2, lib/integrity.mjs).
 // Holds the perf lock (HARNESS_PERF_LOCK); a watchdog after it; always exits.
 import { createHash } from "node:crypto";
-import { mkdirSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
 import { ensureServer, loadHarnessState, captureAtVi, workerRequest } from "../lib/browser.mjs";
@@ -42,7 +50,8 @@ const { values: o } = parseArgs({ options: {
   iso: { type: "string" }, state: { type: "string" }, port: { type: "string" }, out: { type: "string" },
   query: { type: "string" }, extra: { type: "string" }, runs: { type: "string", default: "4" }, vi: { type: "string", default: "240,600" },
   candidate: { type: "string" }, "lock-wait": { type: "string", default: "14400" },
-  "slot-reload": { type: "boolean", default: false }, "slot-saves": { type: "string", default: "0" }
+  "slot-reload": { type: "boolean", default: false }, "slot-saves": { type: "string", default: "0" },
+  "bad-state-load": { type: "boolean", default: false }
 }, strict: true });
 for (const k of ["iso", "state", "port", "out", "query", "extra"]) if (!o[k]) throw new Error(`--${k} is required`);
 if (existsSync(o.out)) throw new Error(`${o.out} exists`);
@@ -58,6 +67,12 @@ const release = await acquirePerfLock({ name: `replay-gates ${o.extra}`, waitSec
 const watchdog = setTimeout(() => { console.error("watchdog: 60 min under the lock"); release(); process.exit(2); }, 60 * 60 * 1000);
 const server = await ensureServer({ port: Number(o.port), root });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const withTimeout = (p, ms, what) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error(`${what} timed out after ${ms} ms`)), ms))]);
+// --bad-state-load: the harness state's headers (game, version), as numbers
+function badStateHeader() {
+  const bytes = readFileSync(o.state);
+  return [...bytes.subarray(0, 32 + bytes.readUInt32LE(28) + 16)];
+}
 const visits = [];
 try {
   for (const [n, side] of order.entries()) {
@@ -103,6 +118,35 @@ try {
         if (!slot.saved || !slot.loaded) throw new Error(`slot reload failed: ${JSON.stringify(slot)}`);
         v.slotReload = slot;
       }
+      if (o["bad-state-load"]) {
+        const t0 = Date.now();
+        const r = await withTimeout(session.page.evaluate(async (header) => {
+          try {
+            return await window.__host.adapter.request("importSaveState", { bytes: truncatedState(header), load: true });
+          } catch (e) {
+            return { error: String(e?.message || e) };
+          }
+          // the state's own headers, uncompressed; its payload: the console
+          // flag and MEM1 size the page checks, 24 MiB of RAM, then 4 KiB
+          function truncatedState(head) {
+            const payload = 0x1800000 + 4096;
+            const out = new Uint8Array(head.length + payload);
+            out.set(head);
+            const view = new DataView(out.buffer);
+            const base = 32 + view.getUint32(28, true);
+            view.setUint16(base + 2, 0, true);
+            view.setUint32(base + 4, 0, true);
+            view.setBigUint64(base + 8, BigInt(payload), true);
+            view.setUint32(head.length + 1, 0x1800000, true);
+            return out.buffer;
+          }
+        }, badStateHeader()), 90000, "bad state load").catch((e) => ({ error: e.message }));
+        v.badLoad = { loaded: r?.loaded ?? null, error: r?.error ?? null, ms: Date.now() - t0 };
+        log(`visit ${n} ${side}: bad state load: ${JSON.stringify(v.badLoad)}`);
+        if (!/did not load the save state/.test(v.badLoad.error ?? "")) {
+          throw new Error(`a state the core cannot apply must be refused: ${JSON.stringify(v.badLoad)}`);
+        }
+      }
       for (const index of VIS) {
         const f = await captureAtVi(session.page, { index, fromLoad: true, timeoutMs: 60000 });
         v.frames[index] = f.error ? { error: f.error } : { width: f.width, height: f.height, b64: Buffer.from(f.data).toString("base64"),
@@ -119,6 +163,7 @@ try {
       await sleep(1000);
       v.input = await session.page.evaluate(() => window.__causalTelemetry?.input?.visible ?? null);
       v.integrity = integrityOf(integrityStart, await readIntegrity(session.page, { expected: integrityExpected }), { postload: true });
+      v.pthreads = await workerRequest(session.page, "validationReadPthreads", {}, 10000).catch((e) => ({ error: String(e?.message || e) }));
     } catch (e) {
       v.error = String(e?.message || e);
     } finally {
@@ -150,6 +195,11 @@ const frameOf = (x) => ({ width: x.width, height: x.height, data: Buffer.from(x.
 const median = (a) => { const s = [...a].sort((x, y) => x - y); return s.length ? s[s.length >> 1] : null; };
 const summary = { probe: "replay-gates", extra: o.extra, order, picture: {}, input: {},
   integrity: visits.filter((v) => v.integrity?.fatal?.length).map((v) => ({ visit: v.n, side: v.side, fatal: v.integrity.fatal })) };
+{
+  const read = visits.map((v) => v.pthreads).filter((p) => Number.isFinite(p?.running));
+  summary.pthreads = read.length ? { maxRunning: Math.max(...read.map((p) => p.running)), maxAllocated: Math.max(...read.map((p) => p.allocated)), poolSize: read[0].poolSize } : null;
+  log(`pthreads: ${JSON.stringify(summary.pthreads)}`);
+}
 for (const f of summary.integrity) log(`INTEGRITY visit ${f.visit} ${f.side}: ${f.fatal.join(", ")}`);
 for (const index of VIS) {
   const of = (side) => visits.filter((v) => v.side === side && v.frames[index]?.b64).map((v) => frameOf(v.frames[index]));
