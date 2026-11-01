@@ -89,3 +89,13 @@ test("patch 0211: a dual-core VI swap ahead of its copy holds the last picture, 
   const core = await read("../core/upstream/dolphin_web_core.cpp");
   assert.match(core, /std::uint32_t DolphinWeb_StaleXfbHeld\(\)\n\{\n#ifdef __EMSCRIPTEN__\n\s+return DolphinWeb::g_stale_xfb_held\.load\(std::memory_order_relaxed\);/);
 });
+
+test("replay-gates --quickload: a quick save and load, then no hold for 60 VIs", async () => {
+  const gates = await read("../harness/probes/replay-gates.mjs");
+  assert.match(gates, /quickload: \{ type: "boolean", default: false \}/);
+  const q = gates.slice(gates.indexOf("if (o.quickload) {"));
+  assert.ok(q.indexOf('"saveState", { slot: 2 }') < q.indexOf("await sleep(50);") && q.indexOf("await sleep(50);") < q.indexOf('"loadState", { slot: 2 }'));
+  assert.match(q, /const after60 = await captureAtVi\(session\.page, \{ index: 60, fromLoad: true, timeoutMs: 60000 \}\);/);
+  assert.match(q, /if \(v\.quickload\.held === null\) throw new Error/);
+  assert.match(q, /if \(v\.quickload\.held > 0\) throw new Error\(`quickload: \$\{v\.quickload\.held\} swap\(s\) held on the last picture right after the load`\);/);
+});
