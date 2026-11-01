@@ -89,6 +89,8 @@ extern "C" void NotifyWebGpuOwnershipTraceLoadRequested();
 // §27d: defined in VideoCommon/Fifo.cpp — the after-load callback (CPU
 // pthread) stores a sentinel; the GPU-thread gate reads it back.
 namespace Fifo { extern std::atomic<std::uint32_t> g_s27_sentinel; }
+// Patch 0211: defined in VideoCommon/Present.cpp.
+namespace DolphinWeb { extern std::atomic<std::uint32_t> g_stale_xfb_held; }
 
 extern "C" const char* DolphinWeb_GetAudioCommonStats();
 
@@ -1924,6 +1926,20 @@ void CoreControlAbandon(int id)
   else if (id == s_control_running_id)
     s_control_abandoned.insert(id);
   s_control_results.erase(id);
+}
+
+// Patch 0211: dual-core swaps that showed the last picture again instead of
+// an XFB whose copy had not been replayed yet (lifetime).
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+std::uint32_t DolphinWeb_StaleXfbHeld()
+{
+#ifdef __EMSCRIPTEN__
+  return DolphinWeb::g_stale_xfb_held.load(std::memory_order_relaxed);
+#else
+  return 0;
+#endif
 }
 
 int GetCoreState()

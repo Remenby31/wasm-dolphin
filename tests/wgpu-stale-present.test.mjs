@@ -43,7 +43,7 @@ test("a duplicate VI swap, an untagged present and a state load are not stale", 
 });
 
 test("stalePresents is reported in every run's integrity, never fatal yet", () => {
-  assert.deepEqual(INTEGRITY_REPORTED, ["stalePresents"]);
+  assert.deepEqual(INTEGRITY_REPORTED, ["stalePresents", "staleXfbHeld"]);
   assert.ok(!INTEGRITY_FATAL.includes("stalePresents"));
   const i = integrityOf({ presents: 0, stalePresents: 2 }, { presents: 500, stalePresents: 9 });
   assert.deepEqual(i.fatal, []);
@@ -59,10 +59,23 @@ test("the replay feeds the detector at every write and present, and reports it",
   assert.match(worker, /noteMissingResource\("color-texture", fbId\);\n\s+break;\n\s+\}\n\s+wgpuStalePresent\.wrote\(fbId\);/);
   assert.match(worker, /if \(s && d\) \{\n\s+wgpuStalePresent\.wrote\(destinationId\);/);
   assert.match(worker, /wgpuStalePresent\.present\(wgpuLastBackbufferSourceTextureId, presentFrameTag, presentFrameTagEpoch\);/);
-  assert.match(worker, /stalePresents: wgpuStalePresent\.stale,\n\s+geometryCacheCollisions,/);
+  assert.match(worker, /stalePresents: wgpuStalePresent\.stale,\n\s+\/\/ patch 0211[^\n]*\n\s+staleXfbHeld: typeof m\?\._DolphinWeb_StaleXfbHeld === "function" \? m\._DolphinWeb_StaleXfbHeld\(\) >>> 0 : null,\n\s+geometryCacheCollisions,/);
   assert.match(worker, /stalePresents: wgpuStalePresent\.stale,\n\s+\/\/ Shares of the last window/);
   const adapter = await read("../src/upstream-worker-adapter.js");
   assert.match(adapter, /"framesOutOfOrder", "stalePresents"\]\) \{/);
   const host = await read("../src/core-host.js");
   assert.match(host, /stalePresents: this\.mode === "dolphin" \? this\.adapter\.stalePresents \?\? null : null,/);
+});
+
+test("patch 0211: in dual core a swap that fetches an older XFB already shown holds the last picture", async () => {
+  const patch = await read("../patches/dolphin-wasm/snapshot/0211-stale-xfb-shows-last-picture.patch");
+  // only in dual core, only an entry older than the last and shown before
+  assert.match(patch, /\+    const bool stale = Core::System::GetInstance\(\)\.IsDualCoreMode\(\) && m_last_shown_entry &&\n\+                       old_xfb_id != std::numeric_limits<u64>::max\(\) && id < old_xfb_id &&\n\+                       shown_before;/);
+  // held: the last entry again, the same id, so the swap is a duplicate
+  assert.match(patch, /\+      m_xfb_entry = m_last_shown_entry;\n\+      m_xfb_rect = m_last_shown_rect;\n\+      m_last_xfb_id = old_xfb_id;/);
+  assert.match(patch, /\+      DolphinWeb::g_stale_xfb_held\.fetch_add\(1, std::memory_order_relaxed\);/);
+  // a state load restores entry ids: lower than every one remembered starts over
+  assert.match(patch, /\+        m_shown_xfb_ids\.fill\(0\);/);
+  const core = await read("../core/upstream/dolphin_web_core.cpp");
+  assert.match(core, /std::uint32_t DolphinWeb_StaleXfbHeld\(\)\n\{\n#ifdef __EMSCRIPTEN__\n\s+return DolphinWeb::g_stale_xfb_held\.load\(std::memory_order_relaxed\);/);
 });
