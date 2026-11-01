@@ -519,6 +519,8 @@ function readWgpuIntegrity() {
     presentRejected: self._wgPresentRejectedLogCount || 0,
     framesOutOfOrder: wgpuNewFrames.outOfOrder,
     stalePresents: wgpuStalePresent.stale,
+    // patch 0211: swaps that showed the last picture instead of a late XFB
+    staleXfbHeld: typeof m?._DolphinWeb_StaleXfbHeld === "function" ? m._DolphinWeb_StaleXfbHeld() >>> 0 : null,
     geometryCacheCollisions,
     geometryCacheFailed,
     ...regionLinkFailures.snapshot(),
