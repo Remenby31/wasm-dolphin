@@ -10,7 +10,7 @@
 import { existsSync } from "node:fs";
 import path from "node:path";
 
-import { INTEGRITY_FATAL } from "../../src/wgpu-integrity.js";
+import { INTEGRITY_FATAL, INTEGRITY_REPORTED } from "../../src/wgpu-integrity.js";
 import { workerRequest } from "./browser.mjs";
 
 const OLD_WORKER = /Unknown upstream worker message/;
@@ -75,7 +75,9 @@ export function integrityOf(start, end, { allow = [], postload = false } = {}) {
   return {
     delta,
     fatal: moved.filter((k) => !allow.includes(k)).map((k) => countOf(k, delta, end)),
-    allowed: moved.filter((k) => allow.includes(k)).map((k) => countOf(k, delta, end))
+    allowed: moved.filter((k) => allow.includes(k)).map((k) => countOf(k, delta, end)),
+    // moved but never fatal (INTEGRITY_REPORTED): shown, not judged
+    reported: INTEGRITY_REPORTED.filter((k) => delta[k] > 0).map((k) => `${k} ${delta[k]}`)
   };
 }
 
@@ -92,5 +94,6 @@ export function parseIntegrityAllow(text = "") {
 // One note for a run's log: nothing when clean or unread.
 export function integrityBrief(i) {
   if (!i || i.unavailable) return "";
-  return [i.fatal.length ? ` INTEGRITY ${i.fatal.join(", ")}` : "", i.allowed?.length ? ` (allowed: ${i.allowed.join(", ")})` : ""].join("");
+  return [i.fatal.length ? ` INTEGRITY ${i.fatal.join(", ")}` : "", i.allowed?.length ? ` (allowed: ${i.allowed.join(", ")})` : "",
+    i.reported?.length ? ` (reported: ${i.reported.join(", ")})` : ""].join("");
 }
