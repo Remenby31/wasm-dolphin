@@ -13,8 +13,9 @@
 //   { mark: "menu", label?: "title", timeoutSec?: 60 }  waits (up to
 //       timeoutSec) for the detected phase to be `mark` for MIN_PHASE_SEC,
 //       then records a RESYNC marker at the current poll
-//   { auto: 240, until?: "menu" }  the autopilot for `auto` seconds or until
-//       the phase `until` shows; recorded as an autopilot span
+//   { auto: 240, until?: "menu", ports?: [0, 1] }  the autopilot for `auto`
+//       seconds or until the phase `until` shows, on the step's port or on
+//       every port of `ports` at once; recorded as autopilot spans
 // Each step may name a `port` (0-3, default 0).
 import { readFileSync } from "node:fs";
 
@@ -80,6 +81,7 @@ export function validateRecordSteps(steps) {
     const k = RECORD_KINDS.filter((kind) => kind in s);
     if (k.length !== 1) throw new Error(`record step ${i}: expected exactly one of ${RECORD_KINDS.join("/")}`);
     if (s.port != null && !PORT_OK(s.port)) throw new Error(`record step ${i}: port ${s.port} is not 0-3`);
+    if (s.ports != null && !("auto" in s && Array.isArray(s.ports) && s.ports.length && s.ports.every(PORT_OK))) throw new Error(`record step ${i}: ports (0-3) only with auto`);
     for (const key of ["tap", "down", "up"]) if (key in s) keyToPad(s[key]);
     if ("mark" in s && !PHASES.includes(s.mark)) throw new Error(`record step ${i}: mark ${s.mark} is not one of ${PHASES.join(", ")}`);
     if ("auto" in s && !(s.auto > 0)) throw new Error(`record step ${i}: auto is a number of seconds > 0`);
@@ -89,7 +91,7 @@ export function validateRecordSteps(steps) {
 }
 
 // The ports a step list drives (0 when none is named).
-export const recordPorts = (steps) => [...new Set(steps.map((s) => s.port ?? 0))].sort((a, b) => a - b);
+export const recordPorts = (steps) => [...new Set(steps.flatMap((s) => s.ports ?? [s.port ?? 0]))].sort((a, b) => a - b);
 
 // Start the worker in the page: { film } plays a film, { record: { ports,
 // auto } } records. Returns { started } or { error }.
@@ -183,11 +185,12 @@ export async function runRecordSteps(page, steps, { phase, onMark = () => {}, wa
       onMark({ phase: s.mark, label: s.label ?? null, pos: st?.polls ?? null, missed });
       log(`mark ${s.label ?? s.mark}: ${missed ? `MISSED (phase ${phase() ?? "unsettled"})` : `at poll ${st?.polls}`}`);
     } else if ("auto" in s) {
-      await live.setAuto(page, port, true);
+      // `ports`: several ports under the autopilot at once (a 2-player round)
+      const ports = s.ports ?? [port];
+      for (const p of ports) await live.setAuto(page, p, true);
       const limit = now() + s.auto * 1000;
       while (now() < limit && !(s.until && phase() === s.until)) await wait(250);
-      await live.setAuto(page, port, false);
-      await push(port);
+      for (const p of ports) { await live.setAuto(page, p, false); await push(p); }
     }
   }
 }

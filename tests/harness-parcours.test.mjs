@@ -326,6 +326,8 @@ test("record steps: lib/steps.mjs kinds plus mark and auto; keys mapped as the e
   assert.throws(() => validateRecordSteps([{ auto: 0 }]), /seconds > 0/);
   assert.throws(() => validateRecordSteps([{ wait: 1, port: 5 }]), /0-3/);
   assert.deepEqual(recordPorts([{ wait: 1 }, { tap: "KeyX", port: 1 }]), [0, 1]);
+  assert.deepEqual(recordPorts([{ auto: 5, ports: [2, 0] }]), [0, 2]);
+  assert.throws(() => validateRecordSteps([{ wait: 1, ports: [0, 1] }]), /only with auto/);
 });
 
 test("runRecordSteps: live states set in order, marks wait for the phase, the autopilot until its phase", async () => {
@@ -342,6 +344,9 @@ test("runRecordSteps: live states set in order, marks wait for the phase, the au
     { click: [1, 2] }, { tap: "KeyX", hold: 100 }, { mark: "menu", label: "title", timeoutSec: 10 }, { auto: 60, until: "game" }, { mark: "loading", timeoutSec: 1 }
   ], { phase: () => phase, onMark: (m) => marks.push(m), wait, now: () => t, live });
   assert.deepEqual(calls, [["click"], ["live", 0, 1], ["live", 0, 0], ["auto", 0, true], ["auto", 0, false], ["live", 0, 0]]);
+  calls.length = 0;
+  await runRecordSteps({}, [{ auto: 1, ports: [0, 1] }], { phase: () => null, wait, now: () => t, live });
+  assert.deepEqual(calls, [["auto", 0, true], ["auto", 1, true], ["auto", 0, false], ["live", 0, 0], ["auto", 1, false], ["live", 1, 0]]);
   assert.equal(marks[0].phase, "menu");
   assert.equal(marks[0].missed, false);
   assert.ok(marks[0].pos >= 3000 / 8);
