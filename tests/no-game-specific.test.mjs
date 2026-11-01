@@ -8,7 +8,7 @@
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import { sourceContractTest, vendorSourceRoot } from "./helpers/source-contract.mjs";
@@ -76,19 +76,57 @@ test("the patterns catch what they must and spare what they must", () => {
 // The patched core (vendor/dolphin/Source after the locked series) is held to
 // the same rule. Upstream Dolphin's own comments name games, so titles are
 // checked on what the series adds: the lines of `git diff <upstream base>`
-// and the files the series creates. The fixed guest addresses of the per-game
-// code patch 0196 removed must not come back anywhere in Source/: the fast
-// paths' entry points and data, the OS interrupt routines as one game links
-// them (OSDisable/Enable/RestoreInterrupts, 0x80347364-0x803473ac) and a
-// post-load wedge probe (0x80335e90-0x80335ea4).
-const words = (first, last) => Array.from({ length: (last - first) / 4 + 1 }, (_, i) => first + 4 * i);
-export const REMOVED_GUEST_ADDRESSES = [
-  0x8037699c, 0x80339b4c, 0x800195d0, 0x8001cc84, 0x80019894, 0x801a4da8, 0x801a4db8,
-  0x8035ca24, 0x804c1f7b, 0x804a75e0, 0x80433328, 0x80433324, 0x804329f0,
-  ...words(0x80347364, 0x803473ac), ...words(0x80335e90, 0x80335ea4)
-];
-const GUEST_ADDRESS = new RegExp(
-  `\\b0x(?:${REMOVED_GUEST_ADDRESSES.map((a) => a.toString(16).padStart(8, "0")).join("|")})\\b`, "i");
+// and the files the series creates.
+//
+// Guest addresses likewise: a constant 0x80xxxxxx (MEM1, cached view) in a
+// line the series adds is a fixed place in some game's code or data unless it
+// is listed here with its reason. Patch 0196 removed the ones a game's link
+// layout put there (fast paths, OS routines, a wedge probe).
+export const GUEST_ADDRESS_ALLOWED = Object.freeze([
+  // the base of MEM1's cached view: masks and the view's offset (Mem1ViewOffset)
+  { from: 0x80000000, to: 0x80000000, why: "MEM1 cached view base" },
+  // the OS globals area of low memory (GameCube OS ABI, 0x80000000-0x800000ff):
+  // the self-tests use its words as pointer values
+  { from: 0x80000020, to: 0x800000ff, why: "OS globals area" },
+  // the BAT value of the JIT oracle's set-up: 0x80000000 cached, 256 MiB
+  { from: 0x80001fff, to: 0x80001fff, why: "BAT register value (self-test)" },
+  // the self-tests' own code: the oracle's sentinel return address and the
+  // code it writes at 0x80003000 (never a game's)
+  { from: 0x80002000, to: 0x80002000, why: "self-test sentinel" },
+  { from: 0x80003000, to: 0x80003fff, why: "self-test code" },
+  // upstream Interpreter's dcbz/dcbi low-memory bound, mirrored by the JIT
+  { from: 0x80008000, to: 0x80008000, why: "dcache bound mirrored from upstream" },
+  // the JIT oracle's scratch memory
+  { from: 0x80100000, to: 0x80100000, why: "self-test scratch" }
+]);
+const GUEST_ADDRESS = /\b0x(80[0-9a-f]{6})(?![0-9a-f])/gi;
+
+// "file: address in line" for each address in `lines` ({ file, text }) the
+// allowlist does not cover.
+export function guestAddressOffenders(lines) {
+  const hits = [];
+  for (const { file, text } of lines) {
+    for (const m of text.matchAll(GUEST_ADDRESS)) {
+      const value = Number.parseInt(m[1], 16);
+      if (!GUEST_ADDRESS_ALLOWED.some((a) => value >= a.from && value <= a.to)) {
+        hits.push(`${file}: 0x${m[1].toLowerCase()} in ${text.trim().slice(0, 100)}`);
+      }
+    }
+  }
+  return hits;
+}
+
+test("the guest address pattern catches any MEM1 constant and spares the allowlist", () => {
+  const line = (text) => [{ file: "f.cpp", text }];
+  for (const text of ["if (ppc_state.pc == 0x80335E98u)", "constexpr u32 loop_end = 0x8035cb38;", "{0x800192a0, 0x7c0802a6},",
+    "x = 0X8001CC84ULL;", "// bl 0x80019894"]) {
+    assert.equal(guestAddressOffenders(line(text)).length, 1, text);
+  }
+  for (const text of ["(address ^ 0x80000000u)", "gpr[2] = 0x80000020;", "ppc.spr[base] = 0x80001fff;", "op.address = 0x80003100;",
+    "address < 0x80008000", "SCRATCH_VA = 0x80100000;", "0x8000000000ull", "0x7fffffff", "0xcc008000", "0x8000"]) {
+    assert.deepEqual(guestAddressOffenders(line(text)), [], text);
+  }
+});
 const VENDOR = join(vendorSourceRoot, "../..");
 const TEXT_SOURCE = /\.(?:c|cc|cpp|h|hpp|inc|inl|mm|txt|cmake|js)$/i;
 
@@ -112,14 +150,6 @@ function seriesAddedLines() {
   return lines;
 }
 
-function* sourceFiles(directory) {
-  for (const entry of readdirSync(directory, { withFileTypes: true })) {
-    const path = join(directory, entry.name);
-    if (entry.isDirectory()) yield* sourceFiles(path);
-    else if (TEXT_SOURCE.test(entry.name)) yield path;
-  }
-}
-
 sourceContractTest("the locked series adds no commercial game title to the core source", () => {
   const added = seriesAddedLines();
   assert.ok(added.length > 1000, `the series' added lines were read (${added.length})`);
@@ -127,12 +157,8 @@ sourceContractTest("the locked series adds no commercial game title to the core 
   assert.deepEqual(hits, []);
 });
 
-sourceContractTest("no fixed guest address of a removed per-game fast path in the core source", () => {
-  const hits = [];
-  for (const path of sourceFiles(join(VENDOR, "Source"))) {
-    readFileSync(path, "utf8").split("\n").forEach((line, i) => {
-      if (GUEST_ADDRESS.test(line)) hits.push(`${path.slice(VENDOR.length + 1)}:${i + 1}: ${line.trim().slice(0, 120)}`);
-    });
-  }
-  assert.deepEqual(hits, []);
+sourceContractTest("the locked series adds no guest address outside the allowlist", () => {
+  const added = seriesAddedLines();
+  assert.ok(added.length > 1000, `the series' added lines were read (${added.length})`);
+  assert.deepEqual(guestAddressOffenders(added), []);
 });
