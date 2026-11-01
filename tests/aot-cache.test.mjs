@@ -130,7 +130,8 @@ test("an edited stored identity starts the cache over; a missing one (a cache be
 
 test("corrupt entries are deleted and reported, never compiled", async () => {
   const storage = fakeCacheStorage();
-  const cache = await open(storage);
+  const rejects = [];
+  const cache = await open(storage, {}, { onLoadReject: (key, error) => rejects.push([key, error?.name]) });
   await cache.put([{ key: k(1), bytes: MOD_A }, { key: k(2), bytes: MOD_A }, { key: k(3), bytes: MOD_A }]);
   const raw = await storage.open(cache.cacheName);
   const flip = raw.entries.get(aotEntryUrl(BASE, cache.cacheName, k(1)));
@@ -147,6 +148,8 @@ test("corrupt entries are deleted and reported, never compiled", async () => {
   assert.deepEqual(loaded.get(k(3)), { reason: "engine-reject" });
   assert.deepEqual(await cache.has([k(1), k(2), k(3)]), new Set());
   assert.equal(cache.stats().corrupt, 2);
+  // only the module the engine refused reaches the region-link counters
+  assert.deepEqual(rejects, [[k(3), "CompileError"]]);
 });
 
 test("a CacheStorage that fails to read never fails the launch: the entry is dropped and reported", async () => {

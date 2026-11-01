@@ -127,6 +127,7 @@ import {
 import { createWgpuSemanticRuntime } from "./wgpu-semantic-runtime.js";
 import { createWgpuFatalReporter, handleWgpuDeviceLoss, wgpuFatalPageReason } from "./wgpu-device-lifecycle.js";
 import { coreIntegrityOf, createWgpuIntegrity, SKIP, skippedDrawCause } from "./wgpu-integrity.js";
+import { createRegionLinkFailures } from "./region-link-failures.js";
 import { CORE_CONTROL_OPS, runCoreControl, setPausedThroughControl } from "./core-control.js";
 import { createNewFrameCounter } from "./wgpu-new-frames.js";
 import { createBusyClock, createOccupancyMeter, readHeadroomStats } from "./occupancy-stats.js";
@@ -483,6 +484,13 @@ function noteMissingResource(kind, id) {
   wgpuReplayClassifier?.recordMissingResource({ kind, id });
 }
 
+// Region modules the engine refused, by cause, once per module
+// (src/region-link-failures.js): the first launch's compile
+// (precompileAotRegion), the cache's load (onLoadReject) and the CPU thread's
+// instantiation (its "dolphin-region-link-failure" message).
+const regionLinkFailures = createRegionLinkFailures();
+export const regionLinkFailuresForTest = () => regionLinkFailures.snapshot();
+
 // validationReadIntegrity: the replay's integrity counters, cumulative and
 // flat (fatal ones: INTEGRITY_FATAL), plus non-fatal context (staging waits,
 // presents rejected, presents).
@@ -511,6 +519,7 @@ function readWgpuIntegrity() {
     framesOutOfOrder: wgpuNewFrames.outOfOrder,
     geometryCacheCollisions,
     geometryCacheFailed,
+    ...regionLinkFailures.snapshot(),
     presents: webGpuExecStats.present
   });
 }
@@ -8683,6 +8692,7 @@ export async function prepareAotFirstLaunch(file, {
       ...identity, baseUrl: AOT_BASE_URL, cacheStorage,
       // one wait per round of the loader's 8 lanes (sharedYield), not 8
       beforeLoad: sharedYield(discAwareYield({ lastReadAt: () => lastDiscReadAt })),
+      onLoadReject: (key, error) => regionLinkFailures.record(key, error),
       ...aotCacheCompileOptions()
     }),
     planStore: opfs ? new OpfsPlanStore(opfs) : null,
@@ -9121,6 +9131,7 @@ export async function precompileAotRegion(key, bytes) {
       ? (await getDolphinAotCompiler().compile(bytes, { deliver: DELIVER_BEFORE_WARM })).module
       : await WebAssembly.compile(bytes);
   } catch (err) {
+    regionLinkFailures.record(key, err);
     return { reason: compileFailureReason(err) };
   }
   if (!keepModulesForNativeCache()) dolphinJitCopiesSkipped += 1;
@@ -9347,6 +9358,14 @@ let dolphinJitNewCompileCount = 0;
 const dolphinJitPersistedOnly = new Set();
 let dolphinJitCompilePending = 0;
 const dolphinJitVerificationPending = new Set();
+// The CPU thread could not instantiate a region module (patch 0196: posted
+// from DolphinWeb_CachedInterpreterCompileWasmBlock's catch).
+function handleDolphinRegionLinkFailure(event) {
+  const data = event.data;
+  if (data?.type !== "dolphin-region-link-failure") return;
+  regionLinkFailures.record(data.key, { name: String(data.name ?? ""), message: String(data.message ?? "") });
+}
+
 function handleDolphinJitNewCompile(event) {
   if (event.data?.type !== "dolphin-jit-new-compile") return undefined;
   return workerBusy.run(handleDolphinJitNewCompileOnce, event);
@@ -9477,6 +9496,7 @@ function ensureDolphinJitPthreadListeners(worker) {
   if (!dolphinJitPthreadCompileListeners.has(worker)) {
     worker.addEventListener("message", handleDolphinJitNewCompile);
     worker.addEventListener("message", handleDolphinJitCompileRequest);
+    worker.addEventListener("message", handleDolphinRegionLinkFailure);
     dolphinJitPthreadCompileListeners.add(worker);
   }
 }

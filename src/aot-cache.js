@@ -251,6 +251,8 @@ export async function openAotCache({
   compileStreaming = (response) => WebAssembly.compileStreaming(response),
   // awaited before each key's load (the worker: give way to the core's disc reads)
   beforeLoad = null,
+  // (key, error): a module that would not compile (src/region-link-failures.js)
+  onLoadReject = null,
   serviceWorker = null,
   onProgress = null,
   keepPerDisc = 2,
@@ -405,6 +407,7 @@ export async function openAotCache({
       if (streamed) stats.streamed += 1;
       return { module, streamed, byteLength: bytes.byteLength, bytes };
     } catch (error) {
+      onLoadReject?.(key, error);
       if (error instanceof WebAssembly.CompileError || error?.name === "CompileError") {
         stats.rejected += 1;
         await dropEntry(key);
