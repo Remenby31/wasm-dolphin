@@ -1,0 +1,86 @@
+diff --git a/Source/Core/VideoCommon/Present.cpp b/Source/Core/VideoCommon/Present.cpp
+index 0c58fad..cc668bd 100644
+--- a/Source/Core/VideoCommon/Present.cpp
++++ b/Source/Core/VideoCommon/Present.cpp
+@@ -3,12 +3,17 @@
+ 
+ #include "VideoCommon/Present.h"
+ 
++#include <algorithm>
++
+ #ifdef __EMSCRIPTEN__
+ #include <atomic>
+ namespace DolphinWeb
+ {
+ extern std::atomic<bool> g_dup_xfb_rearms_throttle;  // CoreTiming.cpp, patch 0150
+ extern std::atomic<bool> g_present_on_arrival;       // CoreTiming.cpp, patch 0153
++// Patch 0211: swaps that held the last picture instead of an XFB whose copy
++// had not been replayed yet (dual core, a late GPU thread).
++std::atomic<u32> g_stale_xfb_held{0};
+ }
+ #endif
+ 
+@@ -172,7 +177,44 @@ bool Presenter::FetchXFB(u32 xfb_addr, u32 fb_width, u32 fb_stride, u32 fb_heigh
+   {
+     m_xfb_entry =
+         g_texture_cache->GetXFBTexture(xfb_addr, fb_width, fb_height, fb_stride, &m_xfb_rect);
+-    m_last_xfb_id = m_xfb_entry->id;
++    const u64 id = m_xfb_entry->id;
++    // Patch 0211. In dual core the swap is an AsyncRequests event the GPU
++    // thread pulls between FIFO chunks: a late GPU thread can run it before
++    // the EFB-to-XFB copy the game made for this frame. The cache then gives
++    // the entry this address had before, the picture from two frames back,
++    // and the scene jumps back for one frame. That entry is older than the
++    // last one shown and was shown already: show the last picture again (a
++    // duplicate, as when the game repeats a frame) instead of going back.
++    // Entry ids only grow, but a state load restores them: an id below the
++    // ones remembered starts over.
++    const bool shown_before =
++        std::find(m_shown_xfb_ids.begin(), m_shown_xfb_ids.end(), id) != m_shown_xfb_ids.end();
++    const bool stale = Core::System::GetInstance().IsDualCoreMode() && m_last_shown_entry &&
++                       old_xfb_id != std::numeric_limits<u64>::max() && id < old_xfb_id &&
++                       shown_before;
++    if (stale)
++    {
++      m_xfb_entry = m_last_shown_entry;
++      m_xfb_rect = m_last_shown_rect;
++      m_last_xfb_id = old_xfb_id;
++#ifdef __EMSCRIPTEN__
++      DolphinWeb::g_stale_xfb_held.fetch_add(1, std::memory_order_relaxed);
++#endif
++    }
++    else
++    {
++      if (id < *std::min_element(m_shown_xfb_ids.begin(), m_shown_xfb_ids.end()) && id < old_xfb_id &&
++          old_xfb_id != std::numeric_limits<u64>::max())
++        m_shown_xfb_ids.fill(0);
++      if (id != old_xfb_id)
++      {
++        m_shown_xfb_ids[m_shown_xfb_next] = id;
++        m_shown_xfb_next = (m_shown_xfb_next + 1) % m_shown_xfb_ids.size();
++      }
++      m_last_xfb_id = id;
++      m_last_shown_entry = m_xfb_entry;
++      m_last_shown_rect = m_xfb_rect;
++    }
+ 
+     m_xfb_entry->AcquireContentLock();
+   }
+diff --git a/Source/Core/VideoCommon/Present.h b/Source/Core/VideoCommon/Present.h
+index 7e5ce65..cf6907f 100644
+--- a/Source/Core/VideoCommon/Present.h
++++ b/Source/Core/VideoCommon/Present.h
+@@ -148,6 +148,13 @@ private:
+ 
+   // Tracking of XFB textures so we don't render duplicate frames.
+   u64 m_last_xfb_id = std::numeric_limits<u64>::max();
++  // Patch 0211: the XFB entries shown before the last one (dual core). A swap
++  // that fetches one of them again, older than the last, comes before the
++  // copy of its frame was replayed: the picture from two frames back.
++  std::array<u64, 4> m_shown_xfb_ids{};
++  size_t m_shown_xfb_next = 0;
++  RcTcacheEntry m_last_shown_entry;
++  MathUtil::Rectangle<int> m_last_shown_rect{};
+ 
+   // These will be set on the first call to SetSuggestedWindowSize.
+   int m_last_window_request_width = 0;
