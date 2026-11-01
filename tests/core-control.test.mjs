@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-import { CORE_CONTROL_GAVE_UP, CORE_CONTROL_OPS, CORE_CONTROL_STUCK, CORE_CONTROL_TIMEOUT_MS, runCoreControl } from "../src/core-control.js";
+import { CORE_CONTROL_GAVE_UP, CORE_CONTROL_OPS, CORE_CONTROL_STUCK, CORE_CONTROL_TIMEOUT_MS, runCoreControl, setPausedThroughControl } from "../src/core-control.js";
 
 const read = (path) => readFile(new URL(path, import.meta.url), "utf8");
 
@@ -83,7 +83,7 @@ test("the core runs pausing requests on its control pthread and reports their re
 test("the worker never calls a pausing export when the core has the control pthread", async () => {
   const worker = await read("../src/upstream-discio-worker.js");
   assert.match(worker, /stopCore: coreControl\n\s+\? \(\) => coreControl\(CORE_CONTROL_OPS\.stop, "", "stop"\)/);
-  assert.match(worker, /setCorePaused: coreControl\n\s+\? \(paused\) => coreControl\(paused \? CORE_CONTROL_OPS\.pause : CORE_CONTROL_OPS\.resume/);
+  assert.match(worker, /setCorePaused: coreControl\n\s+\? \(paused\) => setPausedThroughControl\(coreControl, paused\)/);
   // each synchronous export only in the branch for a core without it
   for (const call of ["api.loadStateFile(path)", "api.saveStateFile(path)"]) {
     for (const at of [...worker.matchAll(new RegExp(call.replace(/[.()]/g, "\\$&"), "g"))].map((m) => m.index)) {
@@ -239,4 +239,25 @@ test("a slot save never reads as saved from the slot's previous file", async () 
   assert.ok(save.indexOf("File::Rename(job.path, previous)") < save.indexOf("Core::RunOnCPUThread("), "moved aside before the save");
   assert.match(save, /const bool saved = File::Exists\(job\.path\) && File::GetSize\(job\.path\) > 0;/);
   assert.match(save, /if \(saved\)\n\s+File::Delete\(previous\);\n\s+else\n\s+File::Rename\(previous, job\.path\);/);
+});
+
+test("a pause the core cannot do yet answers 0, as SetCorePaused did, so callers retry until it holds", async () => {
+  // the salon pauses right after mounting, while the game still boots, and
+  // retries until the core reports Paused: a throw there stopped its retries
+  // and the game ran behind the loading screen (2026-11-01, after 0209)
+  const control = (sequence, opts) => (op, path, what) => runCoreControl({ ...fakeCore(sequence, opts), op, path, what });
+  assert.equal(await setPausedThroughControl(control([0, -1]), true), 0, "still booting: the core could not");
+  assert.equal(await setPausedThroughControl(control([1], { refuse: true }), true), 0, "no runtime yet");
+  assert.equal(await setPausedThroughControl(control([0, 1]), true), 1);
+  assert.equal(await setPausedThroughControl(control([1]), false), 1);
+  // a time limit or a stuck thread is never a quiet 0
+  await assert.rejects(setPausedThroughControl((op, path, what) => runCoreControl({ ...fakeCore([0]), op, path, what, timeoutMs: 1000 }), true), /reload the page/);
+  await assert.rejects(setPausedThroughControl(control([1], { stuck: true }), true), /reload the page/);
+});
+
+test("the harness pause barrier answers the core's state, never throws, for a pause during boot", async () => {
+  const worker = await read("../src/upstream-discio-worker.js");
+  const barrier = worker.slice(worker.indexOf('case "validationSetCorePaused": {'), worker.indexOf('case "validationSetCorePaused": {') + 1500);
+  assert.match(barrier, /if \(await api\.setCorePaused\(paused \? 1 : 0\)\) \{/);
+  assert.match(barrier, /coreStateName,/);
 });

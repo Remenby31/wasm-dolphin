@@ -127,7 +127,7 @@ import {
 import { createWgpuSemanticRuntime } from "./wgpu-semantic-runtime.js";
 import { createWgpuFatalReporter, handleWgpuDeviceLoss, wgpuFatalPageReason } from "./wgpu-device-lifecycle.js";
 import { coreIntegrityOf, createWgpuIntegrity, SKIP, skippedDrawCause } from "./wgpu-integrity.js";
-import { CORE_CONTROL_OPS, runCoreControl } from "./core-control.js";
+import { CORE_CONTROL_OPS, runCoreControl, setPausedThroughControl } from "./core-control.js";
 import { createNewFrameCounter } from "./wgpu-new-frames.js";
 import { createBusyClock, createOccupancyMeter, readHeadroomStats } from "./occupancy-stats.js";
 import {
@@ -4108,8 +4108,7 @@ function bindApi(module) {
       : optionalCwrap("StopCore", null, []),
     resetCore: optionalCwrap("ResetCore", "number", []),
     setCorePaused: coreControl
-      ? (paused) => coreControl(paused ? CORE_CONTROL_OPS.pause : CORE_CONTROL_OPS.resume, "",
-        paused ? "pause" : "resume").then(() => 1)
+      ? (paused) => setPausedThroughControl(coreControl, paused)
       : optionalCwrap("SetCorePaused", "number", ["number"]),
     coreControl,
     pumpHostJobs: optionalCwrap("PumpHostJobs", null, []),
