@@ -87,7 +87,7 @@ index 0c58fad..323c3d4 100644
 -bool Presenter::FetchXFB(u32 xfb_addr, u32 fb_width, u32 fb_stride, u32 fb_height, u64 ticks)
 +// Patch 0211: at most this many holds in a row; a game that shows one of its
 +// finished buffers again without a new copy is then shown as it asks.
-+constexpr u32 MAX_STALE_HOLDS_IN_A_ROW = 2;
++constexpr u32 MAX_STALE_HOLDS_IN_A_ROW = 4;
 +
 +void Presenter::ForgetShownXfbs()
 +{

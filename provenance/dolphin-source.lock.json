@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "7fd77ae651ead466639674bcc64ec1368acfe91c3ddfd37e340ed8dff46ec658",
+  "patchSeriesSha256": "11fa896e6238ec358a3b9fe377b760ebc2b9d9a55f370b7e9df0d2bb664e91b1",
   "patches": [
     {
       "order": 1,
@@ -1169,7 +1169,7 @@
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0211-stale-xfb-shows-last-picture.patch",
       "size": 11274,
-      "sha256": "b3fd73fd55d21e4e972a059d44a8180de7674d2c2b7ff3ad78d5b41f7c4f4602"
+      "sha256": "54945e8dce37d98e11689364489a2995e416d860255fef19c56db16bc52cc3f4"
     },
     {
       "order": 144,
