@@ -43,7 +43,7 @@ test("a duplicate VI swap, an untagged present and a state load are not stale", 
 });
 
 test("stalePresents is reported in every run's integrity, never fatal yet", () => {
-  assert.deepEqual(INTEGRITY_REPORTED, ["stalePresents", "staleXfbHeld"]);
+  assert.deepEqual(INTEGRITY_REPORTED, ["stalePresents", "staleXfbHeld", "staleXfbHeldPreload"]);
   assert.ok(!INTEGRITY_FATAL.includes("stalePresents"));
   const i = integrityOf({ presents: 0, stalePresents: 2 }, { presents: 500, stalePresents: 9 });
   assert.deepEqual(i.fatal, []);
@@ -59,7 +59,7 @@ test("the replay feeds the detector at every write and present, and reports it",
   assert.match(worker, /noteMissingResource\("color-texture", fbId\);\n\s+break;\n\s+\}\n\s+wgpuStalePresent\.wrote\(fbId\);/);
   assert.match(worker, /if \(s && d\) \{\n\s+wgpuStalePresent\.wrote\(destinationId\);/);
   assert.match(worker, /wgpuStalePresent\.present\(wgpuLastBackbufferSourceTextureId, presentFrameTag, presentFrameTagEpoch\);/);
-  assert.match(worker, /stalePresents: wgpuStalePresent\.stale,\n\s+\/\/ patch 0211[^\n]*\n\s+staleXfbHeld: typeof m\?\._DolphinWeb_StaleXfbHeld === "function" \? m\._DolphinWeb_StaleXfbHeld\(\) >>> 0 : null,\n\s+geometryCacheCollisions,/);
+  assert.match(worker, /stalePresents: wgpuStalePresent\.stale,\n\s+\/\/ patch 0211[^\n]*\n\s+staleXfbHeld: typeof m\?\._DolphinWeb_StaleXfbHeld === "function" \? m\._DolphinWeb_StaleXfbHeld\(\) >>> 0 : null,\n\s+\/\/ of those[^\n]*\n\s+staleXfbHeldPreload: typeof m\?\._DolphinWeb_StaleXfbHeldPreload === "function" \? m\._DolphinWeb_StaleXfbHeldPreload\(\) >>> 0 : null,\n\s+geometryCacheCollisions,/);
   assert.match(worker, /stalePresents: wgpuStalePresent\.stale,\n\s+\/\/ Shares of the last window/);
   const adapter = await read("../src/upstream-worker-adapter.js");
   assert.match(adapter, /"framesOutOfOrder", "stalePresents"\]\) \{/);
@@ -84,7 +84,7 @@ test("patch 0211: a dual-core VI swap ahead of its copy holds the last picture, 
   // a load forgets the ids it restores, before its re-display
   const doState = patch.slice(patch.indexOf("Patch 0211: a load restores"));
   assert.ok(doState.indexOf("ForgetShownXfbs();") >= 0 && doState.indexOf("ForgetShownXfbs();") < doState.indexOf("If we're loading and there is a last XFB, re-display it."), "forgotten before the re-display");
-  assert.match(patch, /\+  if \(p\.IsReadMode\(\)\)\n\+  \{\n\+    ForgetShownXfbs\(\);\n\+    m_last_xfb_id = std::numeric_limits<u64>::max\(\);/);
+  assert.match(patch, /\+  if \(p\.IsReadMode\(\)\)\n\+  \{\n\+    \+\+m_load_generation;\n\+    ForgetShownXfbs\(\);\n\+    m_last_xfb_id = std::numeric_limits<u64>::max\(\);/);
   assert.match(patch, /\+      DolphinWeb::g_stale_xfb_held\.fetch_add\(1, std::memory_order_relaxed\);/);
   const core = await read("../core/upstream/dolphin_web_core.cpp");
   assert.match(core, /std::uint32_t DolphinWeb_StaleXfbHeld\(\)\n\{\n#ifdef __EMSCRIPTEN__\n\s+return DolphinWeb::g_stale_xfb_held\.load\(std::memory_order_relaxed\);/);
@@ -96,6 +96,10 @@ test("replay-gates --quickload: a quick save and load, then no hold for 60 VIs",
   const q = gates.slice(gates.indexOf("if (o.quickload) {"));
   assert.ok(q.indexOf('"saveState", { slot: 2 }') < q.indexOf("await sleep(50);") && q.indexOf("await sleep(50);") < q.indexOf('"loadState", { slot: 2 }'));
   assert.match(q, /const after60 = await captureAtVi\(session\.page, \{ index: 60, fromLoad: true, timeoutMs: 60000 \}\);/);
-  assert.match(q, /if \(v\.quickload\.held === null\) throw new Error/);
-  assert.match(q, /if \(v\.quickload\.held > 0\) throw new Error\(`quickload: \$\{v\.quickload\.held\} swap\(s\) held on the last picture right after the load`\);/);
+  assert.match(q, /if \(v\.quickload\.preload === null\) throw new Error/);
+  assert.match(q, /if \(v\.quickload\.preload > 0\) throw new Error\(`quickload: \$\{v\.quickload\.preload\} swap\(s\) held on a picture from before the load`\);/);
+  // the core counts a hold of a pre-load picture: a load moves the generation first
+  const patch = await read("../patches/dolphin-wasm/snapshot/0211-stale-xfb-shows-last-picture.patch");
+  assert.match(patch, /\+      if \(m_last_shown_generation != m_load_generation\)\n\+        DolphinWeb::g_stale_xfb_held_preload\.fetch_add\(1, std::memory_order_relaxed\);/);
+  assert.match(patch, /\+    \+\+m_load_generation;\n\+    ForgetShownXfbs\(\);/);
 });
