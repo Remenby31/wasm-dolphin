@@ -483,7 +483,14 @@ phase found matches, or `timeoutSec` (default `--marker-timeout`) passes:
 then the run is INCOMPLETE and never counts. `auto` drives a game round (A
 held, the stick a sine around 128 + bias; when the picture stands still,
 element screenshots compared every 2 s, B and the stick the other way) until
-the port's next pad step. A run is COMPLETE when every marker was reached in
+the port's next pad step. `--edge '{"0":[0,0,1,1]}'` lets it steer from the
+picture instead (`lib/edge-follower.mjs`: the road's colour learnt at the
+drive's start, the widest run of it on a few rows, per port view for a split
+screen); on the first disc it stays on the road more often but still does
+not finish a race (no sense of direction), and its capture stream makes such
+runs another measure (`--noise` checks it). Menus drop a stick press made
+while a screen is still opening: a film's steps wait for it to settle
+(≥ 3 s after a pause, for instance). A run is COMPLETE when every marker was reached in
 order and the phases found contain the markers' phases in that order.
 
 ```sh

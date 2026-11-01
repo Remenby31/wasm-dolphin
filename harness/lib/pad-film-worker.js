@@ -41,6 +41,8 @@
 //   [7] ports under the autopilot now (bit p; worker): the page looks for
 //       a still picture (the stuck signal) only then
 //   [8 + 2p], [9 + 2p] record: port p's live mask and stick (x | y << 8; page)
+//   [16 + p] the autopilot's steering for port p from the picture (stick x
+//       + 1; 0: none, the sine drives; page: lib/edge-follower.mjs)
 // Message in: { type: "start", buffer, offset, control, film | record }
 //   record: { ports, auto } records the live states the page sets (and the
 //   autopilot's spans) as a film.
@@ -48,8 +50,8 @@
 // (stop, or the film's end), { type: "error", error }.
 var SLOTS = 36;
 var SLOT = { SEQ: 0, ENABLED: 1, CONNECTED: 2, MASK: 3, AXES0: 4, AXES1: 5, POLL_COUNT: 11 };
-var CONTROL = { STOP: 0, STUCK: 1, HOLD: 2, RELEASED: 3, POS: 4, POLLS: 5, AUTO: 6, AUTO_ON: 7, LIVE: 8 };
-var CONTROL_WORDS = 16;
+var CONTROL = { STOP: 0, STUCK: 1, HOLD: 2, RELEASED: 3, POS: 4, POLLS: 5, AUTO: 6, AUTO_ON: 7, LIVE: 8, STEER: 16 };
+var CONTROL_WORDS = 20;
 var BTN_A = 1, BTN_B = 2;
 var NEUTRAL = { mask: 0, stick: [128, 128] };
 var AUTO_DEFAULTS = { amp: 60, periodPolls: 180, recoverPolls: 300, bias: 0 };
@@ -62,9 +64,11 @@ function autoParams(a) {
   return o;
 }
 
-// The autopilot's state at core poll n; recover: { until, x } or null.
-function autoState(p, n, recover) {
+// The autopilot's state at core poll n; recover: { until, x } or null;
+// steer: the stick x the page found from the picture, or null.
+function autoState(p, n, recover, steer) {
   if (recover && n < recover.until) return { mask: BTN_B, stick: [recover.x, 128] };
+  if (steer) return { mask: BTN_A, stick: [steer, 128] };
   return { mask: BTN_A, stick: [128 + p.bias + p.amp * Math.sin((2 * Math.PI * n) / p.periodPolls), 128] };
 }
 
@@ -135,7 +139,7 @@ function createPlayer(film) {
         if (a) {
           autoOn |= 1 << p;
           if (stuckNew) run.recover[p] = { until: n + a.params.recoverPolls, x: run.stuck & 1 ? 28 : 228 };
-          s = autoState(a.params, n, run.recover[p]);
+          s = autoState(a.params, n, run.recover[p], ctl.steer ? ctl.steer[p] : null);
         } else if (run.hold) s = NEUTRAL;
         else s = padAt(p, run.pos) || NEUTRAL;
         var key = s.mask + ":" + byte(s.stick[0]) + ":" + byte(s.stick[1]);
@@ -164,7 +168,7 @@ function createRecorder(ports, auto) {
           autoOn |= 1 << p;
           if (!lastAuto[p]) steps.push({ at: n, port: p, auto: { amp: params.amp, periodPolls: params.periodPolls, recoverPolls: params.recoverPolls, bias: params.bias } });
           if (stuckNew) recover[p] = { until: n + params.recoverPolls, x: stuck & 1 ? 28 : 228 };
-          s = autoState(params, n, recover[p]);
+          s = autoState(params, n, recover[p], ctl && ctl.steer ? ctl.steer[p] : null);
         } else {
           s = { mask: l.mask >>> 0, stick: [byte(l.stick[0]), byte(l.stick[1])] };
           var k = s.mask + ":" + s.stick[0] + ":" + s.stick[1];
@@ -210,7 +214,8 @@ function loop() {
       r.lastPoll = poll;
       if (r.p0 === null) r.p0 = poll;
       r.n = ((poll - r.p0) >>> 0) + 1; // the poll these states are for
-      var c = { released: Atomics.load(ctl, CONTROL.RELEASED), stuck: Atomics.load(ctl, CONTROL.STUCK) };
+      var c = { released: Atomics.load(ctl, CONTROL.RELEASED), stuck: Atomics.load(ctl, CONTROL.STUCK), steer: {} };
+      r.ports.forEach(function (p) { var x = Atomics.load(ctl, CONTROL.STEER + p); c.steer[p] = x > 0 ? x - 1 : null; });
       var out;
       if (r.player) out = r.player.onPoll(r.n, c);
       else {

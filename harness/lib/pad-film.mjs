@@ -23,8 +23,8 @@ import { BUTTONS, DEFAULT_KEY_BINDINGS, MAIN_STICK_GATE_RADIUS, stickToPadBytes 
 import { PHASES } from "./parcours.mjs";
 
 export const WORKER_SOURCE = new URL("./pad-film-worker.js", import.meta.url);
-export const CONTROL_WORDS = 16;
-export const CONTROL = Object.freeze({ STOP: 0, STUCK: 1, HOLD: 2, RELEASED: 3, POS: 4, POLLS: 5, AUTO: 6, AUTO_ON: 7, LIVE: 8 });
+export const CONTROL_WORDS = 20;
+export const CONTROL = Object.freeze({ STOP: 0, STUCK: 1, HOLD: 2, RELEASED: 3, POS: 4, POLLS: 5, AUTO: 6, AUTO_ON: 7, LIVE: 8, STEER: 16 });
 // ~120 polls a second (the game reads the pad twice a frame): a way out of
 // ~2.5 s, B held long enough to back off.
 export const AUTO_DEFAULTS = Object.freeze({ amp: 60, periodPolls: 180, recoverPolls: 300, bias: 0 });

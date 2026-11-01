@@ -59,6 +59,7 @@ import { acquirePerfLock } from "../lib/perf-lock.mjs";
 import { chromeInfo, isLocalOnly, probeOutDir } from "../lib/probe-out.mjs";
 import { decodePng } from "../lib/png.mjs";
 import { savePng } from "../lib/session.mjs";
+import { startEdgeFollower, stopEdgeFollower } from "../lib/edge-follower.mjs";
 import { median, round } from "../lib/stats.mjs";
 import { machineSnapshot, powerDrained, powerSnapshot } from "../lib/system.mjs";
 import { PRODUCT_QUERY } from "./drop-meter.mjs";
@@ -147,7 +148,7 @@ async function playRun(o, server, { side, run, outDir }) {
     let rows = [];
     const phaseNow = () => currentPhase(rows, o.detect);
     const markerState = { held: 0, since: 0 };
-    let still = 0, lastStuck = -Infinity, prevFrame = null, ended = null;
+    let still = 0, lastStuck = -Infinity, prevFrame = null, ended = null, edgeOn = false;
     // --record: the step list runs beside the sampling loop
     const recording = o.recordSteps ? runRecordSteps(page, o.recordSteps, {
       phase: phaseNow,
@@ -185,6 +186,13 @@ async function playRun(o, server, { side, run, outDir }) {
         }
         if (status?.result) ended = status.result.type === "error" ? `film worker: ${status.result.error}` : "film end";
       }
+      // --edge: the autopilot steers from the picture while it drives
+      if (o.edge && Boolean(status?.autoOn) !== edgeOn) {
+        edgeOn = Boolean(status?.autoOn);
+        if (edgeOn) raw.edge = await startEdgeFollower(page, o.edge);
+        else raw.edgeStats = await stopEdgeFollower(page);
+        if (o.verbose) o.log(`${side} ${run}: ${sec} s edge follower ${edgeOn ? "on" : "off"}`);
+      }
       // the autopilot's way out: a still picture while it drives
       if (status?.autoOn && sec % STILL_EVERY_SEC === 0) {
         const frame = await screenFrame(page).catch(() => null);
@@ -204,6 +212,7 @@ async function playRun(o, server, { side, run, outDir }) {
       if (Date.now() - t0 > o.maxSec * 1000) ended = `--max-sec ${o.maxSec} reached`;
     }
     raw.ended = ended;
+    if (edgeOn) raw.edgeStats = await stopEdgeFollower(page);
     await recording;
     raw.filmResult = await stopPadFilm(page);
     raw.integrityEnd = await readIntegrity(page, { expected: o.integrityExpected });
@@ -264,7 +273,8 @@ export function humanSummary(summary) {
 export function readNoise(file, expect) {
   const s = JSON.parse(readFileSync(file, "utf8"));
   if (s.probe !== "parcours") throw new Error(`--noise ${file}: not a parcours summary`);
-  const differ = ["probeVersion", "film", "query"].filter((k) => s[k] !== expect[k]);
+  // --edge drives (a capture stream in the page): another measure; unset is none
+  const differ = ["probeVersion", "film", "query", "edge"].filter((k) => JSON.stringify(s[k] ?? null) !== JSON.stringify(expect[k] ?? null));
   if (expect.cpuModel && s.machine?.cpuModel && s.machine.cpuModel !== expect.cpuModel) differ.push("cpuModel");
   if (differ.length) throw new Error(`--noise ${file}: another measure (${differ.join(", ")})`);
   if (!s.noise) throw new Error(`--noise ${file}: no A/A noise in it (a comparison, or no usable run)`);
@@ -329,7 +339,7 @@ async function main() {
       iso: { type: "string" }, film: { type: "string" }, record: { type: "string" }, "film-out": { type: "string" },
       runs: { type: "string", default: "1" }, candidate: { type: "string" }, baseline: { type: "string" }, noise: { type: "string" },
       config: { type: "string", default: "product" }, query: { type: "string" }, "marker-timeout": { type: "string", default: "120" }, "max-sec": { type: "string", default: "1200" },
-      shots: { type: "boolean", default: false }, "shot-every": { type: "string", default: "0" }, auto: { type: "string" }, verbose: { type: "boolean", default: false }, analyze: { type: "string" },
+      edge: { type: "string" }, shots: { type: "boolean", default: false }, "shot-every": { type: "string", default: "0" }, auto: { type: "string" }, verbose: { type: "boolean", default: false }, analyze: { type: "string" },
       "max-load": { type: "string" }, "load-wait": { type: "string", default: "300" }, "lock-wait": { type: "string", default: "14400" }, "no-lock": { type: "boolean", default: false },
       port: { type: "string", default: process.env.HARNESS_PORT }, out: { type: "string" }
     }
@@ -354,12 +364,15 @@ async function main() {
     // --shot-every N: a picture every N seconds too (with --shots), to place a film's marks
     shotEvery: values.shots ? num(values, "shot-every", { min: 0, int: true }) : 0,
     // --auto '{"bias":-20}': the recorder's autopilot settings (pad-film-worker.js)
-    auto: values.auto ? JSON.parse(values.auto) : null
+    auto: values.auto ? JSON.parse(values.auto) : null,
+    // --edge '{"0":[0,0,1,1]}': the autopilot steers from the picture, each
+    // port in its view (lib/edge-follower.mjs); '{}' or absent: the sine
+    edge: values.edge ? JSON.parse(values.edge) : null
   };
   const filmBytes = values.film ? readFileSync(values.film) : null;
   const filmId = filmBytes ? `${path.basename(values.film)}#${createHash("sha256").update(filmBytes).digest("hex").slice(0, 12)}` : null;
   const machine = machineSnapshot();
-  const noise = values.noise ? readNoise(values.noise, { probeVersion: PROBE_VERSION, film: filmId, query: o.query, cpuModel: machine.cpuModel }) : null;
+  const noise = values.noise ? readNoise(values.noise, { probeVersion: PROBE_VERSION, film: filmId, query: o.query, edge: o.edge, cpuModel: machine.cpuModel }) : null;
   const sides = { candidate: resolveSide("candidate", values.candidate) };
   if (values.baseline) sides.baseline = resolveSide("baseline", values.baseline);
   const lockWait = num(values, "lock-wait", { min: 0 });
@@ -373,7 +386,7 @@ async function main() {
   const outDir = probeOutDir("parcours", iso, values.out);
   const meta = {
     probe: "parcours", probeVersion: PROBE_VERSION, at: new Date().toISOString(), locked: !values["no-lock"], machine, chrome: chromeInfo(), iso: path.basename(iso),
-    film: filmId, record: values.record ? path.basename(values.record) : null, query: o.query, runs: o.runs, maxLoad: o.maxLoad, markerTimeout: o.markerTimeout,
+    film: filmId, edge: o.edge, record: values.record ? path.basename(values.record) : null, query: o.query, runs: o.runs, maxLoad: o.maxLoad, markerTimeout: o.markerTimeout,
     sides: Object.fromEntries(Object.entries(sides).map(([k, s]) => [k, s.label])), noiseFrom: values.noise ?? null,
     definition: "one sample a second; speed = guest/host time (core ticks); smoothness = new frames shown / the game's cadence learnt as the site does; phases from disc reads, new frames, EFB→XFB copies and replay draws per frame, ≥ 2 s each; A/B per phase and per film section against the A/A noise"
   };
