@@ -388,6 +388,9 @@ export async function openAotCache({
       await dropEntry(key);
       return { reason: "corrupt" };
     }
+    // "compile" once the engine has the bytes: a failure before (the
+    // Service Worker's fetch) is a read, never a refused module.
+    let stage = "fetch";
     try {
       // The bytes are checked above from their own read; the module is then
       // compiled from an untouched response, the one V8 attaches code to.
@@ -398,16 +401,21 @@ export async function openAotCache({
       if (compileStreaming && await viaServiceWorker()) {
         const response = await fetchImpl(urlOf(key));
         if (response.ok && response.headers.get(AOT_HASH_HEADER) === claimed) {
+          stage = "compile";
           module = await compileStreaming(response);
           streamed = true;
         }
       }
-      module ??= await compile(bytes);
+      if (!module) {
+        stage = "compile";
+        module = await compile(bytes);
+      }
       stats.loads += 1;
       if (streamed) stats.streamed += 1;
       return { module, streamed, byteLength: bytes.byteLength, bytes };
     } catch (error) {
-      onLoadReject?.(key, error);
+      // compileStreaming rejects a response it cannot read with a TypeError
+      if (stage === "compile" && !(error instanceof TypeError)) onLoadReject?.(key, error);
       if (error instanceof WebAssembly.CompileError || error?.name === "CompileError") {
         stats.rejected += 1;
         await dropEntry(key);

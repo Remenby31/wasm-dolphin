@@ -689,3 +689,32 @@ test("a region cached under compiler version 36 never loads under 37, whatever t
     assert.deepEqual(await next.has([k(7)]), new Set(), JSON.stringify(over));
   }
 });
+
+test("a module the engine never saw is not a refused region: fetch and response failures are not reported, compile failures are", async () => {
+  const storage = fakeCacheStorage();
+  const rejects = [];
+  let failFetch = true;
+  const fetchImpl = async (url) => {
+    if (failFetch) throw new TypeError("Failed to fetch");
+    return (await (await storage.open(cacheNameOf)).match(url)) ?? new Response(null, { status: 404 });
+  };
+  let cacheNameOf = null;
+  const cache = await openAotCache({ ...ident(), baseUrl: BASE, cacheStorage: storage, fetchImpl, serviceWorker: true,
+    compileStreaming: async () => { throw new TypeError("WebAssembly: Response body loading failed"); },
+    compile: (bytes) => WebAssembly.compile(bytes),
+    onLoadReject: (key, error) => rejects.push([key, error?.name]) });
+  cacheNameOf = cache.cacheName;
+  await cache.put([{ key: k(1), bytes: MOD_A }, { key: k(2), bytes: MOD_A }]);
+  // the Service Worker's fetch throws: a read failure, not reported
+  assert.deepEqual((await cache.load([k(1)])).get(k(1)), { reason: "compile-error" });
+  // the streamed response cannot be read (TypeError): not reported either
+  failFetch = false;
+  assert.deepEqual((await cache.load([k(1)])).get(k(1)), { reason: "compile-error" });
+  assert.deepEqual(rejects, []);
+  // an engine out of memory while compiling is reported (regionLinkOther)
+  const direct = await openAotCache({ ...ident(), baseUrl: BASE, cacheStorage: storage, serviceWorker: false,
+    compile: async () => { throw new RangeError("WebAssembly.Module(): Out of memory"); },
+    onLoadReject: (key, error) => rejects.push([key, error?.name]) });
+  assert.deepEqual((await direct.load([k(2)])).get(k(2)), { reason: "compile-error" });
+  assert.deepEqual(rejects, [[k(2), "RangeError"]]);
+});

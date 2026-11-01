@@ -12,14 +12,21 @@
 //   helper with a type the core's function does not have);
 // - regionLinkValidation: a CompileError (the bytes do not validate: a call
 //   to a helper with the wrong arguments, a malformed module);
+// - regionLinkSize: a CompileError for a function the engine will not take
+//   at its size (JSC and V8 cap a function body). Not fatal: an engine limit
+//   on a large region, the region's pcs stay on the block JIT; counted so a
+//   jump shows;
 // - regionLinkOther: anything else (out of memory while compiling or
 //   instantiating). Not fatal: an engine out of memory is transient, the
 //   region is tried again (aot-cache, the core's handle -1), and a device
 //   under memory pressure gets there without anything being wrong.
-// Each module counts once, under its key, whichever path saw it first (the
-// first launch's compile, the cache's load, the CPU thread's instantiation).
+// A failure to read a module (network, cache storage) is not counted: the
+// engine never saw it.
+// A module counts at most once per cause, under its key, whichever path saw
+// it (the first launch's compile, the cache's load, the CPU thread's
+// instantiation): an out of memory first never hides a refusal after it.
 
-export const REGION_LINK_KEYS = Object.freeze(["regionLinkImportType", "regionLinkValidation", "regionLinkOther"]);
+export const REGION_LINK_KEYS = Object.freeze(["regionLinkImportType", "regionLinkValidation", "regionLinkSize", "regionLinkOther"]);
 export const REGION_LINK_FATAL = Object.freeze(["regionLinkImportType", "regionLinkValidation"]);
 
 const nameOf = (error) => {
@@ -29,6 +36,14 @@ const nameOf = (error) => {
   }
   return String(error?.name ?? "");
 };
+
+// The engines' refusals of a function by its size:
+//   V8 (module-decoder): "size 9000000 > maximum function size (7654321)",
+//     also "local count too large" for its locals;
+//   JSC (WasmSectionParser / WasmFunctionParser): "Code function's size N is
+//     too big", "Function's number of locals is too big";
+//   SpiderMonkey: "function body too big", "too many locals".
+const SIZE_REFUSAL = /maximum function size|function'?s size .*too big|function body too big|local count too large|number of locals is too big|too many locals/i;
 
 // The counter of a failure: an Error (or { name, message } as a message
 // carries it), or the reason string compileFailureReason gives ("compile",
@@ -40,7 +55,9 @@ export function regionLinkCause(failure) {
     return "regionLinkOther";
   }
   const name = nameOf(failure);
-  if (name === "CompileError" || name === "WebAssembly.CompileError") return "regionLinkValidation";
+  if (name === "CompileError" || name === "WebAssembly.CompileError") {
+    return SIZE_REFUSAL.test(String(failure?.message ?? "")) ? "regionLinkSize" : "regionLinkValidation";
+  }
   if (name === "LinkError" || name === "WebAssembly.LinkError") {
     // V8: 'Import #15 "env" "fma": imported function does not match the
     // expected type'; JSC: 'imported function ... signature doesn't match'.
@@ -51,16 +68,16 @@ export function regionLinkCause(failure) {
 
 export function createRegionLinkFailures() {
   const counts = Object.fromEntries(REGION_LINK_KEYS.map((k) => [k, 0]));
-  const seen = new Set();
+  const seen = new Set(); // "cause key"
   return {
-    // Returns the counter it moved, or null (a key already counted).
+    // Returns the counter it moved, or null (that key already counted there).
     record(key, failure) {
-      const id = key == null || key === "" ? null : String(key);
+      const cause = regionLinkCause(failure);
+      const id = key == null || key === "" ? null : `${cause} ${key}`;
       if (id !== null) {
         if (seen.has(id)) return null;
         seen.add(id);
       }
-      const cause = regionLinkCause(failure);
       counts[cause] += 1;
       return cause;
     },
