@@ -146,7 +146,7 @@ test("the probes read integrity around what they measure and act on it", async (
   const gates = await readFile(new URL("../harness/probes/replay-gates.mjs", import.meta.url), "utf8");
   assert.match(gates, /const integrityExpected = treeHasIntegrity\(root\);/);
   assert.match(gates, /v\.integrity = integrityOf\(integrityStart, await readIntegrity\(session\.page, \{ expected: integrityExpected \}\), \{ postload: true \}\)/);
-  assert.match(gates, /process\.exit\(failed\.length \|\| empty\.length \|\| summary\.integrity\.length \|\| summary\.flicker\.length \? 1 : 0\)/);
+  assert.match(gates, /process\.exit\(failed\.length \|\| empty\.length \|\| summary\.integrity\.length \|\| flickerFails \? 1 : 0\)/);
 });
 
 test("liveness: at speed >= 95 %, a picture changing under the floor is FROZEN (median of the readings)", async () => {

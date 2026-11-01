@@ -95,8 +95,9 @@ test("the worker records presents only while the harness watches, and replay-gat
   assert.match(gates, /const found = findFlicker\(distinctRuns\(watch\), \{ cols: watch\.cols, rows: watch\.rows \}\);/);
   assert.match(worker, /if \(harnessFlicker\.active\) harnessFlicker\.noteOp\(op\);\n\s+let replayRecordAccepted = true;/);
   assert.match(gates, /if \(!found\.triples\) throw new Error\(`flicker watch: no triple to judge/);
-  assert.match(gates, /process\.exit\(failed\.length \|\| empty\.length \|\| summary\.integrity\.length \|\| summary\.flicker\.length \? 1 : 0\);/);
-  assert.match(gates, /!summary\.integrity\.length && !summary\.flicker\.length \? 0 : 1\);/);
+  assert.match(gates, /process\.exit\(failed\.length \|\| empty\.length \|\| summary\.integrity\.length \|\| flickerFails \? 1 : 0\);/);
+  assert.match(gates, /!summary\.integrity\.length && !flickerFails \? 0 : 1\);/);
+  assert.match(gates, /summary\.flickerFatal = flickerFatal\(o\.query, `\$\{o\.query\}\$\{o\.extra\}`\);\nconst flickerFails = summary\.flickerFatal \? summary\.flicker\.length : 0;/);
 });
 
 test("a flagged picture says where it changed and what the stream did before it", async () => {
@@ -125,4 +126,11 @@ test("a flagged picture says where it changed and what the stream did before it"
   assert.equal(out.frames[1].ops.draw, 1);
   assert.equal(out.frames[1].ops.uploadTexture, 0);
   assert.deepEqual(out.frames.map((f) => f.vi), [7, 8]);
+});
+
+test("A-B-A fails a run only on the deterministic CPU, both sides", async () => {
+  const { flickerFatal } = await import("../harness/lib/flicker.mjs");
+  assert.equal(flickerFatal("video=wgpu&cpu=single", "video=wgpu&cpu=single&metrics=1"), true);
+  assert.equal(flickerFatal("video=wgpu&cpu=dual"), false);
+  assert.equal(flickerFatal("video=wgpu"), false);
 });
