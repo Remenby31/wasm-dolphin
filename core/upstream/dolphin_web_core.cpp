@@ -959,7 +959,9 @@ void EnsureRuntime()
     // Patch 0210: the callback runs whatever the outcome; only a load that
     // applied the state counts as loaded (a file of another game or version,
     // or a load undone after a failure, never reads "Loaded"). The epoch and
-    // the GPU wake below stay unconditional: an undo replayed DoState too.
+    // the GPU wake below stay unconditional: needed after an undo, which
+    // replayed DoState too; for a file never read (no DoState ran), one more
+    // epoch and a wake of a running GPU loop, both harmless.
     if (State::LastLoadApplied())
     {
       const std::uint64_t loaded_ticks = system.GetCoreTiming().GetTicks();
@@ -1665,8 +1667,8 @@ struct CoreControlJob
   std::string path;
 };
 
-// A request's outcome so far, and when it is late (from when it was asked:
-// one queued behind a stuck request is late too).
+// A request's outcome so far, and when it is late: its own time counted from
+// when the thread starts it (never late while it waits its turn).
 struct CoreControlState
 {
   int rc;
@@ -1679,11 +1681,11 @@ std::deque<CoreControlJob> s_control_queue;
 std::unordered_map<int, CoreControlState> s_control_results;
 int s_control_next_id = 1;
 bool s_control_started = false;
-// The request the thread runs (0: none) and its deadline: past it, the thread
-// is stuck on it and new requests are refused at once (RequestCoreControl
-// -1) instead of queuing behind it until the worker gives up.
+// The request the thread runs (0: none). Once the worker gave up on it
+// (CoreControlAbandon, past the worker's own 60 s), the thread is stuck and
+// new requests are refused at once (RequestCoreControl -1). A request only
+// late on the core's time is not stuck: it may still end (rc 2).
 int s_control_running_id = 0;
-std::chrono::steady_clock::time_point s_control_running_deadline;
 // Requests the worker gave up on while they ran: their end is not kept.
 std::unordered_set<int> s_control_abandoned;
 
@@ -1721,6 +1723,15 @@ bool RunCoreControl(const CoreControlJob& job)
     if (!Core::IsRunning(system))
       return false;
     SetCoreStatus("Saving state");
+    // The slot's previous file moves aside first: a save that writes nothing
+    // must not read as saved from the old file, and gets it back.
+    const std::string previous = job.path + ".prev";
+    const bool had_previous = File::Exists(job.path);
+    if (had_previous && !File::Rename(job.path, previous))
+    {
+      SetCoreStatus("Save state failed");
+      return false;
+    }
     auto written = std::make_shared<std::atomic<bool>>(false);
     // On the CPU thread, SaveToFileSync runs inline: the file is whole when
     // the job returns.
@@ -1729,7 +1740,14 @@ bool RunCoreControl(const CoreControlJob& job)
       written->store(true, std::memory_order_release);
     });
     wait_until([&] { return written->load(std::memory_order_acquire); });
-    const bool saved = File::GetSize(job.path) > 0;
+    const bool saved = File::Exists(job.path) && File::GetSize(job.path) > 0;
+    if (had_previous)
+    {
+      if (saved)
+        File::Delete(previous);
+      else
+        File::Rename(previous, job.path);
+    }
     SetCoreStatus(saved ? "State saved" : "Save state failed");
     return saved;
   }
@@ -1806,7 +1824,8 @@ void CoreControlThread()
       job = std::move(s_control_queue.front());
       s_control_queue.pop_front();
       s_control_running_id = job.id;
-      s_control_running_deadline = s_control_results[job.id].deadline;
+      s_control_results[job.id].deadline =
+          std::chrono::steady_clock::now() + std::chrono::milliseconds(CoreControlTimeoutMs(job.op));
     }
     const bool ok = RunCoreControl(job);
     std::lock_guard lock(s_control_mutex);
@@ -1825,8 +1844,8 @@ void CoreControlThread()
 
 // Queues a request (op: 1 save to `path`, 2 load from `path`, 3 pause,
 // 4 resume, 5 stop) and returns its id at once; 0 when refused (no runtime,
-// unknown op, no path for a save or load); -1 when the thread is stuck on an
-// earlier request past its time (nothing more can run: reload the page).
+// unknown op, no path for a save or load); -1 when the thread is stuck on a
+// request the worker gave up on (nothing more can run: reload the page).
 #ifdef __EMSCRIPTEN__
 EMSCRIPTEN_KEEPALIVE
 #endif
@@ -1839,7 +1858,7 @@ int RequestCoreControl(int op, const char* path)
   if (needs_path && (path == nullptr || *path == '\0'))
     return 0;
   std::lock_guard lock(s_control_mutex);
-  if (s_control_running_id != 0 && std::chrono::steady_clock::now() >= s_control_running_deadline)
+  if (s_control_running_id != 0 && s_control_abandoned.count(s_control_running_id) != 0)
     return -1;
   if (!s_control_started)
   {
@@ -1847,8 +1866,8 @@ int RequestCoreControl(int op, const char* path)
     s_control_started = true;
   }
   const int id = s_control_next_id++;
-  s_control_results[id] = {0, std::chrono::steady_clock::now() +
-                                  std::chrono::milliseconds(CoreControlTimeoutMs(control_op))};
+  // not late while queued: its time starts with it (CoreControlThread)
+  s_control_results[id] = {0, std::chrono::steady_clock::time_point::max()};
   s_control_queue.push_back({id, control_op, needs_path ? std::string(path) : std::string()});
   s_control_cv.notify_one();
   return id;

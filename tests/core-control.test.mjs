@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-import { CORE_CONTROL_OPS, CORE_CONTROL_STUCK, CORE_CONTROL_TIMEOUT_MS, runCoreControl } from "../src/core-control.js";
+import { CORE_CONTROL_GAVE_UP, CORE_CONTROL_OPS, CORE_CONTROL_STUCK, CORE_CONTROL_TIMEOUT_MS, runCoreControl } from "../src/core-control.js";
 
 const read = (path) => readFile(new URL(path, import.meta.url), "utf8");
 
@@ -40,9 +40,10 @@ test("a refusal or a failure is an error with a message, never silence", async (
 
 test("past the worker's limit, a request is given back to the core and the player is told to reload", async () => {
   assert.equal(CORE_CONTROL_STUCK, "the emulator is stuck on an earlier request: reload the page");
+  assert.equal(CORE_CONTROL_GAVE_UP, "the emulator is stuck on it: reload the page");
   const late = fakeCore([0, -2]);
   await assert.rejects(runCoreControl({ ...late, op: 1, what: "Save state", timeoutMs: 1000 }),
-    /^Error: Save state: the emulator did not finish within 1 s; the emulator is stuck on an earlier request: reload the page$/);
+    /^Error: Save state: the emulator did not finish within 1 s; the emulator is stuck on it: reload the page$/);
   assert.deepEqual(late.abandoned, [7], "the abandoned request is freed in the core");
   const queued = fakeCore([0]);
   await assert.rejects(runCoreControl({ ...queued, op: 5, what: "stop", timeoutMs: 1000 }), /did not finish within 1 s; .*reload the page$/);
@@ -193,7 +194,12 @@ test("a load counts as loaded only when the core applied the state (patch 0210)"
 
 test("a stuck control pthread refuses at once, and an abandoned request leaves nothing behind", async () => {
   const core = await read("../core/upstream/dolphin_web_core.cpp");
-  assert.match(core, /if \(s_control_running_id != 0 && std::chrono::steady_clock::now\(\) >= s_control_running_deadline\)\n\s+return -1;/);
+  // refused only behind a request the worker gave up on, never because one is late
+  assert.match(core, /if \(s_control_running_id != 0 && s_control_abandoned\.count\(s_control_running_id\) != 0\)\n\s+return -1;/);
+  assert.ok(!core.includes("s_control_running_deadline"));
+  // a request's own time starts when the thread starts it, not when it was queued
+  assert.match(core, /s_control_results\[id\] = \{0, std::chrono::steady_clock::time_point::max\(\)\};/);
+  assert.match(core, /s_control_running_id = job\.id;\n\s+s_control_results\[job\.id\]\.deadline =\n\s+std::chrono::steady_clock::now\(\) \+ std::chrono::milliseconds\(CoreControlTimeoutMs\(job\.op\)\);/);
   const abandon = core.slice(core.indexOf("void CoreControlAbandon(int id)"));
   assert.match(abandon, /s_control_queue\.erase\(queued\);/, "a queued request never runs");
   assert.match(abandon, /else if \(id == s_control_running_id\)\n\s+s_control_abandoned\.insert\(id\);/);
@@ -224,4 +230,13 @@ test("the worker reports its pthreads against the pool", async () => {
   const PTHREAD_POOL_SIZE = Number(worker.match(/export const PTHREAD_POOL_SIZE = (\d+);/)[1]);
   const build = await read("../patches/dolphin-wasm/0001-browser-platform-build-gates.patch");
   assert.match(build, new RegExp(`-sPTHREAD_POOL_SIZE=${PTHREAD_POOL_SIZE}"`));
+});
+
+test("a slot save never reads as saved from the slot's previous file", async () => {
+  const core = await read("../core/upstream/dolphin_web_core.cpp");
+  const save = core.slice(core.indexOf("case CoreControlOp::SaveFile:\n  {"), core.indexOf("case CoreControlOp::LoadFile:\n  {"));
+  assert.match(save, /if \(had_previous && !File::Rename\(job\.path, previous\)\)/);
+  assert.ok(save.indexOf("File::Rename(job.path, previous)") < save.indexOf("Core::RunOnCPUThread("), "moved aside before the save");
+  assert.match(save, /const bool saved = File::Exists\(job\.path\) && File::GetSize\(job\.path\) > 0;/);
+  assert.match(save, /if \(saved\)\n\s+File::Delete\(previous\);\n\s+else\n\s+File::Rename\(previous, job\.path\);/);
 });
