@@ -38,7 +38,7 @@ export function distinctRuns(watch, decode = (b64) => new Uint8Array(Buffer.from
     const sig = decode(f.b64);
     const last = run.at(-1);
     if (last && same(last.sig, sig)) { last.presents += 1; continue; }
-    run.push({ seq: f.seq, at: f.at, sig, presents: 1 });
+    run.push({ seq: f.seq, at: f.at, vi: f.vi ?? null, sig, presents: 1 });
   }
   if (run.length) runs.push(run);
   return runs;
@@ -59,7 +59,7 @@ export function findFlicker(runs, { floor = FLICKER_FLOOR, ratio = FLICKER_RATIO
       triples += 1;
       const r = ac / step;
       if (closest === null || r < closest) closest = r;
-      if (r <= ratio) flagged.push({ seqA: a.seq, seqB: b.seq, seqC: c.seq, atB: b.at, presentsB: b.presents, ab: round(ab), bc: round(bc), ac: round(ac), ratio: round(r), frames: [a, b, c] });
+      if (r <= ratio) flagged.push({ seqA: a.seq, seqB: b.seq, seqC: c.seq, viA: a.vi, viB: b.vi, viC: c.vi, atB: b.at, presentsB: b.presents, ab: round(ab), bc: round(bc), ac: round(ac), ratio: round(r), frames: [a, b, c] });
     }
   }
   return { triples, distinct: runs.reduce((s, r) => s + r.length, 0), runs: runs.length, closestRatio: closest === null ? null : round(closest), flagged };
