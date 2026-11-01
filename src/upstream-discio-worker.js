@@ -14759,6 +14759,7 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
     const replayOpStartedAt = causalMetricsEnabled
       ? wgpuReplayOpMetrics.beginReplay(op)
       : null;
+    if (harnessFlicker.active) harnessFlicker.noteOp(op);
     let replayRecordAccepted = true;
     try {
       switch (op) {

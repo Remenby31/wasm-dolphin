@@ -92,8 +92,37 @@ test("the worker records presents only while the harness watches, and replay-gat
   assert.match(worker, /if \(!harnessEnabled\) return \{ error: "harness hooks are off" \};\n\s+if \(action === "start"\) \{\n\s+if \(!\(harnessVideoBackend === "WebGPU-Real" \|\| harnessVideoBackend === "WebGPU"\)\) return \{ error: `flicker watch/);
   const gates = await read("../harness/probes/replay-gates.mjs");
   assert.match(gates, /flicker: \{ type: "string", default: "0" \}/);
-  assert.match(gates, /const found = findFlicker\(distinctRuns\(watch\)\);/);
+  assert.match(gates, /const found = findFlicker\(distinctRuns\(watch\), \{ cols: watch\.cols, rows: watch\.rows \}\);/);
+  assert.match(worker, /if \(harnessFlicker\.active\) harnessFlicker\.noteOp\(op\);\n\s+let replayRecordAccepted = true;/);
   assert.match(gates, /if \(!found\.triples\) throw new Error\(`flicker watch: no triple to judge/);
   assert.match(gates, /process\.exit\(failed\.length \|\| empty\.length \|\| summary\.integrity\.length \|\| summary\.flicker\.length \? 1 : 0\);/);
   assert.match(gates, /!summary\.integrity\.length && !summary\.flicker\.length \? 0 : 1\);/);
+});
+
+test("a flagged picture says where it changed and what the stream did before it", async () => {
+  const { changedRegion } = await import("../harness/lib/flicker.mjs");
+  // 4 x 2 cells; B differs in the top-right cell only
+  assert.deepEqual(changedRegion(Uint8Array.from([0, 0, 0, 0, 0, 0, 0, 0]), Uint8Array.from([0, 0, 0, 99, 0, 0, 0, 0]), 4, 2),
+    { top: 0, bottom: 0.5, left: 0.75, right: 1, changed: 0.125 });
+  assert.equal(changedRegion(Uint8Array.from([5, 5]), Uint8Array.from([6, 6]), 2, 1), null, "under the threshold");
+  const frames = [sig(50), sig(50), sig(50, 3, 0), sig(50)].map((s, seq) => ({ seq, at: seq * 16, b64: b64(s), ops: { uploadTexture: seq, blitTexture: 1 } }));
+  const found = findFlicker(distinctRuns({ frames }), { cols: 8, rows: 1 });
+  assert.equal(found.flagged.length, 1);
+  assert.deepEqual(found.flagged[0].ops, { A: { uploadTexture: 1, blitTexture: 2 }, B: { uploadTexture: 2, blitTexture: 1 }, C: { uploadTexture: 3, blitTexture: 1 } });
+  assert.deepEqual(found.flagged[0].region, { top: 0, bottom: 1, left: 0.375, right: 0.5, changed: 0.125 });
+  const { createFlickerRecorder, COUNTED_OPS } = await import("../src/harness-flicker.js");
+  assert.equal(COUNTED_OPS[8], "uploadTexture");
+  assert.equal(COUNTED_OPS[24], "blitTexture");
+  const rec = createFlickerRecorder({ now: () => 0 });
+  rec.start();
+  rec.noteOp(8); rec.noteOp(8); rec.noteOp(24); rec.noteOp(3);
+  rec.onPresent(() => ({ cols: 1, rows: 1, data: Uint8Array.from([1]) }), 7);
+  rec.noteOp(19);
+  rec.onPresent(() => ({ cols: 1, rows: 1, data: Uint8Array.from([2]) }), 8);
+  const out = await rec.stop({ waitMs: 0 });
+  assert.equal(out.frames[0].ops.uploadTexture, 2);
+  assert.equal(out.frames[0].ops.blitTexture, 1);
+  assert.equal(out.frames[1].ops.draw, 1);
+  assert.equal(out.frames[1].ops.uploadTexture, 0);
+  assert.deepEqual(out.frames.map((f) => f.vi), [7, 8]);
 });

@@ -192,7 +192,7 @@ try {
         await sleep(Number(o.flicker) * 1000);
         const watch = await workerRequest(session.page, "validationFlickerWatch", { action: "stop" }, 60000);
         if (watch?.error) throw new Error(`flicker watch: ${watch.error}`);
-        const found = findFlicker(distinctRuns(watch));
+        const found = findFlicker(distinctRuns(watch), { cols: watch.cols, rows: watch.rows });
         found.flagged.slice(0, 5).forEach((t, k) => savePng(tripleStrip(t, watch.cols, watch.rows), path.join(o.out, `flicker-visit${n}-${k}.png`)));
         v.flicker = { presents: watch.presents, kept: watch.kept, gaps: watch.gaps, errors: watch.errors, full: watch.full,
           distinct: found.distinct, triples: found.triples, closestRatio: found.closestRatio,

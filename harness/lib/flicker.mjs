@@ -37,8 +37,13 @@ export function distinctRuns(watch, decode = (b64) => new Uint8Array(Buffer.from
     }
     const sig = decode(f.b64);
     const last = run.at(-1);
-    if (last && same(last.sig, sig)) { last.presents += 1; continue; }
-    run.push({ seq: f.seq, at: f.at, vi: f.vi ?? null, sig, presents: 1 });
+    if (last && same(last.sig, sig)) {
+      last.presents += 1;
+      // the ops of a picture presented again still fed the stream
+      for (const [k, n] of Object.entries(f.ops ?? {})) last.ops[k] = (last.ops[k] ?? 0) + n;
+      continue;
+    }
+    run.push({ seq: f.seq, at: f.at, vi: f.vi ?? null, ops: { ...(f.ops ?? {}) }, sig, presents: 1 });
   }
   if (run.length) runs.push(run);
   return runs;
@@ -46,7 +51,27 @@ export function distinctRuns(watch, decode = (b64) => new Uint8Array(Buffer.from
 
 // Every A-B-A in the runs, and how close clean motion came to the rule (the
 // smallest ratio seen among triples whose steps are real changes).
-export function findFlicker(runs, { floor = FLICKER_FLOOR, ratio = FLICKER_RATIO } = {}) {
+// Where B differs from A, in signature cells (luma apart by more than
+// `threshold`): the bounding box as shares of the width and height, and the
+// share of cells changed. A HUD element, a texture, or the whole scene.
+export function changedRegion(a, b, cols, rows, threshold = 16) {
+  let r0 = rows, r1 = -1, c0 = cols, c1 = -1, n = 0;
+  for (let r = 0; r < rows; r += 1) {
+    for (let c = 0; c < cols; c += 1) {
+      if (Math.abs(a[r * cols + c] - b[r * cols + c]) <= threshold) continue;
+      n += 1;
+      if (r < r0) r0 = r;
+      if (r > r1) r1 = r;
+      if (c < c0) c0 = c;
+      if (c > c1) c1 = c;
+    }
+  }
+  if (!n) return null;
+  const share = (x, of) => Math.round((x / of) * 1000) / 1000;
+  return { top: share(r0, rows), bottom: share(r1 + 1, rows), left: share(c0, cols), right: share(c1 + 1, cols), changed: share(n, rows * cols) };
+}
+
+export function findFlicker(runs, { floor = FLICKER_FLOOR, ratio = FLICKER_RATIO, cols = 0, rows = 0 } = {}) {
   const flagged = [];
   let triples = 0;
   let closest = null;
@@ -59,7 +84,12 @@ export function findFlicker(runs, { floor = FLICKER_FLOOR, ratio = FLICKER_RATIO
       triples += 1;
       const r = ac / step;
       if (closest === null || r < closest) closest = r;
-      if (r <= ratio) flagged.push({ seqA: a.seq, seqB: b.seq, seqC: c.seq, viA: a.vi, viB: b.vi, viC: c.vi, atB: b.at, presentsB: b.presents, ab: round(ab), bc: round(bc), ac: round(ac), ratio: round(r), frames: [a, b, c] });
+      if (r <= ratio) {
+        flagged.push({ seqA: a.seq, seqB: b.seq, seqC: c.seq, viA: a.vi, viB: b.vi, viC: c.vi, atB: b.at, presentsB: b.presents,
+          ab: round(ab), bc: round(bc), ac: round(ac), ratio: round(r),
+          region: cols && rows ? changedRegion(a.sig, b.sig, cols, rows) : null,
+          ops: { A: a.ops, B: b.ops, C: c.ops }, frames: [a, b, c] });
+      }
     }
   }
   return { triples, distinct: runs.reduce((s, r) => s + r.length, 0), runs: runs.length, closestRatio: closest === null ? null : round(closest), flagged };
