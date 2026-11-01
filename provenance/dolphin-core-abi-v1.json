@@ -44,8 +44,8 @@
     {
       "path": "core/upstream/dolphin_web_core.cpp",
       "hashMode": "lf-normalized",
-      "size": 74104,
-      "sha256": "d6485899a48e3ea2d434aad9c36a7dbeea101cf7227051e92d2cf66688407344"
+      "size": 74761,
+      "sha256": "cc349f1bc222390b04d94aa3ee4d741647b2757874b74ce35a89ed74dcb621e6"
     },
     {
       "path": "src/app.js",
@@ -158,8 +158,8 @@
     {
       "path": "src/upstream-main-thread-adapter.js",
       "hashMode": "lf-normalized",
-      "size": 22618,
-      "sha256": "d5caddff2ab25a450f0c4a08b9adeb4c89cb63b110017539a088d300a24b0ccc"
+      "size": 24587,
+      "sha256": "c1e880f1ab811ac5ae95f28ce195cfbdf08263023a939e6d8232fb12b63eb339"
     },
     {
       "path": "src/upstream-worker-adapter.js",

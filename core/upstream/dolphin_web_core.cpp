@@ -9,6 +9,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <mutex>
 #include <chrono>
@@ -1783,6 +1784,23 @@ int RequestCoreControl(int op, const char* path)
   s_control_queue.push_back({id, control_op, needs_path ? std::string(path) : std::string()});
   s_control_cv.notify_one();
   return id;
+}
+
+// A Dolphin save slot (StateSaves/<game id>.sNN, as State::Save/Load name
+// it), for the page that runs the core without the worker
+// (upstream-main-thread-adapter.js): op 1 save, 2 load; the id as above.
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int RequestCoreControlSlot(int op, int slot)
+{
+  if (!s_runtime_initialized || slot < 0 || slot > 99 || (op != 1 && op != 2))
+    return 0;
+  char suffix[8];
+  std::snprintf(suffix, sizeof(suffix), ".s%02d", slot);
+  const std::string path =
+      File::GetUserPath(D_STATESAVES_IDX) + SConfig::GetInstance().GetGameID() + suffix;
+  return RequestCoreControl(op, path.c_str());
 }
 
 // A request's state (see above); an unknown id reads -1. A final result is

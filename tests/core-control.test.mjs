@@ -122,3 +122,33 @@ test("the page answers a slot save or load within its limit, and a refused load 
   assert.match(source, /this\.requestWithin\("saveState", \{ slot \}, SLOT_REQUEST_TIMEOUT_MS, `Save slot \$\{slot\}`\)/);
   assert.match(source, /this\.requestWithin\("loadState", \{ slot \}, SLOT_REQUEST_TIMEOUT_MS, `Load slot \$\{slot\}`\)/);
 });
+
+test("the main-thread adapter pauses and saves through the control pthread too", async () => {
+  const { UpstreamMainThreadAdapter } = await import("../src/upstream-main-thread-adapter.js");
+  const statuses = [];
+  const adapter = new UpstreamMainThreadAdapter({ canvas: null, onStatus: (s) => statuses.push(s) });
+  const requests = [];
+  let next = 0;
+  const outcomes = [1, 1, 1, -1];
+  adapter.api = {
+    setCorePaused: () => { throw new Error("the synchronous pause must not be called"); },
+    saveCoreState: () => { throw new Error("the synchronous save must not be called"); },
+    requestCoreControl: (op, path) => { requests.push(["control", op, path]); return 1; },
+    requestCoreControlSlot: (op, slot) => { requests.push(["slot", op, slot]); return 1; },
+    coreControlResult: () => outcomes[next++]
+  };
+  assert.equal(await adapter.pause(), 1);
+  assert.equal(await adapter.start(), 1);
+  assert.equal(await adapter.saveState(3), 1);
+  assert.equal(await adapter.loadState(4), 0, "a load the core could not apply");
+  assert.deepEqual(requests, [["control", 3, ""], ["control", 4, ""], ["slot", 1, 3], ["slot", 2, 4]]);
+  assert.deepEqual(statuses, ["Load slot 4: the emulator could not do it"]);
+  // a core without the control pthread: the synchronous exports, as before
+  const legacy = [];
+  adapter.api = { setCorePaused: (p) => { legacy.push(p); return 1; } };
+  adapter.pause();
+  assert.deepEqual(legacy, [1]);
+  const core = await read("../core/upstream/dolphin_web_core.cpp");
+  assert.match(core, /int RequestCoreControlSlot\(int op, int slot\)/);
+  assert.match(core, /File::GetUserPath\(D_STATESAVES_IDX\) \+ SConfig::GetInstance\(\)\.GetGameID\(\) \+ suffix/);
+});
