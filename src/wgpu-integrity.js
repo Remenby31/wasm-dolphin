@@ -81,7 +81,9 @@ export const INTEGRITY_FATAL = Object.freeze([
 // back; fatal once the core shows the last picture instead (patch 0211).
 // staleXfbHeld (patch 0211): the swaps the core held on the last picture
 // instead (a duplicate shown rather than a jump back).
-export const INTEGRITY_REPORTED = Object.freeze(["stalePresents", "staleXfbHeld"]);
+// staleXfbHeldPreload: of those, a hold that showed a picture from before
+// the last state load (a stale record; 0 by construction since the review).
+export const INTEGRITY_REPORTED = Object.freeze(["stalePresents", "staleXfbHeld", "staleXfbHeldPreload"]);
 
 // The first missing resource of a skipped draw (SKIP), or -1 when it has all.
 export function skippedDrawCause(hasPass, hasPipeline, bindGroupsValid, needsVertexBuffer, vertexBufferValid, indexed, indexBufferValid) {
