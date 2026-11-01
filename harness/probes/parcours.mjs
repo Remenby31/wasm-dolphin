@@ -4,7 +4,9 @@
 //
 // A parcours: a whole play-through, from the boot (no savestate) through the
 // title, the menus, a selection, a load, a full game round, its results and
-// back to a menu, played by a pad film, headless only. Emulation speed and
+// back to a menu, played by a pad film. Headless on the Mac (no window may
+// show there); on the Spark spark-run requires --headed :N (its bare Xorg:
+// WebGPU on the GPU, a real BeginFrame source). Emulation speed and
 // what the player sees (new frames, smoothness, hitches) everywhere, not only
 // on a few race savestates.
 //
