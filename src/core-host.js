@@ -1,5 +1,6 @@
 import { defaultWgpuBindGroupCache, requestedWgpuBindGroupCache } from "./wgpu-bind-group-cache.js";
 import { aotCompilerRequested, jitOffThreadRequested } from "./aot-compiler-worker.js";
+import { aotAssemblerRequested } from "./aot-assembler-worker.js";
 import { aotSamplePeriodRequested } from "./aot-hot-sampler.js";
 import { wasmEngine } from "./wasm-engine.js";
 import { anisotropyToCore, clampInternalResolution, internalResolutionCeiling, requestedEnhancements } from "./wgpu-enhancements.js";
@@ -208,6 +209,8 @@ export class EmulatorHost {
     this.regionCap = regionCap !== null && /^\d+$/.test(regionCap) ? Number(regionCap) : null;
     // With aot=1, regions tail-call the next region (patch 0102); ?regionchain=0 turns it off.
     this.regionChain = new URLSearchParams(window.location.search).get("regionchain") !== "0";
+    // First-launch regions assembled off the discio worker (aot-assembler-worker.js); ?aotasm=0: in place.
+    this.aotAssembler = aotAssemblerRequested(window.location.search);
     // Where relaxed_madd is fused the JIT's FMA uses it (patch 0129); ?fusedmadd=0
     // keeps the exact plain-f64 path (A/B on one core).
     this.fusedMadd = new URLSearchParams(window.location.search).get("fusedmadd") !== "0";
@@ -575,6 +578,7 @@ export class EmulatorHost {
             wasmEngine: this.wasmEngine,
             regionCap: this.regionCap,
             regionChain: this.regionChain,
+            aotAssembler: this.aotAssembler,
             fusedMadd: this.fusedMadd,
             collectMetrics: this.collectMetrics,
             legacyOneWayAck: this.legacyOneWayAck,
