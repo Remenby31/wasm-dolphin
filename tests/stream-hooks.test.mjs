@@ -128,7 +128,7 @@ test("a rejected write closes the frame and stops the capture", async () => {
 // Internal resolution N (patch 0168) makes the canvas 640N x 480N: the stream
 // keeps 640x480, scaled in the capture before the VideoFrame exists, and
 // follows a switch to another scale.
-test("a canvas wider than the stream is scaled down to 640 wide before the frame; a native one goes as is", () => {
+test("a canvas larger than the stream is scaled down to 640x480 (4:3) before the frame; a native one goes as is", () => {
   const written = [];
   const writer = { desiredSize: 1, write: async (f) => written.push(f), close: async () => {}, closed: new Promise(() => {}) };
   const draws = [];
@@ -148,6 +148,22 @@ test("a canvas wider than the stream is scaled down to 640 wide before the frame
   assert.deepEqual(draws, [[2560, 1920, 640, 480], [1280, 960, 640, 480], [1280, 960, 640, 480]]);
   assert.equal(created.length, 1, "one scaler canvas, reused across scales");
   assert.deepEqual([capture.stats.width, capture.stats.height], [640, 480]);
+});
+
+// 16:9 (patch 0178): the stream keeps 480 lines, its width follows the
+// picture (854x480), never wider than 854; a 16:9 canvas already at 480
+// lines goes as is.
+test("a 16:9 canvas is brought down to 854x480, 4:3 still to 640x480", () => {
+  const written = [];
+  const writer = { desiredSize: 1, write: async (f) => written.push(f), close: async () => {}, closed: new Promise(() => {}) };
+  const createCanvas = (width, height) => ({ width, height, getContext: () => ({ drawImage: () => {} }) });
+  const capture = new StreamCapture({ now: () => 10, VideoFrameImpl: FakeFrame, createCanvas });
+  capture.attach({ getWriter: () => writer });
+  for (const c of [{ width: 2560, height: 1440 }, { width: 2100, height: 1180 }, { width: 1920, height: 1440 }, { width: 3000, height: 480 }]) capture.offerCanvas(c, 1);
+  const native = { width: 854, height: 480 };
+  capture.offerCanvas(native, 2);
+  assert.deepEqual(written.slice(0, 4).map((f) => [f.source.width, f.source.height]), [[854, 480], [854, 480], [640, 480], [854, 136]]);
+  assert.equal(written[4].source, native);
 });
 
 // Follow-up of 0168, point 5: one capture at 4x ended at 320x240. The size
