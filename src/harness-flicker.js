@@ -14,6 +14,10 @@ export const SIGNATURE_ROWS = 48;
 export const SIGNATURE_STEP = 2;
 export const MAX_IN_FLIGHT = 6;
 export const MAX_FRAMES = 1200;
+// The replay ops counted between two presents (command-stream op numbers,
+// src/upstream-discio-worker.js WGPU_CMD_OP_*): what fed each picture.
+export const COUNTED_OPS = Object.freeze({ 8: "uploadTexture", 12: "beginPass", 19: "draw", 20: "drawIndexed", 24: "blitTexture", 25: "clearRect", 28: "copyToStaging" });
+const emptyOps = () => Object.fromEntries(Object.values(COUNTED_OPS).map((k) => [k, 0]));
 
 // Luma (BT.601, 8 bits) of every `step`-th pixel of each sampled row.
 // `bytes` holds `rows` rows of `bytesPerRow`, `width` RGBA (or BGRA) pixels.
@@ -45,14 +49,20 @@ export function createFlickerRecorder({ now = () => performance.now(), maxFrames
   return {
     get active() { return state != null; },
     start() {
-      state = { t0: now(), presents: 0, inFlight: 0, frames: [], gaps: 0, errors: 0, lastError: null, full: false };
+      state = { t0: now(), presents: 0, inFlight: 0, frames: [], gaps: 0, errors: 0, lastError: null, full: false, ops: emptyOps() };
+    },
+    // A replay op: counted toward the next present.
+    noteOp(op) {
+      const name = COUNTED_OPS[op];
+      if (name && state) state.ops[name] += 1;
     },
     onPresent(readback, vi = null) {
       if (!state) return;
       const s = state;
       const seq = s.presents++;
       if (s.frames.length >= maxFrames) { s.full = true; return; }
-      const frame = { seq, at: Math.round(now() - s.t0), vi, sig: null };
+      const frame = { seq, at: Math.round(now() - s.t0), vi, ops: s.ops, sig: null };
+      s.ops = emptyOps();
       s.frames.push(frame);
       if (s.inFlight >= MAX_IN_FLIGHT) { s.gaps += 1; return; }
       let p;
@@ -74,8 +84,8 @@ export function createFlickerRecorder({ now = () => performance.now(), maxFrames
       state = null;
       const shape = s.frames.find((f) => f.sig)?.sig;
       const frames = s.frames.map((f) => (f.sig && shape && f.sig.cols === shape.cols && f.sig.rows === shape.rows
-        ? { seq: f.seq, at: f.at, vi: f.vi, b64: toBase64(f.sig.data) }
-        : { seq: f.seq, at: f.at, vi: f.vi, gap: true }));
+        ? { seq: f.seq, at: f.at, vi: f.vi, ops: f.ops, b64: toBase64(f.sig.data) }
+        : { seq: f.seq, at: f.at, vi: f.vi, ops: f.ops, gap: true }));
       return {
         windowMs: Math.round(now() - s.t0), presents: s.presents, kept: frames.filter((f) => !f.gap).length,
         gaps: frames.filter((f) => f.gap).length, errors: s.errors, lastError: s.lastError, full: s.full,
