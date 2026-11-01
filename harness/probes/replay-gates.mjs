@@ -105,9 +105,12 @@ try {
     const query = o.exact
       ? (side === "base" ? `${referenceQuery(o.query)}&metrics=1` : `${o.query}&metrics=1${o.extra}`)
       : `${o.query}&inputlatency=1&metrics=1${side === "candidate" ? o.extra : ""}`;
-    const session = await openSession({ base: server.base, server, query, iso: o.iso, gamepads: { connected: 1 }, routes: { "**/__harness_state.sav": o.state } });
     const v = { n, side, frames: {}, input: null };
+    // a boot that fails (a timeout on a loaded bench) fails this visit, not
+    // the whole run: the other visits still count, and the summary is written
+    let session = null;
     try {
+      session = await openSession({ base: server.base, server, query, iso: o.iso, gamepads: { connected: 1 }, routes: { "**/__harness_state.sav": o.state } });
       const loaded = await loadHarnessState(session.page, session.url);
       if (!loaded?.loaded) throw new Error(`savestate not loaded: ${JSON.stringify(loaded)}`);
       // glitch-meter G2: the replay's integrity from the load to the visit's end
@@ -230,7 +233,7 @@ try {
     } catch (e) {
       v.error = String(e?.message || e);
     } finally {
-      await session.close();
+      await session?.close();
     }
     const i = v.input;
     log(`visit ${n} ${side}: ${v.error ?? `frames ${VIS.map((x) => (v.frames[x]?.error ? "err" : "ok")).join("/")}, input ${i ? `${i.visibleCount} seen, p95 ${Math.round(i.visibleAgeP95Ms)} ms, max ${Math.round(i.visibleAgeMaxMs)} ms` : "none"}${integrityBrief(v.integrity)}`}`);

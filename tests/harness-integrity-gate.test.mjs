@@ -257,3 +257,10 @@ test("region link refusals are fatal on their total since boot", async () => {
   // allowed explicitly: moved to allowed
   assert.deepEqual(integrityOf({ ...zero, regionLinkValidation: 1 }, { ...zero, regionLinkValidation: 1 }, { allow: ["regionLinkValidation"] }).allowed, ["regionLinkValidation 1 since boot"]);
 });
+
+test("replay-gates: a boot that fails fails its visit, never the whole run", async () => {
+  const gates = await readFile(new URL("../harness/probes/replay-gates.mjs", import.meta.url), "utf8");
+  const visit = gates.slice(gates.indexOf("const v = { n, side, frames: {}, input: null };"));
+  assert.ok(visit.indexOf("try {") < visit.indexOf("session = await openSession("), "openSession inside the visit's try");
+  assert.match(visit, /\} catch \(e\) \{\n\s+v\.error = String\(e\?\.message \|\| e\);\n\s+\} finally \{\n\s+await session\?\.close\(\);/);
+});
