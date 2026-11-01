@@ -67,15 +67,25 @@ test("the replay feeds the detector at every write and present, and reports it",
   assert.match(host, /stalePresents: this\.mode === "dolphin" \? this\.adapter\.stalePresents \?\? null : null,/);
 });
 
-test("patch 0211: in dual core a swap that fetches an older XFB already shown holds the last picture", async () => {
+test("patch 0211: a dual-core VI swap ahead of its copy holds the last picture, at most twice in a row", async () => {
   const patch = await read("../patches/dolphin-wasm/snapshot/0211-stale-xfb-shows-last-picture.patch");
-  // only in dual core, only an entry older than the last and shown before
-  assert.match(patch, /\+    const bool stale = Core::System::GetInstance\(\)\.IsDualCoreMode\(\) && m_last_shown_entry &&\n\+                       old_xfb_id != std::numeric_limits<u64>::max\(\) && id < old_xfb_id &&\n\+                       shown_before;/);
-  // held: the last entry again, the same id, so the swap is a duplicate
-  assert.match(patch, /\+      m_xfb_entry = m_last_shown_entry;\n\+      m_xfb_rect = m_last_shown_rect;\n\+      m_last_xfb_id = old_xfb_id;/);
+  // the race's own condition: the GPU thread has not consumed the FIFO written before the VI
+  assert.match(patch, /\+            m_gpu_chunks_consumed\.fetch_add\(1, std::memory_order_release\);/);
+  assert.match(patch, /\+  return m_gpu_chunks_consumed\.load\(std::memory_order_acquire\) \+\n\+         \(pending \+ GPFifo::GATHER_PIPE_SIZE - 1\) \/ GPFifo::GATHER_PIPE_SIZE;/);
+  assert.match(patch, /\+        system\.IsDualCoreMode\(\) && !fifo_manager\.UseDeterministicGPUThread\(\) \?\n\+            fifo_manager\.GpuCatchUpTarget\(\) :\n\+            0;/);
+  assert.match(patch, /\+      fifo_target != 0 &&\n\+      Core::System::GetInstance\(\)\.GetFifo\(\)\.GpuChunksConsumed\(\) < fifo_target;/);
+  // held only then, for an older entry already shown, and at most twice in a row
+  assert.match(patch, /\+    const bool stale = may_hold && m_last_shown_entry && id < old_xfb_id &&\n\+                       old_xfb_id != std::numeric_limits<u64>::max\(\) && shown_before &&\n\+                       m_stale_holds_in_a_row < MAX_STALE_HOLDS_IN_A_ROW;/);
+  assert.match(patch, /\+constexpr u32 MAX_STALE_HOLDS_IN_A_ROW = 2;/);
+  // an immediate swap never holds: FetchXFB's may_hold defaults to false and only ViSwap passes it
+  assert.match(patch, /\+                bool may_hold = false\);/);
+  assert.match(patch, /\+  bool is_duplicate = FetchXFB\(xfb_addr, fb_width, fb_stride, fb_height, ticks, may_hold\);/);
+  assert.ok(!/ImmediateSwap[\s\S]{0,400}may_hold/.test(patch.slice(patch.indexOf("void Presenter::ImmediateSwap"))), "ImmediateSwap untouched");
+  // a load forgets the ids it restores, before its re-display
+  const doState = patch.slice(patch.indexOf("Patch 0211: a load restores"));
+  assert.ok(doState.indexOf("ForgetShownXfbs();") >= 0 && doState.indexOf("ForgetShownXfbs();") < doState.indexOf("If we're loading and there is a last XFB, re-display it."), "forgotten before the re-display");
+  assert.match(patch, /\+  if \(p\.IsReadMode\(\)\)\n\+  \{\n\+    ForgetShownXfbs\(\);\n\+    m_last_xfb_id = std::numeric_limits<u64>::max\(\);/);
   assert.match(patch, /\+      DolphinWeb::g_stale_xfb_held\.fetch_add\(1, std::memory_order_relaxed\);/);
-  // a state load restores entry ids: lower than every one remembered starts over
-  assert.match(patch, /\+        m_shown_xfb_ids\.fill\(0\);/);
   const core = await read("../core/upstream/dolphin_web_core.cpp");
   assert.match(core, /std::uint32_t DolphinWeb_StaleXfbHeld\(\)\n\{\n#ifdef __EMSCRIPTEN__\n\s+return DolphinWeb::g_stale_xfb_held\.load\(std::memory_order_relaxed\);/);
 });
