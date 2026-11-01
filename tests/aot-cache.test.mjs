@@ -673,3 +673,19 @@ test("blacklist: two sessions of one identity add keys side by side, and a black
   assert.deepEqual(await next.has([key(7)]), new Set(), "the bytes of a blacklisted region are deleted");
   assert.equal(next.blacklistReason(key(7)), "too-large");
 });
+
+// 0196 (AOT_COMPILER_VERSION 36 -> 37) drops four helper imports: a region
+// module cached by a 20-import core must never load against a 16-import one,
+// or every player with a warm cache would see all regions refused at the next
+// launch. The new core has another hash AND another compiler version; either
+// alone is another cache.
+test("a region cached under compiler version 36 never loads under 37, whatever the core hash", async () => {
+  const storage = fakeCacheStorage();
+  const old = await open(storage, { compilerVersion: "region-36" }, { clock });
+  await old.put([{ key: k(7), bytes: MOD_A }]);
+  for (const over of [{ compilerVersion: "region-37" }, { compilerVersion: "region-37", coreHash: "c".repeat(64) }, { compilerVersion: "region-36", coreHash: "c".repeat(64) }]) {
+    const next = await open(storage, over, { clock });
+    assert.notEqual(next.cacheName, old.cacheName, JSON.stringify(over));
+    assert.deepEqual(await next.has([k(7)]), new Set(), JSON.stringify(over));
+  }
+});
