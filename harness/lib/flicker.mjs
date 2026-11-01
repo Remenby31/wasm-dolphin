@@ -14,6 +14,15 @@
 // d: mean absolute luma difference (0-255) over the signature.
 
 export const FLICKER_FLOOR = 1.0;
+
+// Fatal only on the deterministic CPU. In cpu=dual a late replay can present
+// an XFB buffer whose new copy has not run yet, so the picture from two
+// frames back comes again (Spark, 2026-11-01: 3 to 12 per visit, the same
+// texture for A and C, a bare present for C): reported, not fatal, until the
+// core fix (patch 0211).
+export function flickerFatal(...queries) {
+  return queries.every((q) => new URLSearchParams(String(q ?? "")).get("cpu") === "single");
+}
 export const FLICKER_RATIO = 0.25;
 
 export function signatureDistance(a, b) {

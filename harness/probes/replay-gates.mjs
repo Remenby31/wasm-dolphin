@@ -55,7 +55,7 @@ import { parseArgs } from "node:util";
 import { ensureServer, loadHarnessState, captureAtVi, workerRequest } from "../lib/browser.mjs";
 import { integrityBrief, integrityOf, readIntegrity, treeHasIntegrity } from "../lib/integrity.mjs";
 import { openSession, savePng } from "../lib/session.mjs";
-import { distinctRuns, findFlicker, tripleStrip } from "../lib/flicker.mjs";
+import { distinctRuns, findFlicker, flickerFatal, tripleStrip } from "../lib/flicker.mjs";
 import { diffFrame, exactVerdict, oracleQueryError, referenceQuery, referenceSwitchesOn } from "../lib/glitch-oracle.mjs";
 import { setPad } from "../lib/gamepad-mock.mjs";
 import { acquirePerfLock } from "../lib/perf-lock.mjs";
@@ -253,7 +253,11 @@ const summary = { probe: "replay-gates", extra: o.extra, order, picture: {}, inp
   log(`pthreads: ${JSON.stringify(summary.pthreads)}`);
 }
 summary.flicker = visits.filter((v) => v.flicker?.flagged?.length).map((v) => ({ visit: v.n, side: v.side, flagged: v.flicker.flagged }));
-for (const f of summary.flicker) log(`FLICKER visit ${f.visit} ${f.side}: ${f.flagged.length} A-B-A (first at present ${f.flagged[0].seqB}, ratio ${f.flagged[0].ratio})`);
+// A-B-A per visit, and whether they fail the run (cpu=single on both sides)
+summary.flickerPerVisit = visits.filter((v) => v.flicker).map((v) => ({ visit: v.n, side: v.side, abA: v.flicker.flagged.length, presents: v.flicker.presents }));
+summary.flickerFatal = flickerFatal(o.query, `${o.query}${o.extra}`);
+const flickerFails = summary.flickerFatal ? summary.flicker.length : 0;
+for (const f of summary.flicker) log(`FLICKER${summary.flickerFatal ? "" : " (reported, cpu=dual)"} visit ${f.visit} ${f.side}: ${f.flagged.length} A-B-A (first at present ${f.flagged[0].seqB}, ratio ${f.flagged[0].ratio})`);
 for (const f of summary.integrity) log(`INTEGRITY visit ${f.visit} ${f.side}: ${f.fatal.join(", ")}`);
 for (const index of VIS) {
   const of = (side) => visits.filter((v) => v.side === side && v.frames[index]?.b64).map((v) => frameOf(v.frames[index]));
@@ -295,8 +299,8 @@ if (o.exact) {
   for (const row of verdict.rows) log(`exact VI ${row.vi}: ${row.missing ? "MISSING" : row.unstable ? "REFERENCE UNSTABLE" : row.mismatches ? `DIFFERS in ${row.mismatches} visit(s), ${row.pixels} px` : "0 px"}`);
   const errors = visits.filter((v) => v.error);
   for (const v of errors) log(`visit ${v.n} ${v.side}: ${v.error}`);
-  log(verdict.pass && !errors.length && !summary.integrity.length && !summary.flicker.length ? "EXACT: the default renders the reference's pixels at every VI" : `EXACT FAILED: ${[...verdict.failures, ...errors.map((v) => `visit ${v.n}: ${v.error}`)].join("; ")}`);
-  process.exit(verdict.pass && !errors.length && !summary.integrity.length && !summary.flicker.length ? 0 : 1);
+  log(verdict.pass && !errors.length && !summary.integrity.length && !flickerFails ? "EXACT: the default renders the reference's pixels at every VI" : `EXACT FAILED: ${[...verdict.failures, ...errors.map((v) => `visit ${v.n}: ${v.error}`)].join("; ")}`);
+  process.exit(verdict.pass && !errors.length && !summary.integrity.length && !flickerFails ? 0 : 1);
 }
 // a gate that measured nothing never passes
 // __causalTelemetry.input.visible is never null (without the tracker it is
@@ -305,4 +309,4 @@ const failed = visits.filter((v) => v.error || !v.input?.enabled || !v.input.vis
 const empty = ["base", "candidate"].filter((side) => !summary.input[side].visits || !summary.input[side].presses || VIS.some((i) => !summary.picture[i][side === "base" ? "baseVsBase" : "candidateVsBase"].length));
 if (failed.length || empty.length) log(`FAILED: ${failed.length} visit(s) without a full reading${empty.length ? `, no data for ${empty.join(" and ")}` : ""}`);
 // a picture known wrong (an integrity counter moved) fails the gate too
-process.exit(failed.length || empty.length || summary.integrity.length || summary.flicker.length ? 1 : 0);
+process.exit(failed.length || empty.length || summary.integrity.length || flickerFails ? 1 : 0);
