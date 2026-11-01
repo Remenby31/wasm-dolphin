@@ -90,7 +90,7 @@ extern "C" void NotifyWebGpuOwnershipTraceLoadRequested();
 // pthread) stores a sentinel; the GPU-thread gate reads it back.
 namespace Fifo { extern std::atomic<std::uint32_t> g_s27_sentinel; }
 // Patch 0211: defined in VideoCommon/Present.cpp.
-namespace DolphinWeb { extern std::atomic<std::uint32_t> g_stale_xfb_held; }
+namespace DolphinWeb { extern std::atomic<std::uint32_t> g_stale_xfb_held; extern std::atomic<std::uint32_t> g_stale_xfb_held_preload; }
 
 extern "C" const char* DolphinWeb_GetAudioCommonStats();
 
@@ -1937,6 +1937,20 @@ std::uint32_t DolphinWeb_StaleXfbHeld()
 {
 #ifdef __EMSCRIPTEN__
   return DolphinWeb::g_stale_xfb_held.load(std::memory_order_relaxed);
+#else
+  return 0;
+#endif
+}
+
+// Patch 0211: of those, holds that showed a picture from before the last
+// state load (0 unless the presenter's record outlived a load).
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+std::uint32_t DolphinWeb_StaleXfbHeldPreload()
+{
+#ifdef __EMSCRIPTEN__
+  return DolphinWeb::g_stale_xfb_held_preload.load(std::memory_order_relaxed);
 #else
   return 0;
 #endif
