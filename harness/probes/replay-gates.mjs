@@ -39,6 +39,10 @@
 // hash: 0 pixels apart. A difference fails (exit 1) and keeps the reference,
 // the default and their difference (x8) as out/mismatch-<VI>-*.png. No
 // input phase (the frames are the measure).
+// --flicker S (glitch-meter G4, lib/flicker.mjs): after the frames, S
+// seconds of presented pictures (sampled rows) watched for one that comes
+// and goes (A-B-A); one found fails (exit 1) and keeps its three pictures
+// as out/flicker-visit<n>-<k>.png.
 // visits.json keeps each captured frame's sha256 (hashes), so the frames of
 // two trees can be compared exactly from two runs.
 // Exit 1 when a visit failed, a side has no picture or no input reading, or
@@ -51,6 +55,7 @@ import { parseArgs } from "node:util";
 import { ensureServer, loadHarnessState, captureAtVi, workerRequest } from "../lib/browser.mjs";
 import { integrityBrief, integrityOf, readIntegrity, treeHasIntegrity } from "../lib/integrity.mjs";
 import { openSession, savePng } from "../lib/session.mjs";
+import { distinctRuns, findFlicker, flickerFatal, tripleStrip } from "../lib/flicker.mjs";
 import { diffFrame, exactVerdict, oracleQueryError, referenceQuery, referenceSwitchesOn } from "../lib/glitch-oracle.mjs";
 import { setPad } from "../lib/gamepad-mock.mjs";
 import { acquirePerfLock } from "../lib/perf-lock.mjs";
@@ -61,7 +66,7 @@ const { values: o } = parseArgs({ options: {
   candidate: { type: "string" }, "lock-wait": { type: "string", default: "14400" },
   "slot-reload": { type: "boolean", default: false }, "slot-saves": { type: "string", default: "0" },
   "bad-state-load": { type: "boolean", default: false },
-  exact: { type: "boolean", default: false }
+  exact: { type: "boolean", default: false }, flicker: { type: "string", default: "0" }
 }, strict: true });
 for (const k of ["iso", "state", "port", "out", "query", ...(o.exact ? [] : ["extra"])]) if (!o[k]) throw new Error(`--${k} is required`);
 o.extra ??= "";
@@ -180,6 +185,21 @@ try {
           // comparable across trees and runs: the same pixels, the same hash
           sha256: createHash("sha256").update(f.data).digest("hex") };
       }
+      // --flicker: the presented pictures watched for an A-B-A
+      if (Number(o.flicker) > 0) {
+        const started = await workerRequest(session.page, "validationFlickerWatch", { action: "start" }, 10000);
+        if (!started?.started) throw new Error(`flicker watch: ${started?.error ?? "not started"}`);
+        await sleep(Number(o.flicker) * 1000);
+        const watch = await workerRequest(session.page, "validationFlickerWatch", { action: "stop" }, 60000);
+        if (watch?.error) throw new Error(`flicker watch: ${watch.error}`);
+        const found = findFlicker(distinctRuns(watch), { cols: watch.cols, rows: watch.rows });
+        found.flagged.slice(0, 5).forEach((t, k) => savePng(tripleStrip(t, watch.cols, watch.rows), path.join(o.out, `flicker-visit${n}-${k}.png`)));
+        v.flicker = { presents: watch.presents, kept: watch.kept, gaps: watch.gaps, errors: watch.errors, full: watch.full,
+          distinct: found.distinct, triples: found.triples, closestRatio: found.closestRatio,
+          flagged: found.flagged.map(({ frames, ...t }) => t) };
+        log(`visit ${n} ${side}: flicker ${watch.presents} presents, ${found.distinct} distinct, ${found.triples} triples, closest ratio ${found.closestRatio}, ${found.flagged.length} A-B-A`);
+        if (!found.triples) throw new Error(`flicker watch: no triple to judge (${watch.kept} sampled presents, ${watch.gaps} gaps)`);
+      }
       // --exact: the frames are the measure, no input phase
       if (!o.exact) {
         await sleep(5000);
@@ -224,12 +244,20 @@ function frameDiff(a, b) {
 const frameOf = (x) => ({ width: x.width, height: x.height, data: Buffer.from(x.b64, "base64") });
 const median = (a) => { const s = [...a].sort((x, y) => x - y); return s.length ? s[s.length >> 1] : null; };
 const summary = { probe: "replay-gates", extra: o.extra, order, picture: {}, input: {},
+  // spark-run --loaded: the lane's cores were not waited free (a correctness run)
+  ...(process.env.SPARK_LOADED === "1" ? { loaded: true } : {}),
   integrity: visits.filter((v) => v.integrity?.fatal?.length).map((v) => ({ visit: v.n, side: v.side, fatal: v.integrity.fatal })) };
 {
   const read = visits.map((v) => v.pthreads).filter((p) => Number.isFinite(p?.running));
   summary.pthreads = read.length ? { maxRunning: Math.max(...read.map((p) => p.running)), maxAllocated: Math.max(...read.map((p) => p.allocated)), poolSize: read[0].poolSize } : null;
   log(`pthreads: ${JSON.stringify(summary.pthreads)}`);
 }
+summary.flicker = visits.filter((v) => v.flicker?.flagged?.length).map((v) => ({ visit: v.n, side: v.side, flagged: v.flicker.flagged }));
+// A-B-A per visit, and whether they fail the run (cpu=single on both sides)
+summary.flickerPerVisit = visits.filter((v) => v.flicker).map((v) => ({ visit: v.n, side: v.side, abA: v.flicker.flagged.length, presents: v.flicker.presents }));
+summary.flickerFatal = flickerFatal(o.query, `${o.query}${o.extra}`);
+const flickerFails = summary.flickerFatal ? summary.flicker.length : 0;
+for (const f of summary.flicker) log(`FLICKER${summary.flickerFatal ? "" : " (reported, cpu=dual)"} visit ${f.visit} ${f.side}: ${f.flagged.length} A-B-A (first at present ${f.flagged[0].seqB}, ratio ${f.flagged[0].ratio})`);
 for (const f of summary.integrity) log(`INTEGRITY visit ${f.visit} ${f.side}: ${f.fatal.join(", ")}`);
 for (const index of VIS) {
   const of = (side) => visits.filter((v) => v.side === side && v.frames[index]?.b64).map((v) => frameOf(v.frames[index]));
@@ -271,8 +299,8 @@ if (o.exact) {
   for (const row of verdict.rows) log(`exact VI ${row.vi}: ${row.missing ? "MISSING" : row.unstable ? "REFERENCE UNSTABLE" : row.mismatches ? `DIFFERS in ${row.mismatches} visit(s), ${row.pixels} px` : "0 px"}`);
   const errors = visits.filter((v) => v.error);
   for (const v of errors) log(`visit ${v.n} ${v.side}: ${v.error}`);
-  log(verdict.pass && !errors.length && !summary.integrity.length ? "EXACT: the default renders the reference's pixels at every VI" : `EXACT FAILED: ${[...verdict.failures, ...errors.map((v) => `visit ${v.n}: ${v.error}`)].join("; ")}`);
-  process.exit(verdict.pass && !errors.length && !summary.integrity.length ? 0 : 1);
+  log(verdict.pass && !errors.length && !summary.integrity.length && !flickerFails ? "EXACT: the default renders the reference's pixels at every VI" : `EXACT FAILED: ${[...verdict.failures, ...errors.map((v) => `visit ${v.n}: ${v.error}`)].join("; ")}`);
+  process.exit(verdict.pass && !errors.length && !summary.integrity.length && !flickerFails ? 0 : 1);
 }
 // a gate that measured nothing never passes
 // __causalTelemetry.input.visible is never null (without the tracker it is
@@ -281,4 +309,4 @@ const failed = visits.filter((v) => v.error || !v.input?.enabled || !v.input.vis
 const empty = ["base", "candidate"].filter((side) => !summary.input[side].visits || !summary.input[side].presses || VIS.some((i) => !summary.picture[i][side === "base" ? "baseVsBase" : "candidateVsBase"].length));
 if (failed.length || empty.length) log(`FAILED: ${failed.length} visit(s) without a full reading${empty.length ? `, no data for ${empty.join(" and ")}` : ""}`);
 // a picture known wrong (an integrity counter moved) fails the gate too
-process.exit(failed.length || empty.length || summary.integrity.length ? 1 : 0);
+process.exit(failed.length || empty.length || summary.integrity.length || flickerFails ? 1 : 0);

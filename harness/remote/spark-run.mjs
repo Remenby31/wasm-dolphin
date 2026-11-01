@@ -321,9 +321,18 @@ export function checkPresentationProbe(probe, rawArgs, benchArgs, headed) {
   const extra = raw.indexOf("--extra");
   if (extra >= 0 && new URLSearchParams(raw[extra + 1] ?? "").has("video")) throw new Error("--extra must not change video= (it escapes the bench's query check)");
 }
-export function launchCommand({ harnessDir, outDir, lane = "auto", raceArgs, chromeCpus, nodeCpus, headed = null, headless = false, xauth = BENCH_XAUTHORITY, probe = "race-perf" }) {
+// --loaded: a correctness run (replay-gates: exact pictures, integrity,
+// flicker) does not wait for the lane's cores to be free of other people's
+// processes. Its verdicts do not depend on speed, and a loaded, late replay
+// is where some glitches show (the judge, 2026-11-01). It still takes its
+// turn and the lane's lock; spark.json says loaded. Speed probes refuse it.
+export const LOADED_PROBES = Object.freeze(["replay-gates"]);
+export const LOADED_NOTE = "lane cores not waited free of other processes (correctness run): no speed reading from it";
+
+export function launchCommand({ harnessDir, outDir, lane = "auto", raceArgs, chromeCpus, nodeCpus, headed = null, headless = false, xauth = BENCH_XAUTHORITY, probe = "race-perf", loaded = false }) {
   if (!SPARK_PROBES.includes(probe)) throw new Error(`probe ${probe}: one of ${SPARK_PROBES.join(", ")}`);
-  const env = [chromeCpus && `SPARK_CHROME_CPUS=${sh(chromeCpus)}`, nodeCpus && `SPARK_NODE_CPUS=${sh(nodeCpus)}`, probe !== "race-perf" && `SPARK_PROBE=${sh(probe)}`, ...headedEnv(headed, xauth, { headless })].filter(Boolean).join(" ");
+  if (loaded && !LOADED_PROBES.includes(probe)) throw new Error(`loaded: correctness probes only, not ${probe}`);
+  const env = [chromeCpus && `SPARK_CHROME_CPUS=${sh(chromeCpus)}`, nodeCpus && `SPARK_NODE_CPUS=${sh(nodeCpus)}`, probe !== "race-perf" && `SPARK_PROBE=${sh(probe)}`, loaded && "SPARK_LOADED=1", ...headedEnv(headed, xauth, { headless })].filter(Boolean).join(" ");
   return [
     `mkdir -p ${sh(path.posix.dirname(outDir))}`,
     // Two pairs never share a name (race-perf refuses an existing --out, the log would mix).
@@ -574,7 +583,8 @@ async function main() {
       headed: { type: "string" }, headless: { type: "boolean", default: false }, xauth: { type: "string", default: BENCH_XAUTHORITY },
       detach: { type: "boolean", default: false }, fetch: { type: "string" }, build: { type: "string" },
       "multi-lanes": { type: "string" }, queue: { type: "boolean", default: false },
-      probe: { type: "string", default: "race-perf" }, noise: { type: "string" }, screen: { type: "boolean", default: false }
+      probe: { type: "string", default: "race-perf" }, noise: { type: "string" }, screen: { type: "boolean", default: false },
+      loaded: { type: "boolean", default: false }
     },
     allowPositionals: true
   });
@@ -598,6 +608,7 @@ async function main() {
   if (values.candidate.length > 1) throw new Error("several --candidate: only with --multi");
   // --probe: the probe the pair runs (same lane, lock, cores and options as race-perf's)
   if (!SPARK_PROBES.includes(values.probe)) throw new Error(`--probe ${values.probe}: one of ${SPARK_PROBES.join(", ")}`);
+  if (values.loaded && !LOADED_PROBES.includes(values.probe)) throw new Error(`--loaded: correctness runs only (${LOADED_PROBES.join(", ")}); a speed measure keeps its load gate`);
   values.candidate = values.candidate[0];
   // drop-meter runs its full scenario from the boot without a savestate
   if (!values.candidate || (!values.state && values.probe !== "drop-meter")) throw new Error("usage: spark-run.mjs --candidate <ref|dir> [--baseline <ref|dir>] --state <local .sav> [--name n] [--runs 6] [--detach] [--probe race-perf|drop-meter|replay-gates] [-- probe options]");
@@ -640,10 +651,11 @@ async function main() {
     sides: { candidate, ...(baseline ? { baseline } : {}) },
     querySwaps: bench.swaps,
     probe: values.probe, ...(values.screen ? { screen: SCREEN_NOTE } : {}),
+    ...(values.loaded ? { loaded: LOADED_NOTE } : {}),
     headed: values.headed ?? null, headless: values.headless,
     raceArgs
   };
-  ssh(host, launchCommand({ harnessDir: abs(harness.dest), outDir, lane: values.lane, raceArgs, chromeCpus: values["chrome-cpus"], nodeCpus: values["node-cpus"], headed: values.headed, headless: values.headless, xauth: values.xauth, probe: values.probe }));
+  ssh(host, launchCommand({ harnessDir: abs(harness.dest), outDir, lane: values.lane, raceArgs, chromeCpus: values["chrome-cpus"], nodeCpus: values["node-cpus"], headed: values.headed, headless: values.headless, xauth: values.xauth, probe: values.probe, loaded: values.loaded }));
   mkdirSync(path.join(MEASURES, date, name), { recursive: true });
   writeFileSync(path.join(MEASURES, date, name, "spark.json"), JSON.stringify(meta, null, 1) + "\n");
   console.log(`[spark-run] started on ${host}: ${date}/${name}, lane ${values.lane} (${values.probe} waits for its lane's perf lock)`);

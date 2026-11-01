@@ -4,6 +4,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -407,7 +408,7 @@ test("spark-run --probe drop-meter|replay-gates: --headed, an explicit wgpu --qu
   assert.match(run, /positionals\.includes\("--no-lock"\)\) throw/);
   const gates = await readFile(new URL("../harness/probes/replay-gates.mjs", import.meta.url), "utf8");
   assert.doesNotMatch(gates, /baseline-query|baseline: \{/, "both sides from one tree: no --baseline");
-  assert.match(gates, /process\.exit\(failed\.length \|\| empty\.length \|\| summary\.integrity\.length \? 1 : 0\)/);
+  assert.match(gates, /process\.exit\(failed\.length \|\| empty\.length \|\| summary\.integrity\.length \|\| flickerFails \? 1 : 0\)/);
   // review of 768b7be1: a reading needs the tracker on and presses seen
   assert.match(gates, /!v\.input\?\.enabled \|\| !v\.input\.visibleCount/);
   assert.match(gates, /!summary\.input\[side\]\.presses/);
@@ -513,3 +514,16 @@ test("spark-run --multi on two lanes: stamped as screening, three lanes not", as
   assert.match(src, /if \(meta\.screen\) console\.log\(`\[spark-run\] \$\{meta\.screen\}`\);/, "said at the launch");
 });
 
+
+test("spark-run --loaded: correctness runs skip the cores wait, speed probes keep it", async () => {
+  const { launchCommand, LOADED_PROBES } = await import("../harness/remote/spark-run.mjs");
+  assert.deepEqual(LOADED_PROBES, ["replay-gates"]);
+  const cmd = launchCommand({ harnessDir: "/h", outDir: "/r/x", raceArgs: ["--runs", "2"], probe: "replay-gates", loaded: true });
+  assert.match(cmd, /SPARK_PROBE='?replay-gates'? SPARK_LOADED=1 /);
+  assert.ok(!launchCommand({ harnessDir: "/h", outDir: "/r/x", raceArgs: [], probe: "replay-gates" }).includes("SPARK_LOADED"));
+  for (const probe of ["race-perf", "drop-meter"]) assert.throws(() => launchCommand({ harnessDir: "/h", outDir: "/r/x", raceArgs: [], probe, loaded: true }), /correctness probes only/);
+  const race = await readFile(new URL("../harness/remote/spark-race.sh", import.meta.url), "utf8");
+  assert.match(race, /if \[ "\$\{SPARK_LOADED:-0\}" = 1 \]; then[\s\S]*spark-queue\.mjs wait --pid \$\$ --kind pair --lanes "\$want" --name "\$\(basename "\$out"\)" -- "\$@"\)\n\s+else/);
+  const gates = await readFile(new URL("../harness/probes/replay-gates.mjs", import.meta.url), "utf8");
+  assert.match(gates, /\.\.\.\(process\.env\.SPARK_LOADED === "1" \? \{ loaded: true \} : \{\}\),/);
+});

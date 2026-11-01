@@ -36,8 +36,16 @@ export PATH="$B/node/bin:$PATH"
   # exit 4 here, no pair rather than measure on shared cores); any other
   # failure is an error (2), never retried. The last check is kept as
   # <out>.cores.
-  lane=$(node harness/remote/spark-queue.mjs wait --pid $$ --kind pair --lanes "$want" --name "$(basename "$out")" \
-    --cores "a=${SPARK_CHROME_CPUS:-15-19},${SPARK_NODE_CPUS:-10-14}" --cores-out "$out.cores" -- "$@")
+  # SPARK_LOADED=1 (spark-run --loaded, replay-gates only): a correctness
+  # run takes its turn without waiting for the cores to be free.
+  if [ "${SPARK_LOADED:-0}" = 1 ]; then
+    echo "[spark-race] loaded: the lane's cores are not waited free (correctness run)"
+    node harness/remote/spark-cores.mjs check --cpus "${SPARK_CHROME_CPUS:-15-19},${SPARK_NODE_CPUS:-10-14}" --exclude-tree $$ > "$out.cores" 2>&1
+    lane=$(node harness/remote/spark-queue.mjs wait --pid $$ --kind pair --lanes "$want" --name "$(basename "$out")" -- "$@")
+  else
+    lane=$(node harness/remote/spark-queue.mjs wait --pid $$ --kind pair --lanes "$want" --name "$(basename "$out")" \
+      --cores "a=${SPARK_CHROME_CPUS:-15-19},${SPARK_NODE_CPUS:-10-14}" --cores-out "$out.cores" -- "$@")
+  fi
   code=$?
   case $code in
     0) ;;
