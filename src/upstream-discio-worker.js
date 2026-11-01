@@ -17184,7 +17184,7 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
           wgpuNextPresentSource = null;
           wgpuExactCapture.onPresent(readbackWgpuPresentSource);
           if (harnessUniqueFrames.active) harnessUniqueFrames.onPresent(readbackWgpuPresentRowsHash);
-          if (harnessFlicker.active) harnessFlicker.onPresent(readbackWgpuPresentSignature);
+          if (harnessFlicker.active) harnessFlicker.onPresent(readbackWgpuPresentSignature, wgpuExactCapture.currentLoad());
           scheduleDetachedWgpuBitmap(q);
           webGpuExecStats.present++;
           if (webGpuExecStats.present - webGpuExecStats.lastLog >= 120) {

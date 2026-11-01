@@ -37,8 +37,9 @@ function toBase64(bytes) {
   return btoa(s);
 }
 
-// `onPresent(readback)` at each present; `readback()` returns (a promise of)
-// a signature { cols, rows, data }.
+// `onPresent(readback, vi)` at each present; `readback()` returns (a promise
+// of) a signature { cols, rows, data }; `vi`: the VI output since the load
+// that present shows (a capture's fromLoad index), null when untagged.
 export function createFlickerRecorder({ now = () => performance.now(), maxFrames = MAX_FRAMES } = {}) {
   let state = null;
   return {
@@ -46,12 +47,12 @@ export function createFlickerRecorder({ now = () => performance.now(), maxFrames
     start() {
       state = { t0: now(), presents: 0, inFlight: 0, frames: [], gaps: 0, errors: 0, lastError: null, full: false };
     },
-    onPresent(readback) {
+    onPresent(readback, vi = null) {
       if (!state) return;
       const s = state;
       const seq = s.presents++;
       if (s.frames.length >= maxFrames) { s.full = true; return; }
-      const frame = { seq, at: Math.round(now() - s.t0), sig: null };
+      const frame = { seq, at: Math.round(now() - s.t0), vi, sig: null };
       s.frames.push(frame);
       if (s.inFlight >= MAX_IN_FLIGHT) { s.gaps += 1; return; }
       let p;
@@ -73,8 +74,8 @@ export function createFlickerRecorder({ now = () => performance.now(), maxFrames
       state = null;
       const shape = s.frames.find((f) => f.sig)?.sig;
       const frames = s.frames.map((f) => (f.sig && shape && f.sig.cols === shape.cols && f.sig.rows === shape.rows
-        ? { seq: f.seq, at: f.at, b64: toBase64(f.sig.data) }
-        : { seq: f.seq, at: f.at, gap: true }));
+        ? { seq: f.seq, at: f.at, vi: f.vi, b64: toBase64(f.sig.data) }
+        : { seq: f.seq, at: f.at, vi: f.vi, gap: true }));
       return {
         windowMs: Math.round(now() - s.t0), presents: s.presents, kept: frames.filter((f) => !f.gap).length,
         gaps: frames.filter((f) => f.gap).length, errors: s.errors, lastError: s.lastError, full: s.full,
