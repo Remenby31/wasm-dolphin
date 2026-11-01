@@ -6,6 +6,7 @@ import path from "node:path";
 import test from "node:test";
 import { REQUIRED_WGPU_OWNERSHIP_TRACE_EXPORTS } from "../tools/dolphin-provenance.mjs";
 import { CAUSAL_TELEMETRY_SCHEMA_VERSION } from "../src/causal-telemetry.js";
+import { JSC_STAGING_SLOT_COUNT, JSC_STAGING_SLOT_MIB } from "../src/wgpu-replay-diagnostics.js";
 
 import {
   FIXED_BATTLE_FIXTURE,
@@ -518,9 +519,14 @@ test("metrics-off WGPU evidence requires a matching static runtime config", () =
     }).failures.join("\n"), pattern);
   }
   // Unforced, the engine's defaults are expected: under JavaScriptCore,
-  // mapped staging and 4 slots; an artifact without the engine reads as V8.
+  // mapped staging with JSC's slot count and size; an artifact without the
+  // engine reads as V8.
   const { wgpuuploadtransport: _t, wgpustagingslots: _s, ...unforced } = params;
-  const jsc = { ...runtimeConfig, wasmEngine: "jsc", uploadTransport: "mapped", mappedStaging: { ...runtimeConfig.mappedStaging, slotCount: 4 } };
+  const jsc = { ...runtimeConfig, wasmEngine: "jsc", uploadTransport: "mapped", mappedStaging: { ...runtimeConfig.mappedStaging, slotCount: JSC_STAGING_SLOT_COUNT, slotBytes: JSC_STAGING_SLOT_MIB * 1024 * 1024 } };
+  assert.match(evaluateWgpuRuntimeConfigEvidence({
+    required: true, params: unforced,
+    runtimeConfig: { ...jsc, mappedStaging: { ...jsc.mappedStaging, slotBytes: 16 * 1024 * 1024 } },
+  }).failures.join("\n"), /slot bytes mismatch/);
   assert.deepEqual(evaluateWgpuRuntimeConfigEvidence({ required: true, params: unforced, runtimeConfig: jsc }).failures, []);
   assert.match(evaluateWgpuRuntimeConfigEvidence({
     required: true, params: unforced, runtimeConfig: { ...jsc, wasmEngine: "v8" },
