@@ -486,7 +486,8 @@ export class AotOptimizer extends EventTarget {
           let bytes = null;
           const fragments = claimEntries(result.fragments);
           try {
-            bytes = this.assemble(fragments);
+            // sync, or a promise (aot-assembler-worker.js: off this worker)
+            bytes = await this.assemble(fragments);
           } catch (error) {
             // Fragments of one unit translated across a stop and a new boot
             // (another heap layout): translated again later, not refused.
