@@ -51,7 +51,7 @@ index 9d69055..cdee507 100644
    CoreTiming::EventType* m_event_sync_gpu = nullptr;
  
 diff --git a/Source/Core/VideoCommon/Present.cpp b/Source/Core/VideoCommon/Present.cpp
-index 0c58fad..2e11194 100644
+index 0c58fad..2d3a13e 100644
 --- a/Source/Core/VideoCommon/Present.cpp
 +++ b/Source/Core/VideoCommon/Present.cpp
 @@ -3,12 +3,20 @@
@@ -172,7 +172,7 @@ index 0c58fad..2e11194 100644
  
    PresentInfo present_info{
        .present_count = m_present_count++,
-@@ -1063,6 +1131,16 @@ void Presenter::DoState(PointerWrap& p)
+@@ -1063,6 +1131,15 @@ void Presenter::DoState(PointerWrap& p)
    p.Do(m_last_xfb_stride);
    p.Do(m_last_xfb_height);
  
@@ -182,8 +182,7 @@ index 0c58fad..2e11194 100644
 +  if (p.IsReadMode())
 +  {
 +    ++m_load_generation;
-+    ForgetShownXfbs();
-+    m_last_xfb_id = std::numeric_limits<u64>::max();
++    // diag: the record of shown XFBs kept across the load (the review's bug)
 +  }
 +
    // If we're loading and there is a last XFB, re-display it.
