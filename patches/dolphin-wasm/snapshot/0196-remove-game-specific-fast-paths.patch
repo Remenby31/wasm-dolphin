@@ -2792,7 +2792,21 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  constexpr u32 AOT_MAX_FRAGMENT_BYTES = 1u << 20;
  thread_local std::vector<u32> t_aot_out;
  u8* s_aot_ram = nullptr;
-@@ -19247,9 +16977,6 @@ bool CachedInterpreter::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
+@@ -18715,8 +16445,11 @@ extern "C" EMSCRIPTEN_KEEPALIVE const char* DolphinWeb_JitHelperSignature(u32 in
+ {
+   static constexpr std::array<const char*, 5> TYPES = {
+       "i32>i32", "i32,i32>i32", "i32,i32,i32>", "i32,i32,i32,i32,i32>i32", "f64,f64,f64,i32>f64"};
+-  static constexpr std::array<u8, 20> TYPE_OF = {1, 2, 1, 2, 1, 2, 3, 3, 3, 3,
+-                                                 3, 3, 3, 3, 2, 3, 1, 3, 3, 4};
++  // One entry per WASM_IMPORT_NAMES entry, the type index its
++  // EmitEnvFunctionImport declares: the region assembler links by these.
++  static constexpr std::array<u8, WASM_IMPORT_NAMES.size()> TYPE_OF = {
++      1, 2, 1, 2, 1, 2, 3, 3, 3, 3, 3, 3, 3, 3, 2, 4};
++  static_assert(TYPE_OF[WASM_IMPORT_FMA_INDEX] == 4, "fma is the f64 helper");
+   return index < TYPE_OF.size() ? TYPES[TYPE_OF[index]] : nullptr;
+ }
+ 
+@@ -19247,9 +16980,6 @@ bool CachedInterpreter::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
        }
        else
        {
