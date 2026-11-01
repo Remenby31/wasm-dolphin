@@ -237,6 +237,7 @@ test("replay-gates reads the pthreads in use at each visit's end", async () => {
   const gates = await readFile(new URL("../harness/probes/replay-gates.mjs", import.meta.url), "utf8");
   assert.match(gates, /v\.pthreads = await workerRequest\(session\.page, "validationReadPthreads", \{\}, 10000\)/);
   assert.match(gates, /summary\.pthreads = read\.length \? \{ maxRunning:/);
+});
 
 // A region module refused at boot (its first compile, before the window)
 // fails the run too: the 0196 import-table bug refused regions there and the
