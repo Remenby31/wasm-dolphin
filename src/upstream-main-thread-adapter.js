@@ -165,6 +165,7 @@ export class UpstreamMainThreadAdapter {
       requestCoreControl: optionalCwrap("RequestCoreControl", "number", ["number", "string"]),
       requestCoreControlSlot: optionalCwrap("RequestCoreControlSlot", "number", ["number", "number"]),
       coreControlResult: optionalCwrap("CoreControlResult", "number", ["number"]),
+      coreControlAbandon: optionalCwrap("CoreControlAbandon", null, ["number"]),
       resetCore: optionalCwrap("ResetCore", "number", []),
       saveCoreState: optionalCwrap("SaveCoreState", "number", ["number"]),
       loadCoreState: optionalCwrap("LoadCoreState", "number", ["number"]),
@@ -556,7 +557,7 @@ export class UpstreamMainThreadAdapter {
     const api = this.api;
     if (api?.requestCoreControl && api?.coreControlResult) {
       return runCoreControl({
-        request: api.requestCoreControl, result: api.coreControlResult,
+        request: api.requestCoreControl, result: api.coreControlResult, abandon: api.coreControlAbandon ?? undefined,
         op: paused ? CORE_CONTROL_OPS.pause : CORE_CONTROL_OPS.resume, what: paused ? "pause" : "resume"
       }).then(() => 1, (error) => { this.onStatus?.(error.message); return 0; });
     }
@@ -568,7 +569,8 @@ export class UpstreamMainThreadAdapter {
   slotRequest(op, slot, what) {
     const api = this.api;
     return runCoreControl({
-      request: (kind) => api.requestCoreControlSlot(kind, slot | 0), result: api.coreControlResult, op, what
+      request: (kind) => api.requestCoreControlSlot(kind, slot | 0), result: api.coreControlResult,
+      abandon: api.coreControlAbandon ?? undefined, op, what
     }).then(() => 1, (error) => { this.onStatus?.(error.message); return 0; });
   }
 

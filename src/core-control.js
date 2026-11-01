@@ -16,11 +16,19 @@ export const CORE_CONTROL_OPS = Object.freeze({ saveFile: 1, loadFile: 2, pause:
 // pause 10 s): past it the request fails with a message, never silence.
 export const CORE_CONTROL_TIMEOUT_MS = 60000;
 
-// CoreControlResult: 0 pending, 1 done, -1 failed or refused, -2 still
-// running past the core's time, 2 done late, -3 failed late.
+// What the player reads when the control pthread is stuck: nothing more can
+// pause, save, load or stop the core until the page is reloaded.
+export const CORE_CONTROL_STUCK = "the emulator is stuck on an earlier request: reload the page";
+
+// RequestCoreControl: an id, 0 refused, -1 stuck on an earlier request past
+// its time. CoreControlResult: 0 pending, 1 done, -1 failed or refused, -2
+// still running past the core's time, 2 done late, -3 failed late. A request
+// given up here is handed back to the core (abandon: CoreControlAbandon), so
+// a queued one never runs later and no result is left behind.
 export async function runCoreControl({
   request,
   result,
+  abandon = () => {},
   op,
   path = "",
   what,
@@ -30,6 +38,7 @@ export async function runCoreControl({
   now = () => Date.now()
 }) {
   const id = request(op, path) | 0;
+  if (id === -1) throw new Error(`${what}: ${CORE_CONTROL_STUCK}`);
   if (id <= 0) throw new Error(`${what}: the emulator refused the request`);
   const deadline = now() + timeoutMs;
   let late = false;
@@ -41,8 +50,9 @@ export async function runCoreControl({
     }
     if (rc === -2) late = true;
     if (now() >= deadline) {
-      throw new Error(`${what}: the emulator did not finish within ${Math.round(timeoutMs / 1000)} s` +
-        (late ? " (it is still working on it; try again in a moment)" : ""));
+      abandon(id);
+      throw new Error(`${what}: the emulator did not finish within ${Math.round(timeoutMs / 1000)} s; ` +
+        CORE_CONTROL_STUCK);
     }
     await sleep(pollMs);
   }
