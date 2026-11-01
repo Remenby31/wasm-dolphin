@@ -102,7 +102,8 @@ test("pthread renderer transport is independent of the optional JIT cache channe
     ...rendererListenerNames,
     "handleDolphinJitPthreadBarrierAckEvent",
     "handleDolphinJitNewCompile",
-    "handleDolphinJitCompileRequest"
+    "handleDolphinJitCompileRequest",
+    "handleDolphinRegionLinkFailure"
   ]);
   assert.equal(cacheEnabled.messages.length, 2);
   assert.equal(cacheEnabled.messages[0].type, "dolphin-jit-cache");
@@ -117,7 +118,8 @@ test("pthread renderer transport is independent of the optional JIT cache channe
     ...rendererListenerNames,
     "handleDolphinJitPthreadBarrierAckEvent",
     "handleDolphinJitNewCompile",
-    "handleDolphinJitCompileRequest"
+    "handleDolphinJitCompileRequest",
+    "handleDolphinRegionLinkFailure"
   ]);
 });
 
