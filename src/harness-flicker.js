@@ -43,7 +43,8 @@ function toBase64(bytes) {
 
 // `onPresent(readback, vi)` at each present; `readback()` returns (a promise
 // of) a signature { cols, rows, data }; `vi`: the VI output since the load
-// that present shows (a capture's fromLoad index), null when untagged.
+// that present shows (a capture's fromLoad index), null when untagged;
+// `source`: the texture id and rectangle the present sampled.
 export function createFlickerRecorder({ now = () => performance.now(), maxFrames = MAX_FRAMES } = {}) {
   let state = null;
   return {
@@ -56,12 +57,12 @@ export function createFlickerRecorder({ now = () => performance.now(), maxFrames
       const name = COUNTED_OPS[op];
       if (name && state) state.ops[name] += 1;
     },
-    onPresent(readback, vi = null) {
+    onPresent(readback, vi = null, source = null) {
       if (!state) return;
       const s = state;
       const seq = s.presents++;
       if (s.frames.length >= maxFrames) { s.full = true; return; }
-      const frame = { seq, at: Math.round(now() - s.t0), vi, ops: s.ops, sig: null };
+      const frame = { seq, at: Math.round(now() - s.t0), vi, source, ops: s.ops, sig: null };
       s.ops = emptyOps();
       s.frames.push(frame);
       if (s.inFlight >= MAX_IN_FLIGHT) { s.gaps += 1; return; }
@@ -84,8 +85,8 @@ export function createFlickerRecorder({ now = () => performance.now(), maxFrames
       state = null;
       const shape = s.frames.find((f) => f.sig)?.sig;
       const frames = s.frames.map((f) => (f.sig && shape && f.sig.cols === shape.cols && f.sig.rows === shape.rows
-        ? { seq: f.seq, at: f.at, vi: f.vi, ops: f.ops, b64: toBase64(f.sig.data) }
-        : { seq: f.seq, at: f.at, vi: f.vi, ops: f.ops, gap: true }));
+        ? { seq: f.seq, at: f.at, vi: f.vi, source: f.source, ops: f.ops, b64: toBase64(f.sig.data) }
+        : { seq: f.seq, at: f.at, vi: f.vi, source: f.source, ops: f.ops, gap: true }));
       return {
         windowMs: Math.round(now() - s.t0), presents: s.presents, kept: frames.filter((f) => !f.gap).length,
         gaps: frames.filter((f) => f.gap).length, errors: s.errors, lastError: s.lastError, full: s.full,
