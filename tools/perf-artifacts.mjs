@@ -10,7 +10,9 @@ import { CAUSAL_TELEMETRY_SCHEMA_VERSION } from "../src/causal-telemetry.js";
 import {
   defaultWgpuMappedStagingSlotCount,
   defaultWgpuMappedStagingSlotMib,
+  defaultWgpuUboPack,
   defaultWgpuUploadTransport,
+  requestedWgpuUboPack,
   WGPU_MAPPED_STAGING_SLOT_MIB_VALUES,
   wgpuMappedStagingSlotCountOf
 } from "../src/wgpu-replay-diagnostics.js";
@@ -63,7 +65,10 @@ export function evaluateWgpuRuntimeConfigEvidence({
   const expectedUboCache = requestedFlag("wgpuubocache");
   const expectedUboMetrics = expectedMetricsEnabled && requestedFlag("wgpuubometrics");
   const expectedUniformFast = requestedFlag("wgpuuniformfast");
-  const expectedUboPack = requestedFlag("wgpuubopack") && !expectedUboCache;
+  // dense UBO packets: the engine's default unless forced (on under V8)
+  const expectedUboPack = requestedWgpuUboPack(
+    params?.wgpuubopack == null ? "" : `?wgpuubopack=${params.wgpuubopack}`, defaultWgpuUboPack(engine)
+  ) && !expectedUboCache;
   const expectedStageFast = expectedUploadTransport === "mapped" && requestedFlag("wgpustagefast");
   const requestedSlots = String(params?.wgpustagingslots ?? "");
   const expectedSlots = /^[3-8]$/.test(requestedSlots)

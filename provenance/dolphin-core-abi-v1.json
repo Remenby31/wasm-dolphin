@@ -86,8 +86,8 @@
     {
       "path": "src/core-host.js",
       "hashMode": "lf-normalized",
-      "size": 100754,
-      "sha256": "f83275ac91469857a4c291b59a9342489ef439fd19590cffd8bd25d6b41fcc2a"
+      "size": 100813,
+      "sha256": "5d0360d2c37cc4af9c581877b7497964a89b2f69fa0dbaea9646940b26db6cb6"
     },
     {
       "path": "src/diagnostic-log-filter.js",
@@ -188,8 +188,8 @@
     {
       "path": "src/wgpu-replay-diagnostics.js",
       "hashMode": "lf-normalized",
-      "size": 44379,
-      "sha256": "6f757d8f694d47ca1323ec26b13b4d6cc852d101e000576e11ab267a7410ae8b"
+      "size": 44877,
+      "sha256": "5d7c83b5515d45d235b65616908e78c4d5bea4d2a206d50d759467eb1ecc77ec"
     },
     {
       "path": "src/wgpu-replay-quiescence.js",

@@ -48,7 +48,8 @@ import {
   requestedWgpuUboMetrics,
   requestedWgpuVpDiag,
   requestedWgpuUniformFast,
-  requestedWgpuUboPack
+  requestedWgpuUboPack,
+  defaultWgpuUboPack
 } from "./wgpu-replay-diagnostics.js";
 import { instantiateDemoCore } from "./wasm/demo-core.js";
 import { createCausalTelemetry, deepMerge } from "./causal-telemetry.js";
@@ -241,7 +242,7 @@ export class EmulatorHost {
     this.wgpuUboMetrics = requestedWgpuUboMetrics(window.location.search);
     this.wgpuVpDiag = requestedWgpuVpDiag(window.location.search);
     this.wgpuUniformFast = requestedWgpuUniformFast(window.location.search);
-    this.wgpuUboPack = requestedWgpuUboPack(window.location.search);
+    this.wgpuUboPack = requestedWgpuUboPack(window.location.search, defaultWgpuUboPack(this.wasmEngine));
     this.wgpuBindGroupCache = requestedWgpuBindGroupCache(
       window.location.search,
       defaultWgpuBindGroupCache(this.wasmEngine)
