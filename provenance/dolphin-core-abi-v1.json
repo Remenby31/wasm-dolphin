@@ -1,19 +1,19 @@
 {
   "schemaVersion": 1,
   "abiVersion": 1,
-  "coreId": "sha256:1019bfb35716d178258a38f92ca6374bc67b197a0156610ed53d790b6512abd7",
+  "coreId": "sha256:efa85af666fc9448056bffe8a62452a61ec65cc071323ae031b26c9e8a3f9e49",
   "upstreamCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
   "artifacts": [
     {
       "path": "cores/dolphin/dolphin-core-upstream.js",
       "hashMode": "lf-normalized",
-      "size": 290699,
-      "sha256": "edc6856adc29c12662b02257b2cc18dccaa79f57572536066622157e8227c3ee"
+      "size": 290872,
+      "sha256": "bb285981c938358b7c1209a3d828d54722c81d4812cb61383411bbcf8c14d154"
     },
     {
       "path": "cores/dolphin/dolphin-core-upstream.wasm",
-      "size": 13283860,
-      "sha256": "1019bfb35716d178258a38f92ca6374bc67b197a0156610ed53d790b6512abd7"
+      "size": 13291282,
+      "sha256": "efa85af666fc9448056bffe8a62452a61ec65cc071323ae031b26c9e8a3f9e49"
     }
   ],
   "contractSources": [
@@ -366,6 +366,7 @@
     "_AudioChannels",
     "_AudioSampleRate",
     "_BootDisc",
+    "_CoreControlResult",
     "_CoreInit",
     "_DolphinWeb_AotClearCacheForTest",
     "_DolphinWeb_AotDispatchRegionForTest",
@@ -586,6 +587,7 @@
     "_PumpHostJobs",
     "_ReadDisc",
     "_ReadDiscFile",
+    "_RequestCoreControl",
     "_Reset",
     "_ResetCore",
     "_RunFrame",
