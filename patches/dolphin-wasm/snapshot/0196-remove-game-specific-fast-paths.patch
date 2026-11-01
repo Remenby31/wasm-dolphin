@@ -153,7 +153,29 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
            fma: wasmTable.get(fma_index),
            // Region chaining (patch 0102): a region's exit stub asks the core
            // for the next region and tail-calls it through the core's table.
-@@ -391,9 +386,7 @@ std::atomic<u32> s_dolphin_web_disable_mask{0};
+@@ -287,6 +282,21 @@ EM_JS(int, DolphinWeb_CachedInterpreterCompileWasmBlock,
+     // the block is tried again after the next cache clear (handle -1). A full
+     // table is handled at the grow above.
+     const permanent = e instanceof WebAssembly.CompileError || e instanceof WebAssembly.LinkError;
++    // A region module the engine refused is counted by cause in discio
++    // (src/region-link-failures.js, the integrity gate): the session would
++    // otherwise only run slower.
++    if (region_request) {
++      try {
++        self.postMessage({
++          type: "dolphin-region-link-failure",
++          key: cacheKey,
++          name: (e && e.name) || "",
++          message: String((e && e.message) || e)
++        });
++      } catch (postError) {
++        // counted by RecordWasmCompileError below all the same
++      }
++    }
+     if ((_DolphinWeb_RecordWasmCompileError(bytes_len, permanent ? 0 : 1) | 0) <= 8) {
+       console.warn("[ppc-wasm-jit] block " + (permanent ? "rejected by the engine" : "not installed") +
+                    ", interpreting it: " + String((e && e.message) || e));
+@@ -391,9 +401,7 @@ std::atomic<u32> s_dolphin_web_disable_mask{0};
  // (and wherever relaxed SIMD is missing or unfused): the plain-f64 path.
  std::atomic<bool> s_fused_madd{false};
  
@@ -164,7 +186,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  constexpr u32 DOLPHIN_WEB_DISABLE_DCBXLOOP    = 1u << 3;  // DcbxLoop
  constexpr u32 DOLPHIN_WEB_DISABLE_FASTBRANCH  = 1u << 4;  // FastBranch + FastBranchBdnz
  constexpr u32 DOLPHIN_WEB_DISABLE_FASTFP      = 1u << 5;  // FastFloat emit path
-@@ -1154,7 +1147,7 @@ void RetryDeferredWasmBlocks(CachedInterpreter& cpu)
+@@ -1154,7 +1162,7 @@ void RetryDeferredWasmBlocks(CachedInterpreter& cpu)
  
  bool s_wasm_jit_direct_only = true;
  u32 s_wasm_direct_tier_reject_count = 0;
@@ -173,7 +195,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  // the mixed tier compiled only 2048 then stopped while the rest
  // still fell to the slow interpreter (measured: mixed:2048/2048,
  // short:2247, battle ~30%). Mixed keeps blocks alive with
-@@ -1236,180 +1229,16 @@ u32 s_fast_byte_mem_store_ops = 0;
+@@ -1236,180 +1244,16 @@ u32 s_fast_byte_mem_store_ops = 0;
  u32 s_fast_half_mem_load_ops = 0;
  u32 s_fast_half_mem_store_ops = 0;
  u32 s_fast_multiword_mem_ops = 0;
@@ -354,7 +376,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  struct PpcBlockProfileEntry
  {
    u32 pc = 0;
-@@ -1464,783 +1293,13 @@ void UpdatePerformanceMonitorIfNeeded(u32 cycles, u32 num_load_stores, u32 num_f
+@@ -1464,783 +1308,13 @@ void UpdatePerformanceMonitorIfNeeded(u32 cycles, u32 num_load_stores, u32 num_f
                                        PowerPC::PowerPCState& ppc_state)
  {
    if ((ppc_state.feature_flags & FEATURE_FLAG_PERFMON) != 0)
@@ -1144,7 +1166,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  }
  
  s32 DecodeConditionalBranchDisplacement(UGeckoInstruction inst)
-@@ -2554,68 +1613,6 @@ extern "C" void DolphinWeb_CachedInterpreterFastCheckGatherPipe(int state_ptr, u
+@@ -2554,68 +1628,6 @@ extern "C" void DolphinWeb_CachedInterpreterFastCheckGatherPipe(int state_ptr, u
    Core::System::GetInstance().GetGPFifo().FastCheckGatherPipe();
  }
  
@@ -1213,7 +1235,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  u16 ReadRamU16BE(const u8* ram, u32 offset)
  {
    return static_cast<u16>((u16{ram[offset]} << 8) | ram[offset + 1]);
-@@ -3253,20 +2250,14 @@ struct WasmStateLayout
+@@ -3253,20 +2265,14 @@ struct WasmStateLayout
  
  constexpr u32 WASM_IMPORT_FASTCHECK_GPFIFO_INDEX = 14;
  constexpr u32 WASM_IMPORT_INTERPRET_INDEX = 13;
@@ -1237,7 +1259,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  
  // Region fragments (P4): while a collector is installed, helper calls are
  // emitted with a 5-byte padded LEB index and recorded, so the region
-@@ -4295,11 +3286,6 @@ void EmitMcrf(std::vector<u8>& body, const WasmStateLayout& layout, UGeckoInstru
+@@ -4295,11 +3301,6 @@ void EmitMcrf(std::vector<u8>& body, const WasmStateLayout& layout, UGeckoInstru
  }
  
  void EmitSystemCall(std::vector<u8>& body, const PPCAnalyst::CodeOp& op, u32 downcount);
@@ -1249,7 +1271,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  
  void EmitMfmsr(std::vector<u8>& body, const WasmStateLayout& layout, const PPCAnalyst::CodeOp& op,
                 u32 downcount)
-@@ -4563,30 +3549,9 @@ void EmitBranchToRegister(std::vector<u8>& body, const WasmStateLayout& layout,
+@@ -4563,30 +3564,9 @@ void EmitBranchToRegister(std::vector<u8>& body, const WasmStateLayout& layout,
  }
  
  void EmitUnconditionalBranch(std::vector<u8>& body, const WasmStateLayout& layout,
@@ -1281,7 +1303,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    if (inst.LK)
      EmitStoreStateU32Const(body, SprOffset(layout, SPR_LR), op.address + 4);
  
-@@ -5233,56 +4198,6 @@ void EmitInterpretCall(std::vector<u8>& body, const PPCAnalyst::CodeOp& op, u32
+@@ -5233,56 +4213,6 @@ void EmitInterpretCall(std::vector<u8>& body, const PPCAnalyst::CodeOp& op, u32
    EmitRegCacheReloadAll(body);  // interpret may have written arbitrary GPRs
  }
  
@@ -1338,7 +1360,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  void EmitFpCall(std::vector<u8>& body, const PPCAnalyst::CodeOp& op, u32 downcount)
  {
    EmitRegCacheFlushDirty(body);  // §28cx C1
-@@ -5294,7 +4209,7 @@ void EmitFpCall(std::vector<u8>& body, const PPCAnalyst::CodeOp& op, u32 downcou
+@@ -5294,7 +4224,7 @@ void EmitFpCall(std::vector<u8>& body, const PPCAnalyst::CodeOp& op, u32 downcou
    EmitCallImport(body, 11);
    EmitImportedHaltCheck(body);
    // FP ops write FPRs (+CR/FPSCR), not GPRs — reload only the op's GPR outputs
@@ -1347,7 +1369,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    EmitRegCacheReloadMask(body, op.regsOut);
  }
  
-@@ -8408,7 +7323,7 @@ bool EmitWasmSupportedIntegerInstruction(std::vector<u8>& body, const WasmStateL
+@@ -8408,7 +7338,7 @@ bool EmitWasmSupportedIntegerInstruction(std::vector<u8>& body, const WasmStateL
      return true;
  
    case 18:  // bx
@@ -1356,7 +1378,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      return true;
  
    case 19:  // bclrx/bcctrx
-@@ -9085,7 +8000,7 @@ bool EmitWasmSupportedIntegerInstruction(std::vector<u8>& body, const WasmStateL
+@@ -9085,7 +8015,7 @@ bool EmitWasmSupportedIntegerInstruction(std::vector<u8>& body, const WasmStateL
  
        // Compute new XER.CA using ORIGINAL RA/RB from memory and store it FIRST.
        // We must not store the result to GprOffset(RD) before this read pair —
@@ -1365,7 +1387,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
        // the rD store would otherwise clobber the value we re-read here, giving
        // a carry computed from (result, RB) instead of (RA, RB). The corrupted
        // CA then propagates through subsequent adde/subfe and breaks 3D
-@@ -9635,7 +8550,7 @@ bool IsPpcWasmDirectInstructionCandidate(const PPCAnalyst::CodeOp& op)
+@@ -9635,7 +8565,7 @@ bool IsPpcWasmDirectInstructionCandidate(const PPCAnalyst::CodeOp& op)
    }
  
    // Direct-tier JIT admits FPU only when this file has a specialized emitter or a known hot helper
@@ -1374,7 +1396,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    if ((op.opinfo->flags & FL_USE_FPU) != 0)
      return IsPpcWasmSpecializedFpuInstruction(inst) || IsPpcWasmDirectHelperFpuInstruction(inst);
  
-@@ -10011,7 +8926,7 @@ std::vector<u8> BuildWasmCachedInterpreterBlock(std::span<const PPCAnalyst::Code
+@@ -10011,7 +8941,7 @@ std::vector<u8> BuildWasmCachedInterpreterBlock(std::span<const PPCAnalyst::Code
    EmitSection(bytes, 1, types);
  
    std::vector<u8> imports;
@@ -1383,7 +1405,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    EmitEnvFunctionImport(imports, "read_u32", 1);
    EmitEnvFunctionImport(imports, "write_u32", 2);
    EmitEnvFunctionImport(imports, "read_u8", 1);
-@@ -10027,10 +8942,6 @@ std::vector<u8> BuildWasmCachedInterpreterBlock(std::span<const PPCAnalyst::Code
+@@ -10027,10 +8957,6 @@ std::vector<u8> BuildWasmCachedInterpreterBlock(std::span<const PPCAnalyst::Code
    EmitEnvFunctionImport(imports, "fctiwz", 3);
    EmitEnvFunctionImport(imports, "interpret", 3);
    EmitEnvFunctionImport(imports, "fastcheck_gpfifo", 2);
@@ -1394,7 +1416,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    EmitEnvFunctionImport(imports, "fma", 4);
    EmitName(imports, "env");
    EmitName(imports, "memory");
-@@ -10241,20 +9152,11 @@ int CompileWasmModuleWithKey(const std::vector<u8>& bytes, const std::array<char
+@@ -10241,20 +9167,11 @@ int CompileWasmModuleWithKey(const std::vector<u8>& bytes, const std::array<char
        reinterpret_cast<std::uintptr_t>(&DolphinWeb_CachedInterpreterInterpret));
    const auto fastcheck_gpfifo_index = static_cast<int>(
        reinterpret_cast<std::uintptr_t>(&DolphinWeb_CachedInterpreterFastCheckGatherPipe));
@@ -1416,7 +1438,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
        static_cast<int>(reinterpret_cast<std::uintptr_t>(&DolphinWeb_CachedInterpreterFma)),
        ready_bits_ptr,
        region ? ((DolphinWebDisableMask() & DOLPHIN_WEB_ENABLE_REGION_FRAGMENT_HANDLES) != 0 ? 2 : 1) : 0);
-@@ -12514,62 +11416,6 @@ void CachedInterpreter::ExecuteOneBlock([[maybe_unused]] bool allow_redispatch)
+@@ -12514,62 +11431,6 @@ void CachedInterpreter::ExecuteOneBlock([[maybe_unused]] bool allow_redispatch)
      }
      // DOLPHIN_WEB_LEGACY_DISPATCH_ORDER_END
  #endif
@@ -1479,7 +1501,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      else if (callback == AnyCallbackCast(FastDcbx))
      {
        FastDcbx(ppc_state, *reinterpret_cast<const FastInstructionOperands*>(payload));
-@@ -13081,328 +11927,56 @@ static bool IsFastPureIntegerInstruction(UGeckoInstruction inst)
+@@ -13081,328 +11942,56 @@ static bool IsFastPureIntegerInstruction(UGeckoInstruction inst)
      case 183:  // stwux
      case 266:  // addx
      case 316:  // xorx
@@ -1843,7 +1865,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  }
  
  bool CachedInterpreter::TryWriteDcbxLoop(u32 index, PowerPC::PowerPCManager& power_pc)
-@@ -13476,51 +12050,11 @@ bool CachedInterpreter::TryWriteFastInstruction(const PPCAnalyst::CodeOp& op,
+@@ -13476,51 +12065,11 @@ bool CachedInterpreter::TryWriteFastInstruction(const PPCAnalyst::CodeOp& op,
  
    if (!IsBranchWatchEnabled() && IsFastBranchInstruction(op.inst))
    {
@@ -1896,7 +1918,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      // untouched. BI is irrelevant when BO bit 4 is set, but we constrain BI==0 to match the
      // canonical assembler form and avoid surprise. The branch target is statically known
      // (PPCAnalyst already populates op.branchTo), so we precompute it here and skip the BO
-@@ -14542,677 +13076,6 @@ s32 CachedInterpreter::FastFloat(PowerPC::PowerPCState& ppc_state,
+@@ -14542,677 +13091,6 @@ s32 CachedInterpreter::FastFloat(PowerPC::PowerPCState& ppc_state,
    return sizeof(AnyCallback) + sizeof(operands);
  }
  
@@ -2574,7 +2596,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  static void ExecuteDcbxCacheOperation(Core::System& system, PowerPC::PowerPCState& ppc_state,
                                        UGeckoInstruction inst, u32 address)
  {
-@@ -15406,21 +13269,6 @@ bool CachedInterpreter::TryWriteWasmBlock(u32 nextPC)
+@@ -15406,21 +13284,6 @@ bool CachedInterpreter::TryWriteWasmBlock(u32 nextPC)
      LogWasmBlockReject("empty", nullptr, 0, js.blockStart, code_block.m_num_instructions);
      return false;
    }
@@ -2596,7 +2618,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  
    ++s_wasm_block_attempt_count;
    if (!s_wasm_jit_direct_only && s_wasm_block_mixed_compile_count >= MAX_WASM_MIXED_COMPILED_BLOCKS)
-@@ -15766,14 +13614,6 @@ bool CachedInterpreter::TryWriteWasmBlock(u32 nextPC)
+@@ -15766,14 +13629,6 @@ bool CachedInterpreter::TryWriteWasmBlock(u32 nextPC)
        reinterpret_cast<std::uintptr_t>(&DolphinWeb_CachedInterpreterInterpret));
    const auto fastcheck_gpfifo_index = static_cast<int>(
        reinterpret_cast<std::uintptr_t>(&DolphinWeb_CachedInterpreterFastCheckGatherPipe));
@@ -2611,7 +2633,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    const auto cache_key = DolphinWeb_MakeWasmBlockCacheKey(bytes);
    if (s_wasm_rejected_block_keys.contains(cache_key.data()))
    {
-@@ -15791,8 +13631,7 @@ bool CachedInterpreter::TryWriteWasmBlock(u32 nextPC)
+@@ -15791,8 +13646,7 @@ bool CachedInterpreter::TryWriteWasmBlock(u32 nextPC)
        bytes.data(), static_cast<int>(bytes.size()), cache_key.data(), read_u32_index,
        write_u32_index, read_u8_index, write_u8_index, read_u16_index, write_u16_index, lfs_index,
        stfs_index, lfd_index, fmr_index, system_index, fp_index, fctiwz_index, interpret_index,
@@ -2621,7 +2643,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
        static_cast<int>(reinterpret_cast<std::uintptr_t>(&DolphinWeb_CachedInterpreterFma)),
        off_thread ? static_cast<int>(DolphinWeb_JitReadyBitsPtr()) : 0, 0);
    if (handle == -3 || handle == -4)
-@@ -15956,9 +13795,6 @@ bool CachedInterpreter::TryWriteWasmBlock(u32 nextPC)
+@@ -15956,9 +13810,6 @@ bool CachedInterpreter::TryWriteWasmBlock(u32 nextPC)
        }
        else
        {
@@ -2631,7 +2653,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
          if (!TryWriteDcbxLoop(i, power_pc) && !TryWriteFastInstruction(op, power_pc))
          {
            s_mem_block_counts.Interpreted(op);
-@@ -16018,23 +13854,6 @@ void ApplyRequestedWasmPolicy(CachedInterpreter& cpu)
+@@ -16018,23 +13869,6 @@ void ApplyRequestedWasmPolicy(CachedInterpreter& cpu)
        requested == s_applied_wasm_policy.load(std::memory_order_relaxed))
      return;
    const bool next_enabled = requested != 0;
@@ -2655,7 +2677,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    s_wasm_jit_enabled = next_enabled;
    s_wasm_jit_direct_only = requested < 2;
    // Drop code generated under the previous policy, including pre-JIT fallbacks
-@@ -16263,7 +14082,6 @@ extern "C" const char* GetPpcWasmHelperStats()
+@@ -16263,7 +14097,6 @@ extern "C" const char* GetPpcWasmHelperStats()
    static u32 last_refresh_direct_tier_reject_count = 0;
    static u32 last_refresh_too_short_count = 0;
    static u32 last_refresh_dcbx_loop_blocks = 0;
@@ -2663,7 +2685,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    static u64 last_refresh_fallback_dispatch_total = 0;
    constexpr u32 STATS_REFRESH_BLOCK_RUNS = 1000;
    const JitFallbackDispatchStats fallback_dispatch = GetJitFallbackDispatchStats();
-@@ -16278,7 +14096,6 @@ extern "C" const char* GetPpcWasmHelperStats()
+@@ -16278,7 +14111,6 @@ extern "C" const char* GetPpcWasmHelperStats()
        s_wasm_direct_tier_reject_count == last_refresh_direct_tier_reject_count &&
        s_wasm_block_too_short_count == last_refresh_too_short_count &&
        s_fast_dcbx_loop_blocks == last_refresh_dcbx_loop_blocks &&
@@ -2671,7 +2693,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
        fallback_dispatch_total == last_refresh_fallback_dispatch_total &&
        static_link_snapshot.sequence == static_link_last_sequence)
  #else
-@@ -16290,7 +14107,6 @@ extern "C" const char* GetPpcWasmHelperStats()
+@@ -16290,7 +14122,6 @@ extern "C" const char* GetPpcWasmHelperStats()
        s_wasm_direct_tier_reject_count == last_refresh_direct_tier_reject_count &&
        s_wasm_block_too_short_count == last_refresh_too_short_count &&
        s_fast_dcbx_loop_blocks == last_refresh_dcbx_loop_blocks &&
@@ -2679,7 +2701,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
        fallback_dispatch_total == last_refresh_fallback_dispatch_total)
  #endif
  #line 11305
-@@ -16304,7 +14120,6 @@ extern "C" const char* GetPpcWasmHelperStats()
+@@ -16304,7 +14135,6 @@ extern "C" const char* GetPpcWasmHelperStats()
    last_refresh_direct_tier_reject_count = s_wasm_direct_tier_reject_count;
    last_refresh_too_short_count = s_wasm_block_too_short_count;
    last_refresh_dcbx_loop_blocks = s_fast_dcbx_loop_blocks;
@@ -2687,7 +2709,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    last_refresh_fallback_dispatch_total = fallback_dispatch_total;
  #if DOLPHIN_WEB_STATIC_EXIT_LINKS && DOLPHIN_WEB_STATIC_EXIT_LINK_STATS
    static_link_last_sequence = static_link_snapshot.sequence;
-@@ -16528,92 +14343,6 @@ extern "C" const char* GetPpcWasmHelperStats()
+@@ -16528,92 +14358,6 @@ extern "C" const char* GetPpcWasmHelperStats()
          << " lh:" << s_fast_half_mem_load_ops << " sth:" << s_fast_half_mem_store_ops
          << " mw:" << s_fast_multiword_mem_ops;
    }
@@ -2780,7 +2802,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    if (s_fast_branch_ops != 0)
    {
      out << " | fastbranch ops:" << s_fast_branch_ops << " bcx:" << s_fast_branch_bcx_ops
-@@ -18478,8 +16207,9 @@ namespace
+@@ -18478,8 +16222,9 @@ namespace
  // 34 (0146): the 0141/0143 paths in fewer bytes (splatted constants, one
  // helper call per op); 33 is retired (0144, closed). 35 (0147): psq_l and
  // psq_st float pairs in v128. 36 (0157): regions run with MSR.FP clear,
@@ -2792,7 +2814,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  constexpr u32 AOT_MAX_FRAGMENT_BYTES = 1u << 20;
  thread_local std::vector<u32> t_aot_out;
  u8* s_aot_ram = nullptr;
-@@ -18715,8 +16445,11 @@ extern "C" EMSCRIPTEN_KEEPALIVE const char* DolphinWeb_JitHelperSignature(u32 in
+@@ -18715,8 +16460,11 @@ extern "C" EMSCRIPTEN_KEEPALIVE const char* DolphinWeb_JitHelperSignature(u32 in
  {
    static constexpr std::array<const char*, 5> TYPES = {
        "i32>i32", "i32,i32>i32", "i32,i32,i32>", "i32,i32,i32,i32,i32>i32", "f64,f64,f64,i32>f64"};
@@ -2806,7 +2828,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    return index < TYPE_OF.size() ? TYPES[TYPE_OF[index]] : nullptr;
  }
  
-@@ -19247,9 +16980,6 @@ bool CachedInterpreter::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
+@@ -19247,9 +16995,6 @@ bool CachedInterpreter::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
        }
        else
        {
