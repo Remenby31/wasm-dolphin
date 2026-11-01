@@ -57,7 +57,7 @@ test("replay-gates --exact: reference read back, no input phase, images kept, ex
   assert.match(gates, /const on = referenceSwitchesOn\(v\.runtimeConfig\);\n\s+if \(on\.length\) throw new Error/);
   assert.match(gates, /if \(!o\.exact\) \{\n\s+await sleep\(5000\);/);
   assert.match(gates, /savePng\(diff, path\.join\(o\.out, `mismatch-\$\{row\.vi\}-diff-x8\.png`\)\);/);
-  assert.match(gates, /process\.exit\(verdict\.pass && !errors\.length && !summary\.integrity\.length \? 0 : 1\);/);
+  assert.match(gates, /process\.exit\(verdict\.pass && !errors\.length && !summary\.integrity\.length && !flickerFails \? 0 : 1\);/);
   // the worker reports the two switches the reference needs read back
   const worker = await read("../src/upstream-discio-worker.js");
   const config = worker.slice(worker.indexOf("function wgpuRuntimeConfigPayload()"), worker.indexOf("function wgpuRuntimeConfigPayload()") + 3000);
