@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "0fa0669b4fea21f03e055ad74a001327f584b8dc64b728562b21954479472c1f",
+  "patchSeriesSha256": "72e82efb8bbf55454dcc7660a5deed622892a759ef17c2195b4bde6dd982e16f",
   "patches": [
     {
       "order": 1,
@@ -1103,12 +1103,20 @@
       "order": 135,
       "cwd": ".",
       "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0196-remove-game-specific-fast-paths.patch",
+      "size": 142322,
+      "sha256": "9a301448fdab79d113c14ccff1a8cfdc1f255701ec6a53f25f9427d709769e04"
+    },
+    {
+      "order": 136,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0201-webgpu-destroy-evicted-bind-groups.patch",
       "size": 3127,
       "sha256": "e377cd746a4518e18be8aca99af824f6afa7c64a7e0e2c083907bf37915d43fe"
     },
     {
-      "order": 136,
+      "order": 137,
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0202-webgpu-destroy-freed-textures.patch",
@@ -1116,7 +1124,7 @@
       "sha256": "db2b4aef881a895ba63e88ef71f22e4c582ac14c41ea6b935bc56ee81913c936"
     },
     {
-      "order": 137,
+      "order": 138,
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0203-webgpu-retire-geometry-buffers.patch",
@@ -1124,7 +1132,7 @@
       "sha256": "e383e68a278cd19303de20204d764a1a307e05c5531f224fcc99a0f7e445c878"
     },
     {
-      "order": 138,
+      "order": 139,
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0204-webgpu-geometry-content-cache.patch",
@@ -1132,7 +1140,7 @@
       "sha256": "7448892897ff4c70aa2d2915254e5e2f08645e5163b5aa3d094491e4640382bf"
     },
     {
-      "order": 139,
+      "order": 140,
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0207-webgpu-integrity-abort-causes.patch",
@@ -1140,7 +1148,7 @@
       "sha256": "32905b569939bf3aeec1052f959e8d41b4ea8a47e2f445188cb718f4e54a8ae1"
     },
     {
-      "order": 140,
+      "order": 141,
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0208-webgpu-new-frame-tag.patch",
@@ -1148,7 +1156,7 @@
       "sha256": "9756fe97951174e3546c856ea88c21b7515161e52c96a32b3476790cc2a94dfd"
     },
     {
-      "order": 141,
+      "order": 142,
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0210-state-load-applied.patch",
@@ -1156,7 +1164,7 @@
       "sha256": "f677b2274e8e7f48a635cf9ee162c8334179424ed3cb12052a4ec8d028928ca7"
     },
     {
-      "order": 142,
+      "order": 143,
       "cwd": "Externals/SFML/SFML",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0001-sfml-emscripten-config.patch",
@@ -1164,7 +1172,7 @@
       "sha256": "f82197a21fe982ad83f6ee7bbf5a03839b1cebd4d64da3eab11263842bf61d89"
     },
     {
-      "order": 143,
+      "order": 144,
       "cwd": "Externals/xxhash/xxHash",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0002-xxhash-wasm-simd-scalar.patch",

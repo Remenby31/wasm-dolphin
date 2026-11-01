@@ -130,7 +130,8 @@ test("an edited stored identity starts the cache over; a missing one (a cache be
 
 test("corrupt entries are deleted and reported, never compiled", async () => {
   const storage = fakeCacheStorage();
-  const cache = await open(storage);
+  const rejects = [];
+  const cache = await open(storage, {}, { onLoadReject: (key, error) => rejects.push([key, error?.name]) });
   await cache.put([{ key: k(1), bytes: MOD_A }, { key: k(2), bytes: MOD_A }, { key: k(3), bytes: MOD_A }]);
   const raw = await storage.open(cache.cacheName);
   const flip = raw.entries.get(aotEntryUrl(BASE, cache.cacheName, k(1)));
@@ -147,6 +148,8 @@ test("corrupt entries are deleted and reported, never compiled", async () => {
   assert.deepEqual(loaded.get(k(3)), { reason: "engine-reject" });
   assert.deepEqual(await cache.has([k(1), k(2), k(3)]), new Set());
   assert.equal(cache.stats().corrupt, 2);
+  // only the module the engine refused reaches the region-link counters
+  assert.deepEqual(rejects, [[k(3), "CompileError"]]);
 });
 
 test("a CacheStorage that fails to read never fails the launch: the entry is dropped and reported", async () => {
@@ -669,4 +672,49 @@ test("blacklist: two sessions of one identity add keys side by side, and a black
   assert.equal(next.isBlacklisted(key(7)) && next.isBlacklisted(key(8)), true, "neither tab's list overwrote the other");
   assert.deepEqual(await next.has([key(7)]), new Set(), "the bytes of a blacklisted region are deleted");
   assert.equal(next.blacklistReason(key(7)), "too-large");
+});
+
+// 0196 (AOT_COMPILER_VERSION 36 -> 37) drops four helper imports: a region
+// module cached by a 20-import core must never load against a 16-import one,
+// or every player with a warm cache would see all regions refused at the next
+// launch. The new core has another hash AND another compiler version; either
+// alone is another cache.
+test("a region cached under compiler version 36 never loads under 37, whatever the core hash", async () => {
+  const storage = fakeCacheStorage();
+  const old = await open(storage, { compilerVersion: "region-36" }, { clock });
+  await old.put([{ key: k(7), bytes: MOD_A }]);
+  for (const over of [{ compilerVersion: "region-37" }, { compilerVersion: "region-37", coreHash: "c".repeat(64) }, { compilerVersion: "region-36", coreHash: "c".repeat(64) }]) {
+    const next = await open(storage, over, { clock });
+    assert.notEqual(next.cacheName, old.cacheName, JSON.stringify(over));
+    assert.deepEqual(await next.has([k(7)]), new Set(), JSON.stringify(over));
+  }
+});
+
+test("a module the engine never saw is not a refused region: fetch and response failures are not reported, compile failures are", async () => {
+  const storage = fakeCacheStorage();
+  const rejects = [];
+  let failFetch = true;
+  const fetchImpl = async (url) => {
+    if (failFetch) throw new TypeError("Failed to fetch");
+    return (await (await storage.open(cacheNameOf)).match(url)) ?? new Response(null, { status: 404 });
+  };
+  let cacheNameOf = null;
+  const cache = await openAotCache({ ...ident(), baseUrl: BASE, cacheStorage: storage, fetchImpl, serviceWorker: true,
+    compileStreaming: async () => { throw new TypeError("WebAssembly: Response body loading failed"); },
+    compile: (bytes) => WebAssembly.compile(bytes),
+    onLoadReject: (key, error) => rejects.push([key, error?.name]) });
+  cacheNameOf = cache.cacheName;
+  await cache.put([{ key: k(1), bytes: MOD_A }, { key: k(2), bytes: MOD_A }]);
+  // the Service Worker's fetch throws: a read failure, not reported
+  assert.deepEqual((await cache.load([k(1)])).get(k(1)), { reason: "compile-error" });
+  // the streamed response cannot be read (TypeError): not reported either
+  failFetch = false;
+  assert.deepEqual((await cache.load([k(1)])).get(k(1)), { reason: "compile-error" });
+  assert.deepEqual(rejects, []);
+  // an engine out of memory while compiling is reported (regionLinkOther)
+  const direct = await openAotCache({ ...ident(), baseUrl: BASE, cacheStorage: storage, serviceWorker: false,
+    compile: async () => { throw new RangeError("WebAssembly.Module(): Out of memory"); },
+    onLoadReject: (key, error) => rejects.push([key, error?.name]) });
+  assert.deepEqual((await direct.load([k(2)])).get(k(2)), { reason: "compile-error" });
+  assert.deepEqual(rejects, [[k(2), "RangeError"]]);
 });

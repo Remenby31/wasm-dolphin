@@ -220,8 +220,9 @@ sourceContractTest("actual policy setter defers cache changes to the CPU between
   const declarations = between(source, "bool s_wasm_jit_enabled = false;",
     "\n// All accesses are on the owning CPU thread.");
   const directOnly = matchOne(source, /bool s_wasm_jit_direct_only = true;/g, "effective tier declaration");
+  // Helpers that verify guest code once reset that state when the policy
+  // turns the JIT on; since 0196 removed the last of them there may be none.
   const resets = [...policy.matchAll(/\b(s_fast_\w+) = (false|0);/g)];
-  assert.ok(resets.length > 0, "actual policy invalidates verified helper state");
   const helperDeclarations = resets.map(([, name, value]) =>
     `${value === "false" ? "bool" : "u32"} ${name} = 1;`).join("\n");
   const resetAssertions = resets.map(([, name]) => `assert(${name} == 0);`).join("\n");

@@ -16,8 +16,13 @@
 //   refused, geometry cache collisions and failures;
 // - frames shown out of order: an older XFB put on the canvas after a newer
 //   one (patch 0208 frame tags, src/wgpu-new-frames.js; null without tags).
+// - region modules the engine refused (src/region-link-failures.js): an
+//   import of the wrong type or bytes that do not validate are fatal, an
+//   out of memory (regionLinkOther) is not.
 // validationReadIntegrity returns them flat and cumulative; the probes take
 // the delta over a window and fail the run on any of INTEGRITY_FATAL.
+
+import { REGION_LINK_FATAL } from "./region-link-failures.js";
 
 // Why a draw was skipped, in the order the replay checks (positional, no
 // object per draw).
@@ -66,7 +71,8 @@ export const INTEGRITY_FATAL = Object.freeze([
   "stagingUnsafe",
   "geometryCacheCollisions",
   "geometryCacheFailed",
-  "framesOutOfOrder"
+  "framesOutOfOrder",
+  ...REGION_LINK_FATAL
 ]);
 
 // The first missing resource of a skipped draw (SKIP), or -1 when it has all.

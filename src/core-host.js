@@ -1966,10 +1966,8 @@ function requestedCorrectTimeDrift() {
 // Accepts comma-separated category names, a raw 0xHEX value, or a decimal int.
 // Unknown category names are logged and ignored (so a typo doesn't pretend to
 // disable things it isn't actually disabling).
+// Bits 0, 1 and 2 are unused (patch 0196 removed the helpers they gated).
 const CACHED_INTERPRETER_DISABLE_BITS = {
-  idlepollloop: 1 << 0,
-  statuscall:  1 << 1,
-  osinterrupt: 1 << 2,
   dcbxloop:    1 << 3,
   fastbranch:  1 << 4,
   fastfp:      1 << 5,
@@ -1994,9 +1992,8 @@ const CACHED_INTERPRETER_DISABLE_BITS = {
   regionchaincache: 1 << 18, // 0187 region chaining looks the next region up in one cache line (ENABLE polarity; default-on; ?regionchaincache=0 turns it off)
   regshape:        1 << 28, // 0184 x64 register shape: at most 4 GPRs per block in locals (ENABLE polarity; default-off; ?regshape=x64)
   // Aliases the plan / TL;DR uses interchangeably:
-  fastinputpoll: 1 << 1, // legacy synonym for statuscall (input-poll lives there)
   fastmem:       1 << 7, // legacy synonym for fastsystem (load/store-ish helpers)
-  all:           0x47fffff
+  all:           0x47ffff8
 };
 
 // The WebGPU backend emits partial and independent-channel EFB clears as a
