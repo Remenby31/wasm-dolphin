@@ -295,11 +295,20 @@ export async function acquirePerfLock({
     }
     sweepLeftovers(dir);
     const ticket = enqueue(dir, name);
+    // While queued, the ticket goes with the process too: the finally below
+    // never runs on a signal's exit (a SIGTERM'd queued block left its ticket
+    // on 2026-11-02, until the next contender swept it).
+    const dropTicket = () => dequeue(dir, ticket);
+    const onQueuedSignal = (sig) => { dropTicket(); process.exit({ SIGINT: 130, SIGTERM: 143, SIGHUP: 129 }[sig] ?? 1); };
+    process.once("exit", dropTicket);
+    if (handleSignals) for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) process.once(sig, onQueuedSignal);
     let held;
     try {
       held = await contend({ dir, name, waitSec, pollSec, orphanSec, log, sleep, end, ticket, onBattery, handleSignals });
     } finally {
       dequeue(dir, ticket);
+      process.off("exit", dropTicket);
+      for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) process.off(sig, onQueuedSignal);
     }
     if (held === ON_BATTERY) continue;
     held.requireMains = requireMains;
