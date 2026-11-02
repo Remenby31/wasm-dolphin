@@ -763,13 +763,15 @@ export function trendTable(lines) {
 // ---- Dip attribution (one tool for drop-meter and parcours) --------------
 // Where a run's smoothness went, frame by frame. Input: a sequence of
 // windows in host time, from any probe (an adapter per probe):
-//   { t, ms, phase?, speed?, produced?, shown?, presents?,
+//   { t, ms, phase?, cadence?, speed?, produced?, shown?, presents?,
 //     gaps?: [{ ms, vis, workerLagMs? }]  (presentation gaps ending in it),
 //     occupancy?: { cpu, gpu, replay }   (0..1),
 //     causes?: { <cause>: host ms }      (counter differences, CAUSES),
 //     mainLagMs?, workerLagMs? }
 // produced: new game frames (XFB copies or new frame tags), shown: new
 // frames put on screen, presents: presentations (new or repeated).
+// cadence: the scene's frames per second (a 30 fps menu, a 60 fps race in
+// one run), else opts.cadence; a second never spans two cadences.
 // Per second of the run (ATTRIBUTION_SECOND_MS), the deficit is
 // cadence − shown frames, split so that the parts add up to it:
 //   production gap = cadence − produced:
@@ -808,7 +810,8 @@ const allKnown = (xs, f) => xs.length > 0 && xs.every((x) => Number.isFinite(f(x
 export function attributeSecond(ws, { cadence, fullSpeed = ATTRIBUTION_FULL_SPEED, busy = ATTRIBUTION_BUSY, stallMs = STALL_MIN_MS } = {}) {
   if (!allKnown(ws, (w) => w.produced) || !allKnown(ws, (w) => w.shown)) return null;
   const hostMs = sumOf(ws, (w) => w.ms);
-  const expected = (cadence * hostMs) / 1000;
+  const cadenceOf = (w) => w.cadence ?? cadence;
+  const expected = sumOf(ws, (w) => (cadenceOf(w) * w.ms) / 1000);
   const produced = sumOf(ws, (w) => w.produced), shown = sumOf(ws, (w) => w.shown);
   const presents = allKnown(ws, (w) => w.presents) ? sumOf(ws, (w) => w.presents) : null;
   const speeds = ws.filter((w) => Number.isFinite(w.speed));
@@ -843,9 +846,9 @@ export function attributeSecond(ws, { cadence, fullSpeed = ATTRIBUTION_FULL_SPEE
   // the presentation gap
   let presentationGap = Math.max(0, Math.min(produced, expected) - shown);
   if (presentationGap > 0) {
-    const frameMs = 1000 / cadence;
     let blocked = 0;
     for (const w of ws) for (const g of w.gaps ?? []) {
+      const frameMs = 1000 / cadenceOf(w);
       if (g.ms > frameMs * 1.5 && g.vis > 0 && (g.workerLagMs ?? w.workerLagMs ?? 0) >= g.ms / 2) blocked += Math.max(0, Math.round(g.ms / frameMs) - 1);
     }
     blocked = Math.min(blocked, presentationGap);
@@ -872,12 +875,12 @@ export function attributeSecond(ws, { cadence, fullSpeed = ATTRIBUTION_FULL_SPEE
 // gaps over `hitchMs`, each with the part of its second that dominates) and
 // the table: per phase, each part's frames over the dips, ranked.
 export function attributeDips(windows, { cadence, fluidity = ATTRIBUTION_FLUIDITY, hitchMs = ATTRIBUTION_HITCH_MS, secondMs = ATTRIBUTION_SECOND_MS, refreshHz = null, viHz = null, beatToleranceMs = 2000, ...opts } = {}) {
-  if (!(cadence > 0)) throw new Error("attributeDips: the scene's cadence (frames per second) is the caller's");
   const ws = [...windows].filter((w) => Number.isFinite(w.t) && w.ms > 0).sort((a, b) => a.t - b.t);
+  if (!(cadence > 0) && !ws.every((w) => w.cadence > 0)) throw new Error("attributeDips: the scene's cadence (frames per second) is the caller's: opts.cadence, or window.cadence on every window");
   const seconds = [];
   let group = [];
   for (const w of ws) {
-    if (group.length && (w.t - group[0].t >= secondMs || (w.phase ?? null) !== (group[0].phase ?? null))) {
+    if (group.length && (w.t - group[0].t >= secondMs || (w.phase ?? null) !== (group[0].phase ?? null) || (w.cadence ?? cadence) !== (group[0].cadence ?? cadence))) {
       seconds.push(group);
       group = [];
     }
@@ -887,10 +890,10 @@ export function attributeDips(windows, { cadence, fluidity = ATTRIBUTION_FLUIDIT
   const attributed = seconds.filter((g) => sumOf(g, (w) => w.ms) >= secondMs / 2).map((g) => attributeSecond(g, { cadence, ...opts })).filter(Boolean);
   const dips = attributed.filter((s) => s.fluidity != null && s.fluidity < fluidity);
   markBeat(dips, { refreshHz, viHz, toleranceMs: beatToleranceMs, fullSpeed: opts.fullSpeed ?? ATTRIBUTION_FULL_SPEED, busy: opts.busy ?? ATTRIBUTION_BUSY });
-  const frameMs = 1000 / cadence;
   const hitches = [];
   for (const w of ws) for (const g of w.gaps ?? []) {
     if (!(g.ms > hitchMs)) continue;
+    const frameMs = 1000 / (w.cadence ?? cadence);
     hitches.push({ t: w.t, phase: w.phase ?? null, ms: round(g.ms, 1), frames: Math.max(1, Math.round(g.ms / frameMs) - 1), cause: hitchCause(g, w, { frameMs, fullSpeed: opts.fullSpeed ?? ATTRIBUTION_FULL_SPEED }) });
   }
   return { cadence, seconds: attributed.length, dips, hitches, table: attributionTable(dips, hitches) };
@@ -998,4 +1001,43 @@ export function attributionLines(result) {
     if (r.hitches) lines.push(`  hitches > ${ATTRIBUTION_HITCH_MS} ms: ${r.hitches} (${r.hitchFrames} frames): ${Object.entries(r.hitchCauses).sort((a, b) => b[1] - a[1]).map(([c, f]) => `${c} ${f}`).join(", ")}`);
   }
   return lines;
+}
+
+// parcours (lib/parcours.mjs deriveSeconds: one row per second) as
+// attribution windows. rows[i] is the second ending at raw.samples[i + 1]
+// (samples[0] is the origin); the samples give the exact presentation times
+// (gaps). parcours has no per-gap VI count nor worker lateness: a gap's VIs
+// are the second's VI rate over its length (scaled by the speed), and
+// presenter-blocked is not judged (needs workerLagMs).
+export function parcoursWindowsForAttribution(rows, raw = null) {
+  return rows.map((r, i) => {
+    const sample = raw?.samples?.[i + 1] ?? null;
+    const times = Array.isArray(sample?.presents) ? [...sample.presents].sort((a, b) => a - b) : null;
+    const prev = Array.isArray(raw?.samples?.[i]?.presents) ? raw.samples[i].presents.at(-1) : null;
+    const viPerMs = (r.viRate ?? 0) / 1000;
+    const gaps = [];
+    if (times) for (let k = 0; k < times.length; k += 1) {
+      const from = k === 0 ? prev : times[k - 1];
+      if (from == null) continue;
+      const ms = times[k] - from;
+      gaps.push({ ms, vis: Math.round(ms * viPerMs * Math.min(1, (r.speed ?? 100) / 100)) });
+    }
+    return {
+      t: (r.t - 1) * 1000, ms: 1000, phase: r.phase ?? null, cadence: r.cadence ?? null, speed: r.speed ?? null,
+      produced: r.producedFps ?? null, shown: r.newFps ?? null, presents: r.presents ?? null, gaps,
+      occupancy: { cpu: r.cpuBusy ?? null, gpu: r.gpuBusy ?? null, replay: r.replayBusy ?? null }
+    };
+  });
+}
+
+// The core's VI rate (frames counter over host time) and the screen's
+// refresh (the median presentation interval under `maxMs`) of a parcours
+// raw record, for the beat: null when unknown.
+export function parcoursRates(raw, { maxMs = ATTRIBUTION_HITCH_MS } = {}) {
+  const s = (raw?.samples ?? []).filter((x) => x.counters?.frame != null && x.counters?.t != null);
+  const viHz = s.length > 1 ? ((s.at(-1).counters.frame - s[0].counters.frame) * 1000) / (s.at(-1).counters.t - s[0].counters.t) : null;
+  const times = (raw?.samples ?? []).flatMap((x) => (Array.isArray(x.presents) ? x.presents : [])).sort((a, b) => a - b);
+  const intervals = times.slice(1).map((t, i) => t - times[i]).filter((d) => d > 0 && d < maxMs).sort((a, b) => a - b);
+  const refreshHz = intervals.length ? 1000 / intervals[intervals.length >> 1] : null;
+  return { viHz: viHz > 0 ? viHz : null, refreshHz };
 }

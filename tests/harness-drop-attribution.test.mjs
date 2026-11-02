@@ -139,3 +139,39 @@ test("drop-meter windows: occupancy from the CPU thread's sleep and the GPU thre
   const [w] = dropWindowsForAttribution([{ t0: 0, speed: 100, presents: 6, xfb: 6, sleptMs: 70, gpuWorkMs: 95, causes: {} }], {});
   assert.deepEqual(w.occupancy, { cpu: 0.3, gpu: 0.95, replay: null });
 });
+
+test("a cadence per window: a 30 fps scene loses nothing at 30, a 60 fps one is judged at 60", () => {
+  const at = (w, cadence) => w.map((x) => ({ ...x, cadence }));
+  const windows = [
+    ...at(second(0, { phase: "menu", produced: 30, shown: 30, presents: 60, occupancy: { cpu: 0.95, gpu: 0.2, replay: 0.1 } }), 30),
+    ...at(second(1000, { phase: "race", produced: 60, shown: 54, presents: 54 }), 60)
+  ];
+  const r = attributeDips(windows, {});
+  assert.equal(r.dips.length, 1, "the 30 fps menu is not a dip, even saturated");
+  assert.equal(r.dips[0].phase, "race");
+  assert.deepEqual(r.dips[0].parts, { "no-present": 6 });
+  // a second never spans two cadences
+  const mixed = attributeDips([...at(second(0, { produced: 30, shown: 30 }).slice(0, 5), 30), ...at(second(500, { produced: 60, shown: 60 }).slice(5), 60)], {});
+  assert.equal(mixed.seconds, 2);
+  // opts.cadence is the default for windows without one; with neither: an error
+  assert.equal(attributeDips(second(0, { produced: 54, shown: 54 }), { cadence: 60 }).dips.length, 1);
+  assert.throws(() => attributeDips(second(0), {}), /window\.cadence/);
+});
+
+test("parcours rows as windows: the row's rates, its cadence and occupancy, gaps from the samples' presents", async () => {
+  const { parcoursWindowsForAttribution, parcoursRates } = await import("../harness/lib/drops.mjs");
+  const rows = [{ t: 1, phase: "race", cadence: 60, speed: 100, producedFps: 60, newFps: 57, presents: 3, viRate: 60, cpuBusy: 0.3, gpuBusy: 0.2, replayBusy: 0.1 }];
+  const raw = { samples: [
+    { presents: [1000], counters: { t: 1000, frame: 0 } },
+    { presents: [1017, 1050, 1067], counters: { t: 2000, frame: 60 } }
+  ] };
+  const [w] = parcoursWindowsForAttribution(rows, raw);
+  assert.deepEqual({ t: w.t, ms: w.ms, phase: w.phase, cadence: w.cadence, produced: w.produced, shown: w.shown, presents: w.presents }, { t: 0, ms: 1000, phase: "race", cadence: 60, produced: 60, shown: 57, presents: 3 });
+  assert.deepEqual(w.occupancy, { cpu: 0.3, gpu: 0.2, replay: 0.1 });
+  assert.deepEqual(w.gaps, [{ ms: 17, vis: 1 }, { ms: 33, vis: 2 }, { ms: 17, vis: 1 }], "the first gap from the previous sample's last present");
+  assert.equal(parcoursWindowsForAttribution(rows)[0].gaps.length, 0, "without raw: no gaps");
+  const rates = parcoursRates(raw);
+  assert.equal(rates.viHz, 60);
+  assert.ok(Math.abs(rates.refreshHz - 1000 / 17) < 0.01, "the median interval under 25 ms");
+  assert.deepEqual(parcoursRates(null), { viHz: null, refreshHz: null });
+});
