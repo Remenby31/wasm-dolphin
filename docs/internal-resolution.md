@@ -69,7 +69,11 @@ with `scaleResolutionDownBy` there.
   Firefox) on a touch device (`navigator.maxTouchPoints` > 0: an iPhone, an
   iPad, its desktop mode with a Mac's user agent included; reason
   `apple-touch`) or where the touch points are unknown (reason
-  `apple-without-memory`); with `maxTouchPoints` 0, a Mac, an Apple GPU
+  `apple-without-memory`); a user agent naming an iPhone, iPad or iPod is a
+  touch device whatever `maxTouchPoints` says (WebKit fixes it at build
+  time, 0 on macOS and 5 on iOS; its only iOS paths to 0, a per-domain quirk
+  list and a private background text-extraction flag, do not apply to a
+  normal tab here); with `maxTouchPoints` 0, a Mac, an Apple GPU
   without `deviceMemory` goes by the other rules (as Chrome on a Mac). The
   page passes its `maxTouchPoints` to the worker (`pageMaxTouchPoints`: a
   worker has none);

@@ -41,6 +41,15 @@ export function normalizeInternalResolution(value) {
 // is a Mac only with maxTouchPoints 0 (then it goes by the same rules as
 // Chrome on a Mac); with touch points, or without the reading (a worker
 // whose page passed none, a non-integer), it stays at 2. The adapter limits
+// A user agent naming an iPhone, iPad or iPod (the worker has its own:
+// WorkerNavigator.userAgent) is a touch device whatever maxTouchPoints says
+// (defence in depth). WebKit fixes maxTouchPoints at build time (Navigator.cpp:
+// 0 on macOS, 5 on iOS); its only iOS paths to 0 are a per-domain quirk list
+// (a few streaming sites) and a private flag for background text extraction,
+// neither of which applies to a normal tab here; fingerprinting protection
+// leaves it alone. Firefox on macOS (no deviceMemory either) goes from 2 to
+// the Mac rules too.
+// The adapter limits
 // were not taken: WebKit's (maxBufferSize 2147483644 on an M-series Mac)
 // are not documented per platform, and a cautious signal that is sometimes
 // absent beats a guessed one.
@@ -54,7 +63,7 @@ export function integratedIntelArchitecture(architecture) {
   return /lp/.test(a) || (a.startsWith("gen-") && !a.endsWith("hp"));
 }
 
-export function internalResolutionCeiling(adapter, { deviceMemory, maxTouchPoints } = {}) {
+export function internalResolutionCeiling(adapter, { deviceMemory, maxTouchPoints, userAgent } = {}) {
   const max = INTERNAL_RESOLUTIONS.at(-1);
   if (!adapter) return { ceiling: 1, reason: "no-adapter" };
   const info = adapter.info ?? {};
@@ -78,7 +87,8 @@ export function internalResolutionCeiling(adapter, { deviceMemory, maxTouchPoint
   if (vendor === "intel" && integratedIntelArchitecture(architecture)) lower(2, "integrated-gpu");
   if (vendor === "apple" && !(memory > 0)) {
     const touch = Number.isInteger(maxTouchPoints) && maxTouchPoints >= 0 ? maxTouchPoints : null;
-    if (touch === null) lower(2, "apple-without-memory");
+    if (/iPhone|iPad|iPod/.test(String(userAgent ?? ""))) lower(2, "apple-touch");
+    else if (touch === null) lower(2, "apple-without-memory");
     else if (touch > 0) lower(2, "apple-touch");
   }
   return { ceiling, reason };

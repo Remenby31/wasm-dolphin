@@ -1370,6 +1370,9 @@ function wgpuRuntimeConfigPayload() {
     // The engine whose defaults applied (mapped staging, 4 slots and the bind
     // group cache under JavaScriptCore): what tools/perf-artifacts.mjs expects.
     wasmEngine: wasmEngineName,
+    // the page's touch points as the worker received them (the adapter
+    // ceiling's Mac-or-touch signal; null: not passed)
+    pageMaxTouchPoints,
     metricsEnabled: causalMetricsEnabled,
     uploadTransport: wgpuUploadTransport,
     stateCacheEnabled: wgpuStateCacheEnabled,
@@ -7158,7 +7161,7 @@ async function createWebGpuPresenter(canvas) {
   }
   const scaleCeiling = internalResolutionCeiling(
     { info: adapterInfo, limits: adapter.limits, isFallbackAdapter: adapter.isFallbackAdapter },
-    { deviceMemory: self.navigator?.deviceMemory, maxTouchPoints: pageMaxTouchPoints });
+    { deviceMemory: self.navigator?.deviceMemory, maxTouchPoints: pageMaxTouchPoints, userAgent: self.navigator?.userAgent });
   wgpuScaleAdapterCeiling = scaleCeiling.ceiling;
   rendererDiagnostics.internalResolutionCeiling = { ...scaleCeiling, lost: wgpuScaleLostCeiling < 4 };
   // The page holds its scales to this adapter's ceiling (core-host), not to

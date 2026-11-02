@@ -155,6 +155,12 @@ test("the internal resolution ceiling goes by adapter class and limits", async (
     [gpu("apple", "apple", { maxBufferSize: 2147483644 }), { maxTouchPoints: 0 }, 4, "adapter"],
     [gpu("apple", "metal-3"), { maxTouchPoints: 5 }, 2, "apple-touch"],
     [gpu("apple", "metal-3"), { maxTouchPoints: 1 }, 2, "apple-touch"],
+    // an iPhone's user agent wins over a 0 (a privacy setting), an iPad's
+    // desktop mode (a Mac's user agent) is caught by its touch points
+    [gpu("apple", "metal-3"), { maxTouchPoints: 0, userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 26_6 like Mac OS X) AppleWebKit/605.1.15" }, 2, "apple-touch"],
+    [gpu("apple", "metal-3"), { userAgent: "Mozilla/5.0 (iPad; CPU OS 26_6 like Mac OS X)" }, 2, "apple-touch"],
+    [gpu("apple", "metal-3"), { maxTouchPoints: 5, userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Version/26.6 Safari/605.1.15" }, 2, "apple-touch"],
+    [gpu("apple", "metal-3"), { maxTouchPoints: 0, userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Version/26.6 Safari/605.1.15" }, 4, "adapter"],
     ...[null, undefined, -1, 0.5, "0", NaN].map((t) => [gpu("apple", "metal-3"), { maxTouchPoints: t }, 2, "apple-without-memory"]),
     // deviceMemory known (Chrome): the touch points change nothing
     [gpu("apple", "metal-3"), { deviceMemory: 8, maxTouchPoints: 5 }, 4, "adapter"],
@@ -340,10 +346,10 @@ test("pageMaxTouchPoints goes from the page to the worker's adapter ceiling", as
   assert.equal(await load({ pageMaxTouchPoints: "0" }), null);
   const host = await read("../src/core-host.js");
   assert.match(host, /pageMaxTouchPoints: globalThis\.navigator\?\.maxTouchPoints,/);
-  assert.match(host, /\{ deviceMemory: globalThis\.navigator\?\.deviceMemory, maxTouchPoints: globalThis\.navigator\?\.maxTouchPoints \}/);
+  assert.match(host, /\{ deviceMemory: globalThis\.navigator\?\.deviceMemory, maxTouchPoints: globalThis\.navigator\?\.maxTouchPoints, userAgent: globalThis\.navigator\?\.userAgent \}/);
   const worker = await read("../src/upstream-discio-worker.js");
   assert.match(worker, /pageMaxTouchPoints: payload\.pageMaxTouchPoints,/);
   assert.match(worker, /pageMaxTouchPoints: requestedPageMaxTouchPoints = null,/);
   assert.match(worker, /pageMaxTouchPoints = Number\.isInteger\(requestedPageMaxTouchPoints\) && requestedPageMaxTouchPoints >= 0 \? requestedPageMaxTouchPoints : null;/);
-  assert.match(worker, /\{ deviceMemory: self\.navigator\?\.deviceMemory, maxTouchPoints: pageMaxTouchPoints \}/);
+  assert.match(worker, /\{ deviceMemory: self\.navigator\?\.deviceMemory, maxTouchPoints: pageMaxTouchPoints, userAgent: self\.navigator\?\.userAgent \}/);
 });

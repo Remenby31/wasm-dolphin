@@ -1134,7 +1134,7 @@ export class EmulatorHost {
         info = await adapter.requestAdapterInfo().catch(() => null);
       }
       return internalResolutionCeiling(adapter ? { info, limits: adapter.limits, isFallbackAdapter: adapter.isFallbackAdapter } : null,
-        { deviceMemory: globalThis.navigator?.deviceMemory, maxTouchPoints: globalThis.navigator?.maxTouchPoints });
+        { deviceMemory: globalThis.navigator?.deviceMemory, maxTouchPoints: globalThis.navigator?.maxTouchPoints, userAgent: globalThis.navigator?.userAgent });
     })();
     const adapter = this.workerScaleCeiling ?? await this.scaleCeilingPromise;
     return this.scaleLostCeiling < adapter.ceiling
