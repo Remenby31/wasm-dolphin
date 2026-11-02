@@ -444,7 +444,10 @@ a block off the median block by more than 3.5 of its own standard errors
 is cut out of the fit: slowdowns of 0.1 % over 12 s or 3-7 % over a few
 seconds never bend the VI rate. For the refresh, such a block makes it null
 (one screen rate or none: 60 → 59.94, 60 → 72, 60 → 120). A fit less
-precise than 5 mHz is also null. On real Mac runs the VI fit keeps about
+precise than 5 mHz is also null. This check is a fail-safe and sometimes
+nulls a steady 60 Hz screen: from 1-2 runs in 20 up to 8 in 20 over 300 s
+with 10 % of vsyncs missed (review of #414). A null refresh only means no
+beat is proven in that run. On real Mac runs the VI fit keeps about
 half the VIs: the game's speed varies a little from block to block.
 
 A repeat is labelled `beat` only when the two rates drift, the repeat
@@ -459,7 +462,10 @@ is labelled beat (slowdowns from 0.1 % to 7 % included).
 A second at full speed with a thread between 0.7 and 0.85 busy (no margin,
 not saturated) is `marginal`: content or game, undecided. It is reported
 apart (`marginalFrames`), not counted in the frames lost. The expected
-cadence is capped at the second's nominal VI rate.
+cadence is capped at the run's standard VI rate (59.94 or 50, from the
+median over the run of VIs × 100 / speed), never at a second's own VI
+count: in a stall that count falls while the speed read may be stale, and
+the frames owed must not fall with it.
 
 ## Parcours (the whole play-through)
 

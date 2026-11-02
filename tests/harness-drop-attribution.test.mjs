@@ -4,7 +4,7 @@ import test from "node:test";
 
 import {
   attributeDips, attributeSecond, attributionLines, beatEvidence, dropWindowsForAttribution, hitchCause,
-  attributionTable, fitPeriod, learnedCadences, measuredRefreshHz, parcoursWindowsForAttribution
+  attributionTable, fitPeriod, learnedCadences, standardViHz, measuredRefreshHz, parcoursWindowsForAttribution
 } from "../harness/lib/drops.mjs";
 
 const quiet = { cpu: 0.3, gpu: 0.3, replay: 0.2 };
@@ -313,7 +313,7 @@ test("fitPeriod: a rate less precise than 5 mHz is no rate; at 3 ms of jitter a 
   }
 });
 
-test("a thread between the content margin and saturation: marginal, not lost; a cadence over the VI rate is capped", () => {
+test("a thread between the content margin and saturation: marginal, not lost; a cadence over the run's standard VI rate is capped, never by a stall", () => {
   // 12 new frames a second, all shown, at full speed, cpu 0.717
   const d = attributeSecond(second(0, { produced: 12, shown: 12, presents: 60, occupancy: { cpu: 0.717, gpu: 0.3, replay: 0.2 } }), { cadence: 60 });
   assert.deepEqual(d.parts, { marginal: 48 });
@@ -323,12 +323,24 @@ test("a thread between the content margin and saturation: marginal, not lost; a 
   assert.deepEqual(table[0].ranked, []);
   // quiet threads, produced near the cadence: still game:marginal, lost
   assert.deepEqual(attributeSecond(second(0, { produced: 58, shown: 58, presents: 60 }), { cadence: 60 }).parts, { "game:marginal": 2 });
-  // a cadence of 120 on a 60 VI/s second: expected 60, not 120
-  const ws = second(0, { produced: 60, shown: 60, presents: 60, cadence: 120 }).map((w) => ({ ...w, vis: 6 }));
-  assert.equal(attributeSecond(ws, {}).expected, 60);
-  // a slow core keeps its cadence: 48 VIs at 80 % speed are 60 nominal
-  const slow = second(0, { speed: 80, produced: 48, shown: 48, presents: 48, cadence: 60 }).map((w) => ({ ...w, vis: 4.8 }));
-  assert.equal(attributeSecond(slow, {}).expected, 60);
+  // a cadence of 120 on an NTSC run: capped at the standard VI rate
+  const ws = second(0, { produced: 60, shown: 60, presents: 60, cadence: 120 });
+  assert.equal(attributeSecond(ws, { viHz: 59.94 }).expected, 59.9);
+  // a stall with the VI counter lagging the speed (100 or 300 ms): the
+  // speed read stays 100 while the second's VIs fall; the frames owed do
+  // not fall with them (true loss 30)
+  for (const vis of [45, 30]) {
+    const run = [...Array.from({ length: 5 }, (_, k) => second(k * 1000, { cadence: 60 }).map((w) => ({ ...w, vis: 6 }))),
+      second(5000, { produced: 30, shown: 30, presents: 30, cadence: 60 }).map((w) => ({ ...w, vis: vis / 10 }))].flat();
+    const r = attributeDips(run, {});
+    assert.equal(r.dips.length, 1);
+    assert.equal(r.dips[0].expected, 60);
+    assert.equal(r.dips[0].deficit, 30, `vis ${vis}`);
+  }
+  // PAL: 50 VIs, cadence 50, nothing lost; the standard rate is 50
+  const pal = Array.from({ length: 5 }, (_, k) => second(k * 1000, { produced: 50, shown: 50, presents: 50, cadence: 50 }).map((w) => ({ ...w, vis: 5 }))).flat();
+  assert.equal(standardViHz(pal), 50);
+  assert.equal(attributeDips(pal, {}).dips.length, 0);
   // parcours rows carry viRate
   assert.equal(parcoursWindowsForAttribution([{ t: 1, cadence: 120, speed: 100, producedFps: 60, newFps: 60, presents: 60, viRate: 60 }])[0].vis, 60);
 });

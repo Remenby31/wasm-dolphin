@@ -828,19 +828,26 @@ const causeMs = (w, c) => { const v = w?.causes?.[c]; return Number.isFinite(v) 
 const NOT_LOST = new Set(["content", "marginal"]);
 const allKnown = (xs, f) => xs.length > 0 && xs.every((x) => Number.isFinite(f(x)));
 
+// The run's standard VI rate: the median over its windows of VIs × 100 /
+// speed (a stall or a stale speed in a few seconds does not move it),
+// snapped to 59.94 or 50 within 3 %; null without VI counts and speeds.
+export function standardViHz(windows) {
+  const rates = windows.filter((w) => Number.isFinite(w.vis) && w.speed > 0 && w.ms > 0).map((w) => (w.vis * 1000 * 100) / (w.ms * w.speed)).sort((a, b) => a - b);
+  if (rates.length < 3) return null;
+  const med = rates[rates.length >> 1];
+  return [59.94, 50].find((hz) => Math.abs(med / hz - 1) <= 0.03) ?? null;
+}
+
 // One second's split (frames). null when it lacks produced or shown.
-export function attributeSecond(ws, { cadence, fullSpeed = ATTRIBUTION_FULL_SPEED, busy = ATTRIBUTION_BUSY, contentBusy = ATTRIBUTION_CONTENT_BUSY, contentShare = ATTRIBUTION_CONTENT_SHARE, stallMs = STALL_MIN_MS } = {}) {
+export function attributeSecond(ws, { cadence, viHz = null, fullSpeed = ATTRIBUTION_FULL_SPEED, busy = ATTRIBUTION_BUSY, contentBusy = ATTRIBUTION_CONTENT_BUSY, contentShare = ATTRIBUTION_CONTENT_SHARE, stallMs = STALL_MIN_MS } = {}) {
   if (!allKnown(ws, (w) => w.produced) || !allKnown(ws, (w) => w.shown)) return null;
   const hostMs = sumOf(ws, (w) => w.ms);
-  const cadenceOf = (w) => w.cadence ?? cadence;
-  let expected = sumOf(ws, (w) => (cadenceOf(w) * w.ms) / 1000);
-  // a cadence never exceeds the VI rate: capped at the second's nominal VIs
-  // (VIs counted × 100 / speed, so a slow core still owes its frames) when
-  // it lies over them by more than 2 %
-  if (ws.every((w) => Number.isFinite(w.vis) && w.speed > 0)) {
-    const nominal = sumOf(ws, (w) => (w.vis * 100) / w.speed);
-    if (nominal > 0 && expected > 1.02 * nominal) expected = nominal;
-  }
+  // a cadence never exceeds the run's standard VI rate (viHz: 50 or 59.94):
+  // over it by more than 2 %, it is that rate. Never the second's own VI
+  // count: in a stall it falls while the speed read may be stale, and the
+  // frames owed must not fall with it.
+  const cadenceOf = (w) => { const c = w.cadence ?? cadence; return viHz > 0 && c > 1.02 * viHz ? viHz : c; };
+  const expected = sumOf(ws, (w) => (cadenceOf(w) * w.ms) / 1000);
   const produced = sumOf(ws, (w) => w.produced), shown = sumOf(ws, (w) => w.shown);
   const presents = allKnown(ws, (w) => w.presents) ? sumOf(ws, (w) => w.presents) : null;
   const speed = allKnown(ws, (w) => w.speed) ? sumOf(ws, (w) => w.speed * w.ms) / hostMs : null;
@@ -915,8 +922,10 @@ export function attributeSecond(ws, { cadence, fullSpeed = ATTRIBUTION_FULL_SPEE
 // The run's seconds, its dips (under `fluidity`), its hitches (presentation
 // gaps over `hitchMs`, each classed by its own gap) and the table: per
 // phase, each part's frames over the dips, ranked.
-export function attributeDips(windows, { cadence, fluidity = ATTRIBUTION_FLUIDITY, hitchMs = ATTRIBUTION_HITCH_MS, secondMs = ATTRIBUTION_SECOND_MS, ...opts } = {}) {
+export function attributeDips(windows, { cadence, viHz = null, fluidity = ATTRIBUTION_FLUIDITY, hitchMs = ATTRIBUTION_HITCH_MS, secondMs = ATTRIBUTION_SECOND_MS, ...opts } = {}) {
   const ws = [...windows].filter((w) => Number.isFinite(w.t) && w.ms > 0).sort((a, b) => a.t - b.t);
+  viHz ??= standardViHz(ws);
+  opts = { ...opts, viHz };
   if (!(cadence > 0) && !ws.every((w) => w.cadence > 0)) throw new Error("attributeDips: the scene's cadence (frames per second) is the caller's: opts.cadence, or window.cadence on every window");
   const seconds = [];
   let group = [];
