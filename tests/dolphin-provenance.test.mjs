@@ -323,8 +323,10 @@ test("committed Dolphin provenance and ABI manifests verify", () => {
   // 0196 (no per-game fast paths) rewords two upstream comments that named
   // a game, in FileMonitor.cpp and TMEM.cpp: 146.
   // 0211 (a late XFB shows the last picture) is the first to touch Present.h: 147.
+  // 0212 (throttle rate trim) adds Core/WasmThrottleRate.h and is the first to
+  // touch Mixer.cpp: 149.
   // Update deliberately when the series changes what it modifies.
-  assert.equal(result.vendorSnapshot.rootPaths, 147);
+  assert.equal(result.vendorSnapshot.rootPaths, 149);
   assert.equal(result.vendorSnapshot.submodulePaths, 2);
   assert.equal(result.core.abiVersion, 1);
   assert.equal(result.core.memoryContract.jsGlue.initialPages, 24576);

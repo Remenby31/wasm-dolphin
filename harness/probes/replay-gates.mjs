@@ -297,6 +297,11 @@ try {
       }
       v.integrity = integrityOf(integrityStart, await readIntegrity(session.page, { expected: integrityExpected }), { postload: true });
       v.pthreads = await workerRequest(session.page, "validationReadPthreads", {}, 10000).catch((e) => ({ error: String(e?.message || e) }));
+      // ?vilock=1 (patch 0212): the phase lock's counters at the visit's end
+      // (null without the lock): an --exact run must show it was engaged
+      const aq = await workerRequest(session.page, "validationReadAudioQueue", {}, 10000).catch(() => null);
+      v.phaseLock = aq?.phaseLock ?? null;
+      v.trimPpm = aq?.trimPpm ?? null;
     } catch (e) {
       v.error = String(e?.message || e);
     } finally {
@@ -415,6 +420,15 @@ if (o.exact) {
     savePng(diff, path.join(o.out, `mismatch-${row.vi}-diff-x8.png`));
   }
   summary.exact = verdict;
+  // ?vilock=1 in the candidate's query: every candidate visit must have taken
+  // the lock (locks >= 1, a trim applied), else its 0 px says nothing of it
+  const wantsLock = /(^|&)vilock=1(&|$)/.test(`${o.query}${o.extra}`.replace(/^\?/, ""));
+  if (wantsLock) {
+    summary.phaseLock = visits.filter((v) => v.side === "candidate").map((v) => ({ visit: v.n, locks: v.phaseLock?.locks ?? null, on: v.phaseLock?.on ?? null, ppm: v.phaseLock?.ppm ?? null, trimPpm: v.trimPpm, why: v.phaseLock?.why ?? null }));
+    for (const x of summary.phaseLock) log(`phase lock visit ${x.visit}: locks ${x.locks}, on ${x.on}, ppm ${x.ppm}, trim ${x.trimPpm}${x.why ? ` (${x.why})` : ""}`);
+    const unlocked = summary.phaseLock.filter((x) => !(x.locks >= 1) || !Number.isFinite(x.trimPpm) || x.trimPpm === 0);
+    if (unlocked.length) verdict.failures.push(`?vilock=1: the lock was never engaged in candidate visit(s) ${unlocked.map((x) => x.visit).join(", ")}`), verdict.pass = false;
+  }
   writeFileSync(path.join(o.out, "summary.json"), JSON.stringify(summary, null, 1) + "\n");
   for (const row of verdict.rows) log(`exact VI ${row.vi}: ${row.missing ? "MISSING" : row.unstable ? "REFERENCE UNSTABLE" : row.mismatches ? `DIFFERS in ${row.mismatches} visit(s), ${row.pixels} px` : "0 px"}`);
   const errors = visits.filter((v) => v.error);

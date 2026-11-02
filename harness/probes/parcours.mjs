@@ -252,12 +252,14 @@ async function playRun(o, server, { side, run, outDir }) {
       if (tl?.presents?.lost || tl?.vi?.lost) raw.timelineLost = (raw.timelineLost ?? 0) + (tl.presents?.lost ?? 0) + (tl.vi?.lost ?? 0);
       const integrity = await readIntegrity(page, { expected: o.integrityExpected });
       const status = await padFilmStatus(page);
+      // patch 0212's audio queue events and the VI lock's counters (null on a core without them)
+      const audioQ = await workerRequest(page, "validationReadAudioQueue", {}, 5000).catch(() => null);
       const presents = tl?.presents?.t ?? [], viT = viTimesOf(tl), samplerTicks = samplerTicksOf(drained);
       // per present, the gap before it: its VIs and the worker's stall
       // (lib/drops.mjs parcoursWindowsForAttribution reads gapVis, gapWorkerLagMs)
       const per = presentGaps(raw.samples.at(-1), { presents, viT, samplerTicks });
       if (o.samplerRows && drained?.rows) (raw.samplerRows ??= []).push(drained);
-      raw.samples.push({ t, info, counters: countersOf(drained), presents, vi: tl?.vi?.t?.length ?? null, viT, samplerTicks, gapVis: per.vis, gapWorkerLagMs: per.workerLagMs, integrity: integrity?.unread || integrity?.unavailable ? null : integrity, film: status ? { pos: status.pos, hold: status.hold, polls: status.polls } : null });
+      raw.samples.push({ t, info, counters: countersOf(drained), presents, vi: tl?.vi?.t?.length ?? null, viT, samplerTicks, gapVis: per.vis, gapWorkerLagMs: per.workerLagMs, audioQ: audioQ?.unavailable ? null : audioQ, integrity: integrity?.unread || integrity?.unavailable ? null : integrity, film: status ? { pos: status.pos, hold: status.hold, polls: status.polls } : null });
       raw.loads.push([Date.now(), os.loadavg()[0]]);
       const sec = Math.round((Date.now() - t0) / 1000);
       // the other processes' CPU every OTHER_CPU_EVERY_SEC, off the loop

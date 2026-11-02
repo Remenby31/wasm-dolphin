@@ -3,8 +3,8 @@
   "normalization": "git-blob-lf",
   "root": {
     "baseCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
-    "resultTree": "f8a90b091d01f6d2b280116b5624b5f4fe1ec347",
-    "changedPathCount": 147,
+    "resultTree": "4a8eb99dcfe23b504fca795ede7dcf0ad5ed8eac",
+    "changedPathCount": 149,
     "records": [
       {
         "path": "CMakeLists.txt",
@@ -41,6 +41,15 @@
         "resultBlob": "b7f924866052f428252136b22f52e6f8b50a5bd3",
         "size": 2624,
         "sha256": "24711d65660d56f0f6281084fb8564ce51728478b3b777d62795bd49f82b0dfc"
+      },
+      {
+        "path": "Source/Core/AudioCommon/Mixer.cpp",
+        "status": "M",
+        "mode": "100644",
+        "baseBlob": "1229d8faa135c7688cad1b6bffcb762f69eec14f",
+        "resultBlob": "d53d6986bb95d0634643e5741caffd57418e8cbf",
+        "size": 22973,
+        "sha256": "7971aa1fefadf8b879c1571090b716d2c35b519c2fb2491dcdc862e51803d6de"
       },
       {
         "path": "Source/Core/AudioCommon/Mixer.h",
@@ -200,9 +209,9 @@
         "status": "M",
         "mode": "100644",
         "baseBlob": "1fa39d74486b5c652078c7fba67891c1e13c194f",
-        "resultBlob": "6b6c99837828a1a4f3170cb643577dbdb6e82290",
-        "size": 35136,
-        "sha256": "a80b783f89a0973dd3ecf59062af9b30af7fd61d99b900e309ff1583e95da75c"
+        "resultBlob": "d5d5c25e0f591cebf1ac03903e6aab0e40b491c0",
+        "size": 36815,
+        "sha256": "4fe0c2943e126def87c58f8c65934b2c67be4c9e6e8ad5b4c8e3520e0bf251ed"
       },
       {
         "path": "Source/Core/Core/CoreTiming.h",
@@ -617,6 +626,15 @@
         "resultBlob": "10caf18785554d6ed1476c961efc0b07ff63b075",
         "size": 7691,
         "sha256": "7ca0f96af1517adc900d743adcb6d45e74f2aaff8ad571da8f9c60d9b524fe47"
+      },
+      {
+        "path": "Source/Core/Core/WasmThrottleRate.h",
+        "status": "A",
+        "mode": "100644",
+        "baseBlob": null,
+        "resultBlob": "f864f86bcebc752fa6c1e7c58ae5c655190b4ddd",
+        "size": 1745,
+        "sha256": "c8c93fc10bbf942ab8bb19a0c4aefa58db1bfdd10fe49f215284d209768ce35b"
       },
       {
         "path": "Source/Core/Core/WasmTimingProfile.h",
@@ -1365,5 +1383,5 @@
       ]
     }
   ],
-  "contentSha256": "9fac19cecda5b36a523eb2171ba2ae5747e71cde39667498067ff676c9af8407"
+  "contentSha256": "9066f1e5de9787e47e204d69f36ecf58c12ef5d13fa76f6234e8f67a358f9617"
 }
