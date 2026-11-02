@@ -35,6 +35,16 @@ export const TARGET_PHASE = 0.5;
 // starts from the drift fitted on the arrivals when the lock is taken.
 export const PHASE_GAIN_PPM = 8000;
 export const PHASE_INTEGRAL_PPM_PER_SEC = 1500;
+// The trim's activity at steady lock (each write rebases the throttle and
+// moves the mixer's resampling step): the P term reacted to the phase's
+// noise, ~170-260 ppm a second in the race seconds with audio skips
+// (parcours A/B of #412). The output's P term sees the error smoothed
+// (ERR_ALPHA per update; the anti-windup and the out-of-reach watch keep the
+// raw error), and the trim is written only once it moved by WRITE_STEP_PPM:
+// in simulation (Mac-like jitter, sd 0.8 ms) 2.0 -> 0.6 writes and 90 -> 25
+// ppm a second, still no drop.
+export const ERR_ALPHA = 0.3;
+export const WRITE_STEP_PPM = 25;
 // the drift must be within reach of the bound: 59.94 on 60 Hz is 1001 ppm; a
 // game 1 % behind (a core that cannot keep up) is no lock
 // (a 60.05 Hz panel needs 1835 ppm): taken up to 1900 ppm, leaving the P
@@ -131,7 +141,11 @@ export function stableRefresh(times, { jitter = REFRESH_JITTER } = {}) {
   return { refreshMs: R, why: null };
 }
 
-export function createViPhaseLock({ maxPpm = MAX_PPM, slewPpmPerSec = SLEW_PPM_PER_SEC, target = TARGET_PHASE } = {}) {
+export function createViPhaseLock({ maxPpm = MAX_PPM, slewPpmPerSec = SLEW_PPM_PER_SEC, target = TARGET_PHASE, errAlpha = ERR_ALPHA, writeStep = WRITE_STEP_PPM } = {}) {
+  // the error the output's P term sees (smoothed), and the trim written
+  // (held until the controller's moved by writeStep)
+  let errSmooth = null;
+  let out = 0;
   const times = [];
   let lastFrameTime = null;
   let lastTickAt = null;
@@ -208,7 +222,8 @@ export function createViPhaseLock({ maxPpm = MAX_PPM, slewPpmPerSec = SLEW_PPM_P
   function update(now, { base = 1 } = {}) {
     const dt = lastUpdate === null ? 0.5 : Math.min(2, (now - lastUpdate) / 1000);
     lastUpdate = now;
-    const speed = 1 + ppm / 1e6;
+    // the speed the arrivals came at: the trim written
+    const speed = 1 + out / 1e6;
     const s = assess(now, speed);
     if (!stats.on) {
       // the frames' period is measured over ARRIVAL_WINDOW_MS: only once the
@@ -246,7 +261,8 @@ export function createViPhaseLock({ maxPpm = MAX_PPM, slewPpmPerSec = SLEW_PPM_P
       const raw = next + p;
       const limited = Math.abs(raw) > maxPpm || Math.abs(raw - ppm) > step;
       if (!limited) integral = next;
-      want = Math.max(-maxPpm, Math.min(maxPpm, integral + p));
+      errSmooth = errSmooth === null ? err : errSmooth + (err - errSmooth) * errAlpha;
+      want = Math.max(-maxPpm, Math.min(maxPpm, integral + PHASE_GAIN_PPM * errSmooth));
       // the output wanted past the bound (the clamp limits it) while the
       // phase error does not shrink: the bound cannot hold the drift (an
       // acquisition also holds the output at the bound, but its error shrinks)
@@ -259,20 +275,25 @@ export function createViPhaseLock({ maxPpm = MAX_PPM, slewPpmPerSec = SLEW_PPM_P
       stats.on = false;
       saturatedMs = 0;
       prevErr = null;
+      errSmooth = null;
       if (s.why === "drift out of reach") entryStreak = 0;
     }
     stats.driftPpm = stats.on ? Math.round(integral) : null;
     const step = slewPpmPerSec * dt;
-    const before = ppm;
+    const before = out;
     ppm = s.why === "no rAF" ? 0 : ppm + Math.max(-step, Math.min(step, want - ppm));
+    // the written trim moves by writeStep or more, and back to the base
+    // whenever the lock is let go
+    if (!stats.on && Math.abs(ppm) < writeStep) out = 0;
+    else if (Math.abs(ppm - out) >= writeStep) out = ppm;
     Object.assign(stats, {
-      ppm: Math.round(ppm), why: s.why,
+      ppm: Math.round(out), why: s.why,
       refreshMs: s.refreshMs == null ? null : Math.round(s.refreshMs * 1000) / 1000,
       frameMs: s.frameMs == null ? null : Math.round(s.frameMs * 1000) / 1000,
       ratio: s.ratio == null ? null : Math.round(s.ratio * 10000) / 10000,
       phase: s.phase == null ? null : Math.round(s.phase * 100) / 100
     });
-    return { factor: base * (1 + ppm / 1e6), changed: Math.abs(ppm - before) >= 1 };
+    return { factor: base * (1 + out / 1e6), changed: Math.abs(out - before) >= 1 };
   }
 
   return { tick, arrival, update, stats };
