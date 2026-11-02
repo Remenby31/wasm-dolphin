@@ -58,7 +58,7 @@ import { calmLock, defaultMaxLoad, loadGaveUp, loadLimit } from "../lib/env.mjs"
 import { readIntegrity, treeHasIntegrity } from "../lib/integrity.mjs";
 import { claim } from "../lib/ownership.mjs";
 import { filmMarkers, filmWithMarks, padFilmStatus, recordPorts, releaseMarker, runRecordSteps, signalStuck, startPadFilm, stopPadFilm, validateFilm, validateRecordSteps } from "../lib/pad-film.mjs";
-import { analyzeRun, currentPhase, deriveSeconds, frameDiff, gapDetail, markerIndexes, STILL_DIFF, phaseNoise, parcoursVerdict, renderTimeline, usable } from "../lib/parcours.mjs";
+import { ANALYSIS_VERSION, analyzeRun, currentPhase, deriveSeconds, frameDiff, gapDetail, markerIndexes, STILL_DIFF, phaseNoise, parcoursVerdict, renderTimeline, usable } from "../lib/parcours.mjs";
 import { acquirePerfLock } from "../lib/perf-lock.mjs";
 import { descendantsOf } from "../lib/lock-run.mjs";
 import { chromeInfo, isLocalOnly, probeOutDir } from "../lib/probe-out.mjs";
@@ -372,6 +372,8 @@ export function humanSummary(summary) {
 export function readNoise(file, expect) {
   const s = JSON.parse(readFileSync(file, "utf8"));
   if (s.probe !== "parcours") throw new Error(`--noise ${file}: not a parcours summary`);
+  // the noise of another analysis (an older, wider smoothness) would loosen the gate in silence
+  if ((s.analysisVersion ?? 1) !== ANALYSIS_VERSION) throw new Error(`--noise ${file}: analysed with analysis version ${s.analysisVersion ?? 1}, this probe judges with ${ANALYSIS_VERSION}: re-analyse it (parcours.mjs --analyze <its dir>) or rerun the A/A`);
   // --edge drives (a capture stream in the page): another measure; unset is none
   const differ = ["probeVersion", "film", "query", "edge"].filter((k) => JSON.stringify(s[k] ?? null) !== JSON.stringify(expect[k] ?? null));
   if (expect.cpuModel && s.machine?.cpuModel && s.machine.cpuModel !== expect.cpuModel) differ.push("cpuModel");
@@ -427,7 +429,7 @@ async function analyzeDir(dir, { noiseFile, log }) {
   }
   const noise = noiseFile ? readNoise(noiseFile, { ...meta, cpuModel: meta.machine?.cpuModel }) : null;
   const { runs, verdict, noise: n, human, noVerdict, ...rest } = meta;
-  const summary = writeSummary(dir, { ...rest, reanalyzedAt: new Date().toISOString() }, analyses, noise);
+  const summary = writeSummary(dir, { ...rest, analysisVersion: ANALYSIS_VERSION, reanalyzedAt: new Date().toISOString() }, analyses, noise);
   for (const l of summary.human) log(l);
   return summary;
 }
@@ -492,7 +494,7 @@ async function main() {
   const watchdog = setTimeout(() => { log("watchdog: the probe overran, exiting"); lock.release(); process.exit(4); }, (o.runs * Object.keys(sides).length * (o.maxSec + 240) + 600) * 1000);
   const outDir = probeOutDir("parcours", iso, values.out);
   const meta = {
-    probe: "parcours", probeVersion: PROBE_VERSION, at: new Date().toISOString(), locked: !values["no-lock"], machine, chrome: chromeInfo(), iso: path.basename(iso),
+    probe: "parcours", probeVersion: PROBE_VERSION, analysisVersion: ANALYSIS_VERSION, at: new Date().toISOString(), locked: !values["no-lock"], machine, chrome: chromeInfo(), iso: path.basename(iso),
     film: filmId, edge: o.edge, record: values.record ? path.basename(values.record) : null, query: o.query, runs: o.runs, maxLoad: o.maxLoad, markerTimeout: o.markerTimeout,
     sides: Object.fromEntries(Object.entries(sides).map(([k, s]) => [k, s.label])), noiseFrom: values.noise ?? null,
     definition: "one sample a second; speed = guest/host time (core ticks); smoothness = new frames shown / the game's cadence learnt as the site does; phases from disc reads, new frames, EFB→XFB copies and replay draws per frame, ≥ 2 s each; A/B per phase and per film section against the A/A noise"

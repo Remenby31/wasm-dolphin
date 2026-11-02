@@ -838,6 +838,18 @@ export function standardViHz(windows) {
   return [59.94, 50].find((hz) => Math.abs(med / hz - 1) <= 0.03) ?? null;
 }
 
+// The content rule, the one definition (attribution, parcours smoothness):
+// the game made fewer frames than the scene's cadence (under contentShare of
+// it) at full speed, with every thread measured and under contentBusy (the
+// site's margin). Its missing frames are the scene's own, not lost.
+export function contentRule({ speed, produced, expected, occupancy = {} }, { fullSpeed = ATTRIBUTION_FULL_SPEED, contentBusy = ATTRIBUTION_CONTENT_BUSY, contentShare = ATTRIBUTION_CONTENT_SHARE } = {}) {
+  // every input measured: null >= 0 is true in JS, and an unknown value
+  // must never pass as content (nor its frames as not lost)
+  if (!Number.isFinite(speed) || !Number.isFinite(produced) || !Number.isFinite(expected)) return false;
+  if (!(speed >= fullSpeed) || !(produced >= 0) || !(expected > 0)) return false;
+  return OCCUPANCY_THREADS.every((k) => Number.isFinite(occupancy[k]) && occupancy[k] < contentBusy) && produced < contentShare * expected;
+}
+
 // One second's split (frames). null when it lacks produced or shown.
 export function attributeSecond(ws, { cadence, viHz = null, fullSpeed = ATTRIBUTION_FULL_SPEED, busy = ATTRIBUTION_BUSY, contentBusy = ATTRIBUTION_CONTENT_BUSY, contentShare = ATTRIBUTION_CONTENT_SHARE, stallMs = STALL_MIN_MS } = {}) {
   if (!allKnown(ws, (w) => w.produced) || !allKnown(ws, (w) => w.shown)) return null;
@@ -880,7 +892,7 @@ export function attributeSecond(ws, { cadence, viHz = null, fullSpeed = ATTRIBUT
       add("emulation:unexplained", left);
     } else if (saturated.length) add(`game:${saturated.join("+")}`, productionGap);
     else if (OCCUPANCY_THREADS.some((k) => occ[k] == null)) add("game:unknown", productionGap);
-    else if (OCCUPANCY_THREADS.every((k) => occ[k] < contentBusy) && produced < contentShare * expected) add("content", productionGap);
+    else if (contentRule({ speed, produced, expected, occupancy: occ }, { fullSpeed, contentBusy, contentShare })) add("content", productionGap);
     else if (OCCUPANCY_THREADS.some((k) => occ[k] >= contentBusy)) add("marginal", productionGap);
     else add("game:marginal", productionGap);
   }

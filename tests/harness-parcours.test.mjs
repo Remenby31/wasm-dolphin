@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 
-import { analyzeRun, classifySecond, gapDetail, completionOf, currentPhase, deriveSeconds, GAME_DRAWS_PER_FRAME, LOAD_DISC_BPS, markerIndexes, MIN_PHASE_SEC, parcoursVerdict, phaseLabels, phaseMetrics, phaseNoise, renderTimeline, sectionsOf, segmentsOf, summarizeSeconds, windowCadence } from "../harness/lib/parcours.mjs";
+import { analyzeRun, classifySecond, contentSecond, gapDetail, completionOf, currentPhase, deriveSeconds, GAME_DRAWS_PER_FRAME, LOAD_DISC_BPS, markerIndexes, MIN_PHASE_SEC, parcoursVerdict, phaseLabels, phaseMetrics, phaseNoise, renderTimeline, sectionsOf, segmentsOf, summarizeSeconds, windowCadence } from "../harness/lib/parcours.mjs";
 import { filmMarkers, filmWithMarks, keyToPad, padStateOf, recordPorts, runRecordSteps, validateFilm, validateRecordSteps } from "../harness/lib/pad-film.mjs";
 import { analyzeRaw, countersOf, otherCpuOf, presentGaps, samplerTicksOf, viTimesOf, exitCodeOf, humanSummary, markerStep } from "../harness/probes/parcours.mjs";
 import { decodePng, encodePng } from "../harness/lib/png.mjs";
@@ -513,4 +513,81 @@ test("probe: the sampling loop declares each name before its first use", () => {
     const use = new RegExp(`(?<![\\w.])${name}(?![\\w:])`).exec(loop.slice(0, decl.index));
     assert.equal(use, null, `${name} used before its declaration`);
   }
+});
+
+// Content, not a loss (parcours A/A of 2026-11-01: 31 % of the menus' deficit):
+// the game made fewer frames than the cadence at full speed with margin.
+test("smoothness: a content second (made that few at full speed, with margin) is judged against what was made", () => {
+  const s = samplesOf([["menu", 3]]);
+  for (const x of s.slice(1)) { x.info.newShown = (x.info.newShown / 60) * 45; x.info.producedFps = 45; }
+  const rows = deriveSeconds(s, { tps: TPS });
+  assert.deepEqual(rows.map((r) => r.smoothness), [100, 100, 100]);
+  assert.deepEqual(rows.map((r) => r.content), [true, true, true]);
+  assert.equal(rows[0].sceneCadence, 60);
+  // a frame made and not shown is still a loss
+  const lost = samplesOf([["menu", 2]]);
+  for (const x of lost.slice(1)) { x.info.newShown = (x.info.newShown / 60) * 40; x.info.producedFps = 45; }
+  assert.deepEqual(deriveSeconds(lost, { tps: TPS }).map((r) => r.smoothness), [88.9, 88.9]);
+  // no margin (a saturated thread can be why it made few) or slow: against the cadence
+  const busy = samplesOf([["menu", 2]], { busy: 0.9 });
+  for (const x of busy.slice(1)) { x.info.newShown = (x.info.newShown / 60) * 45; x.info.producedFps = 45; }
+  assert.deepEqual(deriveSeconds(busy, { tps: TPS }).map((r) => r.smoothness), [75, 75]);
+  assert.equal(contentSecond({ producedFps: 45, speed: 90, cadence: 60, cpuBusy: 0.2, gpuBusy: 0.2, replayBusy: 0.2 }), false);
+  assert.equal(contentSecond({ producedFps: 59, speed: 100, cadence: 60, cpuBusy: 0.2, gpuBusy: 0.2, replayBusy: 0.2 }), false, "within the shown share: no content second");
+  assert.equal(contentSecond({ producedFps: 45, speed: 100, cadence: 60, cpuBusy: 0.2, gpuBusy: null, replayBusy: 0.2 }), false, "unknown occupancy is no margin");
+  // a loading screen animating at 45 is still a loading when the disc reads
+  const load = deriveSeconds(samplesOf([["loading", 2]]), { tps: TPS });
+  assert.equal(classifySecond(load[0]), "loading");
+  const a = analyzeRun({ samples: s, tps: TPS });
+  assert.equal(a.phases.menu.contentSeconds, 3);
+});
+
+test("one definition of content: parcours' contentSecond is lib/drops.mjs contentRule", async () => {
+  const { contentRule } = await import("../harness/lib/drops.mjs");
+  for (const speed of [95, 98.9, 99, 100]) for (const producedFps of [30, 56, 58]) for (const busy of [0.5, 0.69, 0.7, 0.9, null]) {
+    const r = { producedFps, speed, cadence: 60, cpuBusy: busy, gpuBusy: 0.2, replayBusy: 0.2 };
+    assert.equal(contentSecond(r), contentRule({ speed, produced: producedFps, expected: 60, occupancy: { cpu: busy, gpu: 0.2, replay: 0.2 } }), JSON.stringify(r));
+  }
+  const src = readFileSync(new URL("../harness/lib/parcours.mjs", import.meta.url), "utf8");
+  assert.doesNotMatch(src, /CONTENT_MIN_SPEED/, "no second set of thresholds");
+});
+
+// Review of #410: an unknown value never passes as content (null >= 0 is
+// true in JS), a second with nothing made is no content reference (0/0).
+test("content: an unknown production, speed or cadence is no content; none made is no reference; the smoothness stays judged", async () => {
+  const { contentRule } = await import("../harness/lib/drops.mjs");
+  const calm = { cpu: 0.2, gpu: 0.2, replay: 0.2 };
+  assert.equal(contentRule({ speed: 100, produced: null, expected: 60, occupancy: calm }), false);
+  assert.equal(contentRule({ speed: 100, produced: NaN, expected: 60, occupancy: calm }), false);
+  assert.equal(contentRule({ speed: null, produced: 30, expected: 60, occupancy: calm }), false);
+  assert.equal(contentRule({ speed: 100, produced: 30, expected: null, occupancy: calm }), false);
+  assert.equal(contentRule({ speed: 100, produced: 30, expected: NaN, occupancy: calm }), false);
+  assert.equal(contentRule({ speed: 100, produced: 30, expected: 60, occupancy: { ...calm, cpu: null } }), false);
+  assert.equal(contentRule({ speed: 100, produced: 0, expected: 60, occupancy: calm }), true, "the attribution: a still screen is content");
+  assert.equal(contentSecond({ producedFps: null, speed: 100, cadence: 60, cpuBusy: 0.2, gpuBusy: 0.2, replayBusy: 0.2 }), false);
+  assert.equal(contentSecond({ producedFps: 0, speed: 100, cadence: 60, cpuBusy: 0.2, gpuBusy: 0.2, replayBusy: 0.2 }), false, "0/0: no reference");
+  // producedFps missing: judged against the cadence, never 100 % by an Infinity
+  const s = samplesOf([["menu", 2]]);
+  for (const x of s.slice(1)) { x.info.newShown = (x.info.newShown / 60) * 40; x.info.producedFps = null; }
+  assert.deepEqual(deriveSeconds(s, { tps: TPS }).map((r) => [r.content, r.smoothness]), [[false, 66.7], [false, 66.7]]);
+  const z = samplesOf([["menu", 2]]);
+  for (const x of z.slice(1)) { x.info.newShown = 0; x.info.producedFps = 0; }
+  assert.deepEqual(deriveSeconds(z, { tps: TPS }).map((r) => r.smoothness), [0, 0]);
+});
+
+test("readNoise refuses an A/A analysed under another analysis version (its noise is of another metric)", async () => {
+  const { mkdtempSync, writeFileSync } = await import("node:fs");
+  const os = await import("node:os");
+  const { readNoise } = await import("../harness/probes/parcours.mjs");
+  const { ANALYSIS_VERSION } = await import("../harness/lib/parcours.mjs");
+  const dir = mkdtempSync(`${os.tmpdir()}/parcours-noise-`);
+  const base = { probe: "parcours", probeVersion: 2, film: "f#1", query: "q", noise: { "kind:menu": {} } };
+  const expect = { probeVersion: 2, film: "f#1", query: "q" };
+  writeFileSync(`${dir}/old.json`, JSON.stringify(base));
+  assert.throws(() => readNoise(`${dir}/old.json`, expect), /analysed with analysis version 1, this probe judges with \d+: re-analyse it/);
+  writeFileSync(`${dir}/new.json`, JSON.stringify({ ...base, analysisVersion: ANALYSIS_VERSION }));
+  assert.deepEqual(readNoise(`${dir}/new.json`, expect), base.noise);
+  const probe = readFileSync(new URL("../harness/probes/parcours.mjs", import.meta.url), "utf8");
+  assert.match(probe, /analysisVersion: ANALYSIS_VERSION, reanalyzedAt/, "--analyze writes the current version");
+  assert.match(probe, /probeVersion: PROBE_VERSION, analysisVersion: ANALYSIS_VERSION, at:/);
 });

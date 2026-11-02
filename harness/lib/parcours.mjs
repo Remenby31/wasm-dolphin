@@ -22,12 +22,19 @@
 //   film      the pad film's position { pos, hold } (optional)
 // Derived per second: speed (guest / host time from the core ticks), new
 // frames shown and produced a second, smoothness (new frames against the
-// game's cadence, learnt as the site learns it), present hitches over 50 and
+// game's cadence, learnt as the site learns it; against what the game made
+// in a content second: contentSecond), present hitches over 50 and
 // 100 ms, disc bytes a second, XFB copies and replay draws per frame made,
 // occupancy.
 import { integrityOf } from "./integrity.mjs";
-import { noiseOf, verdictOf } from "./drops.mjs";
+import { contentRule, noiseOf, verdictOf } from "./drops.mjs";
 import { median, percentile, round } from "./stats.mjs";
+
+// How the seconds are judged (not what the page runs: the probe's
+// PROBE_VERSION). An A/A's noise holds only for the same analysis: readNoise
+// refuses another. 2: content seconds judged against what was made
+// (contentRule), the menus' smoothness p5 several points higher than in 1.
+export const ANALYSIS_VERSION = 2;
 
 export const PHASES = Object.freeze(["boot", "loading", "cinematic", "menu", "game"]);
 // A phase lasts at least this long: a shorter run of seconds goes to the
@@ -98,6 +105,20 @@ export function windowCadence({ newFps, producedFps, speed, viRate, cpuBusy, gpu
 }
 
 const num = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+
+// A second whose missing frames are the game's own content: lib/drops.mjs
+// contentRule, the single definition the attribution uses too (full speed,
+// every thread measured and under the site's margin, fewer frames made than
+// the scene's cadence). Then smoothness is shown / produced. On the first
+// disc measured, 31 % of the menus' deficit was this (a save screen, the
+// hand-over to a race: 45-50 frames made a second).
+// The smoothness reference of a content second is what was made: none made
+// (0, a still screen) leaves no reference, so it is no content second here
+// (0/0 would be NaN).
+export function contentSecond({ producedFps, speed, cadence, cpuBusy, gpuBusy, replayBusy }) {
+  if (!(Number.isFinite(producedFps) && producedFps > 0)) return false;
+  return contentRule({ speed, produced: producedFps, expected: cadence, occupancy: { cpu: cpuBusy, gpu: gpuBusy, replay: replayBusy } });
+}
 const delta = (a, b) => (num(a) == null || num(b) == null || b < a ? null : b - a);
 
 // The raw samples -> one row a second (the first sample is the origin).
@@ -150,12 +171,17 @@ export function deriveSeconds(samples, { tps = null } = {}) {
     const occupancy = { cpuBusy: num(ib.cpuBusy), gpuBusy: num(ib.gpuBusy), replayBusy: num(ib.replayBusy) };
     const seen = windowCadence({ newFps, producedFps, speed, viRate, ...occupancy });
     cadence = seen ?? cadence;
-    const ref = cadence ?? viCadence(viRate);
+    const sceneCadence = cadence ?? viCadence(viRate);
+    // Content, not a loss: the game itself made fewer frames than the
+    // cadence (a menu animating at 45, a screen held still) at full speed
+    // with margin on every thread: the reference is what it made.
+    const content = contentSecond({ producedFps, speed, cadence: sceneCadence, ...occupancy });
+    const ref = content ? producedFps : sceneCadence;
     booted ||= (num(ib.newShown) ?? 0) > 0;
     rows.push({
       i: rows.length, t: round((b.t - t0) / 1000, 2), at: b.t, booted,
       speed: round(speed, 1), newFps: round(newFps, 1), producedFps: round(producedFps, 1),
-      cadence: ref, smoothness: newFps == null ? null : round(Math.max(0, Math.min(100, (newFps / ref) * 100)), 1),
+      cadence: ref, sceneCadence, content, smoothness: newFps == null || !(Number.isFinite(ref) && ref > 0) ? null : round(Math.max(0, Math.min(100, (newFps / ref) * 100)), 1),
       viRate: round(viRate, 1), presents: (b.presents ?? []).length, hitches50, hitches100, maxGapMs: round(maxGapMs, 1),
       // the presenting worker's longest stall in the second (sampler rows)
       workerLagMs: Array.isArray(b.samplerTicks) && b.samplerTicks.length ? Math.max(...b.samplerTicks.map((x) => x[1])) : null,
@@ -175,7 +201,7 @@ export function deriveSeconds(samples, { tps = null } = {}) {
 export function classifySecond(r, { gameDrawsPerFrame = GAME_DRAWS_PER_FRAME } = {}) {
   if (!r.booted) return "boot";
   const disc = r.discBps ?? 0;
-  const scarce = (r.newFps ?? 0) < SCARCE_SHARE * (r.cadence ?? 60) || (r.speed != null && r.speed < SCARCE_SPEED);
+  const scarce = (r.newFps ?? 0) < SCARCE_SHARE * (r.sceneCadence ?? r.cadence ?? 60) || (r.speed != null && r.speed < SCARCE_SPEED);
   if (disc >= LOAD_DISC_BPS && scarce) return "loading";
   if ((r.newFps ?? 0) < MIN_NEW_FPS) return null;
   const draws = r.drawsPerFrame;
@@ -252,8 +278,10 @@ export function summarizeSeconds(rows, { integrityAllow = [] } = {}) {
     newFpsMedian: newFps.median, newFpsP5: newFps.p5, smoothMedian: smooth.median, smoothP5: smooth.p5, smoothMin: smooth.min,
     hitches50: sum("hitches50"), hitches100: sum("hitches100")
   };
+  // seconds whose missing frames were the game's own (contentSecond)
+  const contentSeconds = rows.filter((r) => r.content).length;
   return {
-    seconds: rows.length, speed, newFps, smoothness: smooth, hitches50: metrics.hitches50, hitches100: metrics.hitches100, worst,
+    seconds: rows.length, contentSeconds, speed, newFps, smoothness: smooth, hitches50: metrics.hitches50, hitches100: metrics.hitches100, worst,
     occupancy: { cpuBusy: round(median(rows.map((r) => r.cpuBusy)), 2), gpuBusy: round(median(rows.map((r) => r.gpuBusy)), 2), replayBusy: round(median(rows.map((r) => r.replayBusy)), 2) },
     discMB: round(rows.reduce((s, r) => s + (r.discBps ?? 0), 0) / (1 << 20), 1),
     integrity: integrity ? { fatal: integrity.fatal ?? [], reported: integrity.reported ?? [] } : null,
