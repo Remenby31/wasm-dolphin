@@ -787,7 +787,12 @@ export function trendTable(lines) {
 //                        to learn a cadence), produced under
 //                        ATTRIBUTION_CONTENT_SHARE of the cadence: the scene's
 //                        own cadence; 0 frames lost
-//     game:marginal      full speed, all known, none saturated, yet not content
+//     marginal           full speed, all known, none saturated, one between
+//                        ATTRIBUTION_CONTENT_BUSY and ATTRIBUTION_BUSY: content
+//                        or game, undecided; not counted lost, reported
+//                        apart (marginalFrames)
+//     game:marginal      full speed, all known and quiet, produced near the
+//                        cadence yet short
 //     game:unknown       full speed, an occupancy not measured
 //     production:unknown the speed not measured
 //   presentation gap = deficit − production gap:
@@ -815,13 +820,33 @@ export const ATTRIBUTION_EMULATION_CAUSES = ["jit", "regions", "disc", "slot", "
 const OCCUPANCY_THREADS = ["cpu", "gpu", "replay"];
 
 const sumOf = (xs, f) => xs.reduce((a, x) => a + (Number.isFinite(f(x)) ? f(x) : 0), 0);
+// a window's cause in ms, floored at 0 per window (a negative counter delta
+// in one window never cancels a positive one in another)
+const causeMs = (w, c) => { const v = w?.causes?.[c]; return Number.isFinite(v) && v > 0 ? v : 0; };
+// parts of the deficit that are not frames lost: the scene's own cadence,
+// and the undecided margin between it and a busy thread
+const NOT_LOST = new Set(["content", "marginal"]);
 const allKnown = (xs, f) => xs.length > 0 && xs.every((x) => Number.isFinite(f(x)));
 
+// The run's standard VI rate: the median over its windows of VIs × 100 /
+// speed (a stall or a stale speed in a few seconds does not move it),
+// snapped to 59.94 or 50 within 3 %; null without VI counts and speeds.
+export function standardViHz(windows) {
+  const rates = windows.filter((w) => Number.isFinite(w.vis) && w.speed > 0 && w.ms > 0).map((w) => (w.vis * 1000 * 100) / (w.ms * w.speed)).sort((a, b) => a - b);
+  if (rates.length < 3) return null;
+  const med = rates[rates.length >> 1];
+  return [59.94, 50].find((hz) => Math.abs(med / hz - 1) <= 0.03) ?? null;
+}
+
 // One second's split (frames). null when it lacks produced or shown.
-export function attributeSecond(ws, { cadence, fullSpeed = ATTRIBUTION_FULL_SPEED, busy = ATTRIBUTION_BUSY, contentBusy = ATTRIBUTION_CONTENT_BUSY, contentShare = ATTRIBUTION_CONTENT_SHARE, stallMs = STALL_MIN_MS } = {}) {
+export function attributeSecond(ws, { cadence, viHz = null, fullSpeed = ATTRIBUTION_FULL_SPEED, busy = ATTRIBUTION_BUSY, contentBusy = ATTRIBUTION_CONTENT_BUSY, contentShare = ATTRIBUTION_CONTENT_SHARE, stallMs = STALL_MIN_MS } = {}) {
   if (!allKnown(ws, (w) => w.produced) || !allKnown(ws, (w) => w.shown)) return null;
   const hostMs = sumOf(ws, (w) => w.ms);
-  const cadenceOf = (w) => w.cadence ?? cadence;
+  // a cadence never exceeds the run's standard VI rate (viHz: 50 or 59.94):
+  // over it by more than 2 %, it is that rate. Never the second's own VI
+  // count: in a stall it falls while the speed read may be stale, and the
+  // frames owed must not fall with it.
+  const cadenceOf = (w) => { const c = w.cadence ?? cadence; return viHz > 0 && c > 1.02 * viHz ? viHz : c; };
   const expected = sumOf(ws, (w) => (cadenceOf(w) * w.ms) / 1000);
   const produced = sumOf(ws, (w) => w.produced), shown = sumOf(ws, (w) => w.shown);
   const presents = allKnown(ws, (w) => w.presents) ? sumOf(ws, (w) => w.presents) : null;
@@ -843,7 +868,7 @@ export function attributeSecond(ws, { cadence, fullSpeed = ATTRIBUTION_FULL_SPEE
       // counted ms exceed the time lost, scaled down together (no cause is
       // favoured by its place in a list)
       const lostMs = Math.max(1, hostMs - (speed * hostMs) / 100);
-      const ms = Object.fromEntries(ATTRIBUTION_EMULATION_CAUSES.map((c) => [c, Math.max(0, sumOf(ws, (w) => w.causes?.[c]))]));
+      const ms = Object.fromEntries(ATTRIBUTION_EMULATION_CAUSES.map((c) => [c, sumOf(ws, (w) => causeMs(w, c))]));
       const counted = Object.values(ms).reduce((a, x) => a + x, 0);
       const scale = counted > lostMs ? lostMs / counted : 1;
       let left = productionGap;
@@ -856,6 +881,7 @@ export function attributeSecond(ws, { cadence, fullSpeed = ATTRIBUTION_FULL_SPEE
     } else if (saturated.length) add(`game:${saturated.join("+")}`, productionGap);
     else if (OCCUPANCY_THREADS.some((k) => occ[k] == null)) add("game:unknown", productionGap);
     else if (OCCUPANCY_THREADS.every((k) => occ[k] < contentBusy) && produced < contentShare * expected) add("content", productionGap);
+    else if (OCCUPANCY_THREADS.some((k) => occ[k] >= contentBusy)) add("marginal", productionGap);
     else add("game:marginal", productionGap);
   }
   // the presentation gap: the rest of the deficit
@@ -880,11 +906,11 @@ export function attributeSecond(ws, { cadence, fullSpeed = ATTRIBUTION_FULL_SPEE
       add("old-frame", presentationGap - noPresent);
     }
   }
-  const counted = sumOf(ws, (w) => sumOf(ATTRIBUTION_EMULATION_CAUSES, (c) => w.causes?.[c]));
+  const counted = sumOf(ws, (w) => sumOf(ATTRIBUTION_EMULATION_CAUSES, (c) => causeMs(w, c)));
   const markers = [];
   if (sumOf(ws, (w) => w.mainLagMs) >= stallMs) markers.push("main-stall");
   if (sumOf(ws, (w) => w.workerLagMs) >= stallMs && counted < stallMs) markers.push("gc-probable");
-  const lost = Object.entries(parts).filter(([k]) => k !== "content").reduce((a, [, f]) => a + f, 0);
+  const lost = Object.entries(parts).filter(([k]) => !NOT_LOST.has(k)).reduce((a, [, f]) => a + f, 0);
   return {
     t: ws[0].t, phase: ws[0].phase ?? null, hostMs, expected: round(expected, 1), produced, shown, presents,
     speed: speed == null ? null : round(speed, 1), occupancy: occ,
@@ -896,8 +922,10 @@ export function attributeSecond(ws, { cadence, fullSpeed = ATTRIBUTION_FULL_SPEE
 // The run's seconds, its dips (under `fluidity`), its hitches (presentation
 // gaps over `hitchMs`, each classed by its own gap) and the table: per
 // phase, each part's frames over the dips, ranked.
-export function attributeDips(windows, { cadence, fluidity = ATTRIBUTION_FLUIDITY, hitchMs = ATTRIBUTION_HITCH_MS, secondMs = ATTRIBUTION_SECOND_MS, ...opts } = {}) {
+export function attributeDips(windows, { cadence, viHz = null, fluidity = ATTRIBUTION_FLUIDITY, hitchMs = ATTRIBUTION_HITCH_MS, secondMs = ATTRIBUTION_SECOND_MS, ...opts } = {}) {
   const ws = [...windows].filter((w) => Number.isFinite(w.t) && w.ms > 0).sort((a, b) => a.t - b.t);
+  viHz ??= standardViHz(ws);
+  opts = { ...opts, viHz };
   if (!(cadence > 0) && !ws.every((w) => w.cadence > 0)) throw new Error("attributeDips: the scene's cadence (frames per second) is the caller's: opts.cadence, or window.cadence on every window");
   const seconds = [];
   let group = [];
@@ -932,43 +960,94 @@ export function hitchCause(gap, window, { frameMs } = {}) {
     const lag = gap.workerLagMs ?? window.workerLagMs;
     return gap.vis > 0 && lag != null && lag >= gap.ms / 2 ? "presenter-blocked" : "no-present";
   }
-  const top = ATTRIBUTION_EMULATION_CAUSES.map((c) => [c, window.causes?.[c] ?? 0]).sort((a, b) => b[1] - a[1])[0];
+  const top = ATTRIBUTION_EMULATION_CAUSES.map((c) => [c, causeMs(window, c)]).sort((a, b) => b[1] - a[1])[0];
   return top && top[1] > 0 ? `emulation:${top[0]}` : "emulation:unexplained";
 }
 
 // A steady period from timestamps (ms): t regressed on the number of
-// periods elapsed, pooled over the steady stretches. An interval spans
-// k = round(Δt / median) periods (a missed vsync counts whole when
-// `wholeSkips`, else k > 1 breaks); it is steady when Δt is within
-// `tolerance` periods of k AND the local median interval (±`localSpan`, per
-// period) is within `localTolerance` of the global one, so a slow stretch
-// (a VI at 80 % speed) breaks the fit and never bends the period, while
-// jitter on single timestamps does not. Then `trims` passes cut out the
-// timestamps more than `trimSigmas` residual sigmas off the fit (the edges
-// of a slow stretch the local median let in) and fit again. Returns { periodMs, sigmaMs (the
-// residual jitter of one timestamp), n } or null with fewer than `min`
-// timestamps, or fewer than half of them kept in stretches of at least
-// `minStretch`.
-export function fitPeriod(times, { tolerance = 0.45, localTolerance = 0.05, localSpan = 15, wholeSkips = true, min = 600, minStretch = 30, trims = 3, trimSigmas = 4 } = {}) {
+// periods elapsed, pooled over the steady stretches.
+// 1. Counting: each timestamp's period number n comes from its stretch's
+//    smoothed intercept (the mean of t − n·median over its last `countSpan`
+//    points), so one jittered timestamp never shifts the count of the ones
+//    after it; a missed vsync counts whole when `wholeSkips`, else n must
+//    step by one; a lone timestamp off the count is skipped, two in a row
+//    end the stretch.
+// 2. Steadiness: the local period, by regression over ±`localSpan` points of
+//    its stretch (precise to ~0.05 % even at 3 ms of jitter), must lie within
+//    `slopeTolerance` of the median local period: a stretch a few per cent
+//    slow (a VI at 96 % speed) is cut out, never pooled.
+// 3. Fit, then `trims` passes drop points more than `trimSigmas` residual
+//    sigmas off (a dropped point leaves its stretch whole).
+// 4. One rate: blocks of `blockSize` points fitted alone, each against the
+//    median block within `blockSigmas` of its own standard errors; off
+//    blocks are cut out (blockMode "exclude", the VI) or make it null
+//    ("reject", the screen).
+// Returns { periodMs, sigmaMs (one timestamp's residual jitter), seHz (the
+// rate's standard error), n, kept (share of timestamps fitted), skips
+// (share of intervals spanning several periods) } or null with fewer than
+// `min` timestamps, fewer than half of them fitted, a rate less precise
+// than `maxSeHz`, or under `wholeShare` of the intervals spanning a whole
+// number of fitted periods (two rates mixed).
+export function fitPeriod(times, opts = {}) {
+  const { min = 600, wholeShare = 0.7 } = opts;
   if (!times || times.length < min) return null;
-  const d = times.slice(1).map((t, i) => t - times[i]);
-  const sortedD = d.filter((x) => x > 0).sort((x, y) => x - y);
-  const med = sortedD[sortedD.length >> 1];
+  const d = times.slice(1).map((t, i) => t - times[i]).filter((x) => x > 0);
+  const sorted = [...d].sort((x, y) => x - y);
+  const med = sorted[sorted.length >> 1];
   if (!(med > 0)) return null;
-  const k = d.map((x) => Math.round(x / med));
-  const per = d.map((x, i) => (k[i] >= 1 ? x / k[i] : null));
-  const steady = d.map((x, i) => {
-    if (!(k[i] >= 1) || (!wholeSkips && k[i] !== 1) || Math.abs(x / med - k[i]) > tolerance) return false;
-    const near = per.slice(Math.max(0, i - localSpan), i + localSpan + 1).filter((v) => v != null).sort((p, q) => p - q);
-    return Math.abs(near[near.length >> 1] / med - 1) <= localTolerance;
-  });
-  const stretches = [];
-  let cur = [{ t: times[0], n: 0 }];
-  for (let i = 0; i < d.length; i += 1) {
-    if (steady[i]) cur.push({ t: times[i + 1], n: cur.at(-1).n + k[i] });
-    else { if (cur.length >= minStretch) stretches.push(cur); cur = [{ t: times[i + 1], n: 0 }]; }
+  // counted first by the median interval, then again by the fitted period
+  // (slow stretches move the median a few per cent at high jitter)
+  const first = fitPeriodOnce(times, med, opts);
+  const out = first && (fitPeriodOnce(times, first.periodMs, opts) ?? first);
+  if (!out) return null;
+  // one rate: most intervals span a whole number of periods (two rates in
+  // equal parts, 60 + 120, fit a period between them that few do)
+  const whole = d.filter((x) => { const k = Math.round(x / out.periodMs); return k >= 1 && Math.abs(x / out.periodMs - k) <= 0.3; }).length / d.length;
+  return whole >= wholeShare ? out : null;
+}
+
+function fitPeriodOnce(times, med, { tolerance = 0.45, slopeTolerance = 0.005, localSpan = 30, countSpan = 15, wholeSkips = true, min = 600, minStretch = 30, trims = 3, trimSigmas = 4, maxSeHz = 0.005, blockSize = 300, blockSigmas = 3.5, blockMode = "exclude", sigmaFloorMs = 0.02 } = {}) {
+  // 1. counting
+  const counted = [];
+  let cur = [{ t: times[0], n: 0 }], skipped = false, multi = 0, steps = 0;
+  const close = () => { if (cur.length >= minStretch) counted.push(cur); };
+  for (let i = 1; i < times.length; i += 1) {
+    const t = times[i];
+    const tail = cur.slice(-countSpan);
+    const c = tail.reduce((a, p) => a + p.t - p.n * med, 0) / tail.length;
+    const n = Math.round((t - c) / med);
+    const last = cur.at(-1).n;
+    const ok = n > last && (wholeSkips || n === last + 1 + (skipped ? 1 : 0)) && Math.abs(t - c - n * med) <= tolerance * med;
+    if (ok) { steps += 1; if (n - last > 1 + (skipped ? 1 : 0)) multi += 1; cur.push({ t, n }); skipped = false; }
+    else if (!skipped && cur.length > 1) skipped = true;
+    else { close(); cur = [{ t, n: 0 }]; skipped = false; }
   }
-  if (cur.length >= minStretch) stretches.push(cur);
+  close();
+  // 2. steadiness by the local period
+  const localSlope = (st, i) => {
+    const lo = Math.max(0, i - localSpan), hi = Math.min(st.length, i + localSpan + 1);
+    let mn = 0, mt = 0;
+    for (let j = lo; j < hi; j += 1) { mn += st[j].n; mt += st[j].t; }
+    mn /= hi - lo; mt /= hi - lo;
+    let sxy = 0, sxx = 0;
+    for (let j = lo; j < hi; j += 1) { sxy += (st[j].n - mn) * (st[j].t - mt); sxx += (st[j].n - mn) ** 2; }
+    return sxx > 0 ? sxy / sxx : null;
+  };
+  const slopes = counted.map((st) => st.map((_, i) => localSlope(st, i)));
+  const all = slopes.flat().filter((v) => v != null).sort((x, y) => x - y);
+  if (!all.length) return null;
+  const ref = all[all.length >> 1];
+  const stretches = [];
+  counted.forEach((st, si) => {
+    let piece = [];
+    st.forEach((p, i) => {
+      const sl = slopes[si][i];
+      if (sl != null && Math.abs(sl / ref - 1) <= slopeTolerance) piece.push(p);
+      else { if (piece.length >= minStretch) stretches.push(piece); piece = []; }
+    });
+    if (piece.length >= minStretch) stretches.push(piece);
+  });
+  // 3. fit and trims
   const fit = (parts) => {
     const centred = parts.map((st) => ({ st, mn: st.reduce((a, p) => a + p.n, 0) / st.length, mt: st.reduce((a, p) => a + p.t, 0) / st.length }));
     let sxy = 0, sxx = 0, count = 0;
@@ -983,37 +1062,94 @@ export function fitPeriod(times, { tolerance = 0.45, localTolerance = 0.05, loca
       c.res = c.st.map((p) => p.t - c.mt - periodMs * (p.n - c.mn));
       for (const r of c.res) ss += r * r;
     }
-    return { periodMs, sigmaMs: Math.sqrt(ss / Math.max(1, count - parts.length - 1)), n: count, centred };
+    const sigmaMs = Math.sqrt(ss / Math.max(1, count - parts.length - 1));
+    return { periodMs, sigmaMs, seHz: (1000 / periodMs ** 2) * (sigmaMs / Math.sqrt(sxx)), n: count, centred };
   };
-  let parts = stretches, best = fit(parts);
+  let best = fit(stretches);
   for (let pass = 0; best && pass < trims; pass += 1) {
     const limit = trimSigmas * best.sigmaMs;
     const next = [];
     let cut = false;
     for (const { st, res } of best.centred) {
-      let piece = [];
-      st.forEach((p, i) => {
-        if (Math.abs(res[i]) <= limit) piece.push(p);
-        else { cut = true; if (piece.length >= minStretch) next.push(piece); piece = []; }
-      });
-      if (piece.length >= minStretch) next.push(piece);
+      const kept = st.filter((_, i) => Math.abs(res[i]) <= limit);
+      if (kept.length < st.length) cut = true;
+      if (kept.length >= minStretch) next.push(kept);
     }
     if (!cut) break;
     const refit = fit(next);
     if (!refit) break;
-    parts = next;
     best = refit;
   }
-  if (!best) return null;
-  return { periodMs: best.periodMs, sigmaMs: best.sigmaMs, n: best.n };
+  // 4. one rate: blocks of `blockSize` points, each fitted alone, against
+  // the median block's period, within `blockSigmas` standard errors of
+  // their own. A slowdown too small for the local slope (0.1 % for 12 s)
+  // is still hundreds of them off. "exclude" (the VI: a slow stretch is
+  // real) cuts the blocks off and fits again; "reject" (the screen: one
+  // rate or none) returns null.
+  for (let pass = 0; best && pass < 2; pass += 1) {
+    const blocks = [];
+    best.centred.forEach(({ st }, si) => {
+      for (let i = 0; i < st.length; i += blockSize) {
+        const end = st.length - (i + blockSize) < blockSize / 2 ? st.length : i + blockSize;
+        blocks.push({ si, pts: st.slice(i, end) });
+        if (end === st.length) break;
+      }
+    });
+    if (blocks.length < 2) break;
+    for (const b of blocks) {
+      const mn = b.pts.reduce((a, p) => a + p.n, 0) / b.pts.length, mt = b.pts.reduce((a, p) => a + p.t, 0) / b.pts.length;
+      let sxy = 0, sxx = 0;
+      for (const p of b.pts) { sxy += (p.n - mn) * (p.t - mt); sxx += (p.n - mn) ** 2; }
+      b.slope = sxx > 0 ? sxy / sxx : null;
+      // the block's own residual sigma: the run's is inflated by the very
+      // misfit this looks for (two rates pooled into one line)
+      let ss = 0;
+      if (b.slope != null) for (const p of b.pts) ss += (p.t - mt - b.slope * (p.n - mn)) ** 2;
+      // floored at `sigmaFloorMs` (the timers' resolution): exact timestamps
+      // would otherwise make any rounding a deviation
+      b.se = sxx > 0 && b.pts.length > 2 ? Math.max(sigmaFloorMs, Math.sqrt(ss / (b.pts.length - 2))) / Math.sqrt(sxx) : Infinity;
+    }
+    const sl = blocks.filter((b) => b.slope != null).map((b) => b.slope).sort((x, y) => x - y);
+    const ref = sl[sl.length >> 1];
+    for (const b of blocks) b.off = !(b.slope != null && Math.abs(b.slope - ref) <= blockSigmas * b.se);
+    if (!blocks.some((b) => b.off)) break;
+    if (blockMode === "reject") return null;
+    const parts = [];
+    let piece = null, lastSi = -1;
+    for (const b of blocks) {
+      if (b.off) { piece = null; continue; }
+      if (piece && b.si === lastSi) piece.push(...b.pts);
+      else { piece = [...b.pts]; parts.push(piece); }
+      lastSi = b.si;
+    }
+    best = fit(parts.filter((x) => x.length >= minStretch));
+  }
+  if (!best || !(best.seHz <= maxSeHz)) return null;
+  return { periodMs: best.periodMs, sigmaMs: best.sigmaMs, seHz: best.seHz, n: best.n, kept: best.n / times.length, skips: steps ? multi / steps : 0 };
 }
 
 // The screen's refresh, measured from the animation frames (not the
 // presentations, which follow the core's VI): their period by regression
-// over every tick, a missed vsync counted as whole periods.
-export function measuredRefreshHz(ticks, opts = {}) {
-  const fit = fitPeriod(ticks, { wholeSkips: true, ...opts });
-  return fit ? 1000 / fit.periodMs : null;
+// over every tick, a missed vsync counted as whole periods. One rate for the
+// whole run or none: null when under `minKept` of the ticks fit it (a rate
+// change, 60 → 72, leaves the other part out), when over `maxSkips` of the
+// intervals span several periods (120 → 60 would read as 120 with every
+// other vsync missed), or when any block of ticks, fitted alone, is off the
+// others beyond its standard error (fitPeriod blockMode "reject": 60 → 59.94
+// mid-run), or when a block of `block` ticks counted on its own median
+// interval differs by more than `blockTolerance` (60 → 72, whose 60 Hz part
+// also reads as 72 Hz with a vsync in six missed; 120 → 60 likewise).
+export function measuredRefreshHz(ticks, { minKept = 0.9, maxSkips = 0.25, block = 600, blockTolerance = 0.01, ...opts } = {}) {
+  const fit = fitPeriod(ticks, { wholeSkips: true, blockMode: "reject", ...opts });
+  if (!fit || fit.kept < minKept || fit.skips > maxSkips) return null;
+  // blocks counted on their own median interval: a part on a common grid
+  // with the rest (60 Hz read as 72 Hz with a vsync in six missed) shows its
+  // own rate there
+  for (let i = 0; i + block <= ticks.length; i += block) {
+    const part = fitPeriod(ticks.slice(i, ticks.length - i < 2 * block ? ticks.length : i + block), { wholeSkips: true, ...opts, min: block });
+    if (part && Math.abs(part.periodMs / fit.periodMs - 1) > blockTolerance) return null;
+  }
+  return 1000 / fit.periodMs;
 }
 
 // The beat, proven frame by frame. vi: the core's VI outputs { t, index };
@@ -1031,7 +1167,9 @@ export function measuredRefreshHz(ticks, opts = {}) {
 // repeat is a single tick (the beat loses one frame at a time; a stall holds
 // several). Both rates come from regressions (fitPeriod: the refresh over
 // every tick, the VI over its full-speed stretches); `deltaMs` defaults to
-// `jitterSigmas` times the VI timestamps' residual jitter. Returns
+// `jitterSigmas` times the VI timestamps' residual jitter. An upper bound: a
+// random drop inside a crossing window reads as beat (~1 in 4 on a drifting
+// screen; see harness/README.md). Returns
 // { refreshHz, viHz, viJitterMs, deltaMs, boundaryMs, share, proven: [tick t] }
 // or a reason.
 export function beatEvidence({ vi, ticks }, { deltaMs = null, jitterSigmas = 3, minShare = 0.5, minDriftHz = 0.005, smooth = 30, minRepeats = 6 } = {}) {
@@ -1111,9 +1249,10 @@ export function attributionTable(dips, hitches = []) {
   }
   return [...byPhase.values()].map((r) => ({
     ...r, lostFrames: round(r.lostFrames, 1),
-    ranked: Object.entries(r.parts).filter(([k]) => k !== "content").sort((a, b) => b[1] - a[1])
+    ranked: Object.entries(r.parts).filter(([k]) => !NOT_LOST.has(k)).sort((a, b) => b[1] - a[1])
       .map(([cause, frames]) => ({ cause, frames: round(frames, 1), share: r.lostFrames > 0 ? round(frames / r.lostFrames, 3) : null })),
-    contentFrames: round(r.parts.content ?? 0, 1)
+    contentFrames: round(r.parts.content ?? 0, 1),
+    marginalFrames: round(r.parts.marginal ?? 0, 1)
   }));
 }
 
@@ -1205,7 +1344,7 @@ export function parcoursWindowsForAttribution(rows, raw = null) {
       gaps.push({ ms: times[k] - from, vis: sample.gapVis?.[k] ?? null, workerLagMs: sample.gapWorkerLagMs?.[k] ?? null });
     }
     return {
-      t: (r.t - 1) * 1000, ms: 1000, phase: r.phase ?? null, cadence: r.cadence ?? null, speed: r.speed ?? null,
+      t: (r.t - 1) * 1000, ms: 1000, phase: r.phase ?? null, cadence: r.cadence ?? null, speed: r.speed ?? null, vis: r.viRate ?? null,
       produced: r.producedFps ?? null, shown: r.newFps ?? null, presents: r.presents ?? null, gaps,
       occupancy: { cpu: r.cpuBusy ?? null, gpu: r.gpuBusy ?? null, replay: r.replayBusy ?? null },
       workerLagMs: r.workerLagMs ?? null
@@ -1217,7 +1356,7 @@ export function parcoursWindowsForAttribution(rows, raw = null) {
 export function attributionLines(result) {
   const lines = [];
   for (const r of result.table) {
-    lines.push(`${r.phase}: ${r.dips} dip second(s), ${r.lostFrames} frames lost${r.contentFrames ? ` (+${r.contentFrames} content, not lost)` : ""}${Object.keys(r.markers).length ? `, markers ${JSON.stringify(r.markers)}` : ""}`);
+    lines.push(`${r.phase}: ${r.dips} dip second(s), ${r.lostFrames} frames lost${r.contentFrames ? ` (+${r.contentFrames} content, not lost)` : ""}${r.marginalFrames ? ` (+${r.marginalFrames} marginal: a thread at ${ATTRIBUTION_CONTENT_BUSY}-${ATTRIBUTION_BUSY}, content or game)` : ""}${Object.keys(r.markers).length ? `, markers ${JSON.stringify(r.markers)}` : ""}`);
     for (const x of r.ranked) lines.push(`  ${x.cause.padEnd(28)} ${String(x.frames).padStart(7)} frames  ${x.share == null ? "" : `${(100 * x.share).toFixed(1)} %`}`);
     if (r.hitches) lines.push(`  hitches > ${ATTRIBUTION_HITCH_MS} ms: ${r.hitches} (${r.hitchFrames} frames): ${Object.entries(r.hitchCauses).sort((a, b) => b[1] - a[1]).map(([c, f]) => `${c} ${f}`).join(", ")}`);
   }
