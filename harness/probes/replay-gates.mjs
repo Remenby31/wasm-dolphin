@@ -44,11 +44,17 @@
 // and goes (A-B-A); one found keeps its three pictures as
 // out/flicker-visit<n>-<k>.png. Fatal (exit 1) in cpu=single only; in
 // cpu=dual counted per visit (summary.flickerPerVisit), as is a watch with
-// nothing to judge. Pick the scene: content that blinks on purpose (an
+// nothing to judge. Content that blinks or pulses on purpose (an
 // invincibility flash, a menu cursor, a transparency drawn every other
-// frame) is an A-B-A too. The race and 2P states have none (Mac and Spark
-// cpu=single: 0, the closest clean ratio 0.803); a new scene needs a clean
-// cpu=single run first.
+// frame, a countdown digit pulsing on a still camera) is an A-B-A too, and
+// on an irregular frame pace (cpu=dual on a slow bench) the sampling can
+// catch such a pulse on alternate phases (Spark, 2026-11-02: a start
+// countdown 3 to 5 s after the load, no swap held around it). Choose the
+// window, not the threshold: --flicker-from N starts the watch at the VI N
+// after the load (after the last --vi; default: right after the frames),
+// so a scene's own
+// blinking stretch can be left out at the call. A new scene or window needs
+// a clean cpu=single run first.
 // visits.json keeps each captured frame's sha256 (hashes), so the frames of
 // two trees can be compared exactly from two runs.
 // Exit 1 when a visit failed, a side has no picture or no input reading, or
@@ -72,7 +78,7 @@ const { values: o } = parseArgs({ options: {
   candidate: { type: "string" }, "lock-wait": { type: "string", default: "14400" },
   "slot-reload": { type: "boolean", default: false }, "slot-saves": { type: "string", default: "0" },
   "bad-state-load": { type: "boolean", default: false },
-  exact: { type: "boolean", default: false }, flicker: { type: "string", default: "0" }
+  exact: { type: "boolean", default: false }, flicker: { type: "string", default: "0" }, "flicker-from": { type: "string" }
 }, strict: true });
 for (const k of ["iso", "state", "port", "out", "query", ...(o.exact ? [] : ["extra"])]) if (!o[k]) throw new Error(`--${k} is required`);
 o.extra ??= "";
@@ -196,6 +202,15 @@ try {
       }
       // --flicker: the presented pictures watched for an A-B-A
       if (Number(o.flicker) > 0) {
+        // --flicker-from N: wait for the VI N after the load (an exact
+        // capture, bounded), so the window starts at the same place of the
+        // game in every visit
+        if (o["flicker-from"] !== undefined) {
+          const from = Number(o["flicker-from"]);
+          if (!Number.isInteger(from) || from < 1) throw new Error(`--flicker-from ${o["flicker-from"]}: a VI index >= 1`);
+          const at = await captureAtVi(session.page, { index: from, fromLoad: true, timeoutMs: 120000 });
+          if (at.error) throw new Error(`flicker watch: VI ${from} after the load: ${at.error}`);
+        }
         const started = await workerRequest(session.page, "validationFlickerWatch", { action: "start" }, 10000);
         if (!started?.started) throw new Error(`flicker watch: ${started?.error ?? "not started"}`);
         await sleep(Number(o.flicker) * 1000);

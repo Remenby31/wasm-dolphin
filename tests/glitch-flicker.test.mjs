@@ -135,3 +135,14 @@ test("A-B-A fails a run only on the deterministic CPU, both sides", async () => 
   assert.equal(flickerFatal("video=wgpu&cpu=dual"), false);
   assert.equal(flickerFatal("video=wgpu"), false);
 });
+
+test("--flicker-from N: the watch starts at the VI N after the load, no scene default", async () => {
+  const gates = await read("../harness/probes/replay-gates.mjs");
+  assert.match(gates, /"flicker-from": \{ type: "string" \}/, "no default value");
+  const block = gates.slice(gates.indexOf("if (Number(o.flicker) > 0) {"));
+  assert.ok(block.indexOf('o["flicker-from"]') < block.indexOf('"validationFlickerWatch", { action: "start" }'), "waited for before the watch starts");
+  assert.match(block, /const at = await captureAtVi\(session\.page, \{ index: from, fromLoad: true, timeoutMs: 120000 \}\);/);
+  assert.match(block, /if \(!Number\.isInteger\(from\) \|\| from < 1\) throw new Error/);
+  // the blinking caveat is documented where the option is
+  assert.match(gates, /a countdown digit pulsing on a still camera/);
+});
