@@ -95,6 +95,7 @@ export const NESTED = {
   sliceSetup: "other (slice set-up, region service, close-out, 0213)",
   retryDeferred: "other (RetryDeferredWasmBlocks, 0213)",
   staleCheck: "blocksDispatch or other, where the check ran (0213)",
+  deferredInterp: "blocksDispatch (blocks run interpreted for lack of their module: est. from sampled runs, 0213 v2)",
   otherDirect: "other (the core's own count, 0213)"
 };
 // The 0213 parts whose sum is compared with other (coverageOfOther).
@@ -270,6 +271,7 @@ export function cpuWindowBreakdown(start, end) {
     ms.sliceSetup = ct.setupMs + ct.regionServiceMs + ct.tailMs;
     ms.retryDeferred = ct.retryMs;
     ms.staleCheck = ct.staleCheck.ms;
+    ms.deferredInterp = ct.deferredRuns.estMs;
     ms.otherDirect = ct.controlMs;
   }
 
@@ -423,7 +425,7 @@ export function viRangeOf(viEntries) {
 
 // A short human table: one line per row, shares of host time in %.
 const COLS = [["regions", "reg"], ["blocksDispatch", "b+d"], ["idle", "idle"], ["installs", "inst"], ["other", "oth"], ["sleep", "slp"], ["flushGpuWait", "flush"], ["axHle", "ax*"],
-  ["advance", "adv*"], ["throttle", "thr*"], ["sliceSetup", "set*"], ["retryDeferred", "rdw*"], ["staleCheck", "stl*"]];
+  ["advance", "adv*"], ["throttle", "thr*"], ["sliceSetup", "set*"], ["retryDeferred", "rdw*"], ["staleCheck", "stl*"], ["deferredInterp", "dfr*"]];
 export function formatTable(rows) {
   // 5 wide: "100.0" fits (a busy CPU thread is 99.99 %, never cut)
   const pct = (v) => (v == null ? "-" : (v * 100).toFixed(1)).padStart(5);
@@ -443,7 +445,7 @@ export function formatTable(rows) {
     (r.mem?.slowPerKiloInstr == null ? "-" : r.mem.slowPerKiloInstr.toFixed(2)).padStart(7),
     r.dip == null ? "?" : r.dip ? "DIP" : ""
   ].join(" "));
-  return [head, ...lines, "shares of the CPU thread's host time in %; b+d: JIT blocks + dispatch (their split is unreliable, summary.json split); ax* is inside b+d/reg (not added); adv* thr* set* rdw* (0213) are inside oth, stl* inside b+d or oth (thr* inside adv*); cov%: (adv + set + rdw) / oth; ctl%: the core's own count of oth / oth; wait m/M: off-thread waiting list mean/max; over ms: parts past the busy time (other clamped at 0); slow/ki: memory slow paths per 1000 guest instructions"].join("\n");
+  return [head, ...lines, "shares of the CPU thread's host time in %; b+d: JIT blocks + dispatch (their split is unreliable, summary.json split); ax* is inside b+d/reg (not added); adv* thr* set* rdw* (0213) are inside oth, stl* inside b+d or oth (thr* inside adv*); dfr*: blocks run interpreted for lack of their module (estimated, inside b+d); cov%: (adv + set + rdw) / oth; ctl%: the core's own count of oth / oth; wait m/M: off-thread waiting list mean/max; over ms: parts past the busy time (other clamped at 0); slow/ki: memory slow paths per 1000 guest instructions"].join("\n");
 }
 
 // The cost of the per-call timing, from the same run: a window with the

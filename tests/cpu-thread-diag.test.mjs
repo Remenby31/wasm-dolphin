@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-import { CPU_THREAD_DIAG_BYTES, consistentCpuThreadDiagRead, cpuThreadDiagDelta, decodeCpuThreadDiag, FIELDS, PARTS } from "../harness/lib/cpu-thread-diag.mjs";
+import { CPU_THREAD_DIAG_BYTES, consistentCpuThreadDiagRead, cpuThreadDiagDelta, decodeCpuThreadDiag, DEFERRED_FIELDS, deferredRunsDelta, FIELDS, PARTS } from "../harness/lib/cpu-thread-diag.mjs";
 import { classifyDips, contrast, cpuWindowBreakdown, formatTable, NESTED, OTHER_PARTS } from "../harness/lib/cpu-window.mjs";
 import { cpuThreadLine } from "../harness/probes/cpu-window.mjs";
 
@@ -18,8 +18,9 @@ const read = (rel) => readFileSync(new URL(rel, import.meta.url), "utf8");
 const PATCH = "../patches/dolphin-wasm/snapshot/0213-cpu-thread-other-diag.patch";
 const SLOTS = 32;
 
-// Bytes as the core lays them out (v1): header, 32 f64, 33 event entries.
-function diagBytes({ version = 1, size = CPU_THREAD_DIAG_BYTES, on = 1, slots = SLOTS, fields = {}, events = [], others = null } = {}) {
+// Bytes as the core lays them out (v2): header, 32 f64, 33 event entries,
+// 16 f64 of deferred runs.
+function diagBytes({ version = 2, size = CPU_THREAD_DIAG_BYTES, on = 1, slots = SLOTS, fields = {}, events = [], others = null } = {}) {
   const buf = new ArrayBuffer(CPU_THREAD_DIAG_BYTES);
   const view = new DataView(buf), u8 = new Uint8Array(buf);
   [version, size, on, slots].forEach((v, i) => view.setUint32(4 * i, v, true));
@@ -32,6 +33,7 @@ function diagBytes({ version = 1, size = CPU_THREAD_DIAG_BYTES, on = 1, slots = 
   };
   events.forEach(([name, us, calls], slot) => put(slot, name, us, calls));
   if (others) put(slots, "", others[0], others[1]);
+  DEFERRED_FIELDS.forEach((f, i) => view.setFloat64(16 + FIELDS.length * 8 + 33 * 48 + 8 * i, fields[f] ?? 0, true));
   return Array.from(u8);
 }
 
@@ -45,12 +47,16 @@ function fieldsAt(k, g = 0) {
     eventsUs: 8200 * k, eventCalls: 710 * k, throttleUs: 400 * k, throttleCalls: 60 * k,
     offThreadWaitingNow: 12, offThreadWaitingMax: 40, offThreadWaitingSum: 20000 * k * 10,
     deferredNow: 0, deferredMax: 3, deferredSum: 1000 * k, regionWaitingNow: 2, regionWaitingMax: 5, regionWaitingSum: 20000 * k * 2,
-    reverifyUs: 50 * k, reverifyCalls: 3 * k, invalidateUs: 30 * k, invalidateCalls: 10 * k, invalidateScans: 100 * k, clearRegionStateUs: 0, clearRegionStateCalls: 0
+    reverifyUs: 50 * k, reverifyCalls: 3 * k, invalidateUs: 30 * k, invalidateCalls: 10 * k, invalidateScans: 100 * k, clearRegionStateUs: 0, clearRegionStateCalls: 0,
+    // 0213 v2: throttle-deferred blocks run 8000 times a second, 1000 timed
+    // at 2.1 µs each (0.1 µs of clock reads); off-thread ones not at all
+    throttleBlocks: 40 * k, throttleRuns: 8000 * k, throttleInstructions: 96000 * k, throttleCycles: 120000 * k,
+    throttleSampledRuns: 1000 * k, throttleSampledUs: 2100 * k, clockPairUs: 0.1, sampleEvery: 8
   };
 }
 const decoded = (k, g = 0) => decodeCpuThreadDiag(diagBytes({ fields: fieldsAt(k, g), events: EVENTS(k), others: [10 * k, k] }));
 
-test("decoder: v1 fields, named event slots, the (others) bucket; bad versions, sizes and torn reads refused", () => {
+test("decoder: v2 fields, named event slots, the (others) bucket; bad versions, sizes and torn reads refused", () => {
   const s = decoded(2);
   assert.equal(s.on, true);
   assert.equal(s.eventSlots, 32);
@@ -64,9 +70,12 @@ test("decoder: v1 fields, named event slots, the (others) bucket; bad versions, 
   // a name of 31 bytes and more is cut at 31 (NUL at 32)
   const long = decodeCpuThreadDiag(diagBytes({ events: [["X".repeat(40), 1, 1]] }));
   assert.equal(long.events[0].name, "X".repeat(31));
-  assert.match(decodeCpuThreadDiag(diagBytes({ version: 2 })).error, /layout version 2/);
+  assert.equal(s.throttleRuns, 16000);
+  assert.equal(s.clockPairUs, 0.1);
+  assert.equal(DEFERRED_FIELDS.length, 16);
+  assert.match(decodeCpuThreadDiag(diagBytes({ version: 1 })).error, /layout version 1/);
   assert.match(decodeCpuThreadDiag(diagBytes({ size: 96 })).error, /struct of 96 bytes/);
-  assert.match(decodeCpuThreadDiag(diagBytes().slice(0, 100)).error, /v1 needs 1856/);
+  assert.match(decodeCpuThreadDiag(diagBytes().slice(0, 100)).error, /v2 needs 1984/);
   assert.match(decodeCpuThreadDiag(diagBytes({ slots: 64 })).error, /64 event slots/);
   assert.match(decodeCpuThreadDiag([]).error, /no header/);
   assert.equal(decodeCpuThreadDiag(diagBytes({ on: 0 })).on, false);
@@ -98,6 +107,20 @@ test("delta: parts add up to control, coverage of other, list means, stale check
   assert.match(cpuThreadDiagDelta({ error: "core has no DolphinWeb_CpuThreadDiagStats" }, decoded(1)).why, /core has no/);
   const off = decodeCpuThreadDiag(diagBytes({ on: 0 }));
   assert.match(cpuThreadDiagDelta(off, off).why, /not on/);
+});
+
+test("deferred runs: by reason, est. time = runs x (sampled mean - clock pair), null without a sample", () => {
+  const d = cpuThreadDiagDelta(decoded(1), decoded(3)).deferredRuns;
+  assert.deepEqual(d.throttle, { blocks: 80, runs: 16000, instructions: 192000, cycles: 240000, sampledRuns: 2000, usPerRun: 2, estMs: 32 });
+  assert.deepEqual(d.offThread, { blocks: 0, runs: 0, instructions: 0, cycles: 0, sampledRuns: 0, usPerRun: null, estMs: 0 });
+  assert.equal(d.estMs, 32);
+  // runs with no timed sample: unknown, not zero
+  const a = { ...decoded(1), offThreadRuns: 0 }, b = { ...decoded(1), offThreadRuns: 5 };
+  const u = deferredRunsDelta(a, b);
+  assert.equal(u.offThread.estMs, null);
+  assert.equal(u.estMs, null);
+  // a run counter going back is a torn read
+  assert.match(consistentCpuThreadDiagRead(decoded(2), { ...decoded(2), throttleRuns: 1 }).error, /throttleRuns/);
 });
 
 const round4 = (v) => Math.round(v * 1e4) / 1e4;
@@ -184,7 +207,7 @@ test("worker contract: validationReadCpuThreadDiag, harness-only, on/reset/off p
   assert.match(fn, /if \(!harnessEnabled\) return \{ error: "harness hooks are off" \};/);
   assert.match(fn, /moduleInstance\?\._DolphinWeb_CpuThreadDiagStats;/);
   assert.match(fn, /reset >= 0 \|\| reset === -2\) \? reset : -1/);
-  assert.match(fn, /getUint32\(4, true\), 1856\)/);
+  assert.match(fn, /getUint32\(4, true\), 1984\)/);
   assert.match(fn, /new Float64Array\(heap\.buffer, ptr, size \/ 8\)\.slice\(\)\.buffer/);
   assert.match(fn, /return \{ bytes: copy\(\), again: copy\(\) \};/);
   // the product never turns it on: only the harness message calls the export
@@ -231,6 +254,11 @@ test("0213 contract: off by default, every diag clock read behind the flag (zero
       if (!l.added || !/\bNow\(\)/.test(l.text) || /inline TimePoint Now\(\)/.test(l.text)) return;
       // Mark()'s own read: every Mark call is checked below
       if (/^ +t\[i\] = DolphinWeb::CpuThreadDiag::Now\(\);$/.test(l.text)) return;
+      // the reset's clock-pair calibration (ApplyReset runs with the flag on
+      // only) and a deferred block's timed run (after its own On() return):
+      // both checked below
+      if (/^ +const TimePoint a = Now\(\);$|^ +pair = std::min\(pair, Micros\(Now\(\) - a\)\);$/.test(l.text)) return;
+      if (/^ +const D::TimePoint start = D::Now\(\);$|^ +D::AddDeferredSample\(operands\.reason, D::Now\(\) - start, nested_before\);$/.test(l.text)) return;
       reads += 1;
       // a ternary on the flag, a one-line if on the line before, or a block
       // opened by if (flag)
@@ -255,6 +283,14 @@ test("0213 contract: off by default, every diag clock read behind the flag (zero
   assert.match(patch, /\+    if \(cpu_thread_diag\)\n\+    \{\n\+      DolphinWeb::CpuThreadDiag::AddEvent\(evt\.type->diag_slot,/);
   // nested time is added with the flag only (sleep, installs, FlushGpu)
   assert.equal((patch.match(/\+ +if \(DolphinWeb::CpuThreadDiag::On\(\)\)\n\+ +DolphinWeb::CpuThreadDiag::AddNested\(/g) ?? []).length, 3);
+  // ApplyReset: called behind the flag only; the deferred run: returns
+  // before any clock read when off
+  assert.match(patch, /\+    if \(cpu_thread_diag\)\n\+    \{\n\+      diag\.Mark\(0\);\n\+      DolphinWeb::CpuThreadDiag::ApplyReset\(diag\.t\[0\]\);/);
+  assert.equal((patch.match(/ApplyReset\(/g) ?? []).length, 2, "ApplyReset: defined once, called once");
+  assert.match(patch, /\+  if \(!D::On\(\) \|\| !D::NoteDeferredRun\(operands\.reason, operands\.instructions, operands\.cycles\)\)\n\+    return CPU_THREAD_DIAG_DEFERRED_SIZE;\n\+  const double nested_before = D::g_stats\.nested_us;\n\+  const D::TimePoint start = D::Now\(\);/);
+  // the marker is written only with the flag on, and only for a block left
+  // to the interpreter by the throttle or the compiler worker
+  assert.match(patch, /\+  if \(cpu_thread_diag\)\n\+  \{\n\+    const bool throttled =[\s\S]*?\+    if \(throttled \|\| posted\)\n\+    \{[\s\S]*?\+      Write\(CpuThreadDiagDeferredRun, /);
   // RetryDeferredWasmBlocks itself is untouched (contract harnesses compile it alone)
   assert.doesNotMatch(patch, /^[+-].*void RetryDeferredWasmBlocks/m);
   assert.ok(patch.includes("\n     RetryDeferredWasmBlocks(*this);\n"), "the call is a context line");
@@ -266,15 +302,23 @@ test("0213 contract: the export (EMSCRIPTEN_KEEPALIVE, as the 0113/0075 stats), 
   // the other stats exports of the series are KEEPALIVE the same way (no
   // EXPORTED_FUNCTIONS entry: the series exports them with the attribute)
   assert.match(read("../patches/dolphin-wasm/snapshot/0113-headroom-counters.patch"), /EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_HeadroomStats\(int reset\)/);
-  assert.match(patch, /\+  u32 size_bytes = 1856;/);
+  assert.match(patch, /\+  u32 version = 2;\n\+  u32 size_bytes = 1984;/);
   assert.match(patch, /\+constexpr u32 EVENT_SLOTS = 32;/);
-  assert.match(patch, /\+static_assert\(sizeof\(Stats\) == 16 \+ 32 \* 8 \+ \(EVENT_SLOTS \+ 1\) \* 48\);/);
+  assert.match(patch, /\+static_assert\(sizeof\(Stats\) == 16 \+ 32 \* 8 \+ \(EVENT_SLOTS \+ 1\) \* 48 \+ 16 \* 8\);/);
   // the f64 fields in the decoder's order
   const body = patch.slice(patch.indexOf("+struct Stats"), patch.indexOf("+  EventEntry events[EVENT_SLOTS + 1];"));
   const names = [...body.matchAll(/\+  double (\w+) = 0;/g)].map((m) => m[1]);
   const camel = (n) => n.replace(/_(\w)/g, (_, c) => c.toUpperCase()).replace(/Us$/, "Us");
   assert.deepEqual(names.map(camel), FIELDS);
-  assert.equal(16 + names.length * 8 + (SLOTS + 1) * 48, CPU_THREAD_DIAG_BYTES);
+  // v2: two DeferredRuns (6 f64 each), then 4 f64, after the events
+  const runs = patch.slice(patch.indexOf("+struct DeferredRuns"), patch.indexOf("+constexpr u32 DEFERRED_THROTTLE"));
+  const runNames = [...runs.matchAll(/\+  double (\w+) = 0;/g)].map((m) => camel(m[1]));
+  const tail = patch.slice(patch.indexOf("+  DeferredRuns deferred[2];"), patch.indexOf("+static_assert(sizeof(EventEntry)"));
+  const tailNames = [...tail.matchAll(/\+  double (\w+) = /g)].map((m) => camel(m[1]));
+  const cap = (n) => n[0].toUpperCase() + n.slice(1);
+  assert.deepEqual([...["throttle", "offThread"].flatMap((r) => runNames.map((n) => `${r}${cap(n)}`)), ...tailNames], DEFERRED_FIELDS);
+  assert.match(patch, /\+constexpr u32 DEFERRED_THROTTLE = 0;\n\+constexpr u32 DEFERRED_OFF_THREAD = 1;/);
+  assert.equal(16 + names.length * 8 + (SLOTS + 1) * 48 + DEFERRED_FIELDS.length * 8, CPU_THREAD_DIAG_BYTES);
   // event slots by registered name, generic: no game name, no guest address
   assert.match(patch, /\+  event_type->diag_slot = DolphinWeb::CpuThreadDiag::SlotFor\(name\);/);
   assert.doesNotMatch(patch.split("\n").filter((l) => l.startsWith("+")).join("\n"), /0x8[0-9a-f]{7}/i);

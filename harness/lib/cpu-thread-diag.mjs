@@ -5,11 +5,20 @@
 // host time goes outside the timed slice parts (cpu-window's "other").
 // Cumulative since the last reset; the CPU thread alone writes it.
 //
-// Layout v1 (1856 bytes, little-endian): u32 version, sizeBytes, on (1 once
+// Layout v2 (1984 bytes, little-endian): u32 version, sizeBytes, on (1 once
 // a reset was applied), eventSlots (32); 32 f64 fields (FIELDS, host µs or
 // counts); then eventSlots + 1 entries of 48 bytes: char name[32]
 // (NUL-terminated), f64 us, f64 calls. Event types take a slot at their
-// first registration; past 32 they share the last entry, "(others)".
+// first registration; past 32 they share the last entry, "(others)". Then
+// 16 f64 (DEFERRED_FIELDS): the deferred blocks' runs by reason, throttle
+// then offThread (blocks, runs, instructions, cycles, sampledRuns,
+// sampledUs), clockPairUs, sampleEvery and two spares.
+//
+// Deferred blocks: blocks the core wrote as interpreter callbacks for lack
+// of their WebAssembly module, "throttle" (the slice's compile budget was
+// spent) or "offThread" (waiting for the compiler worker). Counted at each
+// run; one run in sampleEvery timed (clock reads included: clockPairUs each).
+// Inside the slice loop (blocks): never added to the parts.
 //
 // The parts (each net of the "nested" time inside it: throttle sleep,
 // region installs, FlushGpu waits, all counted elsewhere):
@@ -26,8 +35,8 @@
 // events), never added.
 import { round } from "./stats.mjs";
 
-export const CPU_THREAD_DIAG_VERSION = 1;
-export const CPU_THREAD_DIAG_BYTES = 1856;
+export const CPU_THREAD_DIAG_VERSION = 2;
+export const CPU_THREAD_DIAG_BYTES = 1984;
 export const FIELDS = [
   "windowUs", "iterations", "controlUs", "sliceLoopUs", "nestedUs",
   "setupUs", "retryUs", "regionServiceUs", "advanceUs", "tailUs",
@@ -38,13 +47,21 @@ export const FIELDS = [
   "reverifyUs", "reverifyCalls", "invalidateUs", "invalidateCalls", "invalidateScans",
   "clearRegionStateUs", "clearRegionStateCalls", "spare0", "spare1"
 ];
+export const DEFERRED_REASONS = ["throttle", "offThread"];
+const DEFERRED_RUN_FIELDS = ["blocks", "runs", "instructions", "cycles", "sampledRuns", "sampledUs"];
+export const DEFERRED_FIELDS = [
+  ...DEFERRED_REASONS.flatMap((r) => DEFERRED_RUN_FIELDS.map((f) => `${r}${f[0].toUpperCase()}${f.slice(1)}`)),
+  "clockPairUs", "sampleEvery", "spare2", "spare3"
+];
 // The parts that add up to controlUs.
 export const PARTS = ["setupUs", "retryUs", "regionServiceUs", "advanceUs", "tailUs"];
 const EVENTS_AT = 16 + FIELDS.length * 8, EVENT_BYTES = 48, NAME_BYTES = 32;
 // Fields that only grow between resets (a torn read or a reset shows as one
 // going back). Times net of nested time could dip by a rounding: compared
 // with a tolerance.
-const COUNTS = ["windowUs", "iterations", "eventCalls", "throttleCalls", "offThreadWaitingSum", "deferredSum", "regionWaitingSum", "reverifyCalls", "invalidateCalls", "invalidateScans", "clearRegionStateCalls", "nestedUs", "sliceLoopUs"];
+const COUNTS = ["windowUs", "iterations", "eventCalls", "throttleCalls", "offThreadWaitingSum", "deferredSum", "regionWaitingSum", "reverifyCalls", "invalidateCalls", "invalidateScans", "clearRegionStateCalls", "nestedUs", "sliceLoopUs",
+  ...DEFERRED_REASONS.flatMap((r) => ["Blocks", "Runs", "Instructions", "Cycles", "SampledRuns"].map((f) => `${r}${f}`))];
+const DEFERRED_AT = EVENTS_AT + 33 * EVENT_BYTES;
 const TIMES = ["controlUs", ...PARTS, "eventsUs", "throttleUs", "reverifyUs", "invalidateUs", "clearRegionStateUs"];
 
 export function decodeCpuThreadDiag(bytes) {
@@ -53,12 +70,13 @@ export function decodeCpuThreadDiag(bytes) {
   const view = new DataView(buf.buffer);
   const version = view.getUint32(0, true), size = view.getUint32(4, true);
   if (version !== CPU_THREAD_DIAG_VERSION) return { error: `CPU-thread diag: layout version ${version}, this harness reads ${CPU_THREAD_DIAG_VERSION}` };
-  if (size < CPU_THREAD_DIAG_BYTES || bytes.length < CPU_THREAD_DIAG_BYTES) return { error: `CPU-thread diag: struct of ${size} bytes (${bytes.length} copied), v1 needs ${CPU_THREAD_DIAG_BYTES}` };
+  if (size < CPU_THREAD_DIAG_BYTES || bytes.length < CPU_THREAD_DIAG_BYTES) return { error: `CPU-thread diag: struct of ${size} bytes (${bytes.length} copied), v2 needs ${CPU_THREAD_DIAG_BYTES}` };
   const slots = view.getUint32(12, true);
-  if (EVENTS_AT + (slots + 1) * EVENT_BYTES > CPU_THREAD_DIAG_BYTES) return { error: `CPU-thread diag: ${slots} event slots do not fit v1` };
+  if (slots !== 32) return { error: `CPU-thread diag: ${slots} event slots, v2 has 32` };
   const out = { on: view.getUint32(8, true) === 1, eventSlots: slots };
   FIELDS.forEach((name, i) => { out[name] = view.getFloat64(16 + i * 8, true); });
-  for (const name of FIELDS) if (!Number.isFinite(out[name])) return { error: `CPU-thread diag: ${name} = ${out[name]}` };
+  DEFERRED_FIELDS.forEach((name, i) => { out[name] = view.getFloat64(DEFERRED_AT + i * 8, true); });
+  for (const name of [...FIELDS, ...DEFERRED_FIELDS]) if (!Number.isFinite(out[name])) return { error: `CPU-thread diag: ${name} = ${out[name]}` };
   const events = [];
   for (let i = 0; i <= slots; i += 1) {
     const at = EVENTS_AT + i * EVENT_BYTES;
@@ -128,10 +146,34 @@ export function cpuThreadDiagDelta(a, b, { otherMs = null, topEvents = 3 } = {})
       invalidateMs: ms("invalidateUs"), invalidations: d("invalidateCalls"), invalidateScans: d("invalidateScans"),
       clearRegionStateMs: ms("clearRegionStateUs"), clears: d("clearRegionStateCalls")
     },
+    deferredRuns: deferredRunsDelta(a, b),
     topEvents: events.slice(0, topEvents),
     events,
     coverageOfOther: coverage,
     controlOfOther: otherMs > 0 ? round(controlMs / otherMs, 4) : null
   };
+  return out;
+}
+
+// The deferred blocks' runs in the window, by reason, and their estimated
+// host time: runs x the sampled runs' mean, less the two clock reads each
+// sample carries (clockPairUs, from b's reset). estMs is null with no sample.
+export function deferredRunsDelta(a, b) {
+  const pair = b.clockPairUs ?? 0;
+  const out = {};
+  let total = 0, totalKnown = true;
+  for (const r of DEFERRED_REASONS) {
+    const d = (f) => b[`${r}${f}`] - a[`${r}${f}`];
+    const runs = d("Runs"), sampled = d("SampledRuns");
+    const usPerRun = sampled > 0 ? Math.max(0, d("SampledUs") / sampled - pair) : null;
+    const estMs = runs === 0 ? 0 : usPerRun == null ? null : round(runs * usPerRun / 1000, 3);
+    if (estMs == null) totalKnown = false; else total += estMs;
+    out[r] = {
+      blocks: d("Blocks"), runs, instructions: d("Instructions"), cycles: d("Cycles"), sampledRuns: sampled,
+      usPerRun: usPerRun == null ? null : round(usPerRun, 3), estMs
+    };
+  }
+  out.estMs = totalKnown ? round(total, 3) : null;
+  out.clockPairUs = round(pair, 4);
   return out;
 }

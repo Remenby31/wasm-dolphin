@@ -668,7 +668,7 @@ function harnessCpuThreadDiag({ reset } = {}) {
   const ptr = stats(n) >>> 0;
   const heap = moduleInstance.HEAPU8;
   if (!ptr || ptr + 8 > heap.length) return { error: `DolphinWeb_CpuThreadDiagStats returned ${ptr}` };
-  const size = Math.min(new DataView(heap.buffer, ptr, 8).getUint32(4, true), 1856);
+  const size = Math.min(new DataView(heap.buffer, ptr, 8).getUint32(4, true), 1984);
   if (ptr + size > heap.length) return { error: `CPU-thread diag of ${size} bytes past the heap` };
   if (ptr % 8 !== 0 || size % 8 !== 0) return { error: `CPU-thread diag at ${ptr} (${size} bytes): not 8-aligned` };
   const copy = () => Array.from(new Uint8Array(new Float64Array(heap.buffer, ptr, size / 8).slice().buffer));

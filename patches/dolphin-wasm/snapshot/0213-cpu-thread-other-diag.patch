@@ -169,14 +169,14 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      for (std::size_t i = 0; i + 1 < region.ranges.size(); i += 2)
      {
        const u64 start = region.ranges[i] & 0x01ffffff;
-@@ -11206,6 +11228,81 @@ extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_JitRegionStats(int sample_every)
+@@ -11206,6 +11228,116 @@ extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_JitRegionStats(int sample_every)
      s_region_stats_request.store(sample_every, std::memory_order_release);
    return static_cast<u32>(reinterpret_cast<std::uintptr_t>(&s_region_stats));
  }
 +
 +namespace
 +{
-+// Patch 0213, CPU-thread diag (Core/WasmCpuThreadDiag.h, layout v1): one Run
++// Patch 0213, CPU-thread diag (Core/WasmCpuThreadDiag.h, layout v2): one Run
 +// iteration's clock points and the nested time at each (taken only with the
 +// diag on): 0 start, 1 before RetryDeferredWasmBlocks, 2 after it, 3 after
 +// ServiceRegionInstalls, 4 before Advance, 5 after it, 6 before the slice
@@ -206,6 +206,41 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +      found == s_deferred_wasm_queues.end() ? 0.0 : static_cast<double>(found->second.Stored());
 +  DolphinWeb::CpuThreadDiag::NoteListSizes(static_cast<double>(s_wasm_off_thread_waiting.size()),
 +                                           deferred, static_cast<double>(s_region_waiting.size()));
++}
++
++// The first callback of a deferred block written with the diag on (layout
++// v2 deferred runs): counts the run and, one run in DEFERRED_SAMPLE_EVERY,
++// runs the block's callbacks itself, timed, and ends the block as its last
++// callback did (a 0 return). Off at run time: only skips itself.
++struct CpuThreadDiagDeferredOperands
++{
++  u32 reason;
++  u32 instructions;
++  s32 cycles;
++};
++using CpuThreadDiagAnyCallback = s32 (*)(PowerPC::PowerPCState& ppc_state, const void* operands);
++constexpr s32 CPU_THREAD_DIAG_DEFERRED_SIZE =
++    sizeof(CpuThreadDiagAnyCallback) + sizeof(CpuThreadDiagDeferredOperands);
++
++s32 CpuThreadDiagDeferredRun(PowerPC::PowerPCState& ppc_state,
++                             const CpuThreadDiagDeferredOperands& operands)
++{
++  namespace D = DolphinWeb::CpuThreadDiag;
++  if (!D::On() || !D::NoteDeferredRun(operands.reason, operands.instructions, operands.cycles))
++    return CPU_THREAD_DIAG_DEFERRED_SIZE;
++  const double nested_before = D::g_stats.nested_us;
++  const D::TimePoint start = D::Now();
++  const u8* entry = reinterpret_cast<const u8*>(&operands) + sizeof(operands);
++  for (;;)
++  {
++    const auto callback = *reinterpret_cast<const CpuThreadDiagAnyCallback*>(entry);
++    const s32 distance = callback(ppc_state, entry + sizeof(callback));
++    if (!distance)
++      break;
++    entry += distance;
++  }
++  D::AddDeferredSample(operands.reason, D::Now() - start, nested_before);
++  return 0;
 +}
 +
 +// The iteration's parts (point 8 just marked); they add up to control.
@@ -251,7 +286,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  #endif
  
  void CachedInterpreter::ExecuteOneBlock([[maybe_unused]] bool allow_redispatch)
-@@ -11507,6 +11604,16 @@ void CachedInterpreter::Run()
+@@ -11507,6 +11639,16 @@ void CachedInterpreter::Run()
    while (*state_ptr == CPU::State::Running)
    {
  #ifdef __EMSCRIPTEN__
@@ -268,7 +303,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      ApplyArmedWasmPolicy();
      ApplyRequestedWasmPolicy(*this);
      ServiceBlockDumpRequest(*this);
-@@ -11539,8 +11646,20 @@ void CachedInterpreter::Run()
+@@ -11539,8 +11681,20 @@ void CachedInterpreter::Run()
        s_wasm_compile_us_this_slice = 0;
      }
      // The compile budget has been replenished and no cached callback is active.
@@ -289,7 +324,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      ApplyRegionStatsRequest();
      if (ApplyMemStatsRequest())
      {
-@@ -11577,7 +11696,15 @@ void CachedInterpreter::Run()
+@@ -11577,7 +11731,15 @@ void CachedInterpreter::Run()
      // NOTE: Exceptions may change PC
      const auto _advance_start =
          _profile_slice ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
@@ -305,7 +340,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      const auto _advance_end =
          _profile_slice ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
  
-@@ -11595,6 +11722,8 @@ void CachedInterpreter::Run()
+@@ -11595,6 +11757,8 @@ void CachedInterpreter::Run()
      const auto slice_start =
          timing ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
      s_sampling_lookups = timing;
@@ -314,7 +349,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  #endif
      do
      {
-@@ -11635,6 +11764,8 @@ void CachedInterpreter::Run()
+@@ -11635,6 +11799,8 @@ void CachedInterpreter::Run()
        ExecuteOneBlock();
      } while (m_ppc_state.downcount > 0 && *state_ptr == CPU::State::Running);
  #ifdef __EMSCRIPTEN__
@@ -323,7 +358,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      s_sampling_lookups = false;
      if (s_mem_stats_on)
      {
-@@ -11705,6 +11836,13 @@ void CachedInterpreter::Run()
+@@ -11705,6 +11871,13 @@ void CachedInterpreter::Run()
                                                                  std::memory_order_relaxed)) {}
        }
      }
@@ -337,11 +372,64 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    }
  #if DOLPHIN_WEB_STATIC_EXIT_LINKS && DOLPHIN_WEB_STATIC_EXIT_LINK_STATS
    s_static_link_stats.Publish();
+@@ -16932,6 +17105,11 @@ bool CachedInterpreter::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
+ #ifdef __EMSCRIPTEN__
+   if (auto deferred = s_deferred_wasm_queues.find(this); deferred != s_deferred_wasm_queues.end())
+     deferred->second.Recompiled(em_address, static_cast<u32>(m_ppc_state.feature_flags));
++  // Patch 0213: with the CPU-thread diag on, why the block is not compiled.
++  const bool cpu_thread_diag = DolphinWeb::CpuThreadDiag::On();
++  const u32 throttled_before =
++      cpu_thread_diag ? s_wasm_compile_throttle_reject_count.load(std::memory_order_relaxed) : 0;
++  const u32 posted_before = cpu_thread_diag ? s_wasm_off_thread_defer_count : 0;
+ #if DOLPHIN_WEB_STATIC_EXIT_LINKS
+   if (TryWriteWasmBlock(nextPC))
+     return !HasWriteFailed();
+@@ -16941,6 +17119,23 @@ bool CachedInterpreter::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
+     return true;
+ #endif
+ #line 12372
++  // Patch 0213: a block left to the interpreter for lack of its module gets
++  // a first callback that counts (and samples) its runs.
++  u8* deferred_marker = nullptr;
++  if (cpu_thread_diag)
++  {
++    const bool throttled =
++        s_wasm_compile_throttle_reject_count.load(std::memory_order_relaxed) != throttled_before;
++    const bool posted = s_wasm_off_thread_defer_count != posted_before;
++    if (throttled || posted)
++    {
++      const u32 reason = throttled ? DolphinWeb::CpuThreadDiag::DEFERRED_THROTTLE :
++                                     DolphinWeb::CpuThreadDiag::DEFERRED_OFF_THREAD;
++      deferred_marker = GetWritableCodePtr();
++      Write(CpuThreadDiagDeferredRun, CpuThreadDiagDeferredOperands{reason, 0, 0});
++      DolphinWeb::CpuThreadDiag::NoteDeferredBlock(reason);
++    }
++  }
+ #endif
+ 
+   if (IsProfilingEnabled())
+@@ -17038,6 +17233,16 @@ bool CachedInterpreter::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
+     WARN_LOG_FMT(DYNA_REC, "JIT ran out of space in code region during code generation.");
+     return false;
+   }
++#ifdef __EMSCRIPTEN__
++  // Patch 0213: the marked block's size, now known.
++  if (deferred_marker)
++  {
++    auto* const operands = reinterpret_cast<CpuThreadDiagDeferredOperands*>(
++        deferred_marker + sizeof(CpuThreadDiagAnyCallback));
++    operands->instructions = code_block.m_num_instructions;
++    operands->cycles = static_cast<s32>(js.downcountAmount);
++  }
++#endif
+   return true;
+ }
+ 
 diff --git a/Source/Core/Core/WasmCpuThreadDiag.h b/Source/Core/Core/WasmCpuThreadDiag.h
 new file mode 100644
 --- /dev/null
 +++ b/Source/Core/Core/WasmCpuThreadDiag.h
-@@ -0,0 +1,225 @@
+@@ -0,0 +1,293 @@
 +// Copyright 2026 wasm-dolphin contributors
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +//
@@ -371,6 +459,18 @@ new file mode 100644
 +// re-verified before it runs (TryRunRegion, in blocks/dispatch),
 +// DolphinWeb_InvalidateRegions (where the invalidation came from: guest code
 +// or a DMA event) and ClearOffThreadAndRegionState (a cache clear).
++// Deferred blocks (layout v2, after the events; inside the slice loop, never
++// added to the parts): a block that DoJit writes as interpreter callbacks
++// because its WebAssembly module is not there yet, by reason: "throttle"
++// (the slice's compile budget was spent: the deferred queue) or "offThread"
++// (posted to the compiler worker, waiting for its ready byte). With the diag
++// on when the block is written, its first callback counts each run (runs,
++// guest instructions and cycles at entry) and times one run in
++// DEFERRED_SAMPLE_EVERY by running the block's callbacks itself, through the
++// generic callback call (the dispatcher's direct arms call the same
++// functions); clockPairUs, measured at the reset, is the cost of the two
++// clock reads each sampled run carries. Est. time = runs x (sampledUs -
++// clockPairUs x sampledRuns) / sampledRuns.
 +//
 +// Off until DolphinWeb_CpuThreadDiagStats(n >= 0), which turns g_on on and
 +// asks the CPU thread to zero the counters at its next Run iteration;
@@ -407,12 +507,27 @@ new file mode 100644
 +  double calls = 0;
 +};
 +
-+// Layout v1 (1856 bytes, little-endian), agreed with the harness: a 16-byte
-+// header, 32 f64 fields, then EVENT_SLOTS + 1 event entries of 48 bytes.
++// Deferred-block runs of one reason (layout v2).
++struct DeferredRuns
++{
++  double blocks = 0;        // blocks written as interpreter callbacks, marked
++  double runs = 0;          // their runs
++  double instructions = 0;  // guest instructions of those runs (at entry)
++  double cycles = 0;        // guest cycles (downcount) of those runs
++  double sampled_runs = 0;  // runs timed (one in DEFERRED_SAMPLE_EVERY)
++  double sampled_us = 0;    // their host time, clock reads included, less nested
++};
++constexpr u32 DEFERRED_THROTTLE = 0;
++constexpr u32 DEFERRED_OFF_THREAD = 1;
++constexpr u32 DEFERRED_SAMPLE_EVERY = 8;
++
++// Layout v2 (1984 bytes, little-endian), agreed with the harness: a 16-byte
++// header, 32 f64 fields, EVENT_SLOTS + 1 event entries of 48 bytes, then 16
++// f64 fields (two DeferredRuns, clockPairUs, sampleEvery, two spares).
 +struct Stats
 +{
-+  u32 version = 1;
-+  u32 size_bytes = 1856;
++  u32 version = 2;
++  u32 size_bytes = 1984;
 +  u32 on = 0;
 +  u32 event_slots = EVENT_SLOTS;
 +  double window_us = 0;        // host time from the reset to the last iteration's start
@@ -448,11 +563,18 @@ new file mode 100644
 +  double spare0 = 0;
 +  double spare1 = 0;
 +  EventEntry events[EVENT_SLOTS + 1];
++  DeferredRuns deferred[2];  // DEFERRED_THROTTLE, DEFERRED_OFF_THREAD
++  double clock_pair_us = 0;  // two back-to-back clock reads, min of 32, at the reset
++  double sample_every = DEFERRED_SAMPLE_EVERY;
++  double spare2 = 0;
++  double spare3 = 0;
 +};
 +static_assert(sizeof(EventEntry) == 48);
 +static_assert(offsetof(Stats, window_us) == 16);
 +static_assert(offsetof(Stats, events) == 16 + 32 * 8);
-+static_assert(sizeof(Stats) == 16 + 32 * 8 + (EVENT_SLOTS + 1) * 48);
++static_assert(sizeof(DeferredRuns) == 6 * 8);
++static_assert(offsetof(Stats, deferred) == 16 + 32 * 8 + (EVENT_SLOTS + 1) * 48);
++static_assert(sizeof(Stats) == 16 + 32 * 8 + (EVENT_SLOTS + 1) * 48 + 16 * 8);
 +
 +using Clock = std::chrono::steady_clock;
 +using TimePoint = Clock::time_point;
@@ -461,6 +583,7 @@ new file mode 100644
 +inline std::atomic<bool> g_reset_request{false};
 +inline TimePoint g_reset_at;
 +inline u32 g_slots_used = 0;
++inline u32 g_deferred_sample_count = 0;
 +
 +inline bool On()
 +{
@@ -505,8 +628,41 @@ new file mode 100644
 +  for (u32 i = 0; i <= EVENT_SLOTS; ++i)
 +    std::memcpy(fresh.events[i].name, g_stats.events[i].name, NAME_BYTES);
 +  fresh.on = 1;
++  double pair = 1e9;
++  for (int i = 0; i < 32; ++i)
++  {
++    const TimePoint a = Now();
++    pair = std::min(pair, Micros(Now() - a));
++  }
++  fresh.clock_pair_us = pair;
 +  g_stats = fresh;
 +  g_reset_at = now;
++  g_deferred_sample_count = 0;
++}
++
++// DoJit wrote a deferred block as interpreter callbacks, marked.
++inline void NoteDeferredBlock(u32 reason)
++{
++  g_stats.deferred[reason & 1].blocks += 1;
++}
++// A marked block starts (its first callback, diag on): counts the run; true
++// when this run is to be timed.
++inline bool NoteDeferredRun(u32 reason, u32 instructions, s32 cycles)
++{
++  DeferredRuns& d = g_stats.deferred[reason & 1];
++  d.runs += 1;
++  d.instructions += instructions;
++  d.cycles += cycles;
++  if (++g_deferred_sample_count < DEFERRED_SAMPLE_EVERY) [[likely]]
++    return false;
++  g_deferred_sample_count = 0;
++  return true;
++}
++inline void AddDeferredSample(u32 reason, Clock::duration d, double nested_before)
++{
++  DeferredRuns& r = g_stats.deferred[reason & 1];
++  r.sampled_runs += 1;
++  r.sampled_us += Micros(d) - (g_stats.nested_us - nested_before);
 +}
 +
 +inline void AddNested(double us)
