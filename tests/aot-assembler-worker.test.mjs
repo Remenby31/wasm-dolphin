@@ -229,3 +229,29 @@ test("package.json postcheck checks the assembler worker's syntax", () => {
   const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
   assert.match(pkg.scripts.postcheck, /node --check src\/aot-assembler-worker\.js/);
 });
+
+test("aot assembler: idle() ends the worker without failing; the next request makes it again, same bytes; a real failure still forbids it", async () => {
+  let made = 0, terminated = 0;
+  const reported = [];
+  const client = createAotAssemblerClient({ options: OPTIONS, onHelperFailure: (w) => reported.push(w), createWorker: () => { made += 1; const w = fakeWorker(); w.terminate = () => { terminated += 1; }; return w; } });
+  assert.deepEqual([...await client.assemble(program())], expected());
+  client.idle();
+  assert.equal(terminated, 1);
+  assert.equal(client.failed, null, "idle is no failure");
+  assert.deepEqual([...await client.assemble(program())], expected(), "made again on demand");
+  assert.equal(made, 2);
+  client.idle(); client.idle();
+  assert.equal(terminated, 2, "idle twice ends it once");
+  assert.deepEqual(reported, []);
+  // a transport failure after an idle: in place for good, never made again
+  let made2 = 0;
+  const flaky = createAotAssemblerClient({ options: OPTIONS, createWorker: () => { made2 += 1; if (made2 > 1) throw new Error("refused"); return fakeWorker(); } });
+  await flaky.assemble(program());
+  flaky.idle();
+  assert.deepEqual([...await flaky.assemble(program())], expected());
+  assert.match(flaky.failed, /refused/);
+  await flaky.assemble(program());
+  assert.equal(made2, 2, "not made again after the failure");
+  const worker = readFileSync(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
+  assert.match(worker, /if \(event\?\.type === "done"\) aotAssemblerClient\?\.idle\(\);/);
+});

@@ -107,6 +107,19 @@ export function createAotAssemblerClient({
         }
       });
     },
+    // Idle (the first launch's optimisation done): the worker goes and its
+    // heap with it (the assembly's temporary arrays kept ~190 MB of
+    // phys_footprint alive in it, Chrome Mac); no failure, nothing reported,
+    // and the next request makes it again. Requests still in flight are
+    // assembled in place.
+    idle() {
+      if (failed || !worker) return;
+      try { worker.terminate(); } catch { /* already gone */ }
+      worker = null;
+      const waiting = [...pending.values()];
+      pending.clear();
+      for (const p of waiting) { clearTimeout(p.timer); inPlace(p); }
+    },
     // The flow's end (another disc, a stop): the worker goes; requests still
     // in flight are assembled in place.
     terminate() {

@@ -8792,7 +8792,11 @@ export async function prepareAotFirstLaunch(file, {
     // The regions' assembly in a worker of its own (aot-assembler-worker.js):
     // 30-60 ms of JS each, which on this worker held back presents.
     ...(aotAssemblerClient ? { tuning: { assemble: (fragments) => aotAssemblerClient.assemble(fragments) }, disposeAssembler: () => aotAssemblerClient.terminate() } : {}),
-    onEvent: (event) => self.postMessage({ type: "aot-progress", event })
+    onEvent: (event) => {
+      // the optimisation done: the assembler worker's memory goes back (made again on demand)
+      if (event?.type === "done") aotAssemblerClient?.idle();
+      self.postMessage({ type: "aot-progress", event });
+    }
   });
   aotFirstLaunch = flow;
   // Where this player's game spends its time, recorded into the local
