@@ -205,13 +205,17 @@ async function main() {
       "dip-speed": { type: "string", default: "99" }, "dip-busy": { type: "string", default: "0.95" },
       "region-sample": { type: "string", default: "64" }, "mem-warm": { type: "string", default: "5" }, "untimed-secs": { type: "string", default: "5" },
       "max-load": { type: "string" }, "load-wait": { type: "string", default: "300" }, "lock-wait": { type: "string", default: "1800" }, "calm-wait": { type: "string" },
-      port: { type: "string", default: process.env.HARNESS_PORT }, out: { type: "string" }
+      port: { type: "string", default: process.env.HARNESS_PORT }, out: { type: "string" },
+      // set by spark-run for every probe: one tree, one window here
+      runs: { type: "string" }, baseline: { type: "string" }
     },
     allowPositionals: false
   });
   if (!values.iso || !values.port || (values.state && values.steps)) {
     throw new Error("usage: cpu-window.mjs --iso disc.iso --port N [--state scene.sav | --steps steps.json] [--candidate dir] [--warmup 25] [--secs 30] [--step 1] [--hold KeyX] [--vi FROM-TO] [--out dir]");
   }
+  if (values.baseline) throw new Error("cpu-window profiles one tree: --candidate only, no --baseline");
+  if (values.runs != null && values.runs !== "1") console.log(`[cpu-window] --runs ${values.runs} ignored: one window per run (--secs sets its length)`);
   const iso = path.resolve(values.iso), state = values.state ? path.resolve(values.state) : null;
   for (const f of [iso, state].filter(Boolean)) if (!existsSync(f)) throw new Error(`not found: ${f}`);
   const steps = values.steps ? JSON.parse(readFileSync(path.resolve(values.steps), "utf8")) : null;

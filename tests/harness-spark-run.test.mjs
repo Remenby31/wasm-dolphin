@@ -379,14 +379,14 @@ test("spark-run --queue: each ticket's wait and estimate, a waiting ticket past 
 // script from SPARK_PROBE, refusing any other name.
 test("spark-run --probe: the probe goes in SPARK_PROBE, race-perf stays the default, other names refused", async () => {
   const { SPARK_PROBES } = await import("../harness/remote/spark-run.mjs");
-  assert.deepEqual(SPARK_PROBES, ["race-perf", "drop-meter", "replay-gates", "parcours"]);
+  assert.deepEqual(SPARK_PROBES, ["race-perf", "drop-meter", "replay-gates", "parcours", "cpu-window"]);
   assert.doesNotMatch(launchCommand({ harnessDir: "/h/k", outDir: "/h/r/d/n", raceArgs: [] }), /SPARK_PROBE/);
   const cmd = launchCommand({ harnessDir: "/h/k", outDir: "/h/r/d/n", raceArgs: ["--display"], headed: ":2", probe: "drop-meter" });
   assert.match(cmd, /\{ SPARK_PROBE='drop-meter' HARNESS_DISPLAY=x11 DISPLAY=':2' /);
-  assert.throws(() => launchCommand({ harnessDir: "/h/k", outDir: "/h/r/d/n", raceArgs: [], probe: "../../evil" }), /one of race-perf, drop-meter, replay-gates, parcours/);
+  assert.throws(() => launchCommand({ harnessDir: "/h/k", outDir: "/h/r/d/n", raceArgs: [], probe: "../../evil" }), /one of race-perf, drop-meter, replay-gates, parcours, cpu-window/);
   const { readFile } = await import("node:fs/promises");
   const race = await readFile(new URL("../harness/remote/spark-race.sh", import.meta.url), "utf8");
-  assert.match(race, /case \$probe in\n\s+race-perf\|drop-meter\|replay-gates\|parcours\) ;;/);
+  assert.match(race, /case \$probe in\n\s+race-perf\|drop-meter\|replay-gates\|parcours\|cpu-window\) ;;/);
   assert.match(race, /node "harness\/probes\/\$probe\.mjs" "\$@" --port "\$port" --out "\$out"/);
   for (const p of SPARK_PROBES) assert.ok((await readFile(new URL(`../harness/probes/${p}.mjs`, import.meta.url), "utf8")).length > 0, `${p}.mjs exists`);
 });
@@ -550,4 +550,19 @@ test("spark-run --loaded: correctness runs skip the cores wait, speed probes kee
   assert.match(race, /if \[ "\$\{SPARK_LOADED:-0\}" = 1 \] && \[ "\$probe" = replay-gates \]; then[\s\S]*spark-queue\.mjs wait --pid \$\$ --kind pair --lanes "\$want" --name "\$\(basename "\$out"\)" -- "\$@"\)\n\s+else/);
   const gates = await readFile(new URL("../harness/probes/replay-gates.mjs", import.meta.url), "utf8");
   assert.match(gates, /\.\.\.\(process\.env\.SPARK_LOADED === "1" \? \{ loaded: true \} : \{\}\),/);
+});
+
+// cpu-window (the CPU thread's time per second) runs headless on the bench,
+// like race-perf: only the probes that judge the presentation need --headed.
+test("spark-run --probe cpu-window: headless, no presentation check, one tree", async () => {
+  const { PRESENTATION_PROBES, SPARK_PROBES } = await import("../harness/remote/spark-run.mjs");
+  assert.ok(SPARK_PROBES.includes("cpu-window"));
+  assert.ok(!PRESENTATION_PROBES.includes("cpu-window"));
+  assert.deepEqual(PRESENTATION_PROBES, ["drop-meter", "replay-gates", "parcours"]);
+  const { readFile } = await import("node:fs/promises");
+  const run = await readFile(new URL("../harness/remote/spark-run.mjs", import.meta.url), "utf8");
+  assert.match(run, /if \(PRESENTATION_PROBES\.includes\(values\.probe\)\) checkPresentationProbe\(/);
+  const probe = await readFile(new URL("../harness/probes/cpu-window.mjs", import.meta.url), "utf8");
+  assert.match(probe, /runs: \{ type: "string" \}, baseline: \{ type: "string" \}/);
+  assert.match(probe, /if \(values\.baseline\) throw new Error\("cpu-window profiles one tree/);
 });

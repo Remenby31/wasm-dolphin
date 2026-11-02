@@ -20,7 +20,7 @@ want=$2
 shift 3
 probe=${SPARK_PROBE:-race-perf}
 case $probe in
-  race-perf|drop-meter|replay-gates|parcours) ;;
+  race-perf|drop-meter|replay-gates|parcours|cpu-window) ;;
   *) echo "[spark-race] unknown probe $probe" >> "$out.log"; echo 2 > "$out.exit"; exit 2 ;;
 esac
 B="$HOME/salon-bench"
