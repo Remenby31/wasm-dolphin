@@ -61,3 +61,10 @@ test("pipeline log: drain records round-trip through the log and mergeTimeline",
   const old = { tags: { vi: [], t: [] }, queued: { vi: [], t: [] }, ticks: { t: [], cb: [], vi: [] }, lost: 0 };
   assert.deepEqual(mergeTimeline([{ ...base, pipeline: old }]).pipeline.drains, []);
 });
+
+test("drop-meter --pipeline samples the threads' occupancy at each timeline read (null where not measured)", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const src = await readFile(new URL("../harness/probes/drop-meter.mjs", import.meta.url), "utf8");
+  assert.match(src, /if \(o\.pipeline\) \(raw\.occupancy \?\?= \[\]\)\.push\(await page\.evaluate\(/);
+  assert.match(src, /return \[performance\.timeOrigin \+ performance\.now\(\), n\(f\.cpuThreadBusy\), n\(f\.gpuThreadBusy\), n\(f\.replayBusy\)\];/);
+});

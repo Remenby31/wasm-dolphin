@@ -192,6 +192,14 @@ async function playVisit(o, server, profileDir, shotDir, visit) {
     let draining = true;
     const drainOnce = async () => {
       raw.chunks.push(await readTimeline(page).catch((e) => ({ error: String(e.message || e) })));
+      // --pipeline: the threads' occupancy at each read (the page's last frame
+      // info: [host ms, cpu, gpu, replay], null where not measured), to check
+      // a change of the replay's wake-ups costs no worker time
+      if (o.pipeline) (raw.occupancy ??= []).push(await page.evaluate(() => {
+        const f = window.__lastFrameInfo || {};
+        const n = (x) => (Number.isFinite(x) ? x : null);
+        return [performance.timeOrigin + performance.now(), n(f.cpuThreadBusy), n(f.gpuThreadBusy), n(f.replayBusy)];
+      }).catch(() => null));
       // The new-frame counter is null until the first tagged present after
       // the boot (a visit from the boot reads it too early): the visit's
       // start is then its first reading.
