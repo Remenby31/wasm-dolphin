@@ -247,6 +247,8 @@ export function createViPhaseLock({ maxPpm = MAX_PPM, slewPpmPerSec = SLEW_PPM_P
       const limited = Math.abs(raw) > maxPpm || Math.abs(raw - ppm) > step;
       if (!limited) integral = next;
       want = Math.max(-maxPpm, Math.min(maxPpm, integral + p));
+      stats.pTerm = Math.round(p);
+      stats.err = Math.round(err * 1000) / 1000;
       // the output wanted past the bound (the clamp limits it) while the
       // phase error does not shrink: the bound cannot hold the drift (an
       // acquisition also holds the output at the bound, but its error shrinks)

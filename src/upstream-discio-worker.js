@@ -2403,6 +2403,20 @@ async function handleMessage(type, payload) {
         ...(aotTestHeapShiftBytes ? { heapShift: coreBoot.attempted ? "too-late" : "before-boot" } : {}) };
     case "validationReadTimeline":
       return readHarnessTimeline();
+    case "validationAudioTrace": {
+      // harness: start (every 100 ms) or drain the audio trace
+      if (payload?.action === "start") {
+        if (audioTrace) clearInterval(audioTrace.timer);
+        audioTrace = { rows: [], timer: setInterval(audioTraceSample, 100) };
+        return { started: true };
+      }
+      const rows = audioTrace ? audioTrace.rows.splice(0) : [];
+      if (payload?.action === "stop" && audioTrace) {
+        clearInterval(audioTrace.timer);
+        audioTrace = null;
+      }
+      return { columns: ["t", "queuedMs", "overflowSkips", "underrunFills", "trimPpm", "trimSets", "lockOn", "lockPpm", "pTerm", "phase"], rows };
+    }
     case "validationReadAudioQueue":
       // patch 0212: the mixer queue's overflow skips (an audible jump) and
       // underrun fills since boot, and the throttle trim applied (ppm)
@@ -13272,7 +13286,33 @@ function wgpuViLockUpdate(now) {
     return;
   }
   const r = wgpuViLock.update(now);
-  if (r.changed) api.setThrottleRatePpm(wgpuViLock.stats.ppm);
+  if (r.changed) {
+    api.setThrottleRatePpm(wgpuViLock.stats.ppm);
+    wgpuViLockSets += 1;
+  }
+}
+// trims written to the core (each one a throttle rebase at the next Throttle)
+let wgpuViLockSets = 0;
+// validationAudioTrace (harness): every 100 ms the mixer queue's depth and
+// events, the throttle trim applied and written, the lock's state and P term
+// (the race's audio skips with ?vilock=1: rebases, P oscillation or the trim
+// moving the resampling step mid-burst)
+let audioTrace = null;
+function audioTraceSample() {
+  const lock = wgpuViLock?.stats ?? null;
+  audioTrace.rows.push([
+    Math.round(performance.now()),
+    api?.audioQueuedMs ? api.audioQueuedMs() : null,
+    api?.audioQueueEvents ? api.audioQueueEvents(0) : null,
+    api?.audioQueueEvents ? api.audioQueueEvents(1) : null,
+    typeof moduleInstance?._DolphinWeb_ThrottleRatePpm === "function" ? moduleInstance._DolphinWeb_ThrottleRatePpm() : null,
+    wgpuViLockSets,
+    lock ? (lock.on ? 1 : 0) : null,
+    lock?.ppm ?? null,
+    lock?.pTerm ?? null,
+    lock?.phase ?? null
+  ]);
+  if (audioTrace.rows.length > 6000) audioTrace.rows.shift();
 }
 // The frames' arrival period, the screen's refresh and the refresh histogram
 // are kept only with ?presentpace=game|observe or the harness: by default the
