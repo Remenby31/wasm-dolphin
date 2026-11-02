@@ -1320,6 +1320,68 @@ EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_HarnessViRingCapacity() { return H
 EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_HarnessViRingHead() { return s_harness_vi_head.load(std::memory_order_acquire); }
 EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_HarnessLoadGeneration() { return s_harness_load_generation.load(std::memory_order_acquire); }
 
+// Patch 0214 (harness pipeline diag): one entry per VI swap the video thread
+// runs (VideoBackendBase.cpp, HarnessRecordedViSwap), read by
+// src/harness-swap-ring.js: the VI output it shows, when the video thread
+// pulled it (host ms, the VI ring's clock), the FIFO chunks it still had to
+// replay to reach what the game wrote before that VI (patch 0211's target),
+// the FIFO distance at the VI in bytes, and flags (bit 0: a new picture, not a
+// duplicate; bit 1: patch 0211 held the last picture for a late copy). A value
+// the core does not know (single core, a deterministic GPU thread) is
+// UINT32_MAX, read as null, never as 0. Same seqlock as the VI ring.
+// Written only with the harness hooks on AND the swap ring asked for
+// (validationEnableHarness { pipeline: true }): otherwise the CPU thread reads
+// one more flag per VI output under the harness, and nothing at all without it.
+struct DolphinWebHarnessSwapEntry
+{
+  std::atomic<std::uint32_t> seq;
+  std::uint32_t vi_since_boot;
+  double host_ms;
+  std::uint32_t behind_chunks;
+  std::uint32_t fifo_bytes;
+  std::uint32_t flags;
+  std::uint32_t pad;
+};
+static_assert(sizeof(DolphinWebHarnessSwapEntry) == 32, "harness swap entry layout is read from JS");
+
+constexpr std::uint32_t HARNESS_SWAP_RING_CAPACITY = 8192;  // as the VI ring
+static std::array<DolphinWebHarnessSwapEntry, HARNESS_SWAP_RING_CAPACITY> s_harness_swap_ring{};
+static std::atomic<std::uint32_t> s_harness_swap_head{0};
+static std::atomic<int> s_harness_swaps_enabled{0};
+
+EMSCRIPTEN_KEEPALIVE void DolphinWeb_HarnessSwapsEnable(int enabled)
+{
+  s_harness_swaps_enabled.store(enabled ? 1 : 0, std::memory_order_relaxed);
+}
+// Read on the CPU thread at each VI output, only under the harness hooks.
+EMSCRIPTEN_KEEPALIVE int DolphinWeb_HarnessSwapsEnabled()
+{
+  return s_harness_enabled.load(std::memory_order_relaxed) &&
+         s_harness_swaps_enabled.load(std::memory_order_relaxed);
+}
+// The video thread (one writer: swaps run on one thread at a time).
+EMSCRIPTEN_KEEPALIVE void DolphinWeb_HarnessRecordSwap(std::uint32_t vi_since_boot, double host_ms,
+                                                       std::uint32_t behind_chunks,
+                                                       std::uint32_t fifo_bytes, std::uint32_t flags)
+{
+  if (!DolphinWeb_HarnessSwapsEnabled())
+    return;
+  const std::uint32_t head = s_harness_swap_head.load(std::memory_order_relaxed);
+  DolphinWebHarnessSwapEntry& e = s_harness_swap_ring[head % HARNESS_SWAP_RING_CAPACITY];
+  e.seq.store(2 * head + 1, std::memory_order_relaxed);  // odd: being written
+  std::atomic_thread_fence(std::memory_order_release);
+  e.vi_since_boot = vi_since_boot;
+  e.host_ms = host_ms;
+  e.behind_chunks = behind_chunks;
+  e.fifo_bytes = fifo_bytes;
+  e.flags = flags;
+  e.seq.store(2 * head + 2, std::memory_order_release);  // even: entry `head` complete
+  s_harness_swap_head.store(head + 1, std::memory_order_release);
+}
+EMSCRIPTEN_KEEPALIVE DolphinWebHarnessSwapEntry* DolphinWeb_HarnessSwapRing() { return s_harness_swap_ring.data(); }
+EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_HarnessSwapRingCapacity() { return HARNESS_SWAP_RING_CAPACITY; }
+EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_HarnessSwapRingHead() { return s_harness_swap_head.load(std::memory_order_acquire); }
+
 // Patch 0164 (harness only): the video thread's blocking EFB copies to RAM.
 // Per kind (0: a sync point flushing deferred copies, 1: an immediate copy,
 // DeferEFBCopies=False), at word 1 + 16 * kind: flushes, copies, FIFO work
