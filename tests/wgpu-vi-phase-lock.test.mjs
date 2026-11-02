@@ -159,12 +159,17 @@ test("bounded and smooth: never past MAX_PPM, at most SLEW a second; out of reac
   assert.equal(near.vi.stats.lost, 1);
 });
 
+// the first arrival's offset (ms) for a lock taken near `phase` (~5 s in: 3 s
+// of the speed at the base, 4 stable updates; the free drift +0.06 cycle/s)
+const at = (phase) => 0.37 * (1000 / 60) + (((phase - 0.3) % 1) + 1) % 1 * (1000 / 60);
+
 // the phase never wraps through the cut (0 / 1) once locked
 const noCrossing = (phases) => phases.every((p, i) => i === 0 || Math.abs(p - phases[i - 1]) < 0.5) && Math.min(...phases.map((p) => Math.min(p, 1 - p))) > 0.04;
 
 test("acquisition from a phase near the cut on either side (0.13, 0.9): settles to the middle without crossing it", () => {
-  // the first arrival placed so the lock is taken (~2 s in, the drift +0.06 cycle/s) near 0.13 and near 0.9
-  for (const [offset, near] of [[0.37 * (1000 / 60) + 0.01 * (1000 / 60), 0.13], [0.37 * (1000 / 60) + 0.78 * (1000 / 60), 0.9]]) {
+  // the first arrival placed so the lock is taken (~4 s in: 2 s of rAF, 4
+  // stable updates; the drift +0.06 cycle/s) near 0.13 and near 0.9
+  for (const [offset, near] of [[at(0.13), 0.13], [at(0.9), 0.9]]) {
     const r = play({ arrivalOffsetMs: offset, jitter: (n) => (((n * 7919) % 7) - 3) * 0.6 });
     assert.ok(r.lockedAt !== null, `${near}: locked`);
     assert.ok(Math.abs(r.phases[0] - near) < 0.12, `${near}: taken at ${r.phases[0]}`);
@@ -175,7 +180,7 @@ test("acquisition from a phase near the cut on either side (0.13, 0.9): settles 
 });
 
 test("a 1 s stall (hidden tab, long task): unlocked at once, locked again after, without crossing", () => {
-  const r = play({ stall: [40_000, 41_000], seconds: 90 });
+  const r = play({ stall: [40_000, 41_000], seconds: 90, arrivalOffsetMs: at(0.4) });
   assert.equal(r.stats.lost, 1);
   assert.equal(r.stats.locks, 2);
   assert.ok(r.stats.on);
@@ -199,4 +204,50 @@ test("a 60.05 Hz panel (1835 ppm) locks; one miscounted tick does not cost the l
   const b = play({ tickJitter: (k) => (k === 1800 ? 0.5 * (1000 / 60) : 0) });
   assert.equal(b.stats.lost, 0, JSON.stringify(b.stats));
   assert.equal(b.stats.locks, 1);
+});
+
+// A screen and a game whose rates change at `changeAt` (ms): the lock's
+// state each update, from a closed loop (the arrivals follow the lock's speed).
+function drive({ seconds = 60, changeAt = 20_000, hzBefore = 60, hzAfter = 60, viBefore = NTSC_VI_MS, viAfter = NTSC_VI_MS, tickJitter = () => 0 }) {
+  const vi = createViPhaseLock();
+  let factor = 1, next = 3, n = 0, t = 0.37 * (1000 / hzBefore), lastUpdate = 0, k = 0;
+  const trace = [];
+  while (t < seconds * 1000) {
+    const viMs = t < changeAt ? viBefore : viAfter;
+    while (next <= t) {
+      vi.arrival(next + (((n * 7919) % 5) - 2) * 0.5);
+      n++;
+      next += viMs / factor;
+    }
+    vi.tick(t + tickJitter(k), t + tickJitter(k));
+    if (t - lastUpdate >= 500) {
+      lastUpdate = t;
+      factor = vi.update(t).factor;
+      trace.push({ t, on: vi.stats.on, why: vi.stats.why, ppm: vi.stats.ppm });
+    }
+    t += 1000 / (t < changeAt ? hzBefore : hzAfter);
+    k++;
+  }
+  return { vi, trace };
+}
+
+test("out of reach after the lock (screen 60 -> 60.08 Hz, a game slowed 0.3 %): released within seconds, not cycling at the bound", () => {
+  for (const [name, o] of [["60.08 Hz", { hzAfter: 60.08 }], ["game -0.3 %", { viAfter: NTSC_VI_MS * 1.003 }]]) {
+    const { vi, trace } = drive(o);
+    const before = trace.filter((x) => x.t < 20_000).at(-1);
+    assert.ok(before.on, `${name}: locked before the change`);
+    const released = trace.find((x) => x.t > 20_000 && !x.on);
+    assert.ok(released, `${name}: released ${JSON.stringify(trace.slice(-3))}`);
+    console.log(`${name}: released after ${Math.round(released.t - 20_000)} ms`);
+    assert.ok(released.t - 20_000 <= 8_000, `${name}: released after ${released.t - 20_000} ms`);
+    assert.equal(released.why, "drift out of reach", name);
+    // and not taken again: the drift is past the entry tolerance
+    assert.equal(vi.stats.on, false, name);
+    assert.equal(vi.stats.locks, 1, name);
+  }
+});
+
+test("a 120 Hz screen with +/-1.5 ms of rAF jitter: the jitter check has hysteresis, no flapping", () => {
+  const { vi } = drive({ hzBefore: 120, hzAfter: 120, seconds: 90, tickJitter: (k) => (((k * 104729) % 31) / 10 - 1.5) });
+  assert.ok(vi.stats.locks + vi.stats.lost <= 2, JSON.stringify(vi.stats));
 });

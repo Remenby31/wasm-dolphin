@@ -62,8 +62,9 @@ test("vilock: host, worker and patch 0212 (a trim of the throttle's wall rate on
   // the mixer resamples at the trim the CPU thread applied (no drift of the queue), after the speed
   assert.match(patch, /\+  in_sample_rate \*= DolphinWeb::ThrottleRate::Factor\(\n\+      DolphinWeb::ThrottleRate::g_applied_ppm\.load\(std::memory_order_relaxed\)\);/);
   // the queue's overflow skips and underrun fills, counted and exported
-  assert.match(patch, /\+    DolphinWeb::ThrottleRate::g_audio_overflow_skips\.fetch_add\(1, std::memory_order_relaxed\);/);
-  assert.match(patch, /\+      DolphinWeb::ThrottleRate::g_audio_underrun_fills\.fetch_add\(1, std::memory_order_relaxed\);/);
+  // only the game's own FIFOs (DMA, streaming): the others are dequeued while never fed
+  assert.match(patch, /\+    if \(this == &m_mixer->m_dma_mixer \|\| this == &m_mixer->m_streaming_mixer\)\n\+      DolphinWeb::ThrottleRate::g_audio_overflow_skips\.fetch_add\(1, std::memory_order_relaxed\);/);
+  assert.match(patch, /\+      if \(this == &m_mixer->m_dma_mixer \|\| this == &m_mixer->m_streaming_mixer\)\n\+        DolphinWeb::ThrottleRate::g_audio_underrun_fills\.fetch_add\(1, std::memory_order_relaxed\);/);
   assert.match(patch, /\+extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_AudioQueueEvents\(int which\)/);
   assert.match(worker, /case "validationReadAudioQueue":/);
   // the speed and the config are not touched (code lines: the comments name them)

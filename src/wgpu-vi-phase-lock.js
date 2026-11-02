@@ -21,7 +21,10 @@
 //   - the frames' period an integer number (1 or 2) of refreshes, within
 //     RATIO_TOLERANCE (1500 ppm) at the base speed (PAL 50 on 60 Hz, 60 on 144 Hz: no
 //     lock), and the frames regular (a load, a core behind: no lock);
-// else the speed goes back to the base, smoothly. Pure: the worker feeds it
+// else the speed goes back to the base, smoothly. A lock taken with the
+// arrivals at 0.96-0.99 of the refresh (right before the cut, drifting
+// toward it) crosses it once while the speed turns: the drift cannot be
+// stopped faster within the bound and the slew; from 0.9 it turns at ~0.95. Pure: the worker feeds it
 // the rAF frame times and the frames' arrivals and applies its speed.
 
 export const MAX_PPM = 2000;
@@ -39,9 +42,20 @@ export const PHASE_INTEGRAL_PPM_PER_SEC = 1500;
 // estimate wobbles: no flapping), dropped past it (the phase would slide)
 export const RATIO_TOLERANCE = 0.0019;
 // Once locked, the frames' period measured over a window at a moving speed
-// wobbles (+/-700 ppm): the lock is kept on the PI's own drift instead, and
-// dropped when it stays at the bound OUT_OF_REACH_MS (the phase would slide).
-export const OUT_OF_REACH_MS = 5000;
+// wobbles (+/-700 ppm): the lock is kept on the PI's own output instead, and
+// dropped when that output has been held at the bound for OUT_OF_REACH_MS
+// (a leaky count: time at the bound adds, time under it takes half as much
+// off; the output cycles bound -> under -> bound when the drift is out of
+// reach, e.g. a screen changed to 60.08 Hz or a game slowed 0.3 % after the
+// lock), counted only while the phase error does not shrink (an acquisition
+// holds the output at the bound too, with an error that shrinks). The
+// integral is frozen at the bound (anti-windup), so the count is on the
+// output, never on the integral.
+export const OUT_OF_REACH_MS = 3000;
+// a lock is taken only after ENTRY_UPDATES updates in a row found the ratio
+// within RATIO_TOLERANCE (its estimate wobbles: a drift past it was taken now
+// and then, and dropped again)
+export const ENTRY_UPDATES = 4;
 // the refresh: a least-squares line through the last REFRESH_TICKS rAF frame
 // times, each numbered by the refreshes since the first (a missed vsync counts
 // as whole periods): 0.0007 Hz over 7,200 ticks, where a filtered mean of the
@@ -53,7 +67,11 @@ export const REFRESH_TICKS = 600;
 const MIN_REFRESH_TICKS = 120;
 export const REFRESH_INLIERS = 0.8;
 export const REFRESH_BAND = 0.3;
-export const REFRESH_JITTER = 0.1;
+// with hysteresis: a lock is taken under REFRESH_JITTER_ENTER and kept up to
+// REFRESH_JITTER (a 120 Hz screen with +/-1.5 ms of jitter sits near 0.1 and
+// flapped every few seconds with one threshold)
+export const REFRESH_JITTER = 0.15;
+export const REFRESH_JITTER_ENTER = 0.08;
 // a gap more than this far from a whole number of refreshes, or more than
 // MAX_MISSED of them, splits the regression
 const AMBIGUOUS_GAP = 0.3;
@@ -77,7 +95,7 @@ const median = (v) => {
  * The screen's refresh period from rAF frame times (a least-squares line over
  * their refresh numbers, missed vsyncs counted), or why it cannot be trusted.
  */
-export function stableRefresh(times) {
+export function stableRefresh(times, { jitter = REFRESH_JITTER } = {}) {
   if (times.length < MIN_REFRESH_TICKS) return { refreshMs: null, why: "few rAF" };
   const gaps = times.slice(1).map((t, i) => t - times[i]);
   const m = median(gaps);
@@ -108,7 +126,7 @@ export function stableRefresh(times) {
   const R = skt / skk;
   let sr = 0;
   segs.forEach((sg, j) => { for (const p of sg) sr += (p.t - (means[j].mt + R * (p.k - means[j].mk))) ** 2; });
-  if (Math.sqrt(sr / n) > R * REFRESH_JITTER) return { refreshMs: null, why: "rAF jitter" };
+  if (Math.sqrt(sr / n) > R * jitter) return { refreshMs: null, why: "rAF jitter" };
   if (R < MIN_REFRESH_MS || R > MAX_REFRESH_MS) return { refreshMs: null, why: "rAF rate out of range" };
   return { refreshMs: R, why: null };
 }
@@ -126,7 +144,12 @@ export function createViPhaseLock({ maxPpm = MAX_PPM, slewPpmPerSec = SLEW_PPM_P
   let ppm = 0;
   let integral = 0;
   let lastUpdate = null;
-  let saturatedSince = null;
+  let entryStreak = 0;
+  let prevErr = null;
+  // since when the speed has been the base while unlocked (null: it is not)
+  let baseSince = null;
+  // the leaky count of time the output spent at the bound (ms)
+  let saturatedMs = 0;
   const stats = { on: false, ppm: 0, locks: 0, lost: 0, why: "starting", driftPpm: null, refreshMs: null, frameMs: null, ratio: null, phase: null };
 
   function tick(frameTime, now = frameTime) {
@@ -148,7 +171,7 @@ export function createViPhaseLock({ maxPpm = MAX_PPM, slewPpmPerSec = SLEW_PPM_P
   /** Why no lock now (null: lockable), with the measures it needs. */
   function assess(now, speed) {
     if (lastTickAt === null || now - lastTickAt > NO_TICK_MS) return { why: "no rAF" };
-    const { refreshMs, why } = stableRefresh(times);
+    const { refreshMs, why } = stableRefresh(times, { jitter: stats.on ? REFRESH_JITTER : REFRESH_JITTER_ENTER });
     if (!refreshMs) return { why };
     const a = arrivals.filter((t) => t >= now - ARRIVAL_WINDOW_MS);
     if (a.length < MIN_ARRIVALS) return { why: "few frames", refreshMs };
@@ -187,11 +210,18 @@ export function createViPhaseLock({ maxPpm = MAX_PPM, slewPpmPerSec = SLEW_PPM_P
     lastUpdate = now;
     const speed = 1 + ppm / 1e6;
     const s = assess(now, speed);
-    // locked, the drift at the bound for OUT_OF_REACH_MS: out of reach
-    if (s.why === null && stats.on && Math.abs(integral) >= maxPpm - 1) {
-      saturatedSince ??= now;
-      if (now - saturatedSince >= OUT_OF_REACH_MS) s.why = "drift out of reach";
-    } else saturatedSince = null;
+    if (!stats.on) {
+      // the frames' period is measured over ARRIVAL_WINDOW_MS: only once the
+      // speed has been back at the base for all of it (after a release the
+      // window still holds frames made faster, and the ratio reads low)
+      if (ppm !== 0) baseSince = null;
+      else baseSince ??= now;
+      const clean = baseSince !== null && now - baseSince >= ARRIVAL_WINDOW_MS;
+      entryStreak = s.why === null && clean ? entryStreak + 1 : 0;
+      if (s.why === null && entryStreak < ENTRY_UPDATES) s.why = "settling";
+    }
+    // locked, the output held at the bound OUT_OF_REACH_MS (leaky): out of reach
+    if (s.why === null && stats.on && saturatedMs >= OUT_OF_REACH_MS) s.why = "drift out of reach";
     let want = 0;
     if (s.why === null) {
       // late in the refresh (phase above the target): a little faster
@@ -200,6 +230,8 @@ export function createViPhaseLock({ maxPpm = MAX_PPM, slewPpmPerSec = SLEW_PPM_P
       if (err < -0.5) err += 1;
       if (!stats.on) {
         stats.locks += 1;
+        entryStreak = 0;
+        prevErr = null;
         // the drift the lock has to cancel: m refreshes per frame
         integral = Math.max(-maxPpm, Math.min(maxPpm, (s.frameMs / (s.m * s.refreshMs) - 1) * 1e6));
       }
@@ -215,9 +247,19 @@ export function createViPhaseLock({ maxPpm = MAX_PPM, slewPpmPerSec = SLEW_PPM_P
       const limited = Math.abs(raw) > maxPpm || Math.abs(raw - ppm) > step;
       if (!limited) integral = next;
       want = Math.max(-maxPpm, Math.min(maxPpm, integral + p));
+      // the output wanted past the bound (the clamp limits it) while the
+      // phase error does not shrink: the bound cannot hold the drift (an
+      // acquisition also holds the output at the bound, but its error shrinks)
+      const atBound = Math.abs(raw) >= maxPpm || Math.abs(integral + p) >= maxPpm;
+      const notShrinking = prevErr !== null && Math.abs(err) >= Math.abs(prevErr) - 0.002;
+      saturatedMs = atBound && notShrinking ? saturatedMs + dt * 1000 : Math.max(0, saturatedMs - dt * 500);
+      prevErr = err;
     } else {
       if (stats.on) stats.lost += 1;
       stats.on = false;
+      saturatedMs = 0;
+      prevErr = null;
+      if (s.why === "drift out of reach") entryStreak = 0;
     }
     stats.driftPpm = stats.on ? Math.round(integral) : null;
     const step = slewPpmPerSec * dt;
