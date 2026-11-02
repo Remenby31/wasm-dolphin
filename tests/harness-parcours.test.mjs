@@ -8,7 +8,7 @@ import vm from "node:vm";
 
 import { analyzeRun, classifySecond, gapDetail, completionOf, currentPhase, deriveSeconds, GAME_DRAWS_PER_FRAME, LOAD_DISC_BPS, markerIndexes, MIN_PHASE_SEC, parcoursVerdict, phaseLabels, phaseMetrics, phaseNoise, renderTimeline, sectionsOf, segmentsOf, summarizeSeconds, windowCadence } from "../harness/lib/parcours.mjs";
 import { filmMarkers, filmWithMarks, keyToPad, padStateOf, recordPorts, runRecordSteps, validateFilm, validateRecordSteps } from "../harness/lib/pad-film.mjs";
-import { analyzeRaw, countersOf, presentGaps, samplerTicksOf, viTimesOf, exitCodeOf, humanSummary, markerStep } from "../harness/probes/parcours.mjs";
+import { analyzeRaw, countersOf, otherCpuOf, presentGaps, samplerTicksOf, viTimesOf, exitCodeOf, humanSummary, markerStep } from "../harness/probes/parcours.mjs";
 import { decodePng, encodePng } from "../harness/lib/png.mjs";
 
 const TPS = 486e6;
@@ -482,4 +482,22 @@ test("per present, the gap before it (the adapter's gapVis, gapWorkerLagMs): unk
   const probe = readFileSync(new URL("../harness/probes/parcours.mjs", import.meta.url), "utf8");
   assert.ok(probe.indexOf("const tl = await readTimeline(page)") < probe.indexOf('"validationDropSampler", { action: "drain" }'), "the timeline read before the sampler is drained");
   assert.match(probe, /raw\.samplerMissing = /);
+});
+
+test("the other processes' CPU: this run's process tree left out (helpers without the profile directory included), the top three", () => {
+  const ps = [
+    "  10     1  50.0 /usr/libexec/fseventsd",
+    "  12     1  30.0 node probe",
+    "  20    12  40.0 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --user-data-dir=/tmp/gc-harness-parcours-abc",
+    "  21    20  80.0 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Helper (GPU) --type=gpu-process",
+    "  22    20  60.0 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Helper (Renderer) --type=renderer",
+    "  23    22   5.0 /some/grandchild",
+    "  30     1  70.0 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Helper (GPU) --type=gpu-process",
+    "  40     1  12.0 /opt/other/cfd-solver --mesh x",
+    "  41     1   2.0 /bin/zsh"
+  ].join("\n");
+  const [t, pct, top] = otherCpuOf(ps, { profileDir: "/tmp/gc-harness-parcours-abc", selfPid: 12, now: 5 });
+  assert.equal(t, 5);
+  assert.equal(pct, 50 + 70 + 12 + 2, "the run's node, browser, helpers and their children left out; another Chrome's GPU counted");
+  assert.deepEqual(top, [["Google Chrome Helper (GPU)", 70], ["fseventsd", 50], ["cfd-solver", 12]]);
 });

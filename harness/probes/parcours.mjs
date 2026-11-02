@@ -40,6 +40,7 @@
 // a first film is scripted, then replayed.
 // The disc and the films are local data: never in the repo (probe-out.mjs
 // puts a local disc's results under ../measures/harness).
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
@@ -56,6 +57,7 @@ import { claim } from "../lib/ownership.mjs";
 import { filmMarkers, filmWithMarks, padFilmStatus, recordPorts, releaseMarker, runRecordSteps, signalStuck, startPadFilm, stopPadFilm, validateFilm, validateRecordSteps } from "../lib/pad-film.mjs";
 import { analyzeRun, currentPhase, deriveSeconds, frameDiff, gapDetail, markerIndexes, STILL_DIFF, phaseNoise, parcoursVerdict, renderTimeline, usable } from "../lib/parcours.mjs";
 import { acquirePerfLock } from "../lib/perf-lock.mjs";
+import { descendantsOf } from "../lib/lock-run.mjs";
 import { chromeInfo, isLocalOnly, probeOutDir } from "../lib/probe-out.mjs";
 import { decodePng } from "../lib/png.mjs";
 import { savePng } from "../lib/session.mjs";
@@ -138,6 +140,35 @@ export function viTimesOf(tl) {
   return tl.vi.t;
 }
 
+// The CPU of every process but this run's, summed from ps (% of one core):
+// [t, pct, the top three]; null when ps fails. This run is a process TREE:
+// this node, every process carrying the profile directory (the browser
+// itself), and every descendant of either (Chrome's GPU, renderer and
+// network helpers do not all carry --user-data-dir). macOS ps %cpu is a
+// decaying average over the last seconds, not an instantaneous reading.
+// Async: never on the sampling loop's path.
+export const OTHER_CPU_EVERY_SEC = 5;
+export function otherCpuOf(psOutput, { profileDir, selfPid = process.pid, now = Date.now() } = {}) {
+  const procs = [];
+  for (const line of psOutput.split("\n")) {
+    const m = /^\s*(\d+)\s+(\d+)\s+([\d.]+)\s+(.*)$/.exec(line);
+    if (m) procs.push({ pid: Number(m[1]), ppid: Number(m[2]), pct: Number(m[3]), command: m[4] });
+  }
+  const roots = procs.filter((p) => p.pid === selfPid || (profileDir && p.command.includes(profileDir))).map((p) => p.pid);
+  const ours = new Set([...roots, ...descendantsOf(procs.map((p) => [p.pid, p.ppid]), roots)]);
+  let total = 0;
+  const top = [];
+  for (const p of procs) {
+    if (ours.has(p.pid)) continue;
+    total += p.pct;
+    if (p.pct >= 5) top.push([p.command.split(" --")[0].split("/").pop().slice(0, 40), p.pct]);
+  }
+  return [now, Math.round(total), top.sort((a, b) => b[1] - a[1]).slice(0, 3)];
+}
+function otherCpu(profileDir) {
+  return new Promise((resolve) => execFile("ps", ["-A", "-o", "pid=,ppid=,pcpu=,command="], { maxBuffer: 32 << 20, timeout: 5000 }, (error, out) => resolve(error ? null : otherCpuOf(out, { profileDir }))));
+}
+
 // The drop sampler's last row of a drain, as named counters (null: no row).
 export function countersOf(drained) {
   const row = drained?.rows?.at(-1);
@@ -213,6 +244,9 @@ async function playRun(o, server, { side, run, outDir }) {
       if (o.samplerRows && drained?.rows) (raw.samplerRows ??= []).push(drained);
       raw.samples.push({ t, info, counters: countersOf(drained), presents, vi: tl?.vi?.t?.length ?? null, viT, samplerTicks, gapVis: per.vis, gapWorkerLagMs: per.workerLagMs, integrity: integrity?.unread || integrity?.unavailable ? null : integrity, film: status ? { pos: status.pos, hold: status.hold, polls: status.polls } : null });
       raw.loads.push([Date.now(), os.loadavg()[0]]);
+      // the other processes' CPU every OTHER_CPU_EVERY_SEC, off the loop
+      // (an async ps): how loaded the machine was, by what is not this run
+      if (sec % OTHER_CPU_EVERY_SEC === 0) otherCpu(profileDir).then((x) => { if (x) (raw.otherCpu ??= []).push(x); });
       rows = deriveSeconds(raw.samples, { tps: raw.tps });
       const phase = phaseNow();
       const sec = Math.round((Date.now() - t0) / 1000);
@@ -285,6 +319,8 @@ export function analyzeRaw(raw, { maxLoad, outDir = null, tag = null } = {}) {
   const a = analyzeRun({ samples: raw.samples, tps: raw.tps, markers, reached: withAt, detect: raw.detect ?? {} });
   const loads = (raw.loads ?? []).map((x) => x[1]);
   a.load1 = { median: round(median(loads), 2), max: loads.length ? round(Math.max(...loads), 2) : null };
+  const others = (raw.otherCpu ?? []).map((x) => x[1]);
+  a.otherCpu = others.length ? { median: round(median(others), 0), max: Math.max(...others) } : null;
   a.overloaded = a.load1.median > loadLimit(raw.gate?.limit ?? maxLoad);
   a.powerDrained = powerDrained(raw.power, raw.powerEnd);
   a.ended = raw.ended ?? null;
