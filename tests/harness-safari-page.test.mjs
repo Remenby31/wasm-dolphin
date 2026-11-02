@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { onSignals, sessionPid, startDiscServer, stopPid, windowOnScreen } from "../harness/lib/safari-page.mjs";
+import { isSessionSafari, onSignals, sessionPid, startDiscServer, stopPid, windowOnScreen } from "../harness/lib/safari-page.mjs";
 import { otherCpuOf } from "../harness/probes/parcours.mjs";
 
 const ORIGIN = "http://127.0.0.1:8306";
@@ -181,4 +181,18 @@ test("safari-capture refuses a bad call before the lock and Safari", async () =>
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("a recorded pid is killed only while it is still a Safari started since the session", () => {
+  const since = new Date("Mon Nov  2 10:45:12 2026").getTime() + 400;
+  const safari = "/Applications/Safari.app/Contents/MacOS/Safari";
+  assert.equal(isSessionSafari(`Mon Nov  2 10:45:12 2026     ${safari}`, since), true, "the same second");
+  assert.equal(isSessionSafari(`Mon Nov  2 10:46:01 2026     ${safari}`, since), true);
+  assert.equal(isSessionSafari(`Mon Nov  2 10:40:00 2026     ${safari}`, since), false, "started before the session: the user's");
+  assert.equal(isSessionSafari("Mon Nov  2 10:46:01 2026     /bin/zsh", since), false, "a recycled pid");
+  assert.equal(isSessionSafari("Mon Nov  2 10:46:01 2026     /Applications/Safari Technology Preview.app/Contents/MacOS/Safari Technology Preview", since), false);
+  assert.equal(isSessionSafari("", since), false, "gone");
+  const src = readFileSync(new URL("../harness/lib/safari-page.mjs", import.meta.url), "utf8");
+  assert.match(src, /const ours = safariPid !== null && isSessionSafari\(psLine\(safariPid\), sessionSince\);\n.*\n\s+const gone = ours \? stopPid\(safariPid\) : false;/);
+  assert.match(src, /stopAll\(\);\n\s+uninstallSignals\(\);/, "the handlers go after everything is stopped");
 });

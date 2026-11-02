@@ -105,6 +105,18 @@ export function sessionPid(before, after) {
   return fresh.length === 1 ? fresh[0] : null;
 }
 
+// `ps -o lstart=,comm=` of one pid ("Mon Nov  2 10:45:12 2026  /Applications/
+// Safari.app/Contents/MacOS/Safari"): is it still a Safari started at or
+// after sinceMs (lstart has whole seconds)? A recycled pid, or a Safari the
+// user started before the session, is not.
+export function isSessionSafari(psLine, sinceMs) {
+  const m = /^\s*(\w{3} \w{3}\s+\d+ \d\d:\d\d:\d\d \d{4})\s+(.+?)\s*$/.exec(psLine ?? "");
+  if (!m) return false;
+  const started = new Date(m[1]).getTime();
+  return path.basename(m[2]) === "Safari" && Number.isFinite(started) && started >= Math.floor(sinceMs / 1000) * 1000;
+}
+const psLine = (pid) => spawnSync("ps", ["-o", "lstart=,comm=", "-p", String(pid)], { encoding: "utf8", timeout: 10_000, env: { ...process.env, LC_ALL: "C" } }).stdout ?? "";
+
 // SIGINT/SIGTERM/SIGHUP: the synchronous cleanup runs first (prepended:
 // before the perf lock's handler, which exits at once), then the other
 // handlers; with none left, exit 128 + signal. Returns the uninstall.
@@ -140,10 +152,11 @@ export async function launchSafariPage({ port = 8306, log = () => {} } = {}) {
   const guard = guardBin ? spawn(guardBin, [front ?? "com.apple.finder"], { stdio: "ignore" }) : null;
   const driver = spawn("/usr/bin/safaridriver", ["-p", String(port)], { stdio: "ignore" });
   const base = `http://127.0.0.1:${port}`;
-  let id = null, closed = false, safariPid = null;
+  let id = null, closed = false, stopped = false, safariPid = null, sessionSince = 0;
   // WebKit's helper processes (WebContent, GPU, Networking) are XPC services
   // of launchd, not Safari's children: the ones born with the session are
-  // counted as the session's (Safari was not running before it).
+  // counted as the session's (Safari was not running before it). An
+  // approximation: a WebView another app opens meanwhile is counted too.
   const webkitBefore = pgrep(["-f", "com.apple.WebKit."]);
   const cmd = async (method, p, body) => {
     const res = await fetch(id ? `${base}/session/${id}${p}` : `${base}${p}`, { method, headers: { "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(150_000) });
@@ -156,23 +169,31 @@ export async function launchSafariPage({ port = 8306, log = () => {} } = {}) {
   // rather than guessed by name), the guard, the session folders. Sync: also
   // the signal path.
   const stopAll = () => {
+    if (stopped) return;
+    stopped = true;
     try { driver.kill(); } catch {}
-    const gone = safariPid ? stopPid(safariPid) : false;
-    if (!safariPid && pgrep(["-x", "Safari"]).length) log("safari: the session's Safari was not identified by pid: left running");
+    // Checked again right before the kill: still a Safari started since the
+    // session's creation, else left alone (a recycled pid, the user's).
+    const ours = safariPid !== null && isSessionSafari(psLine(safariPid), sessionSince);
+    if (safariPid !== null && !ours && alive(safariPid)) log(`safari: pid ${safariPid} is no longer the session's Safari: left alone`);
+    const gone = ours ? stopPid(safariPid) : false;
+    if (safariPid === null && pgrep(["-x", "Safari"]).length) log("safari: the session's Safari was not identified by pid: left running");
     try { guard?.kill(); } catch {}
     if (gone) for (const n of automationDirs()) if (!before.has(n)) try { rmSync(`${AUTOMATION_DIR}/${n}`, { recursive: true, force: true }); } catch {}
     if (front) try { osa(`tell application id "${front}" to activate`); } catch {}
   };
   let uninstallSignals = () => {};
+  // The signal handlers stay until everything is stopped: a Ctrl-C during
+  // the DELETE's wait still stops the session's Safari.
   const close = async () => {
     if (closed) return;
     closed = true;
-    uninstallSignals();
     try { if (id) await Promise.race([cmd("DELETE", ""), sleep(10_000)]); } catch {}
     id = null;
     stopAll();
+    uninstallSignals();
   };
-  uninstallSignals = onSignals(() => { if (!closed) { closed = true; stopAll(); } });
+  uninstallSignals = onSignals(stopAll);
   const assertInvisible = async (when) => {
     const rect = await cmd("GET", "/window/rect");
     if (windowOnScreen(rect, desktopBounds())) {
@@ -186,10 +207,12 @@ export async function launchSafariPage({ port = 8306, log = () => {} } = {}) {
       try { if ((await (await fetch(`${base}/status`, { signal: AbortSignal.timeout(5_000) })).json()).value?.ready) break; } catch {}
       await sleep(100);
     }
+    sessionSince = Date.now();
     created = await cmd("POST", "/session", { capabilities: { alwaysMatch: { browserName: "safari" } } });
     id = created?.sessionId;
     if (!id) throw new Error("no Safari session");
     safariPid = sessionPid([], pgrep(["-x", "Safari"]));
+    if (safariPid !== null && !isSessionSafari(psLine(safariPid), sessionSince)) safariPid = null;
     await cmd("POST", "/timeouts", { script: 120_000, pageLoad: 120_000, implicit: 0 });
     await cmd("POST", "/window/rect", { x: 20000, y: 20000, width: 1280, height: 800 });
     await assertInvisible("after launch");
