@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createViPhaseLock, MAX_PPM, stableRefresh } from "../src/wgpu-vi-phase-lock.js";
+import { createViPhaseLock, MAX_PPM, stableRefresh, WRITE_STEP_PPM } from "../src/wgpu-vi-phase-lock.js";
 import { createVsyncQueue } from "../src/wgpu-vsync-queue.js";
 
 const NTSC_VI_MS = 1000 / 59.94;
@@ -250,4 +250,47 @@ test("out of reach after the lock (screen 60 -> 60.08 Hz, a game slowed 0.3 %): 
 test("a 120 Hz screen with +/-1.5 ms of rAF jitter: the jitter check has hysteresis, no flapping", () => {
   const { vi } = drive({ hzBefore: 120, hzAfter: 120, seconds: 90, tickJitter: (k) => (((k * 104729) % 31) / 10 - 1.5) });
   assert.ok(vi.stats.locks + vi.stats.lost <= 2, JSON.stringify(vi.stats));
+});
+
+test("a calm trim at steady lock: the phase noise moves the written trim little (each write rebases the throttle and the mixer's step)", () => {
+  // NTSC on 60 Hz, arrivals jittered like the Mac's VI outputs (sd ~0.8 ms)
+  let seed = 12345;
+  const rnd = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
+  const gauss = () => { let x = 0; for (let i = 0; i < 6; i++) x += rnd(); return (x - 3) / Math.sqrt(0.5); };
+  const R = 1000 / 60;
+  const vi = createViPhaseLock();
+  const q = createVsyncQueue({ queueSize: 2, createTexture: () => ({}) });
+  let factor = 1, next = 3, tick = 0, last = 0, writes = 0, prev = 0, moved = 0, updates = 0, drops0 = null;
+  for (let k = 0; k * R < 180_000; k++) {
+    const t = 0.37 * R + k * R;
+    while (next <= t) {
+      const at = next + gauss() * 0.8;
+      q.textureForPass("k", 1, 1);
+      q.queueFrame({ tick, at });
+      vi.arrival(at);
+      next += NTSC_VI_MS / factor;
+    }
+    tick++;
+    vi.tick(t, t + 1.2);
+    if (t - last >= 500) {
+      last = t;
+      factor = vi.update(t).factor;
+      if (t > 60_000) {
+        drops0 ??= q.stats.dropped;
+        if (vi.stats.ppm !== prev) writes++;
+        moved += Math.abs(vi.stats.ppm - prev);
+        updates++;
+      }
+      prev = vi.stats.ppm;
+    }
+    const f = q.takeForDisplay(tick, null);
+    if (f) q.shown(f);
+  }
+  const seconds = updates / 2;
+  assert.ok(vi.stats.on);
+  assert.equal(q.stats.dropped - drops0, 0, "no drop once locked");
+  // the merged controller: 2.0 writes and 90 ppm a second here
+  assert.ok(writes / seconds <= 1, `${(writes / seconds).toFixed(2)} writes a second`);
+  assert.ok(moved / seconds <= 40, `${(moved / seconds).toFixed(1)} ppm a second`);
+  assert.ok(WRITE_STEP_PPM >= 20);
 });
