@@ -985,13 +985,14 @@ export class UpstreamWorkerAdapter {
     this.post("setAudioMuted", { muted: Boolean(muted) });
   }
 
-  async configureAudioWorklet({ enabled, muted, sab, targetFrames }) {
+  async configureAudioWorklet({ enabled, muted, sab, targetFrames, rateControl = false }) {
     if (!this.loaded) return { active: false, reason: "core-not-loaded" };
     const response = await this.request("configureAudioWorklet", {
       enabled: Boolean(enabled),
       muted: Boolean(muted),
       sab: sab ?? null,
       targetFrames: Number(targetFrames) || 0,
+      rateControl: Boolean(rateControl),
     });
     if (enabled && !response.active) {
       this.onStatus(`AudioWorklet producer unavailable; using legacy audio: ${response.reason || "unknown"}`);

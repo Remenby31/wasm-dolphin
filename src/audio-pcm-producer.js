@@ -1,5 +1,6 @@
 import {
   AUDIO_PCM_HEADER,
+  AUDIO_PCM_MAX_RATE_PPM,
   AUDIO_PCM_SAMPLE_RATE,
   AUDIO_PCM_STATE_MUTED,
   AUDIO_PCM_STATE_PREFILL,
@@ -18,6 +19,19 @@ export const AUDIO_PCM_START_FRAMES = 2400;
 export const ADAPT_CALM_MS = 5000;
 // The target's descent once calm: 0.5 % of the time, 5 ms of ring a second.
 export const ADAPT_DESCENT = 0.005;
+// ?audiorate=1 (rate control): the consumer plays up to +0.5 % faster while
+// the latency is over its target, the rate proportional to the excess (1000
+// ppm a ms over the dead band, so 5 ms more is the bound), under a 4 ms dead
+// band, moving at most 100 ppm a 10 ms tick (no step). The latency is the
+// ring's fill AND the mixer's queue (smoothed over ~200 ms), against the
+// ring's target plus half the mixer's size: the mixer's queue is pulled down
+// to that half into the ring whenever it comes within 10 ms of overflowing,
+// which moves latency between the two without changing it.
+export const RATE_PPM_PER_MS = 1000;
+export const RATE_DEAD_BAND_MS = 4;
+export const RATE_SMOOTHING = 0.05;
+export const RATE_SLEW_PPM = 100;
+export const SURPLUS_MARGIN_MS = 10;
 
 function atomicMax(header, index, value) {
   let before = Atomics.load(header, index);
@@ -51,7 +65,7 @@ export class AudioPcmProducer {
   // targetFrames: the ring's fill the producer keeps (the AudioWorklet
   // path's latency, before the mixer's own queue); 120 ms by default, the
   // page passes ?audiolead. Playback starts at half of it (at most 50 ms).
-  install(sab, { muted = true, targetFrames = AUDIO_PCM_TARGET_FRAMES } = {}) {
+  install(sab, { muted = true, targetFrames = AUDIO_PCM_TARGET_FRAMES, rateControl = false, mixerCapMs = 80 } = {}) {
     this.requestedTransport = "worklet";
     try {
       const ring = validateAudioPcmRing(openAudioPcmRing(sab));
@@ -69,6 +83,11 @@ export class AudioPcmProducer {
       this.startFrames = Math.min(AUDIO_PCM_START_FRAMES, this.floorFrames >> 1);
       this.calmSince = 0;
       this.underrunsSeen = 0;
+      this.rateControl = Boolean(rateControl);
+      this.mixerCapMs = Math.max(16, Number(mixerCapMs) || 80);
+      this.ratePpm = 0;
+      this.excessMs = null;
+      Atomics.store(ring.header, AUDIO_PCM_HEADER.RATE_PPM, 0);
       this.activeTransport = "worklet";
       this.fallbackReason = "";
       this.muted = Boolean(muted);
@@ -148,6 +167,10 @@ export class AudioPcmProducer {
       skips: typeof events === "function" ? events(0) : null,
       fills: typeof events === "function" ? events(1) : null,
       asked: t.asked, got: t.got, pulls: t.pulls, maxPull: t.maxPull, empty: t.empty,
+      ratePpm: ring ? Atomics.load(ring.header, AUDIO_PCM_HEADER.RATE_PPM) | 0 : null,
+      surplus: ring ? Atomics.load(ring.header, AUDIO_PCM_HEADER.PRODUCER_SURPLUS_FRAMES) >>> 0 : null,
+      resampled: ring ? Atomics.load(ring.header, AUDIO_PCM_HEADER.RESAMPLED_FRAMES) >>> 0 : null,
+      resampleExtra: ring ? Atomics.load(ring.header, AUDIO_PCM_HEADER.RESAMPLE_EXTRA_FRAMES) >>> 0 : null,
       muted: this.muted,
     });
     t.asked = t.got = t.pulls = t.maxPull = t.empty = 0;
@@ -166,6 +189,7 @@ export class AudioPcmProducer {
     this.lastTimerAt = now;
     this.adapt(now, gapMs);
     this.refill(2);
+    if (this.rateControl) this.rate();
     if (this.trace) this.traceTick(now);
   }
 
@@ -198,6 +222,30 @@ export class AudioPcmProducer {
     }
   }
 
+  // rate control: the consumer's rate from the ring's excess over its target
+  rate() {
+    const ring = this.ring;
+    if (!ring) return;
+    const queuedMs = this.api()?.audioQueuedMs?.();
+    const mixerMs = Number.isFinite(queuedMs) && queuedMs >= 0 ? queuedMs : this.mixerCapMs / 2;
+    const rawMs = (audioPcmAvailableFrames(ring.header) - (this.targetFrames ?? AUDIO_PCM_TARGET_FRAMES)) / 48 + mixerMs - this.mixerCapMs / 2;
+    this.excessMs = this.excessMs == null ? rawMs : this.excessMs + RATE_SMOOTHING * (rawMs - this.excessMs);
+    const excessMs = this.excessMs;
+    const goal = excessMs > RATE_DEAD_BAND_MS ? Math.min(AUDIO_PCM_MAX_RATE_PPM, Math.round((excessMs - RATE_DEAD_BAND_MS) * RATE_PPM_PER_MS)) : 0;
+    const next = this.ratePpm + Math.max(-RATE_SLEW_PPM, Math.min(RATE_SLEW_PPM, goal - this.ratePpm));
+    this.ratePpm = next;
+    Atomics.store(ring.header, AUDIO_PCM_HEADER.RATE_PPM, next | 0);
+  }
+
+  // rate control: frames to pull from the mixer beyond the ring's target, so
+  // its queue never reaches AudioBufferSize (an overflow skips half of it)
+  surplusFrames(core) {
+    if (!this.rateControl) return 0;
+    const queuedMs = core.audioQueuedMs?.();
+    if (!(Number.isFinite(queuedMs) && queuedMs > this.mixerCapMs - SURPLUS_MARGIN_MS)) return 0;
+    return Math.max(0, Math.round((queuedMs - this.mixerCapMs / 2) * 48));
+  }
+
   refill(maxMixes = 2) {
     const ring = this.ring;
     if (!ring) return 0;
@@ -214,9 +262,12 @@ export class AudioPcmProducer {
       const fill = audioPcmAvailableFrames(ring.header);
       const free = audioPcmFreeFrames(ring.header);
       const target = Math.round(this.targetFrames ?? AUDIO_PCM_TARGET_FRAMES);
-      if (fill >= target || free <= 0) break;
+      const surplus = this.surplusFrames(core);
+      const want = Math.max(target - fill, surplus);
+      if (want <= 0 || free <= 0) break;
       const maxFrames = Math.max(1, core.audioBufferFrames?.() || 4096);
-      const requested = Math.min(maxFrames, target - fill, free);
+      const requested = Math.min(maxFrames, want, free);
+      if (target - fill < requested) Atomics.add(ring.header, AUDIO_PCM_HEADER.PRODUCER_SURPLUS_FRAMES, requested - Math.max(0, target - fill));
       const started = performance.now();
       const mixed = Math.max(0, Math.min(requested, core.mixAudio(requested) | 0));
       this.recordMix(requested, mixed, performance.now() - started);
@@ -257,6 +308,8 @@ export class AudioPcmProducer {
       transportFallbackReason: this.fallbackReason,
       targetFrames: Math.round(this.targetFrames ?? AUDIO_PCM_TARGET_FRAMES),
       floorFrames: this.floorFrames ?? null,
+      rateControl: Boolean(this.rateControl),
+      ratePpm: this.ratePpm ?? 0,
       workletRing: this.ring ? snapshotAudioPcmRing(this.ring) : null,
     };
   }

@@ -58,6 +58,10 @@ export class AudioController {
     this.workletLeadSeconds =
       Number.isFinite(leadParam) && leadParam >= 0.02 && leadParam <= 1 ? Math.min(leadParam, 0.12) : 0.04;
     this.startLeadSeconds = 0.05;
+    // ?audiorate=1: the worklet's rate control (audio-pcm-producer.js): the
+    // ring's excess over its target played up to 0.5 % faster, and the
+    // mixer's queue pulled before it overflows, instead of mixer skips
+    this.workletRateControl = params.get("audiorate") === "1";
     this.chunkFrames = 1024;
     const pumpParam = Number.parseInt(params.get("audiopump") || "", 10);
     this.pumpIntervalMs =
@@ -128,7 +132,7 @@ export class AudioController {
     if (!muted) {
       await this.ensureContext();
       if (this.activeTransport === "worklet") {
-        await this.transportBridge?.({ enabled: true, muted: false, sab: this.workletRing.sab, targetFrames: this.workletTargetFrames() });
+        await this.transportBridge?.({ enabled: true, muted: false, sab: this.workletRing.sab, targetFrames: this.workletTargetFrames(), rateControl: this.workletRateControl });
         if (!this.workletWatchdog) this.startWorkletWatchdog();
       } else {
         this.startPump();
@@ -138,7 +142,7 @@ export class AudioController {
       this.stopPump();
       this.stopWorkletWatchdog();
       if (this.activeTransport === "worklet") {
-        await this.transportBridge?.({ enabled: true, muted: true, sab: this.workletRing.sab, targetFrames: this.workletTargetFrames() });
+        await this.transportBridge?.({ enabled: true, muted: true, sab: this.workletRing.sab, targetFrames: this.workletTargetFrames(), rateControl: this.workletRateControl });
       }
     }
     this.update();
@@ -252,6 +256,7 @@ export class AudioController {
         muted: this.muted,
         sab: this.workletRing.sab,
         targetFrames: this.workletTargetFrames(),
+        rateControl: this.workletRateControl,
       });
       const activated = typeof activation === "object" ? activation?.active : activation;
       if (!activated) {

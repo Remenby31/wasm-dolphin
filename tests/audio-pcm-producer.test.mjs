@@ -232,3 +232,164 @@ test("worker: validationAudioTrace is harness-gated and reaches the producer; th
   assert.match(worker, /case "validationAudioTrace":\n\s+\/\/[^\n]*\n\s+if \(!harnessEnabled\) return \{ error: "harness hooks are off" \};/);
   assert.match(worker, /audioQueueEvents: api\?\.audioQueueEvents,\n\s+heapU8: moduleInstance\?\.HEAPU8,/);
 });
+
+// ---- ?audiorate=1: rate control ----
+import { AUDIO_PCM_MAX_RATE_PPM } from "../src/audio-pcm-ring.js";
+import { RATE_SLEW_PPM } from "../src/audio-pcm-producer.js";
+
+test("consumer: at 0 ppm the plain copy; at +5000 ppm 0.5 % more input per output, interpolated, the fraction carried then dropped", () => {
+  const ring = createAudioPcmRing();
+  const fill = (n, f = (i) => i) => {
+    const src = new Int16Array(n * 2);
+    for (let i = 0; i < n; i += 1) { src[2 * i] = f(i); src[2 * i + 1] = -f(i); }
+    return writeAudioPcm(ring, src, n, 2);
+  };
+  Atomics.store(ring.header, AUDIO_PCM_HEADER.STATE, AUDIO_PCM_STATE_RUNNING);
+  fill(4000);
+  const L = new Float32Array(1000), R = new Float32Array(1000), res = {};
+  consumeAudioPcm(ring, L, R, 1000, res);
+  assert.equal(res.consumedFrames, 1000);
+  assert.equal(L[999] * 32768, 999, "plain copy");
+  Atomics.store(ring.header, AUDIO_PCM_HEADER.RATE_PPM, AUDIO_PCM_MAX_RATE_PPM);
+  consumeAudioPcm(ring, L, R, 1000, res);
+  assert.equal(res.consumedFrames, 1005);
+  assert.ok(Math.abs(L[500] * 32768 - (1000 + 500 * 1.005)) < 1e-6, `${L[500] * 32768}`);
+  assert.ok(Math.abs(R[500] * 32768 + (1000 + 500 * 1.005)) < 1e-6);
+  const snap = snapshotAudioPcmRing(ring);
+  assert.equal(snap.resampledFrames, 1000);
+  assert.equal(snap.resampleExtraFrames, 5);
+  // back to 0: the fraction is dropped, the plain copy resumes
+  Atomics.store(ring.header, AUDIO_PCM_HEADER.RATE_PPM, 0);
+  consumeAudioPcm(ring, L, R, 10, res);
+  assert.equal(res.frac, 0);
+  assert.equal(L[0] * 32768, 2005);
+  // a rate over the bound is held at it
+  Atomics.store(ring.header, AUDIO_PCM_HEADER.RATE_PPM, 99999);
+  consumeAudioPcm(ring, L, R, 1000, res);
+  assert.equal(res.consumedFrames, 1005);
+});
+
+test("producer rate: proportional to the latency's excess (ring and mixer) over the target, smoothed, a dead band, bounded, slewed", () => {
+  const ring = createAudioPcmRing();
+  const f = fixture();
+  f.producer.install(ring.sab, { muted: false, rateControl: true, mixerCapMs: 40 });
+  const setFill = (frames) => { Atomics.store(ring.header, AUDIO_PCM_HEADER.READ_INDEX, 0); Atomics.store(ring.header, AUDIO_PCM_HEADER.WRITE_INDEX, frames); };
+  f.producer.targetFrames = 1920;
+  setFill(1920 + 48); // 1 ms over: inside the dead band
+  f.producer.rate();
+  assert.equal(f.producer.ratePpm, 0);
+  setFill(1920 + 48 * 40); // 40 ms over: the bound, reached by slew
+  for (let i = 0; i < 3; i += 1) f.producer.rate();
+  assert.ok(f.producer.ratePpm > 0 && f.producer.ratePpm <= 3 * RATE_SLEW_PPM, "slewed up, smoothed");
+  for (let i = 0; i < 100; i += 1) f.producer.rate();
+  assert.equal(f.producer.ratePpm, AUDIO_PCM_MAX_RATE_PPM);
+  assert.equal(Atomics.load(ring.header, AUDIO_PCM_HEADER.RATE_PPM), AUDIO_PCM_MAX_RATE_PPM);
+  setFill(1920);
+  let prev = f.producer.ratePpm, steps = 0;
+  while (f.producer.ratePpm > 0 && steps < 1000) {
+    f.producer.rate();
+    assert.ok(prev - f.producer.ratePpm <= RATE_SLEW_PPM, "down by slew, no step");
+    prev = f.producer.ratePpm;
+    steps += 1;
+  }
+  assert.equal(f.producer.ratePpm, 0, "back to 0 at the target");
+  // the mixer's queue counts: a full mixer with the ring at its target is
+  // latency over the target too
+  f.core.audioQueuedMs = () => 40;
+  for (let i = 0; i < 200; i += 1) f.producer.rate();
+  assert.ok(f.producer.ratePpm > 0);
+  // off: never written
+  const g = fixture();
+  const ring2 = createAudioPcmRing();
+  g.producer.install(ring2.sab, { muted: false });
+  g.producer.timerTick();
+  assert.equal(Atomics.load(ring2.header, AUDIO_PCM_HEADER.RATE_PPM), 0);
+  assert.equal(g.producer.rateControl, false);
+});
+
+test("producer surplus: the mixer's queue pulled to half its size into the ring before it overflows, counted", () => {
+  const ring = createAudioPcmRing();
+  const f = fixture();
+  let queued = 35;
+  f.core.audioQueuedMs = () => queued;
+  f.producer.install(ring.sab, { muted: false, rateControl: true, mixerCapMs: 40 });
+  consumeAudioPcm(ring, new Float32Array(1), new Float32Array(1));
+  f.producer.targetFrames = 0; // the ring at its target: only the surplus is pulled
+  assert.equal(f.producer.surplusFrames(f.core), (35 - 20) * 48);
+  f.producer.refill(1);
+  assert.equal(snapshotAudioPcmRing(ring).producerSurplusFrames, 15 * 48);
+  queued = 29; // under cap − 10 ms: nothing
+  assert.equal(f.producer.surplusFrames(f.core), 0);
+});
+
+// A model of the mixer (Mixer::MixerFifo): a queue of input in ms, capped at
+// AudioBufferSize; a pull over the cap jumps back to half (an overflow skip),
+// a pull from an empty queue loops (an underrun fill). The core produces at
+// `speed` of real time; the worklet consumes 128 frames every 2.67 ms; the
+// producer ticks every 10 ms.
+function simulate({ rateControl, speedAt, seconds = 30, capMs = 40 }) {
+  const ring = createAudioPcmRing();
+  const heapU8 = new Uint8Array(65536);
+  let queueMs = 20, skips = 0, fills = 0;
+  const core = {
+    heapU8, audioSampleRate: () => 48000, audioChannels: () => 2, audioBufferFrames: () => 4096, audioBuffer: () => 1024,
+    audioQueuedMs: () => queueMs,
+    mixAudio(frames) {
+      // per granule of 4 ms: overflow check, then take it (or loop when empty)
+      let left = frames / 48;
+      while (left > 0) {
+        if (queueMs > capMs) { skips += 1; queueMs = capMs / 2 + 4; }
+        const take = Math.min(4, left);
+        if (queueMs < take) { fills += 1; queueMs += capMs / 2 - 4; }
+        queueMs -= take;
+        left -= take;
+      }
+      return frames;
+    },
+  };
+  const producer = new AudioPcmProducer({ api: () => core, setTimer: () => 1, clearTimer() {} });
+  producer.install(ring.sab, { muted: false, targetFrames: 1920, rateControl, mixerCapMs: capMs });
+  const L = new Float32Array(128), R = new Float32Array(128), res = {};
+  consumeAudioPcm(ring, L, R, 128, res); // ack the epoch
+  let now = 0, nextTick = 0, nextQuantum = 0;
+  const realNow = performance.now;
+  try {
+    while (now < seconds * 1000) {
+      const dt = 0.5;
+      queueMs += speedAt(now) * dt;
+      if (now >= nextQuantum) { consumeAudioPcm(ring, L, R, 128, res); nextQuantum += 128 / 48; }
+      if (now >= nextTick) { performance.now = () => now; producer.timerTick(); nextTick += 10; }
+      now += dt;
+    }
+  } finally { performance.now = realNow; }
+  const snap = snapshotAudioPcmRing(ring);
+  return { skips, fills, underruns: snap.underrunEvents, fillMs: snap.fillFrames / 48, targetMs: producer.targetFrames / 48, resampledMs: snap.resampledFrames / 48, surplusMs: snap.producerSurplusFrames / 48 };
+}
+
+test("model of the load: a 3 s slow core then a catch-up, and the ring's descent: rate control removes the mixer skips", () => {
+  const speedAt = (t) => (t < 3000 ? 0.75 : t < 4000 ? 1.14 : 1);
+  const off = simulate({ rateControl: false, speedAt });
+  const on = simulate({ rateControl: true, speedAt });
+  // off: the mixer skips during the catch-up and the 120 -> 40 ms descent
+  assert.ok(off.skips >= 10, JSON.stringify(off));
+  // on: the catch-up goes into the ring (the rest skips only once the ring is
+  // full, 170 ms), the excess is played up to 0.5 % faster
+  assert.ok(on.skips <= off.skips / 2, JSON.stringify({ on, off }));
+  assert.ok(on.resampledMs > 0 && on.surplusMs > 0, JSON.stringify(on));
+  // and the latency comes down to the floor within the 30 s
+  assert.ok(on.fillMs < on.targetMs + 10 && on.targetMs <= 41, JSON.stringify(on));
+  // the slow core's fills are the same: the game made less sound than played
+  assert.ok(Math.abs(on.fills - off.fills) <= Math.max(3, off.fills * 0.5), JSON.stringify({ on, off }));
+});
+
+test("plumbing: ?audiorate reaches the producer with the boot's AudioBufferSize", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const read = (p) => readFile(new URL(p, import.meta.url), "utf8");
+  const [audio, adapter, worker] = await Promise.all([read("../src/audio.js"), read("../src/upstream-worker-adapter.js"), read("../src/upstream-discio-worker.js")]);
+  assert.match(audio, /this\.workletRateControl = params\.get\("audiorate"\) === "1";/);
+  assert.equal(audio.match(/rateControl: this\.workletRateControl/g).length, 3);
+  assert.match(adapter, /async configureAudioWorklet\(\{ enabled, muted, sab, targetFrames, rateControl = false \}\)/);
+  assert.match(adapter, /rateControl: Boolean\(rateControl\),/);
+  assert.match(worker, /rateControl: Boolean\(payload\.rateControl\),\n\s+mixerCapMs: configuredAudioBufferMs > 0 \? configuredAudioBufferMs : 80,/);
+  assert.match(worker, /configuredAudioBufferMs = api\.setAudioBufferMs && Number\(audioBufferMs\) > 0 \? Number\(audioBufferMs\) : 0;/);
+});
