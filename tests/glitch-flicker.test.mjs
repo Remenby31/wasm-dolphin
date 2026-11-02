@@ -139,10 +139,40 @@ test("A-B-A fails a run only on the deterministic CPU, both sides", async () => 
 test("--flicker-from N: the watch starts at the VI N after the load, no scene default", async () => {
   const gates = await read("../harness/probes/replay-gates.mjs");
   assert.match(gates, /"flicker-from": \{ type: "string" \}/, "no default value");
+  // parsed right after the options, before the perf lock and the browser
+  const parsed = gates.indexOf('const flickerFrom = parseFlickerFrom(o["flicker-from"], o.flicker);');
+  assert.ok(parsed > gates.indexOf("}, strict: true });") && parsed < gates.indexOf("await acquirePerfLock("), "checked before the lock");
   const block = gates.slice(gates.indexOf("if (Number(o.flicker) > 0) {"));
-  assert.ok(block.indexOf('o["flicker-from"]') < block.indexOf('"validationFlickerWatch", { action: "start" }'), "waited for before the watch starts");
-  assert.match(block, /const at = await captureAtVi\(session\.page, \{ index: from, fromLoad: true, timeoutMs: 120000 \}\);/);
-  assert.match(block, /if \(!Number\.isInteger\(from\) \|\| from < 1\) throw new Error/);
+  assert.ok(block.indexOf("flickerFrom") < block.indexOf('"validationFlickerWatch", { action: "start" }'), "waited for before the watch starts");
+  assert.match(block, /const at = await captureAtVi\(session\.page, \{ index: flickerFrom, fromLoad: true, timeoutMs: 120000 \}\);/);
   // the blinking caveat is documented where the option is
   assert.match(gates, /a countdown digit pulsing on a still camera/);
+});
+
+test("--flicker-from parsing: digits only, 1 to 2^32 - 1, only with --flicker", async () => {
+  const { parseFlickerFrom } = await import("../harness/lib/flicker.mjs");
+  assert.equal(parseFlickerFrom(undefined, "0"), undefined);
+  assert.equal(parseFlickerFrom("600", "10"), 600);
+  assert.equal(parseFlickerFrom(String(2 ** 32 - 1), "10"), 2 ** 32 - 1);
+  for (const bad of [" 5 ", "0x10", "1e3", "-3", "5.0", "", "abc"]) {
+    assert.throws(() => parseFlickerFrom(bad, "10"), /digits only/, JSON.stringify(bad));
+  }
+  assert.throws(() => parseFlickerFrom("0", "10"), /from 1 to 4294967295/);
+  assert.throws(() => parseFlickerFrom("5000000000", "10"), /from 1 to 4294967295/, "would wrap in the worker's u32");
+  assert.throws(() => parseFlickerFrom("600", "0"), /needs --flicker > 0/);
+  assert.throws(() => parseFlickerFrom("600", undefined), /needs --flicker > 0/);
+});
+
+test("replay-gates refuses a bad --flicker-from before the lock and the browser", async () => {
+  const { spawnSync } = await import("node:child_process");
+  const probe = new URL("../harness/probes/replay-gates.mjs", import.meta.url).pathname;
+  for (const [args, message] of [
+    [["--flicker", "10", "--flicker-from", "1e3"], /digits only/],
+    [["--flicker-from", "600"], /needs --flicker > 0/]
+  ]) {
+    const r = spawnSync(process.execPath, [probe, ...args], { encoding: "utf8", timeout: 20000, env: { ...process.env, HARNESS_PERF_LOCK: "/nonexistent/.perf-lock" } });
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, message);
+    assert.doesNotMatch(r.stdout + r.stderr, /perf lock|\[gates\]/, "nothing ran");
+  }
 });

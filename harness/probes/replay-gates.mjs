@@ -67,7 +67,7 @@ import { parseArgs } from "node:util";
 import { ensureServer, loadHarnessState, captureAtVi, workerRequest } from "../lib/browser.mjs";
 import { integrityBrief, integrityOf, readIntegrity, treeHasIntegrity } from "../lib/integrity.mjs";
 import { openSession, savePng } from "../lib/session.mjs";
-import { distinctRuns, findFlicker, flickerFatal, tripleStrip } from "../lib/flicker.mjs";
+import { distinctRuns, findFlicker, flickerFatal, parseFlickerFrom, tripleStrip } from "../lib/flicker.mjs";
 import { diffFrame, exactVerdict, oracleQueryError, referenceQuery, referenceSwitchesOn } from "../lib/glitch-oracle.mjs";
 import { setPad } from "../lib/gamepad-mock.mjs";
 import { acquirePerfLock } from "../lib/perf-lock.mjs";
@@ -80,6 +80,8 @@ const { values: o } = parseArgs({ options: {
   "bad-state-load": { type: "boolean", default: false },
   exact: { type: "boolean", default: false }, flicker: { type: "string", default: "0" }, "flicker-from": { type: "string" }
 }, strict: true });
+// checked before the lock and the browser: a bad value never runs
+const flickerFrom = parseFlickerFrom(o["flicker-from"], o.flicker);
 for (const k of ["iso", "state", "port", "out", "query", ...(o.exact ? [] : ["extra"])]) if (!o[k]) throw new Error(`--${k} is required`);
 o.extra ??= "";
 if (o.exact) {
@@ -205,11 +207,9 @@ try {
         // --flicker-from N: wait for the VI N after the load (an exact
         // capture, bounded), so the window starts at the same place of the
         // game in every visit
-        if (o["flicker-from"] !== undefined) {
-          const from = Number(o["flicker-from"]);
-          if (!Number.isInteger(from) || from < 1) throw new Error(`--flicker-from ${o["flicker-from"]}: a VI index >= 1`);
-          const at = await captureAtVi(session.page, { index: from, fromLoad: true, timeoutMs: 120000 });
-          if (at.error) throw new Error(`flicker watch: VI ${from} after the load: ${at.error}`);
+        if (flickerFrom !== undefined) {
+          const at = await captureAtVi(session.page, { index: flickerFrom, fromLoad: true, timeoutMs: 120000 });
+          if (at.error) throw new Error(`flicker watch: VI ${flickerFrom} after the load: ${at.error}`);
         }
         const started = await workerRequest(session.page, "validationFlickerWatch", { action: "start" }, 10000);
         if (!started?.started) throw new Error(`flicker watch: ${started?.error ?? "not started"}`);

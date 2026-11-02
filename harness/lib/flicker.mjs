@@ -20,6 +20,19 @@
 
 export const FLICKER_FLOOR = 1.0;
 
+// replay-gates --flicker-from: a VI index after the load, digits only, 1 to
+// 2^32 - 1 (the worker reads it as a u32: a larger value would wrap and
+// watch another VI without a word). Only with --flicker > 0. undefined when
+// not given.
+export function parseFlickerFrom(text, flickerSecs) {
+  if (text === undefined) return undefined;
+  if (!(Number(flickerSecs) > 0)) throw new Error("--flicker-from needs --flicker > 0 (it sets where that watch starts)");
+  if (!/^\d+$/.test(text)) throw new Error(`--flicker-from ${JSON.stringify(text)}: a VI index, digits only`);
+  const n = Number(text);
+  if (n < 1 || n >= 2 ** 32) throw new Error(`--flicker-from ${text}: a VI index from 1 to ${2 ** 32 - 1}`);
+  return n;
+}
+
 // Fatal only on the deterministic CPU. In cpu=dual a late replay can present
 // an XFB buffer whose new copy has not run yet, so the picture from two
 // frames back comes again (Spark, 2026-11-01: 3 to 12 per visit, the same
