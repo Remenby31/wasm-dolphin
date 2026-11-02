@@ -67,6 +67,9 @@ try {
     let safari = null;
     try {
       safari = await launchSafariPage({ port: port + 1, log });
+      // every visibility check (area on screen, tolerance, app in front)
+      run.visibility = safari.visibility;
+      run.tolerance = safari.tolerance;
       run.browserVersion = safari.browserVersion;
       await bootRemoteDisc(safari.page, { url: `${server.base}?${o.query}`, descriptor: disc.descriptor, timeoutMs: 120000 });
       await safari.assertInvisible("after boot");
