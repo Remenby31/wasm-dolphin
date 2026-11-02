@@ -143,6 +143,7 @@ import { createWgpuSparseUboCopyForward } from "./wgpu-sparse-ubo-copy-forward.j
 import { createBindGroupCache } from "./wgpu-bind-group-cache.js";
 import { createVsyncQueue, vsyncLateMs } from "./wgpu-vsync-queue.js";
 import { createGamePacer, createRefreshHistogram, refreshOf } from "./wgpu-game-pacer.js";
+import { createViPhaseLock } from "./wgpu-vi-phase-lock.js";
 import {
   WGPU_MAPPED_DRAIN_FORCE_REASONS,
   createWgpuMappedDrainCoalescer
@@ -2134,6 +2135,7 @@ async function handleMessage(type, payload) {
         presentVsync: payload.presentVsync,
         presentGamePace: payload.presentGamePace,
         presentPaceStats: payload.presentPaceStats,
+        viLock: payload.viLock,
         coreLog: payload.coreLog,
         memcardSlotB: payload.memcardSlotB,
         internalResolution: payload.internalResolution,
@@ -2525,6 +2527,8 @@ async function handleMessage(type, payload) {
         ...wgpuVsync.stats,
         // frames waiting now (the `queued` counter is the total queued)
         waiting: wgpuVsync.waiting,
+        // ?vilock=1: the phase lock's counters (src/wgpu-vi-phase-lock.js)
+        phaseLock: wgpuViLock ? { ...wgpuViLock.stats } : null,
         ticks: wgpuVsyncTick,
         // backbuffer passes and presents since boot: with one pass a frame
         // they match; more passes than presents is a frame's pass reopened
@@ -2857,6 +2861,7 @@ async function loadCore({
   presentVsync = true,
   presentGamePace = false,
   presentPaceStats = false,
+  viLock = false,
   coreLog = false,
   memcardSlotB = false,
   internalResolution = 1,
@@ -3377,6 +3382,9 @@ async function loadCore({
   setWgpuDisplayFilter(displayFilter ?? {});
   wgpuPresentGamePace = presentGamePace === true;
   wgpuPresentPaceStats = presentPaceStats === true || wgpuPresentGamePace;
+  // ?vilock=1: only on the vsync presenter (its rAF measures the refresh) and
+  // at the normal speed (an unlimited or other speed is the user's)
+  wgpuViLock = viLock === true && wgpuPresentVsync && Number(emulationSpeed) === 1 ? createViPhaseLock() : null;
   wgpuGamePacer.reset({ arrival: true });
   wgpuRefreshHistogram.reset();
   releaseWgpuReadback();
@@ -4093,6 +4101,12 @@ function bindApi(module) {
     setEmulationSpeed:
       typeof module._SetEmulationSpeed === "function"
         ? (factor) => ccall("SetEmulationSpeed", "number", ["number"], [Number(factor)])
+        : null,
+    // ?vilock=1 (patch 0212): the throttle's rate trimmed at run time (ppm
+    // of the configured speed, +/-2000); null on a core without it
+    setThrottleRatePpm:
+      typeof module._DolphinWeb_SetThrottleRatePpm === "function"
+        ? (ppm) => module._DolphinWeb_SetThrottleRatePpm(Math.round(Number(ppm)) | 0)
         : null,
     setAudioBufferMs:
       typeof module._DolphinWeb_SetAudioBufferMs === "function"
@@ -5608,7 +5622,10 @@ function maybeCreateCausalTelemetry(videoStats, { force = false } = {}) {
         ...wgpuPresentVsyncStats, ...wgpuVsync.stats,
         refreshMs: wgpuVsyncTracking() ? wgpuVsyncRefreshMs() : null,
         refreshes: wgpuVsyncTracking() ? wgpuRefreshHistogram.snapshot(performance.now()) : null,
-        gamePace: wgpuPresentGamePace ? { ...wgpuGamePacer.stats, periodMs: wgpuGamePacer.period } : null
+        gamePace: wgpuPresentGamePace ? { ...wgpuGamePacer.stats, periodMs: wgpuGamePacer.period } : null,
+        // ?vilock=1: on/off, the speed's nudge (ppm), the drift it cancels,
+        // locks taken and lost, why not locked, the refresh and frame periods
+        phaseLock: wgpuViLock ? { ...wgpuViLock.stats } : null
       } : null,
       visualCadence: wgpuVisualCadenceSnapshot(),
       mappedStaging: wgpuMappedStagingPool?.snapshot() ?? null,
@@ -13205,6 +13222,24 @@ function wgpuVsyncRefreshMs() {
 // the refresh histogram (frames on screen for 1, 2, 3, 4+ refreshes, shown in
 // the HUD) reads the same with the switch on or off.
 let wgpuPresentGamePace = false;
+// ?vilock=1 (src/wgpu-vi-phase-lock.js): the VI locked in phase on the
+// refresh; fed the rAF frame times and the frames' arrivals, it trims the
+// core's throttle rate (patch 0212: +/- at most 0.2 % of the configured
+// speed; the emulated time is unchanged) every 500 ms, from the rAF tick or,
+// without rAF (hidden), from the next arrival. A core without the trim: no
+// lock, and why.
+let wgpuViLock = null;
+let wgpuViLockLastUpdate = 0;
+function wgpuViLockUpdate(now) {
+  if (!wgpuViLock || now - wgpuViLockLastUpdate < 500) return;
+  wgpuViLockLastUpdate = now;
+  if (!api?.setThrottleRatePpm) {
+    wgpuViLock.stats.why = "core without a throttle rate trim";
+    return;
+  }
+  const r = wgpuViLock.update(now);
+  if (r.changed) api.setThrottleRatePpm(wgpuViLock.stats.ppm);
+}
 // The frames' arrival period, the screen's refresh and the refresh histogram
 // are kept only with ?presentpace=game|observe or the harness: by default the
 // presenter does none of this work.
@@ -13312,6 +13347,10 @@ function queueWgpuVsyncFrame(coreFrame, shownVi, stream, tag = 0, tagEpoch = 0) 
   if (stream && streamCapture.active) streamWgpuVsyncFrame(frame.tex, coreFrame);
   wgpuNewFrames.queued(tag, tagEpoch);
   if (wgpuVsyncTracking()) wgpuGamePacer.stamp(at);
+  if (wgpuViLock) {
+    wgpuViLock.arrival(at);
+    wgpuViLockUpdate(at);
+  }
   wgpuVsyncIdleTicks = 0;
   if (!wgpuVsyncLoop) {
     wgpuVsyncLoop = true;
@@ -13322,6 +13361,10 @@ function queueWgpuVsyncFrame(coreFrame, shownVi, stream, tag = 0, tagEpoch = 0) 
         wgpuVsyncFrameGaps[wgpuVsyncFrameGapCount++ % wgpuVsyncFrameGaps.length] = frameTime - wgpuVsyncLastFrameTime;
       }
       wgpuVsyncLastFrameTime = frameTime;
+      if (wgpuViLock) {
+        wgpuViLock.tick(frameTime, now);
+        wgpuViLockUpdate(now);
+      }
       // Back after a gap of 50 ms or more (a block, a silent rAF): the newest
       // frame first, not the oldest one queued before the gap.
       const afterGap = now - wgpuVsyncLastTickAt >= WGPU_VSYNC_FALLBACK_MS;

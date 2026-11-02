@@ -164,7 +164,7 @@ async function playRun(o, server, { side, run, outDir }) {
       if (tl?.presents?.lost || tl?.vi?.lost) raw.timelineLost = (raw.timelineLost ?? 0) + (tl.presents?.lost ?? 0) + (tl.vi?.lost ?? 0);
       const integrity = await readIntegrity(page, { expected: o.integrityExpected });
       const status = await padFilmStatus(page);
-      raw.samples.push({ t, info, counters: countersOf(drained), presents: tl?.presents?.t ?? [], vi: tl?.vi?.t?.length ?? null, integrity: integrity?.unread || integrity?.unavailable ? null : integrity, film: status ? { pos: status.pos, hold: status.hold, polls: status.polls } : null });
+      raw.samples.push({ t, info, counters: countersOf(drained), presents: tl?.presents?.t ?? [], vi: tl?.vi?.t?.length ?? null, viT: tl?.vi?.t ?? null, integrity: integrity?.unread || integrity?.unavailable ? null : integrity, film: status ? { pos: status.pos, hold: status.hold, polls: status.polls } : null });
       raw.loads.push([Date.now(), os.loadavg()[0]]);
       rows = deriveSeconds(raw.samples, { tps: raw.tps });
       const phase = phaseNow();

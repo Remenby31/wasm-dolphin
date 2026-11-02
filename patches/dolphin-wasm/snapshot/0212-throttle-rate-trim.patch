@@ -1,0 +1,78 @@
+diff --git a/Source/Core/Core/CoreTiming.cpp b/Source/Core/Core/CoreTiming.cpp
+index 6b6c998..b68cf27 100644
+--- a/Source/Core/Core/CoreTiming.cpp
++++ b/Source/Core/Core/CoreTiming.cpp
+@@ -163,6 +163,40 @@ extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_ThrottleSleepCascade()
+          (DolphinWeb::g_sleep_spin_us.load(std::memory_order_relaxed) << 16);
+ }
+ 
++namespace DolphinWeb
++{
++// Patch 0212 (?vilock=1, src/wgpu-vi-phase-lock.js): the throttle's rate
++// trimmed by up to +/-2000 ppm of the configured speed, so the emulated VI can
++// be held in phase with the screen's refresh (59.94 on 60 Hz: +1001 ppm).
++// Only the wall pace of the throttle moves: the emulated time, the configured
++// speed (m_emulation_speed, Config::MAIN_EMULATION_SPEED) and the mixer's step
++// stay as they are. The worker writes the requested value; the CPU thread
++// reads it at each Throttle and applies it through UpdateSpeedLimit, which
++// rebases the throttle at the current cycle (no jump). A plain value read at
++// each Throttle, nothing published with it: relaxed is enough. At 0 ppm the
++// factor is exactly 1.0 (no floating point step), the rate unchanged.
++std::atomic<int> g_throttle_rate_ppm{0};
++std::atomic<int> g_throttle_rate_applied_ppm{0};
++constexpr int THROTTLE_RATE_MAX_PPM = 2000;
++inline double ThrottleRateFactor(int ppm)
++{
++  return ppm == 0 ? 1.0 : 1.0 + static_cast<double>(ppm) * 1e-6;
++}
++}  // namespace DolphinWeb
++
++extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_SetThrottleRatePpm(int ppm)
++{
++  DolphinWeb::g_throttle_rate_ppm.store(
++      std::clamp(ppm, -DolphinWeb::THROTTLE_RATE_MAX_PPM, DolphinWeb::THROTTLE_RATE_MAX_PPM),
++      std::memory_order_relaxed);
++}
++
++// The trim the throttle runs with now (applied by the CPU thread), in ppm.
++extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_ThrottleRatePpm()
++{
++  return DolphinWeb::g_throttle_rate_applied_ppm.load(std::memory_order_relaxed);
++}
++
+ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_SetDupXfbRearmsThrottle(int on)
+ {
+   DolphinWeb::g_dup_xfb_rearms_throttle.store(on != 0, std::memory_order_relaxed);
+@@ -779,6 +813,15 @@ void CoreTimingManager::Throttle(const s64 target_cycle)
+     return;
+   }
+ 
++#ifdef __EMSCRIPTEN__
++  // Patch 0212: a new trim requested since the last Throttle, applied here.
++  if (DolphinWeb::g_throttle_rate_ppm.load(std::memory_order_relaxed) !=
++      DolphinWeb::g_throttle_rate_applied_ppm.load(std::memory_order_relaxed))
++  {
++    UpdateSpeedLimit(target_cycle, m_emulation_speed);
++  }
++#endif
++
+   // Push throttle reference values forward by exact seconds.
+   // This avoids drifting from cumulative rounding errors.
+   {
+@@ -819,8 +862,16 @@ void CoreTimingManager::UpdateSpeedLimit(s64 cycle, double new_speed)
+ {
+   m_emulation_speed = new_speed;
+ 
++#ifdef __EMSCRIPTEN__
++  // Patch 0212: the throttle's rate trim on top of the speed (1.0 at 0 ppm).
++  const int rate_ppm = DolphinWeb::g_throttle_rate_ppm.load(std::memory_order_relaxed);
++  DolphinWeb::g_throttle_rate_applied_ppm.store(rate_ppm, std::memory_order_relaxed);
++  const u32 new_clock_per_sec = std::lround(m_system.GetSystemTimers().GetTicksPerSecond() *
++                                            new_speed * DolphinWeb::ThrottleRateFactor(rate_ppm));
++#else
+   const u32 new_clock_per_sec =
+       std::lround(m_system.GetSystemTimers().GetTicksPerSecond() * new_speed);
++#endif
+ 
+   const bool was_limited = m_throttle_adj_clock_per_sec != 0;
+   if (was_limited)

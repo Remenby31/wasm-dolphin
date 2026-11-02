@@ -17,7 +17,8 @@
 //             discBytes, xfbCopies (EFB→XFB copies), cumulative; null when
 //             no row came (the rates of the previous second are kept)
 //   presents  host times of the presentations of that second (timeline)
-//   vi        VI outputs of that second (timeline)
+//   vi        VI outputs of that second (timeline); viT their host times
+//             (the frames' phase against the presents: ?vilock, patch 0212)
 //   integrity validationReadIntegrity, for the deltas per phase (optional)
 //   film      the pad film's position { pos, hold } (optional)
 // Derived per second: speed (guest / host time from the core ticks), new

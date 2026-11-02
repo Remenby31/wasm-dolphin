@@ -545,6 +545,7 @@ export class EmulatorHost {
             presentVsync: this.pacing.presentVsync,
             presentGamePace: this.pacing.presentGamePace,
             presentPaceStats: this.pacing.presentPaceStats,
+            viLock: this.pacing.viLock,
             coreLog: this.coreLog,
             memcardSlotB: this.memcardSlotB,
             internalResolution: this.enhancements.internalResolution,
@@ -1985,7 +1986,12 @@ export function requestedPacing(search = window.location.search) {
     // BeginFrame as before; =observe keeps the refresh histogram (HUD) and
     // the game's period without pacing. Off: none of it runs.
     presentGamePace: presentPaceMode(params) === "game",
-    presentPaceStats: presentPaceMode(params) !== "off"
+    presentPaceStats: presentPaceMode(params) !== "off",
+    // ?vilock=1 (src/wgpu-vi-phase-lock.js): the emulated VI locked in phase
+    // on the screen's refresh (the speed nudged by at most 0.2 %), so the
+    // 59.94/60 Hz drift no longer crosses a BeginFrame every ~16.7 s. Off by
+    // default until measured.
+    viLock: params.get("vilock") === "1"
   };
 }
 

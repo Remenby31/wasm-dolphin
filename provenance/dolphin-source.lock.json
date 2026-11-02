@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "e1902fed9538854541883f9cf52fa8c877b428e695354f4e3c5e2ec2b0dd5a40",
+  "patchSeriesSha256": "32b34727cb9993b1c74635c89bac337af1a90421c3a0bf8dd94f464701b39fbf",
   "patches": [
     {
       "order": 1,
@@ -1173,6 +1173,14 @@
     },
     {
       "order": 144,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0212-throttle-rate-trim.patch",
+      "size": 3473,
+      "sha256": "082100801175e712859fb10f26f809dfc839fd8afdac7e1c9f1810cfb4cefd9d"
+    },
+    {
+      "order": 145,
       "cwd": "Externals/SFML/SFML",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0001-sfml-emscripten-config.patch",
@@ -1180,7 +1188,7 @@
       "sha256": "f82197a21fe982ad83f6ee7bbf5a03839b1cebd4d64da3eab11263842bf61d89"
     },
     {
-      "order": 145,
+      "order": 146,
       "cwd": "Externals/xxhash/xxHash",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0002-xxhash-wasm-simd-scalar.patch",

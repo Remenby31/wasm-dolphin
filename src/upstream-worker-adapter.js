@@ -117,6 +117,7 @@ export class UpstreamWorkerAdapter {
     presentVsync = true,
     presentGamePace = false,
     presentPaceStats = false,
+    viLock = false,
     coreLog = false,
     memcardSlotB = false,
     internalResolution = 1,
@@ -261,6 +262,7 @@ export class UpstreamWorkerAdapter {
     this.presentVsync = presentVsync !== false;
     this.presentGamePace = presentGamePace === true;
     this.presentPaceStats = presentPaceStats === true;
+    this.viLock = viLock === true;
     this.coreLog = Boolean(coreLog);
     this.memcardSlotB = Boolean(memcardSlotB);
     this.internalResolution = Number(internalResolution) || 1;
@@ -537,6 +539,7 @@ export class UpstreamWorkerAdapter {
       presentVsync: this.presentVsync,
       presentGamePace: this.presentGamePace,
       presentPaceStats: this.presentPaceStats,
+      viLock: this.viLock,
       coreLog: this.coreLog,
       memcardSlotB: this.memcardSlotB,
       internalResolution: this.internalResolution,
