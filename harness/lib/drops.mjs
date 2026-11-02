@@ -764,33 +764,41 @@ export function trendTable(lines) {
 // Where a run's smoothness went, frame by frame. Input: a sequence of
 // windows in host time, from any probe (an adapter per probe):
 //   { t, ms, phase?, cadence?, speed?, produced?, shown?, presents?,
-//     gaps?: [{ ms, vis, workerLagMs? }]  (presentation gaps ending in it),
-//     occupancy?: { cpu, gpu, replay }   (0..1),
-//     causes?: { <cause>: host ms }      (counter differences, CAUSES),
+//     gaps?: [{ ms, vis, workerLagMs? }]  (presentation gaps ending in it;
+//                                         vis null when not measured),
+//     beatFrames?                         (repeats proven by beatEvidence),
+//     occupancy?: { cpu, gpu, replay }   (0..1; null when not measured),
+//     causes?: { <cause>: host ms }      (counter differences),
 //     mainLagMs?, workerLagMs? }
 // produced: new game frames (XFB copies or new frame tags), shown: new
 // frames put on screen, presents: presentations (new or repeated).
 // cadence: the scene's frames per second (a 30 fps menu, a 60 fps race in
 // one run), else opts.cadence; a second never spans two cadences.
-// Per second of the run (ATTRIBUTION_SECOND_MS), the deficit is
-// cadence − shown frames, split so that the parts add up to it:
-//   production gap = cadence − produced:
-//     emulation    the guest ran under ATTRIBUTION_FULL_SPEED %; split by
-//                  the counted causes (their ms over the time lost), the rest
-//                  unexplained
-//     game         at full speed with something saturated (occupancy ≥
-//                  ATTRIBUTION_BUSY): the game itself produced less
-//     content      at full speed, nothing saturated: the scene's own cadence
-//                  (a 30 fps menu, a still picture); 0 frames lost
-//   presentation gap = produced − shown:
-//     presenter-blocked  frames of gaps during which the core produced VIs
-//                        while the worker that presents lagged
-//     no-present         cadence − presents (no presentation at all)
-//     old-frame          the rest (presented, but an older picture)
-//     beat               no-present at full speed with nothing saturated, in
-//                        dips that come back every 1 / |refresh − VI rate|
-//                        (opts.refreshHz, opts.viHz: a 59.94 Hz core on a
-//                        60 Hz screen drifts across the vsync every ~16.7 s)
+// Per second (ATTRIBUTION_SECOND_MS) the deficit is cadence − shown, split
+// into parts that add up to it exactly:
+//   production gap = min(cadence − produced, deficit):
+//     emulation:<cause>  the guest ran under ATTRIBUTION_FULL_SPEED %: shared
+//                        in proportion to the counted causes' ms over the
+//                        time lost (all of it when they cover it), the rest
+//                        emulation:unexplained
+//     game:<thread>      full speed, a thread saturated (≥ ATTRIBUTION_BUSY)
+//     content            full speed, cpu, gpu and replay ALL known and under
+//                        ATTRIBUTION_CONTENT_BUSY (the margin the site needs
+//                        to learn a cadence), produced under
+//                        ATTRIBUTION_CONTENT_SHARE of the cadence: the scene's
+//                        own cadence; 0 frames lost
+//     game:marginal      full speed, all known, none saturated, yet not content
+//     game:unknown       full speed, an occupancy not measured
+//     production:unknown the speed not measured
+//   presentation gap = deficit − production gap:
+//     presenter-blocked  gaps during which the core produced VIs while the
+//                        presenting worker lagged (vis and lateness measured)
+//     beat               repeats proven by beatEvidence (frame by frame: the
+//                        missed frame's arrival phase on the measured vsync
+//                        grid at the run's boundary, the phase crossing it)
+//     no-present         cadence − presents (presents measured)
+//     old-frame          presented, but an older picture
+//     pacing:unknown     what the data cannot split (presents not measured)
 // Markers per second, not parts: main-stall (the page's sampler late) and
 // gc-probable (the worker late with no counted work).
 // Seconds under `fluidity` % (shown / cadence) are the dips; the table ranks
@@ -799,64 +807,78 @@ export function trendTable(lines) {
 export const ATTRIBUTION_SECOND_MS = 1000;
 export const ATTRIBUTION_FULL_SPEED = 99;
 export const ATTRIBUTION_BUSY = 0.85;
+export const ATTRIBUTION_CONTENT_BUSY = 0.7;
+export const ATTRIBUTION_CONTENT_SHARE = 0.95;
 export const ATTRIBUTION_FLUIDITY = 95;
 export const ATTRIBUTION_HITCH_MS = 25;
 export const ATTRIBUTION_EMULATION_CAUSES = ["jit", "regions", "disc", "slot", "efb", "gpuWait", "pipelines", "lateWake", "uncountedBusy"];
+const OCCUPANCY_THREADS = ["cpu", "gpu", "replay"];
 
 const sumOf = (xs, f) => xs.reduce((a, x) => a + (Number.isFinite(f(x)) ? f(x) : 0), 0);
 const allKnown = (xs, f) => xs.length > 0 && xs.every((x) => Number.isFinite(f(x)));
 
 // One second's split (frames). null when it lacks produced or shown.
-export function attributeSecond(ws, { cadence, fullSpeed = ATTRIBUTION_FULL_SPEED, busy = ATTRIBUTION_BUSY, stallMs = STALL_MIN_MS } = {}) {
+export function attributeSecond(ws, { cadence, fullSpeed = ATTRIBUTION_FULL_SPEED, busy = ATTRIBUTION_BUSY, contentBusy = ATTRIBUTION_CONTENT_BUSY, contentShare = ATTRIBUTION_CONTENT_SHARE, stallMs = STALL_MIN_MS } = {}) {
   if (!allKnown(ws, (w) => w.produced) || !allKnown(ws, (w) => w.shown)) return null;
   const hostMs = sumOf(ws, (w) => w.ms);
   const cadenceOf = (w) => w.cadence ?? cadence;
   const expected = sumOf(ws, (w) => (cadenceOf(w) * w.ms) / 1000);
   const produced = sumOf(ws, (w) => w.produced), shown = sumOf(ws, (w) => w.shown);
   const presents = allKnown(ws, (w) => w.presents) ? sumOf(ws, (w) => w.presents) : null;
-  const speeds = ws.filter((w) => Number.isFinite(w.speed));
-  const speed = speeds.length ? sumOf(speeds, (w) => w.speed * w.ms) / sumOf(speeds, (w) => w.ms) : null;
+  const speed = allKnown(ws, (w) => w.speed) ? sumOf(ws, (w) => w.speed * w.ms) / hostMs : null;
+  // a thread's occupancy: known only when every window measured it
   const occ = {};
-  for (const k of ["cpu", "gpu", "replay"]) {
-    const v = ws.map((w) => w.occupancy?.[k]).filter(Number.isFinite);
-    occ[k] = v.length ? Math.max(...v) : null;
-  }
-  const saturated = Object.entries(occ).filter(([, v]) => v != null && v >= busy).map(([k]) => k);
+  for (const k of OCCUPANCY_THREADS) occ[k] = allKnown(ws, (w) => w.occupancy?.[k]) ? Math.max(...ws.map((w) => w.occupancy[k])) : null;
+  const saturated = OCCUPANCY_THREADS.filter((k) => occ[k] != null && occ[k] >= busy);
   const parts = {};
-  const add = (k, f) => { if (f > 0) parts[k] = (parts[k] ?? 0) + f; };
-  // the production gap
-  const productionGap = Math.max(0, expected - produced);
+  const add = (k, f) => { if (f > 1e-9) parts[k] = (parts[k] ?? 0) + f; };
+  const deficit = Math.max(0, expected - shown);
+  // the production gap, never more than the deficit (shown can exceed
+  // produced: a frame produced in the second before, counters' edges)
+  const productionGap = Math.min(deficit, Math.max(0, expected - produced));
   if (productionGap > 0) {
-    if (speed != null && speed < fullSpeed) {
+    if (speed == null) add("production:unknown", productionGap);
+    else if (speed < fullSpeed) {
+      // shared in proportion: each cause its ms over the time lost; when the
+      // counted ms exceed the time lost, scaled down together (no cause is
+      // favoured by its place in a list)
       const lostMs = Math.max(1, hostMs - (speed * hostMs) / 100);
+      const ms = Object.fromEntries(ATTRIBUTION_EMULATION_CAUSES.map((c) => [c, sumOf(ws, (w) => w.causes?.[c])]));
+      const counted = Object.values(ms).reduce((a, x) => a + x, 0);
+      const scale = counted > lostMs ? lostMs / counted : 1;
       let left = productionGap;
       for (const c of ATTRIBUTION_EMULATION_CAUSES) {
-        const ms = sumOf(ws, (w) => w.causes?.[c]);
-        const f = Math.min(left, (productionGap * ms) / lostMs);
+        const f = (productionGap * ms[c] * scale) / lostMs;
         add(`emulation:${c}`, f);
         left -= f;
       }
       add("emulation:unexplained", left);
     } else if (saturated.length) add(`game:${saturated.join("+")}`, productionGap);
-    // content only when the occupancy says nothing saturated: unknown, it is
-    // the game's own loss (never hidden as content)
-    else if (Object.values(occ).some((v) => v != null)) add("content", productionGap);
-    else add("game:unknown", productionGap);
+    else if (OCCUPANCY_THREADS.some((k) => occ[k] == null)) add("game:unknown", productionGap);
+    else if (OCCUPANCY_THREADS.every((k) => occ[k] < contentBusy) && produced < contentShare * expected) add("content", productionGap);
+    else add("game:marginal", productionGap);
   }
-  // the presentation gap
-  let presentationGap = Math.max(0, Math.min(produced, expected) - shown);
+  // the presentation gap: the rest of the deficit
+  let presentationGap = deficit - productionGap;
   if (presentationGap > 0) {
     let blocked = 0;
     for (const w of ws) for (const g of w.gaps ?? []) {
       const frameMs = 1000 / cadenceOf(w);
-      if (g.ms > frameMs * 1.5 && g.vis > 0 && (g.workerLagMs ?? w.workerLagMs ?? 0) >= g.ms / 2) blocked += Math.max(0, Math.round(g.ms / frameMs) - 1);
+      const lag = g.workerLagMs ?? w.workerLagMs;
+      if (g.ms > frameMs * 1.5 && g.vis != null && g.vis > 0 && lag != null && lag >= g.ms / 2) blocked += Math.max(0, Math.round(g.ms / frameMs) - 1);
     }
     blocked = Math.min(blocked, presentationGap);
     add("presenter-blocked", blocked);
     presentationGap -= blocked;
-    const noPresent = presents == null ? 0 : Math.min(presentationGap, Math.max(0, expected - presents));
-    add("no-present", noPresent);
-    add("old-frame", presentationGap - noPresent);
+    const beat = Math.min(presentationGap, sumOf(ws, (w) => w.beatFrames));
+    add("beat", beat);
+    presentationGap -= beat;
+    if (presents == null) add("pacing:unknown", presentationGap);
+    else {
+      const noPresent = Math.min(presentationGap, Math.max(0, expected - presents));
+      add("no-present", noPresent);
+      add("old-frame", presentationGap - noPresent);
+    }
   }
   const counted = sumOf(ws, (w) => sumOf(ATTRIBUTION_EMULATION_CAUSES, (c) => w.causes?.[c]));
   const markers = [];
@@ -866,15 +888,15 @@ export function attributeSecond(ws, { cadence, fullSpeed = ATTRIBUTION_FULL_SPEE
   return {
     t: ws[0].t, phase: ws[0].phase ?? null, hostMs, expected: round(expected, 1), produced, shown, presents,
     speed: speed == null ? null : round(speed, 1), occupancy: occ,
-    fluidity: expected > 0 ? round((100 * shown) / expected, 1) : null,
+    fluidity: expected > 0 ? round((100 * shown) / expected, 1) : null, deficit: round(deficit, 2),
     lostFrames: round(lost, 2), parts: Object.fromEntries(Object.entries(parts).map(([k, f]) => [k, round(f, 2)])), markers
   };
 }
 
 // The run's seconds, its dips (under `fluidity`), its hitches (presentation
-// gaps over `hitchMs`, each with the part of its second that dominates) and
-// the table: per phase, each part's frames over the dips, ranked.
-export function attributeDips(windows, { cadence, fluidity = ATTRIBUTION_FLUIDITY, hitchMs = ATTRIBUTION_HITCH_MS, secondMs = ATTRIBUTION_SECOND_MS, refreshHz = null, viHz = null, beatToleranceMs = 2000, ...opts } = {}) {
+// gaps over `hitchMs`, each classed by its own gap) and the table: per
+// phase, each part's frames over the dips, ranked.
+export function attributeDips(windows, { cadence, fluidity = ATTRIBUTION_FLUIDITY, hitchMs = ATTRIBUTION_HITCH_MS, secondMs = ATTRIBUTION_SECOND_MS, ...opts } = {}) {
   const ws = [...windows].filter((w) => Number.isFinite(w.t) && w.ms > 0).sort((a, b) => a.t - b.t);
   if (!(cadence > 0) && !ws.every((w) => w.cadence > 0)) throw new Error("attributeDips: the scene's cadence (frames per second) is the caller's: opts.cadence, or window.cadence on every window");
   const seconds = [];
@@ -889,46 +911,100 @@ export function attributeDips(windows, { cadence, fluidity = ATTRIBUTION_FLUIDIT
   if (group.length) seconds.push(group);
   const attributed = seconds.filter((g) => sumOf(g, (w) => w.ms) >= secondMs / 2).map((g) => attributeSecond(g, { cadence, ...opts })).filter(Boolean);
   const dips = attributed.filter((s) => s.fluidity != null && s.fluidity < fluidity);
-  markBeat(dips, { refreshHz, viHz, toleranceMs: beatToleranceMs, fullSpeed: opts.fullSpeed ?? ATTRIBUTION_FULL_SPEED, busy: opts.busy ?? ATTRIBUTION_BUSY });
   const hitches = [];
   for (const w of ws) for (const g of w.gaps ?? []) {
     if (!(g.ms > hitchMs)) continue;
     const frameMs = 1000 / (w.cadence ?? cadence);
-    hitches.push({ t: w.t, phase: w.phase ?? null, ms: round(g.ms, 1), frames: Math.max(1, Math.round(g.ms / frameMs) - 1), cause: hitchCause(g, w, { frameMs, fullSpeed: opts.fullSpeed ?? ATTRIBUTION_FULL_SPEED }) });
+    hitches.push({ t: w.t, phase: w.phase ?? null, ms: round(g.ms, 1), frames: Math.max(1, Math.round(g.ms / frameMs) - 1), cause: hitchCause(g, w, { frameMs }) });
   }
-  return { cadence, seconds: attributed.length, dips, hitches, table: attributionTable(dips, hitches) };
+  return { cadence: cadence ?? null, seconds: attributed.length, dips, hitches, table: attributionTable(dips, hitches) };
 }
 
-// A presentation gap's cause, from the gap itself: the core kept producing
-// VIs through it (within 1.5 frames) — the presentation side
-// (presenter-blocked when the presenting worker lagged half the gap, else
-// no-present); else the guest fell behind — its window's largest counted
-// cause (emulation:<cause>, else emulation:unexplained).
-export function hitchCause(gap, window, { frameMs, fullSpeed = ATTRIBUTION_FULL_SPEED } = {}) {
-  const expectedVis = gap.ms / frameMs;
-  if (gap.vis == null || gap.vis >= expectedVis - 1.5) {
-    return gap.vis > 0 && (gap.workerLagMs ?? window.workerLagMs ?? 0) >= gap.ms / 2 ? "presenter-blocked" : "no-present";
+// A presentation gap's cause, from the gap itself, when measured: the core
+// kept producing VIs through it (within 1.5 frames) — the presentation side
+// (presenter-blocked when the presenting worker lagged half the gap and its
+// lateness is known, else no-present); else the guest fell behind — its
+// window's largest counted cause (emulation:<cause>, else
+// emulation:unexplained). Not measured (vis null): unknown.
+export function hitchCause(gap, window, { frameMs } = {}) {
+  if (gap.vis == null || !(frameMs > 0)) return "unknown";
+  if (gap.vis >= gap.ms / frameMs - 1.5) {
+    const lag = gap.workerLagMs ?? window.workerLagMs;
+    return gap.vis > 0 && lag != null && lag >= gap.ms / 2 ? "presenter-blocked" : "no-present";
   }
   const top = ATTRIBUTION_EMULATION_CAUSES.map((c) => [c, window.causes?.[c] ?? 0]).sort((a, b) => b[1] - a[1])[0];
   return top && top[1] > 0 ? `emulation:${top[0]}` : "emulation:unexplained";
 }
 
-// The beat: no-present dips at full speed with nothing saturated, recurring
-// about a multiple (1 to 3) of 1 / |refresh − VI rate| apart, have their
-// no-present frames moved to "beat".
-export function markBeat(dips, { refreshHz, viHz, toleranceMs = 2000, fullSpeed = ATTRIBUTION_FULL_SPEED, busy = ATTRIBUTION_BUSY } = {}) {
-  if (!(refreshHz > 0) || !(viHz > 0) || refreshHz === viHz) return dips;
-  const period = 1000 / Math.abs(refreshHz - viHz);
-  const quiet = (d) => (d.speed ?? 0) >= fullSpeed && Object.values(d.occupancy ?? {}).every((v) => v == null || v < busy) &&
-    (d.parts["no-present"] ?? 0) > 0 && Object.entries(d.parts).filter(([k]) => k !== "content").sort((a, b) => b[1] - a[1])[0]?.[0] === "no-present";
-  const candidates = dips.filter(quiet);
-  for (const d of candidates) {
-    const recurs = candidates.some((o) => o !== d && [1, 2, 3].some((k) => Math.abs(Math.abs(o.t - d.t) - k * period) <= toleranceMs));
-    if (!recurs) continue;
-    d.parts.beat = round((d.parts.beat ?? 0) + d.parts["no-present"], 2);
-    delete d.parts["no-present"];
+// The screen's refresh, measured: the mean interval between the page's or
+// worker's animation frames, over the ones within 1.5 x the median (a
+// missed or late frame left out), from at least `minTicks` of them. Not the
+// presentation intervals: those follow the core's VI.
+export function measuredRefreshHz(ticks, { minTicks = 600 } = {}) {
+  if (!ticks || ticks.length < minTicks) return null;
+  const iv = ticks.slice(1).map((t, i) => t - ticks[i]).filter((d) => d > 0);
+  const sorted = [...iv].sort((a, b) => a - b);
+  const med = sorted[sorted.length >> 1];
+  const kept = iv.filter((d) => d <= 1.5 * med);
+  return kept.length ? 1000 / (kept.reduce((a, d) => a + d, 0) / kept.length) : null;
+}
+
+// The beat, proven frame by frame. vi: the core's VI outputs { t, index };
+// ticks: the screen's animation frames { t, vi (index shown), submits }.
+// Each repeat (a tick showing the same picture as the one before while the
+// next one was produced) has a missed frame, the next VI, whose arrival
+// phase on the measured vsync grid (t − the tick before it, mod the period)
+// is read. A screen at refresh Hz and a core at VI Hz drift by one period
+// every 1/|refresh − VI| s: their repeats gather at ONE phase, the boundary.
+// Proven when the refresh and VI rates differ by more than `minDriftHz`, at
+// least `minShare` of the repeats' missed frames lie within `deltaMs` of the
+// densest phase (random repeats spread over the period: a few per cent),
+// and, per repeat, the phase around it (the median over ±`smooth` VIs) lies
+// at that boundary too (the phase crossing it, not one late frame). Returns
+// { refreshHz, viHz, boundaryMs, share, proven: [tick t] } or a reason.
+export function beatEvidence({ vi, ticks }, { deltaMs = 1, minShare = 0.5, minDriftHz = 0.005, smooth = 30, minRepeats = 6 } = {}) {
+  const refreshHz = measuredRefreshHz(ticks?.map((k) => k.t));
+  if (!refreshHz) return { proven: [], reason: "refresh not measured (too few animation frames)" };
+  if (!vi || vi.length < 2) return { proven: [], refreshHz, reason: "no VI timeline" };
+  const viHz = ((vi.length - 1) * 1000) / (vi.at(-1).t - vi[0].t);
+  if (Math.abs(refreshHz - viHz) <= minDriftHz) return { proven: [], refreshHz, viHz, reason: "VI and refresh rates do not drift" };
+  const T = 1000 / refreshHz;
+  const tickTimes = ticks.map((k) => k.t);
+  const prevTick = (t) => {
+    let lo = 0, hi = tickTimes.length - 1;
+    if (t < tickTimes[0]) return null;
+    while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (tickTimes[mid] <= t) lo = mid; else hi = mid; }
+    return tickTimes[hi] <= t ? tickTimes[hi] : tickTimes[lo];
+  };
+  const phase = (t) => { const p = prevTick(t); return p == null || t - p > 1.5 * T ? null : (t - p) % T; };
+  const byIndex = new Map(vi.map((v, i) => [v.index, i]));
+  const phases = vi.map((v) => phase(v.t));
+  const dist = (a, b) => { const d = Math.abs(a - b) % T; return Math.min(d, T - d); };
+  // repeats and their missed frame's phase
+  const repeats = [];
+  for (let j = 1; j < ticks.length; j += 1) {
+    const a = ticks[j - 1], b = ticks[j];
+    if (!(a.submits > 0) || a.vi == null || a.vi < 0) continue;
+    if (b.vi !== a.vi && b.submits > 0) continue;
+    const k = byIndex.get(a.vi + 1);
+    if (k == null || vi[k].t > b.t + T) continue; // not produced yet: nothing to show
+    if (phases[k] != null) repeats.push({ t: b.t, k, phase: phases[k] });
   }
-  return dips;
+  if (repeats.length < minRepeats) return { proven: [], refreshHz, viHz, reason: `${repeats.length} repeats` };
+  // the densest phase (a window of ±deltaMs around each repeat's phase)
+  let boundary = null, best = -1;
+  for (const r of repeats) {
+    const n = repeats.filter((o) => dist(o.phase, r.phase) <= deltaMs).length;
+    if (n > best) { best = n; boundary = r.phase; }
+  }
+  const share = best / repeats.length;
+  if (share < minShare) return { proven: [], refreshHz, viHz, boundaryMs: round(boundary, 3), share: round(share, 3), reason: "repeats spread over the period: no common boundary" };
+  const smoothedAt = (k) => {
+    const xs = phases.slice(Math.max(0, k - smooth), k + smooth + 1).filter((p) => p != null).map((p) => dist(p, boundary)).sort((a, b) => a - b);
+    return xs.length ? xs[xs.length >> 1] : null;
+  };
+  const proven = repeats.filter((r) => dist(r.phase, boundary) <= deltaMs && (smoothedAt(r.k) ?? Infinity) <= deltaMs).map((r) => r.t);
+  return { refreshHz, viHz, boundaryMs: round(boundary, 3), share: round(share, 3), repeats: repeats.length, proven };
 }
 
 // Per phase (or "all"): each part's frames over the dips, ranked, and the
@@ -960,13 +1036,31 @@ export function attributionTable(dips, hitches = []) {
   }));
 }
 
+// A scene's cadence per second, as the site learns it: VI / n (n the VIs per
+// new frame, rounded), learned only in a second at full speed with every
+// measured thread under `contentBusy` (margin left), else the last learned
+// one; before any, the VI rate. seconds: [{ t, vis, produced, speed,
+// occupancy }].
+export function learnedCadences(seconds, { fullSpeed = ATTRIBUTION_FULL_SPEED, contentBusy = ATTRIBUTION_CONTENT_BUSY, threads = OCCUPANCY_THREADS } = {}) {
+  let learned = null;
+  return seconds.map((s) => {
+    const margin = threads.every((k) => s.occupancy?.[k] != null && s.occupancy[k] < contentBusy);
+    if (s.speed != null && s.speed >= fullSpeed && margin && s.vis > 0 && s.produced > 0) learned = s.vis / Math.max(1, Math.round(s.vis / s.produced));
+    return learned ?? (s.vis > 0 ? s.vis : null);
+  });
+}
+
 // drop-meter's windows (windowsOf) and its timeline as attribution windows:
 // produced = XFB copies, shown = distinct new pictures displayed (--display),
 // presents and the presentation gaps (with the VIs produced during each),
-// causes from the counters, the samplers' lateness.
-export function dropWindowsForAttribution(windows, { presents = [], vi = [], displayed = null, rows = [], page = [] } = {}) {
+// causes from the counters, the samplers' lateness, occupancy of the CPU
+// thread (awake share) and of the GPU thread (working share; replay is not
+// sampled: null, so never content), the cadence learned per second from
+// cpu and gpu (lib: learnedCadences), and the beat frames proven per window.
+export function dropWindowsForAttribution(windows, { presents = [], vi = [], displayed = null, rows = [] } = {}) {
+  if (!displayed) throw new Error("attribution needs the pictures displayed: run drop-meter with --display");
   const distinct = [];
-  if (displayed) for (const f of displayed) if (f.submits > 0 && (distinct.length === 0 || f.vi !== distinct.at(-1).vi)) distinct.push(f);
+  for (const f of displayed) if (f.submits > 0 && (distinct.length === 0 || f.vi !== distinct.at(-1).vi)) distinct.push(f);
   const countIn = (points, t0, t1) => points.reduce((a, p) => a + (p.t >= t0 && p.t < t1 ? 1 : 0), 0);
   const gapsIn = (t0, t1) => {
     const out = [];
@@ -977,17 +1071,54 @@ export function dropWindowsForAttribution(windows, { presents = [], vi = [], dis
     }
     return out;
   };
-  return windows.map((w) => {
+  const beat = beatEvidence({ vi: vi.map((v) => ({ t: v.t, index: v.sinceBoot })), ticks: displayed });
+  const out = windows.map((w) => {
     const t1 = w.t0 + STEP_MS;
     return {
-      t: w.t0, ms: STEP_MS, phase: w.label ?? null, speed: w.speed,
-      produced: w.xfb, shown: displayed ? countIn(distinct, w.t0, t1) : null, presents: w.presents,
-      gaps: gapsIn(w.t0, t1),
-      // the CPU thread's share awake (not in its throttle sleep), the GPU
-      // thread's share working; the replay's is not sampled here
+      t: w.t0, ms: STEP_MS, phase: w.label ?? null, speed: w.speed, vis: countIn(vi, w.t0, t1),
+      produced: w.xfb, shown: countIn(distinct, w.t0, t1), presents: w.presents,
+      gaps: gapsIn(w.t0, t1), beatFrames: countIn(beat.proven.map((t) => ({ t })), w.t0, t1),
       occupancy: { cpu: w.sleptMs == null ? null : round(Math.max(0, 1 - w.sleptMs / STEP_MS), 3), gpu: w.gpuWorkMs == null ? null : Math.min(1, w.gpuWorkMs / STEP_MS), replay: null },
       causes: { ...w.causes, slot: w.causes.slot ?? null },
       mainLagMs: w.causes.mainPause ?? null, workerLagMs: w.causes.workerPause ?? null
+    };
+  });
+  // the cadence per second, learned on cpu and gpu (replay is not sampled)
+  const perSecond = [];
+  for (let i = 0; i < out.length; i += 10) {
+    const ws = out.slice(i, i + 10);
+    const occ = (k) => (ws.every((w) => w.occupancy[k] != null) ? Math.max(...ws.map((w) => w.occupancy[k])) : null);
+    perSecond.push({ vis: sumOf(ws, (w) => w.vis) * (1000 / sumOf(ws, (w) => w.ms)), produced: sumOf(ws, (w) => w.produced) * (1000 / sumOf(ws, (w) => w.ms)), speed: ws.every((w) => w.speed != null) ? sumOf(ws, (w) => w.speed) / ws.length : null, occupancy: { cpu: occ("cpu"), gpu: occ("gpu") } });
+  }
+  const cadences = learnedCadences(perSecond, { threads: ["cpu", "gpu"] });
+  out.forEach((w, i) => { w.cadence = cadences[Math.floor(i / 10)] ?? null; });
+  out.beat = beat;
+  return out;
+}
+
+// parcours (lib/parcours.mjs deriveSeconds: one row per second) as
+// attribution windows. rows[i] is the second ending at raw.samples[i + 1]
+// (samples[0] is the origin); the samples give the exact presentation times
+// (gaps). A gap's VIs and the worker's lateness are taken only when the
+// sample measured them (gapVis, workerLagMs): never estimated, so a gap
+// without them is classed unknown, and presenter-blocked needs them. The
+// beat needs per-frame VI and vsync times: not proven from parcours rows.
+export function parcoursWindowsForAttribution(rows, raw = null) {
+  return rows.map((r, i) => {
+    const sample = raw?.samples?.[i + 1] ?? null;
+    const times = Array.isArray(sample?.presents) ? [...sample.presents].sort((a, b) => a - b) : null;
+    const prev = Array.isArray(raw?.samples?.[i]?.presents) ? raw.samples[i].presents.at(-1) : null;
+    const gaps = [];
+    if (times) for (let k = 0; k < times.length; k += 1) {
+      const from = k === 0 ? prev : times[k - 1];
+      if (from == null) continue;
+      gaps.push({ ms: times[k] - from, vis: sample.gapVis?.[k] ?? null, workerLagMs: sample.gapWorkerLagMs?.[k] ?? null });
+    }
+    return {
+      t: (r.t - 1) * 1000, ms: 1000, phase: r.phase ?? null, cadence: r.cadence ?? null, speed: r.speed ?? null,
+      produced: r.producedFps ?? null, shown: r.newFps ?? null, presents: r.presents ?? null, gaps,
+      occupancy: { cpu: r.cpuBusy ?? null, gpu: r.gpuBusy ?? null, replay: r.replayBusy ?? null },
+      workerLagMs: r.workerLagMs ?? null
     };
   });
 }
@@ -1001,43 +1132,4 @@ export function attributionLines(result) {
     if (r.hitches) lines.push(`  hitches > ${ATTRIBUTION_HITCH_MS} ms: ${r.hitches} (${r.hitchFrames} frames): ${Object.entries(r.hitchCauses).sort((a, b) => b[1] - a[1]).map(([c, f]) => `${c} ${f}`).join(", ")}`);
   }
   return lines;
-}
-
-// parcours (lib/parcours.mjs deriveSeconds: one row per second) as
-// attribution windows. rows[i] is the second ending at raw.samples[i + 1]
-// (samples[0] is the origin); the samples give the exact presentation times
-// (gaps). parcours has no per-gap VI count nor worker lateness: a gap's VIs
-// are the second's VI rate over its length (scaled by the speed), and
-// presenter-blocked is not judged (needs workerLagMs).
-export function parcoursWindowsForAttribution(rows, raw = null) {
-  return rows.map((r, i) => {
-    const sample = raw?.samples?.[i + 1] ?? null;
-    const times = Array.isArray(sample?.presents) ? [...sample.presents].sort((a, b) => a - b) : null;
-    const prev = Array.isArray(raw?.samples?.[i]?.presents) ? raw.samples[i].presents.at(-1) : null;
-    const viPerMs = (r.viRate ?? 0) / 1000;
-    const gaps = [];
-    if (times) for (let k = 0; k < times.length; k += 1) {
-      const from = k === 0 ? prev : times[k - 1];
-      if (from == null) continue;
-      const ms = times[k] - from;
-      gaps.push({ ms, vis: Math.round(ms * viPerMs * Math.min(1, (r.speed ?? 100) / 100)) });
-    }
-    return {
-      t: (r.t - 1) * 1000, ms: 1000, phase: r.phase ?? null, cadence: r.cadence ?? null, speed: r.speed ?? null,
-      produced: r.producedFps ?? null, shown: r.newFps ?? null, presents: r.presents ?? null, gaps,
-      occupancy: { cpu: r.cpuBusy ?? null, gpu: r.gpuBusy ?? null, replay: r.replayBusy ?? null }
-    };
-  });
-}
-
-// The core's VI rate (frames counter over host time) and the screen's
-// refresh (the median presentation interval under `maxMs`) of a parcours
-// raw record, for the beat: null when unknown.
-export function parcoursRates(raw, { maxMs = ATTRIBUTION_HITCH_MS } = {}) {
-  const s = (raw?.samples ?? []).filter((x) => x.counters?.frame != null && x.counters?.t != null);
-  const viHz = s.length > 1 ? ((s.at(-1).counters.frame - s[0].counters.frame) * 1000) / (s.at(-1).counters.t - s[0].counters.t) : null;
-  const times = (raw?.samples ?? []).flatMap((x) => (Array.isArray(x.presents) ? x.presents : [])).sort((a, b) => a - b);
-  const intervals = times.slice(1).map((t, i) => t - times[i]).filter((d) => d > 0 && d < maxMs).sort((a, b) => a - b);
-  const refreshHz = intervals.length ? 1000 / intervals[intervals.length >> 1] : null;
-  return { viHz: viHz > 0 ? viHz : null, refreshHz };
 }

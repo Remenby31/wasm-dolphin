@@ -283,7 +283,7 @@ export function markersOnVi(raw, vi) {
 }
 
 // One visit's analysis from its raw record (pure but for the reference).
-export function analyzeVisit(raw, { native = null, refreshHz = null } = {}) {
+export function analyzeVisit(raw, { native = null } = {}) {
   // (raw is reassigned below with the markers placed on the VI ring)
   if (raw.error) return { error: raw.error };
   const timeline = mergeTimeline(raw.chunks);
@@ -302,11 +302,14 @@ export function analyzeVisit(raw, { native = null, refreshHz = null } = {}) {
   const displayed = timeline.displayed?.length ? timeline.displayed.filter(span) : null;
   const phases = phaseSummaries({ windows, presents, vi, tps: raw.tps, rows, displayed, page });
   // Where the smoothness went (lib/drops.mjs attributeDips): with the
-  // pictures displayed (--display) only; the cadence is the run's own VI rate.
+  // pictures displayed (--display) only; the cadence learned per second, the
+  // run's VI rate before the first one; the beat proven frame by frame.
   const viHz = vi.length > 1 ? (vi.length - 1) / ((vi.at(-1).t - vi[0].t) / 1000) : null;
-  const attribution = displayed && viHz > 0
-    ? attributeDips(dropWindowsForAttribution(windows, { presents: timeline.presents, vi: timeline.vi, displayed, rows, page }), { cadence: viHz, refreshHz, viHz })
-    : null;
+  let attribution = null;
+  if (displayed && viHz > 0) {
+    const aw = dropWindowsForAttribution(windows, { presents: timeline.presents, vi: timeline.vi, displayed: timeline.displayed, rows });
+    attribution = { ...attributeDips(aw, { cadence: viHz }), beat: { ...aw.beat, proven: aw.beat.proven.length } };
+  }
   if (native) for (const p of phases) {
     const ws = windows.filter((w) => w.label === p.label && w.guestStart != null);
     p.nativeFps = ws.length ? nativeFps(native, ws[0].guestStart, ws.at(-1).guestStart + 0.1) : null;
@@ -328,7 +331,7 @@ export function analyzeVisit(raw, { native = null, refreshHz = null } = {}) {
     regionsDone, rssPeakMB: rss.length ? Math.max(...rss) : null,
     summary: { ...dropSummary({ windows, presents, vi, tps: raw.tps, rows: rows.filter(span), displayed, page: page.filter(span) }), newFramesPerSec: newFramesRate(raw.newFramesStart, raw.newFramesEnd), loads: loads.length, loadExcessMs: loads.reduce((a, l) => a + l.excessMs, 0), rssPeakMB: rss.length ? Math.max(...rss) : null, regionsDoneMs: regionsDone?.hostMsFromLaunch ?? null },
     phases, loads, worst: worstDrops(events), drops: events.length,
-    attribution: attribution && { cadence: round(attribution.cadence, 3), seconds: attribution.seconds, dips: attribution.dips, hitches: attribution.hitches },
+    attribution: attribution && { viHz: round(viHz, 3), seconds: attribution.seconds, beat: attribution.beat, dips: attribution.dips, hitches: attribution.hitches },
     // the 100 ms timeline, compact: [ms from start, speed %, VI/s, presents, max present gap, lost ms, top cause]
     timeline: windows.map((w) => {
       const top = Object.entries(w.causes).sort((a, b) => (b[1] ?? 0) - (a[1] ?? 0))[0];
@@ -583,14 +586,14 @@ function logRun(log, tag, a) {
 // by lib/bench-load.mjs and kept in raw.gate), else --max-load.
 export const visitLimit = (raw, maxLoad) => raw?.gate?.limit ?? loadLimit(maxLoad);
 
-async function analyzeDir(dir, native, log, noiseFile = null, { attribute = false, refreshHz = null } = {}) {
+async function analyzeDir(dir, native, log, noiseFile = null, { attribute = false } = {}) {
   const meta = JSON.parse(readFileSync(path.join(dir, "summary.json"), "utf8"));
   const noise = noiseFile ? readNoise(noiseFile, { ...meta, cpuModel: meta.machine?.cpuModel, powerSource: meta.machine?.power?.source }) : null;
   const analyses = [];
   for (const f of runFiles(readdirSync(dir), /^raw-(candidate|baseline)-(\d+)-v(\d+)(-retry)?\.json\.gz$/)) {
     const [, side, run, visit] = f.match(/raw-(\w+)-(\d+)-v(\d+)/);
     const raw = JSON.parse(gunzipSync(readFileSync(path.join(dir, f))));
-    const analysis = analyzeVisit(raw, { native, refreshHz });
+    const analysis = analyzeVisit(raw, { native });
     analysis.overloaded = analysis.load1?.median > visitLimit(raw, meta.maxLoad);
     analysis.powerDrained = visitPowerDrained(raw);
     analyses.push({ side, run: Number(run), visit: Number(visit), analysis });
@@ -600,10 +603,11 @@ async function analyzeDir(dir, native, log, noiseFile = null, { attribute = fals
   const summary = writeSummary(dir, { ...meta, reanalyzedAt: new Date().toISOString(), native: Boolean(native) }, analyses, meta.visits ?? 1, { noise });
   for (const l of summary.human) log(l);
   if (attribute) {
+    if (!analyses.some((a) => a.analysis?.attribution)) throw new Error(`--attribute: no run of ${dir} has the pictures displayed (record it with --display)`);
     const out = attributionAcross(analyses);
     writeFileSync(path.join(dir, "attribution.json"), JSON.stringify(out, null, 1) + "\n");
     for (const g of out) {
-      log(`attribution ${g.side} visit ${g.visit} (${g.runs} runs, ${g.seconds} s, ${g.dips} dip seconds, ${g.hitches} hitches):`);
+      log(`attribution ${g.side} visit ${g.visit} (${g.runs} runs, ${g.seconds} s, ${g.dips} dip seconds, ${g.hitches} hitches; beat ${g.beat}):`);
       for (const l of attributionLines({ table: g.table })) log(`  ${l}`);
     }
   }
@@ -616,14 +620,15 @@ export function attributionAcross(analyses) {
   for (const { side, visit, analysis: a } of analyses) {
     if (!a?.attribution || a.error || a.overloaded || a.powerDrained) continue;
     const key = `${side}|${visit}`;
-    if (!groups.has(key)) groups.set(key, { side, visit, runs: 0, seconds: 0, dips: [], hitches: [] });
+    if (!groups.has(key)) groups.set(key, { side, visit, runs: 0, seconds: 0, dips: [], hitches: [], beats: [] });
     const g = groups.get(key);
     g.runs += 1;
+    g.beats.push(a.attribution.beat?.reason ?? `proven ${a.attribution.beat?.proven} (boundary ${a.attribution.beat?.boundaryMs} ms, share ${a.attribution.beat?.share}, refresh ${round(a.attribution.beat?.refreshHz, 3)} Hz, VI ${round(a.attribution.beat?.viHz, 3)} Hz)`);
     g.seconds += a.attribution.seconds;
     g.dips.push(...a.attribution.dips);
     g.hitches.push(...a.attribution.hitches);
   }
-  return [...groups.values()].map((g) => ({ side: g.side, visit: g.visit, runs: g.runs, seconds: g.seconds, dips: g.dips.length, hitches: g.hitches.length, table: attributionTable(g.dips, g.hitches) }));
+  return [...groups.values()].map((g) => ({ side: g.side, visit: g.visit, runs: g.runs, seconds: g.seconds, dips: g.dips.length, hitches: g.hitches.length, beat: g.beats.join("; "), table: attributionTable(g.dips, g.hitches) }));
 }
 
 // The guard's false-positive rate, from real runs of ONE tree: random
@@ -694,7 +699,7 @@ async function main() {
       candidate: { type: "string" }, baseline: { type: "string" }, noise: { type: "string" }, trend: { type: "string" }, "no-confirm": { type: "boolean", default: false }, display: { type: "boolean", default: false }, "noise-stale-ok": { type: "boolean", default: false },
       "false-positives": { type: "string", multiple: true }, draws: { type: "string", default: "2000" },
       config: { type: "string", default: "product" }, query: { type: "string" }, "baseline-query": { type: "string" }, "sample-ms": { type: "string", default: "50" },
-      native: { type: "string" }, analyze: { type: "string" }, attribute: { type: "boolean", default: false }, "refresh-hz": { type: "string" }, trace: { type: "string" }, state: { type: "string" }, "state-delay-ms": { type: "string", default: "0" }, shots: { type: "boolean", default: false },
+      native: { type: "string" }, analyze: { type: "string" }, attribute: { type: "boolean", default: false }, trace: { type: "string" }, state: { type: "string" }, "state-delay-ms": { type: "string", default: "0" }, shots: { type: "boolean", default: false },
       "region-counters": { type: "boolean", default: false }, "pc-window": { type: "string" }, "integrity-allow": { type: "string" },
       "max-load": { type: "string" }, "load-wait": { type: "string", default: "300" }, "lock-wait": { type: "string", default: "14400" }, "calm-wait": { type: "string" }, "no-lock": { type: "boolean", default: false },
       port: { type: "string", default: process.env.HARNESS_PORT }, out: { type: "string" }
@@ -702,10 +707,8 @@ async function main() {
   });
   const log = (m) => console.log(`[drops] ${m}`);
   const native = values.native ? JSON.parse(readFileSync(values.native, "utf8")) : null;
-  if (values.analyze) {
-    const refreshHz = values["refresh-hz"] === undefined ? null : num(values, "refresh-hz", { min: 1 });
-    return analyzeDir(path.resolve(values.analyze), native, log, values.noise ?? null, { attribute: values.attribute, refreshHz });
-  }
+  if (values.attribute && !values.analyze) throw new Error("--attribute works on recorded runs: drop-meter.mjs --analyze <dir> --attribute (record them with --display)");
+  if (values.analyze) return analyzeDir(path.resolve(values.analyze), native, log, values.noise ?? null, { attribute: values.attribute });
   if (values["false-positives"]) return falsePositives(values["false-positives"], { noiseFile: values.noise ?? null, draws: num(values, "draws", { min: 10, int: true }), log });
   // A trace the site's drop HUD recorded (salon, ?engine.drophud=1): a
   // player's real session through the same analysis.
