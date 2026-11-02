@@ -9,7 +9,7 @@
 //     [--noise <A/A>/summary.json] [--trend measures/drops/trend.jsonl]
 //     [--scenario harness/probes/drop-scenario.json] [--state scene.sav [--state-delay-ms N]]
 //     [--config product | --query "..."] [--baseline-query "..."] [--sample-ms 50] [--native ref.json]
-//     [--shots] [--display] [--region-counters] [--pc-window FROM-TO] [--integrity-allow a,b] [--max-load L] [--load-wait 300] [--lock-wait 14400 | --no-lock]
+//     [--shots] [--display] [--pipeline] [--region-counters] [--pc-window FROM-TO] [--integrity-allow a,b] [--max-load L] [--load-wait 300] [--lock-wait 14400 | --no-lock]
 //     [--out dir]
 //   node harness/probes/drop-meter.mjs --analyze <out dir> [--native ref.json]
 //   node harness/probes/drop-meter.mjs --trace drop-trace-….json   (salon's dev HUD)
@@ -45,6 +45,10 @@
 // counters over each visit (from the boot or the state load to the end); a
 // visit where one moved is left out of the noise and fails the batch (exit 2,
 // "INTEGRITY ..." in the summary), whatever the speeds say.
+// --pipeline (implies --display): each VI output followed to the screen (the
+// core's swap ring, patch 0214, and the worker's pipeline log), so that
+// --analyze --attribute splits the BeginFrames that showed nothing new by
+// cause (lib/no-present.mjs, no-present.json); without it, by the VI's phase.
 // Raw data is kept (raw-<run>-v<visit>.json.gz): --analyze re-reads it, e.g.
 // with a native reference (research/native-dolphin, guest seconds and game
 // frames of the same scenario) to compare game frames per guest second.
@@ -68,6 +72,7 @@ import { savePng } from "../lib/session.mjs";
 import { median, round } from "../lib/stats.mjs";
 import { machineSnapshot, powerDrained, powerSnapshot, sampleChromeRss, MIN_BATTERY_PERCENT } from "../lib/system.mjs";
 import { mergeTimeline } from "../lib/timeline.mjs";
+import { analyzeNoPresent, noPresentLines, sumNoPresent } from "../lib/no-present.mjs";
 import { num, sideOrder, STATE_ROUTE } from "./race-perf.mjs";
 import { newFramesRate, visualProbeCheck } from "../lib/matrix.mjs";
 import { integrityBrief, integrityOf, parseIntegrityAllow, readIntegrity, treeHasIntegrity } from "../lib/integrity.mjs";
@@ -143,7 +148,7 @@ async function playVisit(o, server, profileDir, shotDir, visit) {
     raw.launchT = t0;
     raw.power = powerSnapshot(); // mains or battery, this visit
     // --display: the worker's rAF records what each BeginFrame put on screen.
-    await bootIso(page, { url: `${server.base}?${o.query}`, iso: o.iso, timeoutMs: 120000, harness: o.display ? { displayed: true } : {} });
+    await bootIso(page, { url: `${server.base}?${o.query}`, iso: o.iso, timeoutMs: 120000, harness: o.display ? { displayed: true, ...(o.pipeline ? { pipeline: true } : {}) } : {} });
     raw.bootMs = Date.now() - t0;
     raw.browser = await page.evaluate(() => navigator.userAgent.match(/(?:Headless)?Chrome\/[\d.]+/)?.[0] ?? navigator.userAgent).catch(() => null);
     await context.assertInvisible("after boot");
@@ -282,6 +287,41 @@ export function markersOnVi(raw, vi) {
   return { markers, endT };
 }
 
+// Why BeginFrames showed nothing new (lib/no-present.mjs), per phase of the
+// scenario (from its marker to the next one, the last to the end): with the
+// pipeline diag (--pipeline) each miss is followed down the pipeline, else
+// only the VI's phase on the BeginFrame grid speaks. The frames themselves
+// are left out (the table only).
+export function noPresentByPhase(raw, timeline, rows) {
+  const tl = { vi: timeline.vi, displayed: timeline.displayed, swaps: timeline.swaps, pipeline: timeline.pipeline };
+  const out = { swapsWhy: timeline.swapsWhy ?? null, swapsLost: timeline.swapsLost ?? 0, pipelineLost: timeline.pipelineLost ?? 0, phases: {} };
+  const markers = [...(raw.markers ?? [])].filter((m) => Number.isFinite(m.t)).sort((a, b) => a.t - b.t);
+  markers.forEach((m, i) => {
+    const { frames, ...table } = analyzeNoPresent(tl, { from: m.t, to: markers[i + 1]?.t ?? raw.endT ?? Infinity, rows });
+    let key = m.label ?? `phase-${i}`;
+    while (out.phases[key]) key += "'";
+    out.phases[key] = table;
+  });
+  return out;
+}
+
+// The no-present tables of every usable run (as attributionAcross), per side,
+// visit and phase, summed.
+export function noPresentAcross(analyses) {
+  const groups = new Map();
+  for (const { side, visit, analysis: a } of analyses) {
+    if (!a?.noPresent || a.error || a.overloaded || a.powerDrained) continue;
+    for (const [phase, table] of Object.entries(a.noPresent.phases)) {
+      const key = `${side}|${visit}|${phase}`;
+      if (!groups.has(key)) groups.set(key, { side, visit, phase, tables: [], pipeline: true });
+      const g = groups.get(key);
+      g.tables.push(table);
+      g.pipeline &&= table.hasSwaps && table.hasPipeline;
+    }
+  }
+  return [...groups.values()].map((g) => ({ side: g.side, visit: g.visit, phase: g.phase, pipeline: g.pipeline, ...sumNoPresent(g.tables) }));
+}
+
 // One visit's analysis from its raw record (pure but for the reference).
 export function analyzeVisit(raw, { native = null } = {}) {
   // (raw is reassigned below with the markers placed on the VI ring)
@@ -310,6 +350,7 @@ export function analyzeVisit(raw, { native = null } = {}) {
     const aw = dropWindowsForAttribution(windows, { presents: timeline.presents, vi: timeline.vi, displayed: timeline.displayed, rows });
     attribution = { ...attributeDips(aw, { cadence: viHz }), beat: { ...aw.beat, proven: aw.beat.proven.length } };
   }
+  const noPresent = displayed ? noPresentByPhase(raw, timeline, rows) : null;
   if (native) for (const p of phases) {
     const ws = windows.filter((w) => w.label === p.label && w.guestStart != null);
     p.nativeFps = ws.length ? nativeFps(native, ws[0].guestStart, ws.at(-1).guestStart + 0.1) : null;
@@ -332,6 +373,7 @@ export function analyzeVisit(raw, { native = null } = {}) {
     summary: { ...dropSummary({ windows, presents, vi, tps: raw.tps, rows: rows.filter(span), displayed, page: page.filter(span) }), newFramesPerSec: newFramesRate(raw.newFramesStart, raw.newFramesEnd), loads: loads.length, loadExcessMs: loads.reduce((a, l) => a + l.excessMs, 0), rssPeakMB: rss.length ? Math.max(...rss) : null, regionsDoneMs: regionsDone?.hostMsFromLaunch ?? null },
     phases, loads, worst: worstDrops(events), drops: events.length,
     attribution: attribution && { viHz: round(viHz, 3), seconds: attribution.seconds, beat: attribution.beat, dips: attribution.dips, hitches: attribution.hitches },
+    noPresent,
     // the 100 ms timeline, compact: [ms from start, speed %, VI/s, presents, max present gap, lost ms, top cause]
     timeline: windows.map((w) => {
       const top = Object.entries(w.causes).sort((a, b) => (b[1] ?? 0) - (a[1] ?? 0))[0];
@@ -555,8 +597,8 @@ export function readNoise(file, expect = null) {
   if (s.probe !== "drop-meter") throw new Error(`--noise ${file}: not a drop-meter summary`);
   if (expect) {
     // unset in a summary from before the option: the default (false, 0)
-    const unset = { display: false, stateDelayMs: 0 };
-    const differ = ["probeVersion", "scenario", "state", "stateDelayMs", "query", "sampleMs", "display"].filter((k) => (s[k] ?? unset[k] ?? null) !== (expect[k] ?? unset[k] ?? null));
+    const unset = { display: false, pipeline: false, stateDelayMs: 0 };
+    const differ = ["probeVersion", "scenario", "state", "stateDelayMs", "query", "sampleMs", "display", "pipeline"].filter((k) => (s[k] ?? unset[k] ?? null) !== (expect[k] ?? unset[k] ?? null));
     const named = { cpuModel: [s.machine?.cpuModel, expect.cpuModel], browser: [s.browser, expect.browser] };
     // the same machine, and the same browser when both runs say which
     if (expect.cpuModel && s.machine?.cpuModel && s.machine.cpuModel !== expect.cpuModel) differ.push("cpuModel");
@@ -609,6 +651,12 @@ async function analyzeDir(dir, native, log, noiseFile = null, { attribute = fals
     for (const g of out) {
       log(`attribution ${g.side} visit ${g.visit} (${g.runs} runs, ${g.seconds} s, ${g.dips} dip seconds, ${g.hitches} hitches; beat ${g.beat}):`);
       for (const l of attributionLines({ table: g.table })) log(`  ${l}`);
+    }
+    const np = noPresentAcross(analyses);
+    writeFileSync(path.join(dir, "no-present.json"), JSON.stringify(np, null, 1) + "\n");
+    for (const g of np) {
+      log(`no-present ${g.side} visit ${g.visit} ${g.phase} (${g.pipeline ? "pipeline recorded" : "VI phase only: record with --pipeline"}):`);
+      for (const l of noPresentLines(g)) log(`  ${l}`);
     }
   }
 }
@@ -696,7 +744,7 @@ async function main() {
     options: {
       iso: { type: "string" }, scenario: { type: "string", default: path.join(REPO_ROOT, "harness", "probes", "drop-scenario.json") },
       runs: { type: "string", default: "6" }, visits: { type: "string", default: "2" },
-      candidate: { type: "string" }, baseline: { type: "string" }, noise: { type: "string" }, trend: { type: "string" }, "no-confirm": { type: "boolean", default: false }, display: { type: "boolean", default: false }, "noise-stale-ok": { type: "boolean", default: false },
+      candidate: { type: "string" }, baseline: { type: "string" }, noise: { type: "string" }, trend: { type: "string" }, "no-confirm": { type: "boolean", default: false }, display: { type: "boolean", default: false }, pipeline: { type: "boolean", default: false }, "noise-stale-ok": { type: "boolean", default: false },
       "false-positives": { type: "string", multiple: true }, draws: { type: "string", default: "2000" },
       config: { type: "string", default: "product" }, query: { type: "string" }, "baseline-query": { type: "string" }, "sample-ms": { type: "string", default: "50" },
       native: { type: "string" }, analyze: { type: "string" }, attribute: { type: "boolean", default: false }, trace: { type: "string" }, state: { type: "string" }, "state-delay-ms": { type: "string", default: "0" }, shots: { type: "boolean", default: false },
@@ -741,14 +789,14 @@ async function main() {
     iso, scenario, query: query.toString(), baselineQuery: baselineQuery?.toString() ?? null, runs: num(values, "runs", { min: 1, int: true }), visits: num(values, "visits", { min: 1, int: true }),
     sampleMs: num(values, "sample-ms", { min: 10 }), port: num(values, "port", { min: 1, int: true }),
     state: values.state ? path.resolve(values.state) : null, stateDelayMs: num(values, "state-delay-ms", { min: 0, int: true }),
-    regionCounters: values["region-counters"], display: values.display, pcWindow: values["pc-window"] ? values["pc-window"].split("-").map(Number) : null,
+    regionCounters: values["region-counters"], display: values.display || values.pipeline, pipeline: values.pipeline, pcWindow: values["pc-window"] ? values["pc-window"].split("-").map(Number) : null,
     maxLoad: values["max-load"] ? num(values, "max-load", { min: 0.1 }) : defaultMaxLoad(), loadWait: num(values, "load-wait", { min: 0 }),
     integrityAllow: parseIntegrityAllow(values["integrity-allow"])
   };
   // The noise's measure checked before the lock; its power source once the
   // lock is held (the lock waits for mains: on battery now is no mismatch).
   const machine = machineSnapshot();
-  const noiseExpect = { probeVersion: PROBE_VERSION, scenario: path.basename(values.scenario), state: o.state ? path.basename(o.state) : null, stateDelayMs: o.state ? o.stateDelayMs : 0, display: o.display, query: o.baselineQuery ?? o.query, sampleMs: o.sampleMs, cpuModel: machine.cpuModel };
+  const noiseExpect = { probeVersion: PROBE_VERSION, scenario: path.basename(values.scenario), state: o.state ? path.basename(o.state) : null, stateDelayMs: o.state ? o.stateDelayMs : 0, display: o.display, pipeline: o.pipeline, query: o.baselineQuery ?? o.query, sampleMs: o.sampleMs, cpuModel: machine.cpuModel };
   const noise = values.noise ? readNoise(values.noise, noiseExpect) : null;
   const noiseCore = values.noise ? noiseCoreOf(values.noise) : null;
   const sides = { candidate: resolveSide("candidate", values.candidate) };
@@ -776,7 +824,7 @@ async function main() {
   const outDir = probeOutDir("drop-meter", iso, values.out);
   const meta = {
     probe: "drop-meter", at: new Date().toISOString(), locked: !values["no-lock"], machine: machineSnapshot(), chrome: chromeInfo(), iso: path.basename(iso),
-    probeVersion: PROBE_VERSION, scenario: path.basename(values.scenario), state: o.state ? path.basename(o.state) : null, stateDelayMs: o.state ? o.stateDelayMs : 0, display: o.display, query: o.query, ...(o.baselineQuery ? { baselineQuery: o.baselineQuery } : {}), sampleMs: o.sampleMs, runs: o.runs, visits: o.visits, maxLoad: o.maxLoad,
+    probeVersion: PROBE_VERSION, scenario: path.basename(values.scenario), state: o.state ? path.basename(o.state) : null, stateDelayMs: o.state ? o.stateDelayMs : 0, display: o.display, pipeline: o.pipeline, query: o.query, ...(o.baselineQuery ? { baselineQuery: o.baselineQuery } : {}), sampleMs: o.sampleMs, runs: o.runs, visits: o.visits, maxLoad: o.maxLoad,
     sides: Object.fromEntries(Object.entries(sides).map(([k, s]) => [k, s.label])), cores, noise: values.noise ?? null, noiseCore,
     definition: "windows of 100 ms from the scenario's first step; speed = guest/host time (VI ticks); drops: windows < 90 % or a present gap > 50 ms, merged; loads: disc reads ≥ 2.5 MiB/s (0.5 s average), merged within 1 s, excess = host − guest ms; time under 95/90 %: 1 s sliding windows; verdict: median moved the worse way beyond the A/A noise"
   };

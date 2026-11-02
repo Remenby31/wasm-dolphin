@@ -1,0 +1,177 @@
+diff --git a/Source/Core/VideoCommon/Fifo.cpp b/Source/Core/VideoCommon/Fifo.cpp
+index d73ffe0..e47cb12 100644
+--- a/Source/Core/VideoCommon/Fifo.cpp
++++ b/Source/Core/VideoCommon/Fifo.cpp
+@@ -250,15 +250,22 @@ void FifoManager::EmulatorState(bool running)
+ }
+ 
+ u64 FifoManager::GpuCatchUpTarget() const
++{
++  return GpuCatchUpTargetAndDistance().target;
++}
++
++// Patch 0214: the one place the target is read (0211's hold and the harness
++// swap ring share it), so the read order below cannot drift between them.
++FifoManager::GpuCatchUp FifoManager::GpuCatchUpTargetAndDistance() const
+ {
+   auto& fifo = m_system.GetCommandProcessor().GetFifo();
+   // The consumed count first, then the distance: a chunk the GPU thread
+   // consumes between the two reads lowers the distance only, so the target
+   // can come out one chunk low (a hold missed), never one high (a hold of a
+-  // swap whose copy already ran).
++  // swap whose copy already ran). Reversed, the race 0211 fixed comes back.
+   const u64 consumed = m_gpu_chunks_consumed.load(std::memory_order_acquire);
+   const u32 pending = fifo.CPReadWriteDistance.load(std::memory_order_seq_cst);
+-  return consumed + (pending + GPFifo::GATHER_PIPE_SIZE - 1) / GPFifo::GATHER_PIPE_SIZE;
++  return {consumed + (pending + GPFifo::GATHER_PIPE_SIZE - 1) / GPFifo::GATHER_PIPE_SIZE, pending};
+ }
+ 
+ void FifoManager::SyncGPU(SyncGPUReason reason, bool may_move_read_ptr)
+diff --git a/Source/Core/VideoCommon/Fifo.h b/Source/Core/VideoCommon/Fifo.h
+index cdee507..2056f5d 100644
+--- a/Source/Core/VideoCommon/Fifo.h
++++ b/Source/Core/VideoCommon/Fifo.h
+@@ -85,6 +85,14 @@ public:
+   // everything written up to now (read on the CPU thread at a VI).
+   u64 GpuChunksConsumed() const { return m_gpu_chunks_consumed.load(std::memory_order_acquire); }
+   u64 GpuCatchUpTarget() const;
++  // Patch 0214 (harness pipeline diag): the same target and the FIFO distance
++  // (bytes the GPU thread has still to read) it was computed from, in one read.
++  struct GpuCatchUp
++  {
++    u64 target = 0;
++    u32 pending_bytes = 0;
++  };
++  GpuCatchUp GpuCatchUpTargetAndDistance() const;
+   bool UseSyncGPU() const { return m_config_sync_gpu; }
+ 
+   // In deterministic GPU thread mode this waits for the GPU to be done with pending work.
+diff --git a/Source/Core/VideoCommon/Present.cpp b/Source/Core/VideoCommon/Present.cpp
+index 3795ab3..d7ba92f 100644
+--- a/Source/Core/VideoCommon/Present.cpp
++++ b/Source/Core/VideoCommon/Present.cpp
+@@ -248,7 +248,7 @@ bool Presenter::FetchXFB(u32 xfb_addr, u32 fb_width, u32 fb_stride, u32 fb_heigh
+   return old_xfb_id == m_last_xfb_id;
+ }
+ 
+-void Presenter::ViSwap(u32 xfb_addr, u32 fb_width, u32 fb_stride, u32 fb_height, u64 ticks,
++bool Presenter::ViSwap(u32 xfb_addr, u32 fb_width, u32 fb_stride, u32 fb_height, u64 ticks,
+                        TimePoint presentation_time, u64 fifo_target)
+ {
+   // Patch 0211: the GPU thread still behind what the game wrote before this
+@@ -313,6 +313,7 @@ void Presenter::ViSwap(u32 xfb_addr, u32 fb_width, u32 fb_stride, u32 fb_height,
+     Core::System::GetInstance().GetCoreTiming().RearmThrottleAfterSkippedPresent();
+   }
+ #endif
++  return is_duplicate;
+ }
+ 
+ void Presenter::ImmediateSwap(u32 xfb_addr, u32 fb_width, u32 fb_stride, u32 fb_height)
+diff --git a/Source/Core/VideoCommon/Present.h b/Source/Core/VideoCommon/Present.h
+index 01664b5..cca4fe5 100644
+--- a/Source/Core/VideoCommon/Present.h
++++ b/Source/Core/VideoCommon/Present.h
+@@ -38,7 +38,9 @@ public:
+   // fifo_target (patch 0211, dual core): the GPU FIFO chunks the GPU thread
+   // must have consumed to have replayed everything the game wrote before
+   // this VI (FifoManager::GpuCatchUpTarget); 0 when unknown.
+-  void ViSwap(u32 xfb_addr, u32 fb_width, u32 fb_stride, u32 fb_height, u64 ticks,
++  // Returns true when the swap found no new XFB (a duplicate: the picture on
++  // screen stays), for the harness swap ring (patch 0214).
++  bool ViSwap(u32 xfb_addr, u32 fb_width, u32 fb_stride, u32 fb_height, u64 ticks,
+               TimePoint presentation_time, u64 fifo_target = 0);
+   void ImmediateSwap(u32 xfb_addr, u32 fb_width, u32 fb_stride, u32 fb_height);
+ 
+diff --git a/Source/Core/VideoCommon/VideoBackendBase.cpp b/Source/Core/VideoCommon/VideoBackendBase.cpp
+index 4d93578..cd1644d 100644
+--- a/Source/Core/VideoCommon/VideoBackendBase.cpp
++++ b/Source/Core/VideoCommon/VideoBackendBase.cpp
+@@ -77,6 +77,9 @@
+ VideoBackendBase* g_video_backend = nullptr;
+ 
+ #ifdef __EMSCRIPTEN__
++#include <atomic>
++#include <emscripten/emscripten.h>
++
+ extern "C" void DolphinWeb_OnXfb(const u8* xfb, u32 width, u32 stride, u32 height);
+ // Harness exact frames (harness/README.md): VI output counters advanced by
+ // DolphinWeb_OnXfb, and the WebGPU hook that tags the matching present.
+@@ -88,6 +91,41 @@ extern "C" void DolphinWeb_WebGpuTagViOutput(u32 vi_since_boot, u32 vi_since_loa
+                                              u32 load_generation);
+ extern "C" void DolphinWeb_RecordVideoOutputProfile(u32 sync_us, u32 publish_us, u32 total_us);
+ extern "C" int DolphinWeb_UseWorkerOwnedWebGL();
++// Patch 0214 (harness pipeline diag, dolphin_web_discio.cpp): the swap ring.
++extern "C" int DolphinWeb_HarnessSwapsEnabled();
++extern "C" void DolphinWeb_HarnessRecordSwap(std::uint32_t vi_since_boot, double host_ms,
++                                             std::uint32_t behind_chunks,
++                                             std::uint32_t fifo_bytes, std::uint32_t flags);
++namespace DolphinWeb
++{
++extern std::atomic<u32> g_stale_xfb_held;  // Present.cpp, patch 0211
++}
++
++// Patch 0214: one VI swap on the video thread, recorded in the harness swap
++// ring: when the video thread pulled it (host ms, emscripten_get_now, the VI
++// ring's clock), how many FIFO chunks it still had to replay to reach what the
++// game wrote before this VI (0211's target; UINT32_MAX: unknown, single core
++// or a deterministic GPU thread), the FIFO distance at the VI in bytes (same),
++// and whether the swap found a new picture (bit 0) or held the last one for a
++// late copy (bit 1, patch 0211). Called only when the harness asked for it.
++static void HarnessRecordedViSwap(u32 xfb_addr, u32 fb_width, u32 fb_stride, u32 fb_height,
++                                  u64 ticks, TimePoint presentation_time, u64 fifo_target,
++                                  bool fifo_known, u32 fifo_bytes, u32 vi_since_boot)
++{
++  constexpr u32 UNKNOWN = 0xFFFFFFFFu;
++  const double host_ms = emscripten_get_now();
++  const u64 consumed = fifo_known ? Core::System::GetInstance().GetFifo().GpuChunksConsumed() : 0;
++  const u32 held_before = DolphinWeb::g_stale_xfb_held.load(std::memory_order_relaxed);
++  const bool duplicate = g_presenter->ViSwap(xfb_addr, fb_width, fb_stride, fb_height, ticks,
++                                             presentation_time, fifo_target);
++  const bool held = DolphinWeb::g_stale_xfb_held.load(std::memory_order_relaxed) != held_before;
++  const u32 behind = !fifo_known ? UNKNOWN :
++                     fifo_target > consumed ?
++                                   static_cast<u32>(std::min<u64>(fifo_target - consumed, UNKNOWN - 1)) :
++                                   0;
++  DolphinWeb_HarnessRecordSwap(vi_since_boot, host_ms, behind, fifo_known ? fifo_bytes : UNKNOWN,
++                               (duplicate ? 0u : 1u) | (held ? 2u : 0u));
++}
+ #endif
+ 
+ #ifdef _WIN32
+@@ -160,10 +198,11 @@ void VideoBackendBase::Video_OutputXFB(u32 xfb_addr, u32 fb_width, u32 fb_stride
+     // Patch 0211: in dual core (GPU thread not deterministic), where the GPU
+     // thread must be in the FIFO once it has replayed this frame's copy.
+     auto& fifo_manager = system.GetFifo();
+-    const u64 fifo_target =
+-        system.IsDualCoreMode() && !fifo_manager.UseDeterministicGPUThread() ?
+-            fifo_manager.GpuCatchUpTarget() :
+-            0;
++    const bool fifo_known = system.IsDualCoreMode() && !fifo_manager.UseDeterministicGPUThread();
++    // Patch 0214: the target and the FIFO distance from one read (0211's order).
++    const Fifo::FifoManager::GpuCatchUp catch_up =
++        fifo_known ? fifo_manager.GpuCatchUpTargetAndDistance() : Fifo::FifoManager::GpuCatchUp{};
++    const u64 fifo_target = catch_up.target;
+ #ifdef __EMSCRIPTEN__
+     // Read on this (CPU) thread, after publish_xfb_to_web counted the output:
+     // in dual core the video thread presents later, when the counters have
+@@ -172,11 +211,20 @@ void VideoBackendBase::Video_OutputXFB(u32 xfb_addr, u32 fb_width, u32 fb_stride
+     const u32 vi_since_boot = harness_tag ? DolphinWeb_HarnessViSinceBoot() : 0;
+     const u32 vi_since_load = harness_tag ? DolphinWeb_HarnessViSinceLoad() : 0;
+     const u32 load_generation = harness_tag ? DolphinWeb_HarnessLoadGeneration() : 0;
++    // Patch 0214: the swap ring, only when the harness asked for it.
++    const bool harness_swaps = harness_tag && DolphinWeb_HarnessSwapsEnabled() != 0;
++    const u32 fifo_bytes = catch_up.pending_bytes;
+ #endif
+     AsyncRequests::GetInstance()->PushEvent([=] {
+ #ifdef __EMSCRIPTEN__
+       if (harness_tag)
+         DolphinWeb_WebGpuTagViOutput(vi_since_boot, vi_since_load, ticks, load_generation);
++      if (harness_swaps)
++      {
++        HarnessRecordedViSwap(xfb_addr, fb_width, fb_stride, fb_height, ticks, presentation_time,
++                              fifo_target, fifo_known, fifo_bytes, vi_since_boot);
++        return;
++      }
+ #endif
+       g_presenter->ViSwap(xfb_addr, fb_width, fb_stride, fb_height, ticks, presentation_time,
+                           fifo_target);
