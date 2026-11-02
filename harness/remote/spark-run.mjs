@@ -328,20 +328,28 @@ export function checkPresentationProbe(probe, rawArgs, benchArgs, headed) {
 // parcours plays a pad film from the boot (no savestate): the film is local
 // data (never in the repo), pushed like a savestate (mode 600, named by its
 // hash) next to the disc and passed as --film.
-export function pushFilm(host, file) {
+export function pushFilm(host, file, kind = "film") {
   const bytes = readFileSync(file);
   // a local file name may hold anything: a safe name, and quoted remotely
-  const name = `${safeName(path.basename(file, ".json"))}-${createHash("sha256").update(bytes).digest("hex").slice(0, 12)}.film.json`;
+  const name = `${safeName(path.basename(file, ".json"))}-${createHash("sha256").update(bytes).digest("hex").slice(0, 12)}.${kind}.json`;
   const dest = `${BENCH}/roms/${name}`;
   if (ssh(host, `test -f ${sh(dest)}`, { quiet: true }).status !== 0) {
     ssh(host, `set -e; umask 077; cat > ${sh(`${dest}.tmp`)}; mv ${sh(`${dest}.tmp`)} ${sh(dest)}`, { input: bytes });
-    console.log(`[spark-run] film pushed as roms/${name}`);
+    console.log(`[spark-run] ${kind} pushed as roms/${name}`);
   }
   return dest;
 }
 // What each probe needs from the Mac: race-perf and replay-gates a
-// savestate, parcours a film, drop-meter neither (its scenario from the boot).
-export function checkProbeInputs(probe, { state, film }) {
+// savestate, parcours a film, drop-meter neither (its scenario from the boot),
+// cpu-window a savestate or input steps (--steps, pushed like a film; with
+// --steps-during played while its rows run).
+export function checkProbeInputs(probe, { state, film, steps = null, stepsDuring = null }) {
+  if ((steps || stepsDuring) && probe !== "cpu-window") throw new Error("--steps / --steps-during: --probe cpu-window only");
+  if (probe === "cpu-window") {
+    if (film) throw new Error(`--film: --probe parcours only`);
+    if (Boolean(state) === Boolean(steps)) throw new Error("--probe cpu-window: --state <local .sav> or --steps <local steps.json>, one of them");
+    return;
+  }
   if (probe === "parcours") {
     if (!film) throw new Error("--probe parcours needs --film <local film.json> (lib/pad-film.mjs)");
     if (state) throw new Error("--probe parcours boots the disc: no --state");
@@ -613,7 +621,7 @@ async function main() {
       headed: { type: "string" }, headless: { type: "boolean", default: false }, xauth: { type: "string", default: BENCH_XAUTHORITY },
       detach: { type: "boolean", default: false }, fetch: { type: "string" }, build: { type: "string" },
       "multi-lanes": { type: "string" }, queue: { type: "boolean", default: false },
-      probe: { type: "string", default: "race-perf" }, film: { type: "string" }, noise: { type: "string" }, screen: { type: "boolean", default: false },
+      probe: { type: "string", default: "race-perf" }, film: { type: "string" }, steps: { type: "string" }, "steps-during": { type: "string" }, noise: { type: "string" }, screen: { type: "boolean", default: false },
       loaded: { type: "boolean", default: false }
     },
     allowPositionals: true
@@ -643,8 +651,8 @@ async function main() {
   // drop-meter runs its full scenario from the boot without a savestate,
   // parcours its film
   if (!values.candidate) throw new Error("usage: spark-run.mjs --candidate <ref|dir> [--baseline <ref|dir>] --state <local .sav> [--name n] [--runs 6] [--detach] [--probe race-perf|drop-meter|replay-gates|parcours] [-- probe options]");
-  checkProbeInputs(values.probe, { state: values.state, film: values.film });
-  for (const f of ["--iso", "--state", "--film", "--out", "--port", "--runs", "--candidate", "--baseline", "--core-candidate", "--noise"]) {
+  checkProbeInputs(values.probe, { state: values.state, film: values.film, steps: values.steps, stepsDuring: values["steps-during"] });
+  for (const f of ["--iso", "--state", "--film", "--steps", "--steps-during", "--out", "--port", "--runs", "--candidate", "--baseline", "--core-candidate", "--noise"]) {
     if (positionals.includes(f)) throw new Error(`${f} is set by spark-run, not after --`);
   }
   if (values.noise && values.probe !== "drop-meter") throw new Error("--noise: drop-meter's A/A, --probe drop-meter only");
@@ -660,6 +668,8 @@ async function main() {
   const baseline = values.baseline ? (values.baseline === values.candidate ? candidate : await pushSide(host, values.baseline)) : null;
   const state = values.state ? pushState(host, path.resolve(values.state)) : null;
   const film = values.film ? pushFilm(host, path.resolve(values.film)) : null;
+  const steps = values.steps ? pushFilm(host, path.resolve(values.steps), "steps") : null;
+  const stepsDuring = values["steps-during"] ? pushFilm(host, path.resolve(values["steps-during"]), "steps") : null;
   const iso = benchDisc(host, values.iso);
   const home = ssh(host, "printf %s \"$HOME\"").out;
   const abs = (p) => `${home}/${p}`;
@@ -673,7 +683,8 @@ async function main() {
   for (const s of bench.swaps) console.log(`[spark-run] ${s.option} on the bench: ${s.to} (was ${s.from})`);
   requireXfbSwitch(host, bench.args, [candidate, ...(baseline ? [baseline] : [])]);
   const raceArgs = [
-    "--iso", abs(iso), ...(state ? ["--state", abs(state)] : []), ...(film ? ["--film", abs(film)] : []), "--runs", values.runs,
+    "--iso", abs(iso), ...(state ? ["--state", abs(state)] : []), ...(film ? ["--film", abs(film)] : []),
+    ...(steps ? ["--steps", abs(steps)] : []), ...(stepsDuring ? ["--steps-during", abs(stepsDuring)] : []), "--runs", values.runs,
     "--candidate", abs(candidate.dest), ...(baseline ? ["--baseline", abs(baseline.dest)] : []),
     ...benchNoiseArgs(values.noise, abs(`${BENCH}/results`)), ...bench.args
   ];

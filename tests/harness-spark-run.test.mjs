@@ -426,12 +426,19 @@ test("spark-run --probe parcours: --film required and pushed, never --state; set
   assert.throws(() => checkProbeInputs("race-perf", { state: "x.sav", film: "f.json" }), /--probe parcours only/);
   assert.throws(() => checkProbeInputs("race-perf", { state: null, film: null }), /usage/);
   assert.doesNotThrow(() => checkProbeInputs("drop-meter", { state: null, film: null }));
+  // cpu-window: a savestate or input steps, one of them; steps for cpu-window only
+  assert.doesNotThrow(() => checkProbeInputs("cpu-window", { state: "x.sav", film: null }));
+  assert.doesNotThrow(() => checkProbeInputs("cpu-window", { state: null, film: null, steps: "s.json", stepsDuring: "d.json" }));
+  assert.throws(() => checkProbeInputs("cpu-window", { state: null, film: null }), /--state <local \.sav> or --steps/);
+  assert.throws(() => checkProbeInputs("cpu-window", { state: "x.sav", film: null, steps: "s.json" }), /one of them/);
+  assert.throws(() => checkProbeInputs("race-perf", { state: "x.sav", film: null, steps: "s.json" }), /cpu-window only/);
+  assert.throws(() => checkProbeInputs("cpu-window", { state: "x.sav", film: "f.json" }), /--probe parcours only/);
   const q = "core=upstream&video=wgpu&presenter=webgpu&cpu=dual";
   assert.throws(() => checkPresentationProbe("parcours", ["--query", q], benchRaceArgs(["--query", q]).args, null), /needs --headed/);
   const cmd = launchCommand({ harnessDir: "/h/k", outDir: "/h/r/d/n", raceArgs: ["--film", "/h/roms/f.film.json"], headed: ":2", probe: "parcours" });
   assert.match(cmd, /\{ SPARK_PROBE='parcours' HARNESS_DISPLAY=x11 DISPLAY=':2' /);
   const run = readFileSync(new URL("../harness/remote/spark-run.mjs", import.meta.url), "utf8");
-  assert.match(run, /for \(const f of \["--iso", "--state", "--film", "--out"/, "--film after -- refused");
+  assert.match(run, /for \(const f of \["--iso", "--state", "--film", "--steps", "--steps-during", "--out"/, "--film after -- refused");
   assert.match(run, /\.\.\.\(film \? \["--film", abs\(film\)\] : \[\]\)/);
   assert.match(run, /umask 077; cat > \$\{sh\(`\$\{dest\}\.tmp`\)\}; mv \$\{sh\(`\$\{dest\}\.tmp`\)\} \$\{sh\(dest\)\}[^\n]*\n[^\n]*film pushed as roms/, "the film is pushed private and quoted");
   assert.match(run, /const name = `\$\{safeName\(path\.basename\(file, "\.json"\)\)\}-/, "a safe name for a local film file");
