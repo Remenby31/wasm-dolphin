@@ -59,7 +59,7 @@ function createTextureRecord({ levels, layers = 1, width = 64, height = 32 }) {
     {
       u32, recWord, dev: device, webGpuObjects: { textures: records },
       WGPU_CMD_OP_CREATE_TEXTURE: 7, WGPU_TEX_FORMAT: { 1: "rgba8unorm" },
-      DIAG_TEX_READBACK: false, DIAG_DEPTH_READBACK: false, DIAG_DEPTH_TRACE: false, harnessEnabled: false,
+      harnessEnabled: false,
       wgpuStalePresent: { created() {}, wrote() {} },
     }
   );
