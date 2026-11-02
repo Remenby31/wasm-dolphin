@@ -484,10 +484,20 @@ test("per present, the gap before it (the adapter's gapVis, gapWorkerLagMs): unk
   assert.match(probe, /raw\.samplerMissing = /);
 });
 
-test("the other processes' CPU: every process but this run's Chrome and this node, summed, with the top three", () => {
-  const ps = ["  10  50.0 /usr/libexec/fseventsd", "  11 120.5 /Applications/Google Chrome.app/x --user-data-dir=/tmp/gc-harness-parcours-abc", "  12  30.0 node probe", "  13   2.0 /bin/zsh", "  14  12.0 /opt/other/cfd-solver"].join("\n");
+test("the other processes' CPU: this run's process tree left out (helpers without the profile directory included), the top three", () => {
+  const ps = [
+    "  10     1  50.0 /usr/libexec/fseventsd",
+    "  12     1  30.0 node probe",
+    "  20    12  40.0 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --user-data-dir=/tmp/gc-harness-parcours-abc",
+    "  21    20  80.0 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Helper (GPU) --type=gpu-process",
+    "  22    20  60.0 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Helper (Renderer) --type=renderer",
+    "  23    22   5.0 /some/grandchild",
+    "  30     1  70.0 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Helper (GPU) --type=gpu-process",
+    "  40     1  12.0 /opt/other/cfd-solver --mesh x",
+    "  41     1   2.0 /bin/zsh"
+  ].join("\n");
   const [t, pct, top] = otherCpuOf(ps, { profileDir: "/tmp/gc-harness-parcours-abc", selfPid: 12, now: 5 });
   assert.equal(t, 5);
-  assert.equal(pct, 64);
-  assert.deepEqual(top, [["fseventsd", 50], ["cfd-solver", 12]]);
+  assert.equal(pct, 50 + 70 + 12 + 2, "the run's node, browser, helpers and their children left out; another Chrome's GPU counted");
+  assert.deepEqual(top, [["Google Chrome Helper (GPU)", 70], ["fseventsd", 50], ["cfd-solver", 12]]);
 });

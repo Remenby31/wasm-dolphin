@@ -57,6 +57,7 @@ import { claim } from "../lib/ownership.mjs";
 import { filmMarkers, filmWithMarks, padFilmStatus, recordPorts, releaseMarker, runRecordSteps, signalStuck, startPadFilm, stopPadFilm, validateFilm, validateRecordSteps } from "../lib/pad-film.mjs";
 import { analyzeRun, currentPhase, deriveSeconds, frameDiff, gapDetail, markerIndexes, STILL_DIFF, phaseNoise, parcoursVerdict, renderTimeline, usable } from "../lib/parcours.mjs";
 import { acquirePerfLock } from "../lib/perf-lock.mjs";
+import { descendantsOf } from "../lib/lock-run.mjs";
 import { chromeInfo, isLocalOnly, probeOutDir } from "../lib/probe-out.mjs";
 import { decodePng } from "../lib/png.mjs";
 import { savePng } from "../lib/session.mjs";
@@ -139,24 +140,33 @@ export function viTimesOf(tl) {
   return tl.vi.t;
 }
 
-// The CPU of every process but this run's (its Chrome, by its profile
-// directory, and this node), summed from ps (% of one core): [t, pct, the
-// top three]; null when ps fails. Async: never on the sampling loop's path.
+// The CPU of every process but this run's, summed from ps (% of one core):
+// [t, pct, the top three]; null when ps fails. This run is a process TREE:
+// this node, every process carrying the profile directory (the browser
+// itself), and every descendant of either (Chrome's GPU, renderer and
+// network helpers do not all carry --user-data-dir). macOS ps %cpu is a
+// decaying average over the last seconds, not an instantaneous reading.
+// Async: never on the sampling loop's path.
 export const OTHER_CPU_EVERY_SEC = 5;
 export function otherCpuOf(psOutput, { profileDir, selfPid = process.pid, now = Date.now() } = {}) {
+  const procs = [];
+  for (const line of psOutput.split("\n")) {
+    const m = /^\s*(\d+)\s+(\d+)\s+([\d.]+)\s+(.*)$/.exec(line);
+    if (m) procs.push({ pid: Number(m[1]), ppid: Number(m[2]), pct: Number(m[3]), command: m[4] });
+  }
+  const roots = procs.filter((p) => p.pid === selfPid || (profileDir && p.command.includes(profileDir))).map((p) => p.pid);
+  const ours = new Set([...roots, ...descendantsOf(procs.map((p) => [p.pid, p.ppid]), roots)]);
   let total = 0;
   const top = [];
-  for (const line of psOutput.split("\n")) {
-    const m = /^\s*(\d+)\s+([\d.]+)\s+(.*)$/.exec(line);
-    if (!m || Number(m[1]) === selfPid || (profileDir && m[3].includes(profileDir))) continue;
-    const pct = Number(m[2]);
-    total += pct;
-    if (pct >= 5) top.push([m[3].split("/").pop().slice(0, 40), pct]);
+  for (const p of procs) {
+    if (ours.has(p.pid)) continue;
+    total += p.pct;
+    if (p.pct >= 5) top.push([p.command.split(" --")[0].split("/").pop().slice(0, 40), p.pct]);
   }
   return [now, Math.round(total), top.sort((a, b) => b[1] - a[1]).slice(0, 3)];
 }
 function otherCpu(profileDir) {
-  return new Promise((resolve) => execFile("ps", ["-A", "-o", "pid=,pcpu=,command="], { maxBuffer: 32 << 20, timeout: 5000 }, (error, out) => resolve(error ? null : otherCpuOf(out, { profileDir }))));
+  return new Promise((resolve) => execFile("ps", ["-A", "-o", "pid=,ppid=,pcpu=,command="], { maxBuffer: 32 << 20, timeout: 5000 }, (error, out) => resolve(error ? null : otherCpuOf(out, { profileDir }))));
 }
 
 // The drop sampler's last row of a drain, as named counters (null: no row).
