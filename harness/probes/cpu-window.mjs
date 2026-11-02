@@ -139,6 +139,27 @@ async function enableStats(page, { light = false } = {}) {
 }
 const timeRegions = (page, o) => workerRequest(page, "validationReadJitRegionStats", { sampleEvery: o.regionSample }, 10000).catch((e) => ({ error: String(e?.message || e) }));
 
+// The drop sampler's last row of a drain ({ columns, rows }), as an object
+// of cumulative counters, or null when it gave none.
+export function lastSamplerRow(drained) {
+  const row = drained?.rows?.at?.(-1);
+  if (!row || !Array.isArray(drained.columns)) return null;
+  return Object.fromEntries(drained.columns.map((c, i) => [c, row[i]]));
+}
+// What the sampler's counters did between two rows (its rows lag the
+// snapshots by up to --sampler-ms): JIT compiles and their CPU-thread time
+// (0167), the synchronous Module and Instance time (u32 µs, wrap), blocks
+// posted off-thread, region installs, disc waits, new compiles sent.
+export const SAMPLER_DELTAS = ["jitCompiles", "jitUs", "jitModuleUs", "jitInstanceUs", "offThreadDefers", "regionsInstalled", "regionInstallMs", "discWaits", "discWaitUs", "jitNewCompiles", "efbWaitUs"];
+export function samplerDelta(a, b) {
+  if (!a || !b) return null;
+  const wrap = (x) => (x < 0 ? x + 2 ** 32 : x);
+  return Object.fromEntries(SAMPLER_DELTAS.map((c) => {
+    const d = a[c] == null || b[c] == null ? null : b[c] - a[c];
+    return [c, d == null ? null : c === "jitModuleUs" || c === "jitInstanceUs" ? wrap(d) : d];
+  }));
+}
+
 // A watchdog that counts only while armed: armed once the gate returned
 // with the lock held, disarmed when the measure ends (or fails), so a lock
 // given back to wait for calm or mains power (calmLock) is never counted
@@ -242,6 +263,7 @@ async function measure(o, server) {
     if (!o.light) await page.waitForTimeout(1000); // the region reset applies at the next slice (--light: no region stats, rows from the load on)
     await readTimeline(page); // drop the VIs before the first snapshot
     const snaps = [await snapshot(page, { light: o.light })];
+    if (o.samplerMs) snaps[0].sampler = lastSamplerRow(await workerRequest(page, "validationDropSampler", { action: "drain" }, 10000).catch(() => null));
     const rows = [], loads = [];
     const start = performance.now();
     // played alongside the rows; an error is kept and thrown after them
@@ -253,10 +275,10 @@ async function measure(o, server) {
       if (wait > 0) await new Promise((r) => setTimeout(r, wait));
       const snap = await snapshot(page, { light: o.light });
       const chunk = await readTimeline(page).catch((e) => ({ error: String(e?.message || e) }));
-      if (o.samplerMs) await workerRequest(page, "validationDropSampler", { action: "drain" }, 10000).catch(() => null);
+      if (o.samplerMs) snap.sampler = lastSamplerRow(await workerRequest(page, "validationDropSampler", { action: "drain" }, 10000).catch(() => null)) ?? snaps.at(-1).sampler ?? null;
       const timeline = mergeTimeline([chunk]);
       loads.push(os.loadavg()[0]);
-      const row = { i, atS: round((snap.t - snaps[0].t) / 1000, 2), vi: viRangeOf(timeline.vi), viLost: timeline.lost.vi || 0, screen: screenOf(snaps.at(-1), snap), ...cpuWindowBreakdown(snaps.at(-1), snap) };
+      const row = { i, atS: round((snap.t - snaps[0].t) / 1000, 2), vi: viRangeOf(timeline.vi), viLost: timeline.lost.vi || 0, screen: screenOf(snaps.at(-1), snap), sampler: samplerDelta(snaps.at(-1).sampler, snap.sampler), ...cpuWindowBreakdown(snaps.at(-1), snap) };
       snaps.push(snap);
       rows.push(row);
       if (session.watch.fatal().length) throw new Error(`page fatal: ${JSON.stringify(session.watch.fatal()).slice(0, 300)}`);

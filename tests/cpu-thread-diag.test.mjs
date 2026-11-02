@@ -385,6 +385,20 @@ test("probe contract: --steps-during runs alongside the rows and its phase check
   assert.match(src, /screen: screenOf\(snaps\.at\(-1\), snap\)/);
   // --sampler-ms: the drop sampler started as drop-meter starts it, drained every row; --display: the harness's displayed trace
   assert.match(src, /workerRequest\(page, "validationDropSampler", \{ action: "start", everyMs: o\.samplerMs \}, 5000\)/);
-  assert.match(src, /if \(o\.samplerMs\) await workerRequest\(page, "validationDropSampler", \{ action: "drain" \}, 10000\)/);
+  assert.match(src, /if \(o\.samplerMs\) snap\.sampler = lastSamplerRow\(await workerRequest\(page, "validationDropSampler", \{ action: "drain" \}, 10000\)/);
   assert.match(src, /light: o\.light, displayTrace: o\.display, samplerMs: o\.samplerMs,/);
+});
+
+test("--sampler-ms: the drain's last row as counters, deltas per row (u32 µs wrap)", async () => {
+  const { lastSamplerRow, samplerDelta } = await import("../harness/probes/cpu-window.mjs");
+  const a = lastSamplerRow({ columns: ["t", "jitCompiles", "jitUs", "jitModuleUs"], rows: [[1, 5, 100, 10], [2, 10, 400, 2 ** 32 - 10]] });
+  assert.deepEqual(a, { t: 2, jitCompiles: 10, jitUs: 400, jitModuleUs: 2 ** 32 - 10 });
+  const b = { t: 3, jitCompiles: 30, jitUs: 1400, jitModuleUs: 20 };
+  const d = samplerDelta(a, b);
+  assert.equal(d.jitCompiles, 20);
+  assert.equal(d.jitUs, 1000);
+  assert.equal(d.jitModuleUs, 30);
+  assert.equal(d.offThreadDefers, null);
+  assert.equal(lastSamplerRow({ columns: ["t"], rows: [] }), null);
+  assert.equal(samplerDelta(null, b), null);
 });
