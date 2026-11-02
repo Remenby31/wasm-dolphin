@@ -176,6 +176,8 @@ export class AudioPcmProducer {
       fill: ring ? audioPcmAvailableFrames(ring.header) : null,
       underruns: ring ? Atomics.load(ring.header, AUDIO_PCM_HEADER.UNDERRUN_EVENTS) >>> 0 : null,
       mixerMs: Number.isFinite(queuedMs) && queuedMs >= 0 ? Math.round(queuedMs * 10) / 10 : null,
+      dmaMs: Number.isFinite(core?.audioQueuedFifoMs?.(0)) ? Math.round(core.audioQueuedFifoMs(0) * 10) / 10 : null,
+      streamingMs: Number.isFinite(core?.audioQueuedFifoMs?.(1)) ? Math.round(core.audioQueuedFifoMs(1) * 10) / 10 : null,
       skips: typeof events === "function" ? events(0) : null,
       fills: typeof events === "function" ? events(1) : null,
       asked: t.asked, got: t.got, pulls: t.pulls, maxPull: t.maxPull, empty: t.empty,
@@ -238,8 +240,9 @@ export class AudioPcmProducer {
   rate() {
     const ring = this.ring;
     if (!ring) return;
-    const queuedMs = this.api()?.audioQueuedMs?.();
-    const mixerMs = Number.isFinite(queuedMs) && queuedMs >= 0 ? queuedMs : MIXER_LOW_MS;
+    // the latency the worklet can play out: the ring and the shorter FIFO
+    // (the longer's lead over it is not latency of the other's sound)
+    const mixerMs = this.mixerQueues(this.api())?.lo ?? MIXER_LOW_MS;
     const rawMs = (audioPcmAvailableFrames(ring.header) - (this.targetFrames ?? AUDIO_PCM_TARGET_FRAMES)) / 48 + mixerMs - MIXER_LOW_MS;
     this.excessMs = this.excessMs == null ? rawMs : this.excessMs + RATE_SMOOTHING * (rawMs - this.excessMs);
     const excessMs = this.excessMs;
@@ -249,17 +252,32 @@ export class AudioPcmProducer {
     Atomics.store(ring.header, AUDIO_PCM_HEADER.RATE_PPM, next | 0);
   }
 
+  // The mixer's queues in ms: lo the shorter of its DMA and streaming FIFOs
+  // (0216; a FIFO at 0 beside a fed one is taken as not playing), hi the
+  // longer; a core without 0216 gives 0186's longer for both. null unknown.
+  mixerQueues(core) {
+    const one = (which) => { const v = core?.audioQueuedFifoMs?.(which); return Number.isFinite(v) && v >= 0 ? v : null; };
+    const dma = one(0), streaming = one(1);
+    if (dma != null && streaming != null) {
+      const fed = [dma, streaming].filter((v) => v > 0);
+      return { lo: fed.length ? Math.min(...fed) : 0, hi: Math.max(dma, streaming), dma, streaming };
+    }
+    const queuedMs = core?.audioQueuedMs?.();
+    return Number.isFinite(queuedMs) && queuedMs >= 0 ? { lo: queuedMs, hi: queuedMs, dma: null, streaming: null } : null;
+  }
+
   // rate control: how much a pull may take and must take from the mixer.
   // null without rate control or without the mixer's queue (0186).
   mixerBounds(core, fill) {
     if (!this.rateControl) return null;
-    const queuedMs = core.audioQueuedMs?.();
-    if (!(Number.isFinite(queuedMs) && queuedMs >= 0)) return null;
+    const q = this.mixerQueues(core);
+    if (!q) return null;
     return {
-      // never more than the queue holds while the ring has slack
-      maxFrames: fill >= RING_LOW_MS * 48 ? Math.max(0, Math.floor((queuedMs - MIXER_GRANULE_MS) * 48)) : Infinity,
-      // back down to MIXER_LOW_MS once over MIXER_HIGH_MS
-      minFrames: queuedMs > MIXER_HIGH_MS ? Math.round((queuedMs - MIXER_LOW_MS) * 48) : 0,
+      // never more than the shorter FIFO holds while the ring has slack (a
+      // pull drains both at the same rate: more empties it into a gap fill)
+      maxFrames: fill >= RING_LOW_MS * 48 ? Math.max(0, Math.floor((q.lo - MIXER_GRANULE_MS) * 48)) : Infinity,
+      // the longer back down once over MIXER_HIGH_MS (it overflows first)
+      minFrames: q.hi > MIXER_HIGH_MS ? Math.round((q.hi - MIXER_LOW_MS) * 48) : 0,
     };
   }
 

@@ -44,8 +44,8 @@
     {
       "path": "core/upstream/dolphin_web_core.cpp",
       "hashMode": "lf-normalized",
-      "size": 79731,
-      "sha256": "6fbc4b8ae1def59f3f21625219115d7d8e91d84150cebc43430a69fb8296176e"
+      "size": 80536,
+      "sha256": "c9fe8f882df26ec00a32ad8bac90940a27ee79754a37931c310ec2dc0fb435d5"
     },
     {
       "path": "src/app.js",
@@ -68,8 +68,8 @@
     {
       "path": "src/audio-pcm-producer.js",
       "hashMode": "lf-normalized",
-      "size": 15186,
-      "sha256": "b85c29e06af703e735d65acb6030aa143745da42a980f77af34e959bb9460616"
+      "size": 16342,
+      "sha256": "87a865337a7eea68294e7715c0055e2bed5f71dcfee276509b4b9c4f8a9fcb8e"
     },
     {
       "path": "src/audio-worklet-processor.js",
@@ -140,8 +140,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 788623,
-      "sha256": "c26909e3791ff2cfd9b8a63f5e8552ef2e42057b49914e52d013896ef5ae2f90"
+      "size": 788944,
+      "sha256": "d431060a1ed08c913cfbfe8f661d3be58495d4f327c278e3aa0431f32ef20ac6"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",

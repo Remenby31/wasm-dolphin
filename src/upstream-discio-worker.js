@@ -975,6 +975,7 @@ const workletAudioProducer = new AudioPcmProducer({
     audioSampleRate: api?.audioSampleRate,
     audioQueuedMs: api?.audioQueuedMs,
     audioQueueEvents: api?.audioQueueEvents,
+    audioQueuedFifoMs: api?.audioQueuedFifoMs,
     heapU8: moduleInstance?.HEAPU8,
   }),
   recordMix: (requested, returned, durationMs) =>
@@ -4186,6 +4187,12 @@ function bindApi(module) {
     audioQueuedMs:
       typeof module._DolphinWeb_AudioQueuedMs === "function"
         ? () => module._DolphinWeb_AudioQueuedMs()
+        : null,
+    // 0216: one FIFO's queue in ms (0 DMA, 1 streaming; -1 unknown); absent
+    // on an older core
+    audioQueuedFifoMs:
+      typeof module._DolphinWeb_AudioQueuedFifoMs === "function"
+        ? (which) => module._DolphinWeb_AudioQueuedFifoMs(which | 0)
         : null,
     setPresentationScale:
       typeof module._SetPresentationScale === "function"

@@ -1350,6 +1350,25 @@ double DolphinWeb_AudioQueuedMs()
   return mixer ? static_cast<double>(mixer->GetQueuedMicroseconds()) / 1000.0 : -1;
 }
 
+// 0216: one FIFO's queue in ms, 0 the DMA and 1 the streaming (0186 reports
+// the longer); -1 before the boot, without a mixer or for another index.
+// Read-only: the AudioWorklet producer's rate control (?audiorate=1) sizes
+// its pulls on the shorter and its overflow guard on the longer.
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+double DolphinWeb_AudioQueuedFifoMs(int which)
+{
+  if (!s_runtime_initialized || (which != 0 && which != 1))
+    return -1;
+  const SoundStream* sound_stream = Core::System::GetInstance().GetSoundStream();
+  const Mixer* mixer = sound_stream ? sound_stream->GetMixer() : nullptr;
+  if (!mixer)
+    return -1;
+  const u64 us = which == 0 ? mixer->GetDMAQueuedMicroseconds() : mixer->GetStreamingQueuedMicroseconds();
+  return static_cast<double>(us) / 1000.0;
+}
+
 int SetFastSoftwareRaster(int mode)
 {
   DolphinWeb_SetFastSoftwareRaster(mode < 0 ? 0 : mode > 3 ? 3 : mode);

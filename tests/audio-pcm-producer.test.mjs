@@ -231,7 +231,7 @@ test("worker: validationAudioTrace is harness-gated and reaches the producer; th
   const { readFile } = await import("node:fs/promises");
   const worker = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
   assert.match(worker, /case "validationAudioTrace":\n\s+\/\/[^\n]*\n\s+if \(!harnessEnabled\) return \{ error: "harness hooks are off" \};/);
-  assert.match(worker, /audioQueueEvents: api\?\.audioQueueEvents,\n\s+heapU8: moduleInstance\?\.HEAPU8,/);
+  assert.match(worker, /audioQueueEvents: api\?\.audioQueueEvents,\n\s+audioQueuedFifoMs: api\?\.audioQueuedFifoMs,\n\s+heapU8: moduleInstance\?\.HEAPU8,/);
 });
 
 // ---- ?audiorate=1: rate control ----
@@ -433,4 +433,37 @@ test("model: the 1 % bound brings the latency back about twice as fast", () => {
   const b = simulate({ rateControl: true, speedAt, seconds: 30, trackOverMs: 100 });
   const c = simulate({ rateControl: true, speedAt, seconds: 30, trackOverMs: 100, rateMaxPpm: 10000 });
   assert.ok(c.overMs < b.overMs * 0.7, JSON.stringify({ b, c }));
+});
+
+test("0216: pulls sized on the shorter FIFO, the overflow guard on the longer, a FIFO at 0 beside a fed one ignored, 0186 without 0216", () => {
+  const ring = createAudioPcmRing();
+  const f = fixture();
+  let dma = 6, streaming = 30;
+  f.core.audioQueuedMs = () => Math.max(dma, streaming);
+  f.core.audioQueuedFifoMs = (which) => (which === 0 ? dma : which === 1 ? streaming : -1);
+  f.producer.install(ring.sab, { muted: false, rateControl: true, mixerCapMs: 40 });
+  assert.deepEqual(f.producer.mixerQueues(f.core), { lo: 6, hi: 30, dma: 6, streaming: 30 });
+  // at most the DMA's 6 ms less a granule; the streaming's 30 ms asks for 22: capped at 2
+  const b = f.producer.mixerBounds(f.core, 60 * 48);
+  assert.equal(b.maxFrames, 2 * 48);
+  assert.equal(b.minFrames, 22 * 48);
+  // a FIFO that is not playing (0) does not hold the pulls at 0
+  streaming = 0; dma = 20;
+  assert.equal(f.producer.mixerQueues(f.core).lo, 20);
+  // a core without 0216: 0186's longer for both
+  delete f.core.audioQueuedFifoMs;
+  assert.deepEqual(f.producer.mixerQueues(f.core), { lo: 20, hi: 20, dma: null, streaming: null });
+});
+
+test("0216 export: per FIFO, read-only, beside 0186; the worker reaches it", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const read = (p) => readFile(new URL(p, import.meta.url), "utf8");
+  const [core, patch, worker] = await Promise.all([read("../core/upstream/dolphin_web_core.cpp"), read("../patches/dolphin-wasm/snapshot/0216-mixer-queue-depth-per-fifo.patch"), read("../src/upstream-discio-worker.js")]);
+  assert.match(core, /EMSCRIPTEN_KEEPALIVE\n#endif\ndouble DolphinWeb_AudioQueuedFifoMs\(int which\)\n\{\n  if \(!s_runtime_initialized \|\| \(which != 0 && which != 1\)\)\n    return -1;/);
+  assert.match(core, /which == 0 \? mixer->GetDMAQueuedMicroseconds\(\) : mixer->GetStreamingQueuedMicroseconds\(\)/);
+  assert.match(core, /double DolphinWeb_AudioQueuedMs\(\)/, "0186 kept");
+  assert.match(patch, /\+  u64 GetDMAQueuedMicroseconds\(\) const \{ return m_dma_mixer\.QueuedMicroseconds\(\); \}/);
+  assert.match(patch, /\+  u64 GetStreamingQueuedMicroseconds\(\) const \{ return m_streaming_mixer\.QueuedMicroseconds\(\); \}/);
+  assert.doesNotMatch(patch, /Mixer\.cpp/, "the mixer itself is unchanged");
+  assert.match(worker, /audioQueuedFifoMs:\n\s+typeof module\._DolphinWeb_AudioQueuedFifoMs === "function"/);
 });
