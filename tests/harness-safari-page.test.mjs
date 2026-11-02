@@ -65,6 +65,21 @@ test("ranges past the end are a 416 and the server stays up; POST is a 405; only
   assert.equal((await get(d.descriptor.remoteDisc, { range: "bytes=0-0" })).status, 206, "still serving");
 });
 
+test("a small file (a savestate) is served whole without a range only when wholeMax allows it", async (t) => {
+  const dir = mkdtempSync(path.join(tmpdir(), "safari-state-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  writeFileSync(path.join(dir, "s.sav"), Buffer.from([1, 2, 3, 4, 5]));
+  const whole = await startDiscServer(path.join(dir, "s.sav"), { port: 0, origin: ORIGIN, wholeMax: 5 });
+  t.after(() => whole.close());
+  const r = await get(whole.descriptor.remoteDisc);
+  assert.equal(r.status, 200);
+  assert.deepEqual([...new Uint8Array(await r.arrayBuffer())], [1, 2, 3, 4, 5]);
+  assert.equal((await get(whole.descriptor.remoteDisc, { origin: "http://evil.example" })).status, 403);
+  const small = await startDiscServer(path.join(dir, "s.sav"), { port: 0, origin: ORIGIN, wholeMax: 4 });
+  t.after(() => small.close());
+  assert.equal((await get(small.descriptor.remoteDisc)).status, 416, "over wholeMax: ranges only");
+});
+
 test("a taken port rejects the start instead of crashing", async (t) => {
   const busy = createServer().listen(0, "127.0.0.1");
   await new Promise((r) => busy.once("listening", r));
@@ -142,4 +157,28 @@ test("parcours --browser safari boots the disc descriptor, never a file, and che
   assert.match(src, /if \(safari\) await safari\.assertInvisible\("after boot"\)/);
   assert.match(src, /otherCpu\(profileDir, safari\?\.ownPids\(\) \?\? \[\]\)/);
   assert.match(src, /if \(safari\) await safari\.close\(\)/);
+});
+
+test("safari-capture refuses a bad call before the lock and Safari", async () => {
+  const { spawnSync } = await import("node:child_process");
+  const probe = new URL("../harness/probes/safari-capture.mjs", import.meta.url).pathname;
+  const dir = mkdtempSync(path.join(tmpdir(), "safari-capture-"));
+  try {
+    writeFileSync(path.join(dir, "d.iso"), "x");
+    writeFileSync(path.join(dir, "s.sav"), "x");
+    const base = ["--iso", path.join(dir, "d.iso"), "--state", path.join(dir, "s.sav"), "--port", "8306", "--out", path.join(dir, "out")];
+    for (const [args, message] of [
+      [["--query", "video=wgpu&cpu=dual"], /cpu=single/],
+      [["--query", "video=wgpu&cpu=single", "--vi", "240,x"], /--vi/],
+      [["--query", "video=wgpu&cpu=single", "--runs", "0"], /--runs/],
+      [["--query", "video=wgpu&cpu=single", "--state", path.join(dir, "none.sav")], /none\.sav is missing/],
+    ]) {
+      const r = spawnSync(process.execPath, [probe, ...base, ...args], { encoding: "utf8", timeout: 20_000, env: { ...process.env, HARNESS_PERF_LOCK: path.join(dir, ".perf-lock") } });
+      assert.notEqual(r.status, 0, args.join(" "));
+      assert.match(r.stderr, message, args.join(" "));
+      assert.doesNotMatch(r.stdout, /lock/i);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

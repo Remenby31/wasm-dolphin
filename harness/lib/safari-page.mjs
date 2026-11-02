@@ -40,9 +40,11 @@ const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { 
 
 // The disc by HTTP ranges, readable only from the harness page's origin
 // (CORS: any other page open on this Mac gets a 403, never a byte). GET and
-// the preflight only; a range past the disc's end is a 416. Resolves once
-// listening, rejects when the port is taken.
-export function startDiscServer(iso, { port, origin }) {
+// the preflight only; a range past the disc's end is a 416, a GET without a
+// range too unless the file is at most wholeMax bytes (a savestate fetched
+// whole by the page's __loadStateFile; 0, the disc's default: never).
+// Resolves once listening, rejects when the port is taken.
+export function startDiscServer(iso, { port, origin, wholeMax = 0 }) {
   if (!/^https?:\/\/[^/]+$/.test(origin ?? "")) throw new Error(`startDiscServer: origin "${origin}" is not a page origin (http://127.0.0.1:<port>)`);
   const size = statSync(iso).size;
   const name = path.basename(iso);
@@ -53,6 +55,10 @@ export function startDiscServer(iso, { port, origin }) {
     if (req.method === "OPTIONS") { res.writeHead(204, headers); return res.end(); }
     if (req.method !== "GET") { res.writeHead(405, { ...headers, allow: "GET, OPTIONS" }); return res.end(); }
     if (req.url !== `/${encodeURIComponent(name)}`) { res.writeHead(404, headers); return res.end(); }
+    if (req.headers.range === undefined && size <= wholeMax) {
+      res.writeHead(200, { ...headers, "content-length": size });
+      return createReadStream(iso).on("error", () => res.destroy()).pipe(res);
+    }
     const m = /^bytes=(\d+)-(\d*)$/.exec(req.headers.range ?? "");
     const a = m ? Number(m[1]) : NaN, b = m ? Math.min(m[2] === "" ? size - 1 : Number(m[2]), size - 1) : NaN;
     if (!m || a >= size || b < a) { res.writeHead(416, { ...headers, "content-range": `bytes */${size}` }); return res.end(); }
