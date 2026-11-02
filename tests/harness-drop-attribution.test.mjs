@@ -4,7 +4,7 @@ import test from "node:test";
 
 import {
   attributeDips, attributeSecond, attributionLines, beatEvidence, dropWindowsForAttribution, hitchCause,
-  learnedCadences, measuredRefreshHz, parcoursWindowsForAttribution
+  fitPeriod, learnedCadences, measuredRefreshHz, parcoursWindowsForAttribution
 } from "../harness/lib/drops.mjs";
 
 const quiet = { cpu: 0.3, gpu: 0.3, replay: 0.2 };
@@ -110,12 +110,19 @@ test("a hitch's own cause; unknown when its VIs were not measured", () => {
 
 // A screen ticking at `hz` and a core producing VIs at `viHz`; each tick
 // shows the newest VI produced at least `latency` ms before it, with `jitter`
-// on the VI times; extra repeats (stalls) at the `stalls` times.
-function timeline({ hz = 60, viHz = 59.94, seconds = 120, latency = 5, jitter = 0.2, stalls = [], seed = 3 } = {}) {
+// on the VI times (gaussian sigma `jitter`), a stretch `slow` = [t0, t1]
+// where the VIs come at `slowSpeed`; extra repeats (stalls) at the `stalls`
+// times.
+function timeline({ hz = 60, viHz = 59.94, seconds = 120, latency = 5, jitter = 0.2, stalls = [], seed = 3, slow = null, slowSpeed = 0.8 } = {}) {
   let s = seed;
   const rnd = () => ((s = (s * 1103515245 + 12345) % 2 ** 31) / 2 ** 31);
+  const gauss = () => Math.sqrt(-2 * Math.log(rnd() + 1e-12)) * Math.cos(2 * Math.PI * rnd());
   const vi = [];
-  for (let i = 0; i < seconds * viHz; i += 1) vi.push({ t: (i * 1000) / viHz + (rnd() - 0.5) * 2 * jitter, index: i });
+  for (let i = 0, at = 0; at < seconds * 1000; i += 1) {
+    vi.push({ t: at + gauss() * jitter, index: i });
+    at += (1000 / viHz) / (slow && at >= slow[0] && at < slow[1] ? slowSpeed : 1);
+  }
+  vi.sort((a, b) => a.t - b.t);
   const ticks = [];
   let k = 0, last = -1;
   for (let j = 0; j < seconds * hz; j += 1) {
@@ -135,6 +142,23 @@ test("the refresh is measured from the animation frames, not taken from the pres
   const missed = ticks.filter((_, i) => i % 97 !== 0).map((x) => x.t);
   assert.ok(Math.abs(measuredRefreshHz(missed) - 60) < 1e-6, "a missed frame is not a slower screen");
   assert.equal(measuredRefreshHz(ticks.slice(0, 100).map((x) => x.t)), null, "too few frames");
+  // 10 s of ticks with 1 ms of jitter: the regression holds the rate to the
+  // thousandth of a hertz (a mean of intervals would not)
+  let x = 5;
+  const rnd = () => ((x = (x * 1103515245 + 12345) % 2 ** 31) / 2 ** 31);
+  const gauss = () => Math.sqrt(-2 * Math.log(rnd() + 1e-12)) * Math.cos(2 * Math.PI * rnd());
+  const jittered = Array.from({ length: 600 }, (_, j) => (j * 1000) / 59.94 + gauss());
+  assert.ok(Math.abs(measuredRefreshHz(jittered) - 59.94) < 0.005);
+});
+
+test("the VI period: a regression over the full-speed stretches, a slow stretch neither bends it nor breaks the jitter", () => {
+  const { vi } = timeline({ viHz: 59.94, seconds: 60, jitter: 0.9, slow: [20000, 25000] });
+  const fit = fitPeriod(vi.map((v) => v.t), { wholeSkips: false });
+  assert.ok(Math.abs(1000 / fit.periodMs - 59.94) < 0.002, `${1000 / fit.periodMs}`);
+  // the residual is the timestamps' own jitter, not the slow stretch
+  assert.ok(fit.sigmaMs > 0.7 && fit.sigmaMs < 1.1, `${fit.sigmaMs}`);
+  // a count over the run would say ~59.4 Hz here
+  assert.ok((vi.length - 1) * 1000 / (vi.at(-1).t - vi[0].t) < 59.5);
 });
 
 test("the beat: proven at the boundary on a drifting screen; random repeats on a locked one stay unproven", () => {
@@ -162,10 +186,63 @@ test("the beat: proven at the boundary on a drifting screen; random repeats on a
   assert.ok(atStalls <= 1, `${atStalls} stall repeats labelled beat`);
 });
 
-test("learned cadences: VI / n at full speed with margin, else the last one learned", () => {
-  const s = (vis, produced, cpu = 0.3, speed = 100) => ({ vis, produced, speed, occupancy: { cpu, gpu: 0.2, replay: 0.1 } });
-  assert.deepEqual(learnedCadences([s(60, 60), s(60, 30), s(60, 20, 0.9), s(60, 20, 0.3, 80)]), [60, 30, 30, 30]);
-  assert.deepEqual(learnedCadences([{ vis: 60, produced: 30, speed: 100, occupancy: { cpu: 0.3 } }]), [60], "a thread not measured: nothing learned");
+test("the beat: a screen locked to the VI with a slow stretch shows no beat; the window follows the VI jitter measured", () => {
+  // locked 59.94 / 59.94, 5 s at 80 % speed: the slow VIs repeat pictures,
+  // but the VI rate is the screen's: no drift, nothing proven
+  for (const slow of [[30000, 35000], [30000, 31000]]) {
+    const ev = beatEvidence(timeline({ hz: 59.94, viHz: 59.94, seconds: 120, slow, jitter: 0.9 }));
+    assert.equal(ev.proven.length, 0, JSON.stringify({ ...ev, proven: ev.proven.length }));
+    assert.match(ev.reason, /do not drift/);
+  }
+  // the worker's VI timestamps jitter by ~0.7-0.9 ms (measured on two Mac
+  // runs): the window is 3 sigma of that, under the half-period, and the beat
+  // is still proven while random stalls are not
+  let x = 17;
+  const rnd = () => ((x = (x * 1103515245 + 12345) % 2 ** 31) / 2 ** 31);
+  const stalls = Array.from({ length: 6 }, () => 2000 + rnd() * 116000);
+  const ev = beatEvidence(timeline({ viHz: 59.94, seconds: 120, jitter: 0.9, stalls }));
+  assert.ok(ev.viJitterMs > 0.7 && ev.viJitterMs < 1.1, `${ev.viJitterMs}`);
+  assert.ok(Math.abs(ev.deltaMs - 3 * ev.viJitterMs) < 0.01 && ev.deltaMs < 1000 / 60 / 4);
+  assert.ok(ev.proven.length >= 6, JSON.stringify({ ...ev, proven: ev.proven.length }));
+  const atStalls = ev.proven.filter((t) => stalls.some((s) => t >= s && t < s + 60)).length;
+  assert.ok(atStalls <= 1, `${atStalls} stall repeats labelled beat`);
+});
+
+test("learned cadences: from previous seconds only, a median, every thread measured with margin", () => {
+  const s = (vis, produced, cpu = 0.3, speed = 100, replay = 0.1) => ({ vis, produced, speed, occupancy: { cpu, gpu: 0.2, replay } });
+  // a second is never judged against itself: the 30 fps second keeps 60
+  assert.deepEqual(learnedCadences([s(60, 60), s(60, 30), s(60, 30), s(60, 30), s(60, 30)]), [60, 60, 60, 30, 30]);
+  // one 40-frame second among 60s does not move the median
+  assert.deepEqual(learnedCadences([s(60, 60), s(60, 60), s(60, 40), s(60, 60), s(60, 60)]), [60, 60, 60, 60, 60]);
+  // busy, slow, or a thread not measured (replay): nothing learned, the reference holds
+  assert.deepEqual(learnedCadences([s(60, 30, 0.9), s(60, 30, 0.3, 80), s(60, 30, 0.3, 100, null), s(60, 30)], { reference: 59.94 }), [59.94, 59.94, 59.94, 59.94]);
+});
+
+test("drop-meter: 60/40/60 new frames with replay unsampled keeps the VI cadence, the 40 second is one dip", () => {
+  const windows = [], displayed = [], vi = [], presents = [];
+  let idx = 0;
+  for (let s = 0; s < 3; s += 1) {
+    const fps = s === 1 ? 40 : 60;
+    for (let w = 0; w < 10; w += 1) windows.push({ t0: s * 1000 + w * 100, label: null, speed: 100, presents: 6, xfb: fps / 10, sleptMs: 70, gpuWorkMs: 30, causes: { workerPause: 0, mainPause: 0 } });
+    for (let i = 0; i < 60; i += 1) {
+      const t = s * 1000 + (i * 1000) / 60;
+      vi.push({ t, sinceBoot: idx }); presents.push({ t: t + 5 });
+      if (fps === 60 || i % 3 !== 2) displayed.push({ t: t + 5, vi: idx, submits: 1 });
+      idx += 1;
+    }
+  }
+  const aw = dropWindowsForAttribution(windows, { presents, vi, displayed });
+  assert.deepEqual([0, 10, 20].map((i) => Math.round(aw[i].cadence)), [60, 60, 60]);
+  const r = attributeDips(aw, { cadence: 60 });
+  assert.equal(r.dips.length, 1);
+  assert.deepEqual(Object.keys(r.dips[0].parts), ["game:unknown"], "replay not sampled: never content");
+});
+
+test("a negative cause counter never gives a negative part", () => {
+  const d = attributeSecond(second(0, { speed: 80, produced: 48, shown: 48, presents: 48, causes: { jit: 300, disc: -200 } }), { cadence: 60 });
+  assert.ok(Object.values(d.parts).every((f) => f > 0), JSON.stringify(d.parts));
+  assert.ok(Math.abs(allParts(d) - 12) < 0.05);
+  assert.equal(d.parts["emulation:disc"], undefined);
 });
 
 test("drop-meter windows: --display required, shown from the distinct pictures, occupancy", () => {
