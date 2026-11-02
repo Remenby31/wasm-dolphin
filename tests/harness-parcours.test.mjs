@@ -8,7 +8,7 @@ import vm from "node:vm";
 
 import { analyzeRun, classifySecond, gapDetail, completionOf, currentPhase, deriveSeconds, GAME_DRAWS_PER_FRAME, LOAD_DISC_BPS, markerIndexes, MIN_PHASE_SEC, parcoursVerdict, phaseLabels, phaseMetrics, phaseNoise, renderTimeline, sectionsOf, segmentsOf, summarizeSeconds, windowCadence } from "../harness/lib/parcours.mjs";
 import { filmMarkers, filmWithMarks, keyToPad, padStateOf, recordPorts, runRecordSteps, validateFilm, validateRecordSteps } from "../harness/lib/pad-film.mjs";
-import { analyzeRaw, countersOf, lagsOf, exitCodeOf, humanSummary, markerStep } from "../harness/probes/parcours.mjs";
+import { analyzeRaw, countersOf, lagsOf, presentGaps, exitCodeOf, humanSummary, markerStep } from "../harness/probes/parcours.mjs";
 import { decodePng, encodePng } from "../harness/lib/png.mjs";
 
 const TPS = 486e6;
@@ -449,4 +449,12 @@ test("present gaps past 25 ms: their VI outputs and the presenting worker's stal
   assert.deepEqual(rows[0].gaps, []);
   assert.deepEqual(lagsOf({ columns: ["t", "lagMs", "ticks"], rows: [[1, 5, 0], [2, 30, 0]] }), [[2, 30]]);
   assert.deepEqual(lagsOf(null), []);
+});
+
+test("per present, the gap before it: VIs and the worker's stall (the attribution adapter's gapVis, gapWorkerLagMs)", () => {
+  const prev = { presents: [900, 983], viT: [950], lag: [] };
+  const r = presentGaps(prev, { presents: [1000, 1100], viT: [990, 1016, 1050], lag: [[1090, 50]] });
+  assert.deepEqual(r.vis, [1, 2]);
+  assert.deepEqual(r.workerLagMs, [0, 50]);
+  assert.deepEqual(presentGaps(undefined, { presents: [5, 21], viT: [], lag: [] }), { vis: [null, 0], workerLagMs: [null, 0] });
 });

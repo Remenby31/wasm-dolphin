@@ -54,7 +54,7 @@ import { calmLock, defaultMaxLoad, loadGaveUp, loadLimit } from "../lib/env.mjs"
 import { readIntegrity, treeHasIntegrity } from "../lib/integrity.mjs";
 import { claim } from "../lib/ownership.mjs";
 import { filmMarkers, filmWithMarks, padFilmStatus, recordPorts, releaseMarker, runRecordSteps, signalStuck, startPadFilm, stopPadFilm, validateFilm, validateRecordSteps } from "../lib/pad-film.mjs";
-import { analyzeRun, currentPhase, deriveSeconds, frameDiff, markerIndexes, STILL_DIFF, phaseNoise, parcoursVerdict, renderTimeline, usable } from "../lib/parcours.mjs";
+import { analyzeRun, currentPhase, deriveSeconds, frameDiff, gapDetail, markerIndexes, STILL_DIFF, phaseNoise, parcoursVerdict, renderTimeline, usable } from "../lib/parcours.mjs";
 import { acquirePerfLock } from "../lib/perf-lock.mjs";
 import { chromeInfo, isLocalOnly, probeOutDir } from "../lib/probe-out.mjs";
 import { decodePng } from "../lib/png.mjs";
@@ -104,6 +104,23 @@ async function readInfo(page) {
       info: { speed: n(f.gameSpeed), newFps: n(f.newFramesPerSec), producedFps: n(f.newFramesProducedPerSec), newShown: n(f.newFramesShown), outOfOrder: n(f.framesOutOfOrder), cpuBusy: n(f.cpuThreadBusy), gpuBusy: n(f.gpuThreadBusy), replayBusy: n(f.replayBusy), draws: d ? Number(d[1]) : null }
     };
   });
+}
+
+// Per present of a second, the gap since the present before it (the last of
+// the previous second for the first): the VI outputs inside it and the
+// presenting worker's stall inside it; null for a first present with none
+// before it. Pure.
+export function presentGaps(prev, { presents, viT, lag }) {
+  const vis = [], workerLagMs = [];
+  const vAll = [...(prev?.viT ?? []), ...viT], lAll = [...(prev?.lag ?? []), ...lag];
+  let from = prev?.presents?.at(-1) ?? null;
+  for (const p of presents) {
+    if (from == null) { vis.push(null); workerLagMs.push(null); from = p; continue; }
+    const g = gapDetail(from, p, vAll, lAll);
+    vis.push(g.vis); workerLagMs.push(g.workerLagMs);
+    from = p;
+  }
+  return { vis, workerLagMs };
 }
 
 // The drop sampler's late rows of a drain: [t, lagMs] when lagMs >= LAG_KEEP_MS.
@@ -177,7 +194,11 @@ async function playRun(o, server, { side, run, outDir }) {
       if (tl?.presents?.lost || tl?.vi?.lost) raw.timelineLost = (raw.timelineLost ?? 0) + (tl.presents?.lost ?? 0) + (tl.vi?.lost ?? 0);
       const integrity = await readIntegrity(page, { expected: o.integrityExpected });
       const status = await padFilmStatus(page);
-      raw.samples.push({ t, info, counters: countersOf(drained), presents: tl?.presents?.t ?? [], vi: tl?.vi?.t?.length ?? null, viT: tl?.vi?.t ?? [], lag: lagsOf(drained), integrity: integrity?.unread || integrity?.unavailable ? null : integrity, film: status ? { pos: status.pos, hold: status.hold, polls: status.polls } : null });
+      const presents = tl?.presents?.t ?? [], viT = tl?.vi?.t ?? [], lag = lagsOf(drained);
+      // per present, the gap before it: its VIs and the worker's stall
+      // (lib/drops.mjs parcoursWindowsForAttribution reads gapVis, gapWorkerLagMs)
+      const per = presentGaps(raw.samples.at(-1), { presents, viT, lag });
+      raw.samples.push({ t, info, counters: countersOf(drained), presents, vi: tl?.vi?.t?.length ?? null, viT, lag, gapVis: per.vis, gapWorkerLagMs: per.workerLagMs, integrity: integrity?.unread || integrity?.unavailable ? null : integrity, film: status ? { pos: status.pos, hold: status.hold, polls: status.polls } : null });
       raw.loads.push([Date.now(), os.loadavg()[0]]);
       rows = deriveSeconds(raw.samples, { tps: raw.tps });
       const phase = phaseNow();

@@ -157,6 +157,8 @@ export function deriveSeconds(samples, { tps = null } = {}) {
       speed: round(speed, 1), newFps: round(newFps, 1), producedFps: round(producedFps, 1),
       cadence: ref, smoothness: newFps == null ? null : round(Math.max(0, Math.min(100, (newFps / ref) * 100)), 1),
       viRate: round(viRate, 1), presents: (b.presents ?? []).length, hitches50, hitches100, maxGapMs: round(maxGapMs, 1), gaps,
+      // the presenting worker's longest stall in the second (sampler rows)
+      workerLagMs: (b.lag ?? []).length ? Math.max(...b.lag.map((x) => x[1])) : (Array.isArray(b.lag) ? 0 : null),
       discBps: carried?.discBps == null ? null : Math.round(carried.discBps),
       xfbPerFrame: carried?.xfbPerSec != null && producedFps > 0 ? round(carried.xfbPerSec / producedFps, 2) : null,
       drawsPerFrame: draws != null && made ? round(draws / made, 1) : null,
