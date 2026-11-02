@@ -164,6 +164,9 @@ async function playVisit(o, server, profileDir, shotDir, visit) {
     }
     // Counters that need turning on (0113 headroom, 0162 cadence), then the sampler.
     raw.headroom = (await workerRequest(page, "validationReadHeadroomStats", { reset: 0 }, 5000))?.error ?? "on";
+    // patch 0212: the mixer queue's skips and fills, the throttle trim and
+    // the VI phase lock (?vilock=1); read at the start and the end, cheap
+    raw.audioQueueStart = await workerRequest(page, "validationReadAudioQueue", {}, 5000).catch((e) => ({ error: String(e?.message ?? e) }));
     raw.cadence = await workerRequest(page, "validationReadPresentCadence", { reset: 0 }, 5000).then((r) => r?.error ?? (r?.supported === false ? "unsupported" : "on"));
     // --region-counters: the region stats counting guest cycles (no timing):
     // cheap, but not nothing; compare such runs only with each other.
@@ -251,6 +254,7 @@ async function playVisit(o, server, profileDir, shotDir, visit) {
     raw.newFramesEnd = await readFrameInfo(page).catch(() => null);
     // The JIT cache and the off-thread compiler at the end (cheap, read only).
     raw.jitCache = await workerRequest(page, "validationReadJitCacheReadiness", {}, 5000);
+    raw.audioQueueEnd = await workerRequest(page, "validationReadAudioQueue", {}, 5000).catch((e) => ({ error: String(e?.message ?? e) }));
     // The display filter (?fsr=, ?displayfit=): frames it drew and their GPU
     // time (timestamp queries, metrics on), canvas and backbuffer sizes.
     raw.displayFilter = (await workerRequest(page, "validationReadPresentVsync", {}, 5000))?.displayFilter ?? null;
@@ -283,6 +287,16 @@ export function markersOnVi(raw, vi) {
 }
 
 // One visit's analysis from its raw record (pure but for the reference).
+// patch 0212's counters over the visit: the mixer queue's overflow skips
+// (an audible jump) and underrun fills (deltas), the throttle trim and the
+// VI phase lock (?vilock=1) at the end. null on a core without them.
+export function audioQueueOfVisit(raw) {
+  const a = raw?.audioQueueStart, b = raw?.audioQueueEnd;
+  if (!b || b.error || b.unavailable) return b?.unavailable || b?.error ? { unavailable: b.unavailable ?? b.error } : null;
+  const d = (k) => (Number.isFinite(b[k]) && Number.isFinite(a?.[k]) ? b[k] - a[k] : null);
+  return { overflowSkips: d("overflowSkips"), underrunFills: d("underrunFills"), trimPpm: b.trimPpm ?? null, phaseLock: b.phaseLock ?? null };
+}
+
 export function analyzeVisit(raw, { native = null } = {}) {
   // (raw is reassigned below with the markers placed on the VI ring)
   if (raw.error) return { error: raw.error };
@@ -331,6 +345,7 @@ export function analyzeVisit(raw, { native = null } = {}) {
     regionsDone, rssPeakMB: rss.length ? Math.max(...rss) : null,
     summary: { ...dropSummary({ windows, presents, vi, tps: raw.tps, rows: rows.filter(span), displayed, page: page.filter(span) }), newFramesPerSec: newFramesRate(raw.newFramesStart, raw.newFramesEnd), loads: loads.length, loadExcessMs: loads.reduce((a, l) => a + l.excessMs, 0), rssPeakMB: rss.length ? Math.max(...rss) : null, regionsDoneMs: regionsDone?.hostMsFromLaunch ?? null },
     phases, loads, worst: worstDrops(events), drops: events.length,
+    audioQueue: audioQueueOfVisit(raw),
     attribution: attribution && { viHz: round(viHz, 3), seconds: attribution.seconds, beat: attribution.beat, dips: attribution.dips, hitches: attribution.hitches },
     // the 100 ms timeline, compact: [ms from start, speed %, VI/s, presents, max present gap, lost ms, top cause]
     timeline: windows.map((w) => {
@@ -575,10 +590,12 @@ export function readNoise(file, expect = null) {
   return Object.fromEntries(s.visitSummary.map((v) => [v.visit, { run: (v.candidate ?? v).noise, phases: (v.candidate ?? v).phases ?? {} }]));
 }
 
+const audioQueueBrief = (q) => (!q || q.unavailable ? "" : `, audio skips ${q.overflowSkips ?? "–"} fills ${q.underrunFills ?? "–"}${q.phaseLock ? `, vilock ${q.phaseLock.on ? "on" : "off"}${q.phaseLock.why ? ` (${q.phaseLock.why})` : ""} ppm ${q.phaseLock.ppm ?? "–"} locks ${q.phaseLock.locks ?? "–"} lost ${q.phaseLock.lost ?? "–"}` : ""}`);
+
 function logRun(log, tag, a) {
   if (a.error) return log(`${tag}: ${a.error}`);
   const s = a.summary;
-  log(`${tag}: lost ${s.lostMs} ms, <95 % ${s.pctBelow95} %, <90 % ${s.pctBelow90} %, worst 1 s ${s.worstSecond} %, hitches >50 ${s.hitches50} >100 ${s.hitches100}, p99 ${s.presentP99} ms, new frames ${s.newFramesPerSec ?? "–"}/s, ${s.loads} loads +${s.loadExcessMs} ms, underruns ${s.underruns}, audio ${s.audioLatencyMs ?? "–"} ms (mixer ${s.audioMixerMs ?? "–"}), load1 ${a.load1.median}${a.overloaded ? " OVERLOADED" : ""}${a.powerDrained ? ` POWER (charge fell or under ${MIN_BATTERY_PERCENT} %)` : ""}${integrityBrief(a.integrity)}`);
+  log(`${tag}: lost ${s.lostMs} ms, <95 % ${s.pctBelow95} %, <90 % ${s.pctBelow90} %, worst 1 s ${s.worstSecond} %, hitches >50 ${s.hitches50} >100 ${s.hitches100}, p99 ${s.presentP99} ms, new frames ${s.newFramesPerSec ?? "–"}/s, ${s.loads} loads +${s.loadExcessMs} ms, underruns ${s.underruns}, audio ${s.audioLatencyMs ?? "–"} ms (mixer ${s.audioMixerMs ?? "–"}), load1 ${a.load1.median}${audioQueueBrief(a.audioQueue)}${a.overloaded ? " OVERLOADED" : ""}${a.powerDrained ? ` POWER (charge fell or under ${MIN_BATTERY_PERCENT} %)` : ""}${integrityBrief(a.integrity)}`);
   for (const d of a.worst.slice(0, 3)) log(`   drop ${d.label} @${round(d.guestStart, 1)} gs: ${d.durationMs} ms, lost ${d.lostMs} ms, min ${d.minSpeed} %, cause ${d.cause}, ${d.jitBlocks} new blocks (${d.defers} deferred), causes ${JSON.stringify(d.causesMs)}`);
 }
 

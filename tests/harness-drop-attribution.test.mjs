@@ -404,3 +404,12 @@ test("drop-meter: --attribute without --analyze is an error", () => {
   assert.notEqual(res.status, 0);
   assert.match(res.stderr, /--attribute works on recorded runs/);
 });
+
+test("drop-meter: patch 0212's audio queue and VI phase lock over a visit", async () => {
+  const { audioQueueOfVisit } = await import("../harness/probes/drop-meter.mjs");
+  const lock = { on: true, ppm: -620, locks: 1, lost: 0, why: null };
+  assert.deepEqual(audioQueueOfVisit({ audioQueueStart: { overflowSkips: 2, underrunFills: 5, trimPpm: 0 }, audioQueueEnd: { overflowSkips: 3, underrunFills: 5, trimPpm: -620, phaseLock: lock } }),
+    { overflowSkips: 1, underrunFills: 0, trimPpm: -620, phaseLock: lock });
+  assert.deepEqual(audioQueueOfVisit({ audioQueueEnd: { unavailable: "core without patch 0212" } }), { unavailable: "core without patch 0212" });
+  assert.equal(audioQueueOfVisit({}), null);
+});
