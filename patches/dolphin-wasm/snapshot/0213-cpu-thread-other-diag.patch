@@ -1,0 +1,593 @@
+diff --git a/Source/Core/Core/CoreTiming.cpp b/Source/Core/Core/CoreTiming.cpp
+--- a/Source/Core/Core/CoreTiming.cpp
++++ b/Source/Core/Core/CoreTiming.cpp
+@@ -23,6 +23,7 @@
+ #include "Core/Config/MainSettings.h"
+ #include "Core/Core.h"
+ #ifdef __EMSCRIPTEN__
++#include "Core/WasmCpuThreadDiag.h"
+ #include "Core/WasmHeadroom.h"
+ #include "Core/WasmPresentCadence.h"
+ #endif
+@@ -228,6 +229,9 @@ EventType* CoreTimingManager::RegisterEvent(const std::string& name, TimedCallba
+   auto info = m_event_types.emplace(name, EventType{std::move(callback), nullptr});
+   EventType* event_type = &info.first->second;
+   event_type->name = &info.first->first;
++#ifdef __EMSCRIPTEN__
++  event_type->diag_slot = DolphinWeb::CpuThreadDiag::SlotFor(name);
++#endif
+   return event_type;
+ }
+ 
+@@ -509,6 +513,10 @@ void CoreTimingManager::MoveEvents()
+ 
+ void CoreTimingManager::Advance()
+ {
++#ifdef __EMSCRIPTEN__
++  // Patch 0213: read once; off, no clock is read for the events below.
++  const bool cpu_thread_diag = DolphinWeb::CpuThreadDiag::On();
++#endif
+   CPUThreadConfigCallback::CheckForConfigChanges();
+ 
+   MoveEvents();
+@@ -560,6 +568,11 @@ void CoreTimingManager::Advance()
+                                  static_cast<u64>(evt.time), m_globals.global_timer - evt.time);
+ #endif
+ #ifdef __EMSCRIPTEN__
++    // Patch 0213: each event type's callback time, net of the sleep, installs
++    // and FlushGpu waits inside it (the throttle sleep is in VICallback).
++    const auto diag_start =
++        cpu_thread_diag ? DolphinWeb::CpuThreadDiag::Now() : DolphinWeb::CpuThreadDiag::TimePoint{};
++    const double diag_nested = cpu_thread_diag ? DolphinWeb::CpuThreadDiag::g_stats.nested_us : 0;
+     // §28cp metrics-gated per-event callback timing. Logs when ANY single
+     // event callback exceeds 5ms wall time — these are the spikes that
+     // produce the 60ms advMax spike seen in §28co. Per-event so we can
+@@ -588,6 +601,12 @@ void CoreTimingManager::Advance()
+     {
+       evt.type->callback(m_system, evt.userdata, m_globals.global_timer - evt.time);
+     }
++    if (cpu_thread_diag)
++    {
++      DolphinWeb::CpuThreadDiag::AddEvent(evt.type->diag_slot,
++                                          DolphinWeb::CpuThreadDiag::Now() - diag_start,
++                                          diag_nested);
++    }
+ #else
+     evt.type->callback(m_system, evt.userdata, m_globals.global_timer - evt.time);
+ #endif
+@@ -720,6 +739,9 @@ void CoreTimingManager::SleepUntil(TimePoint time_point)
+     m_system.GetPerfMetrics().CountThrottleSleep(time_after_sleep - time);
+ #ifdef __EMSCRIPTEN__
+     DolphinWeb::Headroom::AddCpuSleep(time_after_sleep - time);
++    // Patch 0213: the sleep is left out of the diag part it is in.
++    if (DolphinWeb::CpuThreadDiag::On())
++      DolphinWeb::CpuThreadDiag::AddNested(DolphinWeb::CpuThreadDiag::Micros(time_after_sleep - time));
+     if (DolphinWeb::WasmTimingProfile::IsSliceActive())
+     {
+       const u32 requested_us = DolphinWeb::WasmTimingProfile::ElapsedMicros(time, time_point);
+@@ -742,6 +764,21 @@ void CoreTimingManager::SleepUntil(TimePoint time_point)
+ 
+ void CoreTimingManager::Throttle(const s64 target_cycle)
+ {
++#ifdef __EMSCRIPTEN__
++  // Patch 0213: the throttle's own bookkeeping, every return included, less
++  // its sleep and installs (nested). Off, the guard runs no clock.
++  const bool cpu_thread_diag = DolphinWeb::CpuThreadDiag::On();
++  const auto diag_start =
++      cpu_thread_diag ? DolphinWeb::CpuThreadDiag::Now() : DolphinWeb::CpuThreadDiag::TimePoint{};
++  const double diag_nested = cpu_thread_diag ? DolphinWeb::CpuThreadDiag::g_stats.nested_us : 0;
++  Common::ScopeGuard diag_guard{[&] {
++    if (cpu_thread_diag)
++    {
++      DolphinWeb::CpuThreadDiag::AddThrottle(DolphinWeb::CpuThreadDiag::Now() - diag_start,
++                                             diag_nested);
++    }
++  }};
++#endif
+   const TimePoint time = Clock::now();
+ #ifdef __EMSCRIPTEN__
+   DolphinWeb::Headroom::OnThrottle(GetTicks());
+diff --git a/Source/Core/Core/CoreTiming.h b/Source/Core/Core/CoreTiming.h
+--- a/Source/Core/Core/CoreTiming.h
++++ b/Source/Core/Core/CoreTiming.h
+@@ -55,6 +55,11 @@ struct EventType
+ {
+   TimedCallback callback;
+   const std::string* name;
++#ifdef __EMSCRIPTEN__
++  // Patch 0213: its entry in the CPU-thread diag's event table
++  // (DolphinWeb::CpuThreadDiag::SlotFor, at registration).
++  int diag_slot = -1;
++#endif
+ };
+ 
+ struct Event
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -94,6 +94,8 @@ StaticExitLinks::Stats s_static_link_stats;
+ #include <emscripten/stack.h>
+ #include <mbedtls/sha256.h>
+ 
++#include "Core/WasmCpuThreadDiag.h"
++
+ #ifndef DOLPHIN_WEB_HOT_COUNTERS
+ #define DOLPHIN_WEB_HOT_COUNTERS 1
+ #endif
+@@ -9790,6 +9792,11 @@ void ResetRegionChainStats();  // patch 0102
+ // compiles and regions (a state load may have changed any code).
+ void ClearOffThreadAndRegionState()
+ {
++  // Patch 0213: timed with the CPU-thread diag on (no clock off).
++  const bool cpu_thread_diag = DolphinWeb::CpuThreadDiag::On();
++  const DolphinWeb::CpuThreadDiag::Scope diag_scope{
++      cpu_thread_diag, &DolphinWeb::CpuThreadDiag::g_stats.clear_region_state_us,
++      &DolphinWeb::CpuThreadDiag::g_stats.clear_region_state_calls};
+   ResetOffThreadCompiles();
+   RepostWaitingRegions();
+   UnverifyAllRegions();  // checked against the plan before they run again
+@@ -10200,6 +10207,9 @@ bool TryInstallRegion(PendingRegion& pending, int ready_bits_ptr, double& spent_
+       std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+   spent_ms += ms;
+   s_region_stats.install_ms += ms;
++  // Patch 0213: an install is left out of the CPU-thread diag part it is in.
++  if (DolphinWeb::CpuThreadDiag::On())
++    DolphinWeb::CpuThreadDiag::AddNested(ms * 1000.0);
+   if (handle == -3 || handle == -4)
+   {
+     s_wasm_off_thread_used = true;  // a cache clear must reset what was posted
+@@ -10661,6 +10671,11 @@ bool TryRunRegion(PowerPC::PowerPCState& ppc_state)
+   InstalledRegion& region = s_regions[index];
+   if (!region.verified)
+   {
++    // Patch 0213: the check of a region marked stale, every return included.
++    const bool cpu_thread_diag = DolphinWeb::CpuThreadDiag::On();
++    const DolphinWeb::CpuThreadDiag::Scope diag_scope{
++        cpu_thread_diag, &DolphinWeb::CpuThreadDiag::g_stats.reverify_us,
++        &DolphinWeb::CpuThreadDiag::g_stats.reverify_calls};
+     // The RAM may have been allocated again (a stop and a new boot in the same
+     // page): the code embeds the old address, whatever the guest code says.
+     const bool moved = std::pair{region.ram_base, region.l1_base} != RegionHeapBases() ||
+@@ -10895,6 +10910,11 @@ extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_JitRegionChainStats()
+ // dropped then if it changed. From JitInterface.
+ void DolphinWeb_InvalidateRegions(u32 address, u32 size, bool forced)
+ {
++  // Patch 0213: timed with the CPU-thread diag on, every return included.
++  const bool cpu_thread_diag = DolphinWeb::CpuThreadDiag::On();
++  const DolphinWeb::CpuThreadDiag::Scope diag_scope{
++      cpu_thread_diag, &DolphinWeb::CpuThreadDiag::g_stats.invalidate_us,
++      &DolphinWeb::CpuThreadDiag::g_stats.invalidate_calls};
+   // MEM1 offsets: the 0x8 and 0xC views and DMA (physical) addresses meet.
+   const u64 begin = address & 0x01ffffff;
+   const u64 end = size >= 0x01800000 ? u64{0x01800000} : begin + size;
+@@ -10935,6 +10955,8 @@ void DolphinWeb_InvalidateRegions(u32 address, u32 size, bool forced)
+     if (!region.live || (!region.verified && !forced))
+       continue;
+     s_region_invalidation_scans += 1;
++    if (cpu_thread_diag)
++      DolphinWeb::CpuThreadDiag::g_stats.invalidate_scans += 1;
+     for (std::size_t i = 0; i + 1 < region.ranges.size(); i += 2)
+     {
+       const u64 start = region.ranges[i] & 0x01ffffff;
+@@ -11206,6 +11228,81 @@ extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_JitRegionStats(int sample_every)
+     s_region_stats_request.store(sample_every, std::memory_order_release);
+   return static_cast<u32>(reinterpret_cast<std::uintptr_t>(&s_region_stats));
+ }
++
++namespace
++{
++// Patch 0213, CPU-thread diag (Core/WasmCpuThreadDiag.h, layout v1): one Run
++// iteration's clock points and the nested time at each (taken only with the
++// diag on): 0 start, 1 before RetryDeferredWasmBlocks, 2 after it, 3 after
++// ServiceRegionInstalls, 4 before Advance, 5 after it, 6 before the slice
++// loop, 7 after it, 8 the iteration's end.
++struct CpuThreadDiagIteration
++{
++  DolphinWeb::CpuThreadDiag::TimePoint t[9];
++  double nested[9];
++  void Mark(int i)
++  {
++    t[i] = DolphinWeb::CpuThreadDiag::Now();
++    nested[i] = DolphinWeb::CpuThreadDiag::g_stats.nested_us;
++  }
++  // Host µs from point a to b, less the nested time in between.
++  double Span(int a, int b) const
++  {
++    return DolphinWeb::CpuThreadDiag::Micros(t[b] - t[a]) - (nested[b] - nested[a]);
++  }
++};
++
++// The deferred lists' sizes, next to RetryDeferredWasmBlocks (contract
++// harnesses compile that function alone: nothing is added inside it).
++void NoteDeferredListSizes(const CachedInterpreter& cpu)
++{
++  const auto found = s_deferred_wasm_queues.find(&cpu);
++  const double deferred =
++      found == s_deferred_wasm_queues.end() ? 0.0 : static_cast<double>(found->second.Stored());
++  DolphinWeb::CpuThreadDiag::NoteListSizes(static_cast<double>(s_wasm_off_thread_waiting.size()),
++                                           deferred, static_cast<double>(s_region_waiting.size()));
++}
++
++// The iteration's parts (point 8 just marked); they add up to control.
++void FinishCpuThreadDiagIteration(const CpuThreadDiagIteration& it, const CachedInterpreter& cpu)
++{
++  auto& s = DolphinWeb::CpuThreadDiag::g_stats;
++  const double setup = it.Span(0, 1) + it.Span(3, 4) + it.Span(5, 6);
++  const double retry = it.Span(1, 2);
++  const double service = it.Span(2, 3);
++  const double advance = it.Span(4, 5);
++  const double tail = it.Span(7, 8);
++  s.setup_us += setup;
++  s.retry_us += retry;
++  s.region_service_us += service;
++  s.advance_us += advance;
++  s.tail_us += tail;
++  s.control_us += it.Span(0, 8) - it.Span(6, 7);
++  s.slice_loop_us += DolphinWeb::CpuThreadDiag::Micros(it.t[7] - it.t[6]);
++  s.iterations += 1;
++  s.window_us = DolphinWeb::CpuThreadDiag::Micros(it.t[8] - DolphinWeb::CpuThreadDiag::g_reset_at);
++  NoteDeferredListSizes(cpu);
++}
++}  // namespace
++
++// n >= 0: turns the diag on and asks the CPU thread to zero it at its next
++// Run iteration; n == -2: off; other n < 0: reads only. Returns the struct's
++// address (8-aligned). Callable from any thread: the CPU thread alone writes
++// the struct, the caller copies it.
++extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_CpuThreadDiagStats(int n)
++{
++  if (n >= 0)
++  {
++    DolphinWeb::CpuThreadDiag::g_reset_request.store(true, std::memory_order_release);
++    DolphinWeb::CpuThreadDiag::g_on.store(true, std::memory_order_release);
++  }
++  else if (n == -2)
++  {
++    DolphinWeb::CpuThreadDiag::g_on.store(false, std::memory_order_release);
++  }
++  return static_cast<u32>(
++      reinterpret_cast<std::uintptr_t>(&DolphinWeb::CpuThreadDiag::g_stats));
++}
+ #endif
+ 
+ void CachedInterpreter::ExecuteOneBlock([[maybe_unused]] bool allow_redispatch)
+@@ -11507,6 +11604,16 @@ void CachedInterpreter::Run()
+   while (*state_ptr == CPU::State::Running)
+   {
+ #ifdef __EMSCRIPTEN__
++    // Patch 0213: the CPU-thread diag, read once per iteration; off, no
++    // clock is read at any of its points below.
++    const bool cpu_thread_diag = DolphinWeb::CpuThreadDiag::On();
++    CpuThreadDiagIteration diag;
++    if (cpu_thread_diag)
++    {
++      diag.Mark(0);
++      DolphinWeb::CpuThreadDiag::ApplyReset(diag.t[0]);
++      diag.nested[0] = DolphinWeb::CpuThreadDiag::g_stats.nested_us;
++    }
+     ApplyArmedWasmPolicy();
+     ApplyRequestedWasmPolicy(*this);
+     ServiceBlockDumpRequest(*this);
+@@ -11539,8 +11646,20 @@ void CachedInterpreter::Run()
+       s_wasm_compile_us_this_slice = 0;
+     }
+     // The compile budget has been replenished and no cached callback is active.
++#ifdef __EMSCRIPTEN__
++    if (cpu_thread_diag)
++      diag.Mark(1);
++#endif
+     RetryDeferredWasmBlocks(*this);
++#ifdef __EMSCRIPTEN__
++    if (cpu_thread_diag)
++      diag.Mark(2);
++#endif
+     ServiceRegionInstalls();
++#ifdef __EMSCRIPTEN__
++    if (cpu_thread_diag)
++      diag.Mark(3);
++#endif
+     ApplyRegionStatsRequest();
+     if (ApplyMemStatsRequest())
+     {
+@@ -11577,7 +11696,15 @@ void CachedInterpreter::Run()
+     // NOTE: Exceptions may change PC
+     const auto _advance_start =
+         _profile_slice ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
++#ifdef __EMSCRIPTEN__
++    if (cpu_thread_diag)
++      diag.Mark(4);
++#endif
+     core_timing.Advance();
++#ifdef __EMSCRIPTEN__
++    if (cpu_thread_diag)
++      diag.Mark(5);
++#endif
+     const auto _advance_end =
+         _profile_slice ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+ 
+@@ -11595,6 +11722,8 @@ void CachedInterpreter::Run()
+     const auto slice_start =
+         timing ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+     s_sampling_lookups = timing;
++    if (cpu_thread_diag)
++      diag.Mark(6);
+ #endif
+     do
+     {
+@@ -11635,6 +11764,8 @@ void CachedInterpreter::Run()
+       ExecuteOneBlock();
+     } while (m_ppc_state.downcount > 0 && *state_ptr == CPU::State::Running);
+ #ifdef __EMSCRIPTEN__
++    if (cpu_thread_diag)
++      diag.Mark(7);
+     s_sampling_lookups = false;
+     if (s_mem_stats_on)
+     {
+@@ -11705,6 +11836,13 @@ void CachedInterpreter::Run()
+                                                                 std::memory_order_relaxed)) {}
+       }
+     }
++#ifdef __EMSCRIPTEN__
++    if (cpu_thread_diag)
++    {
++      diag.Mark(8);
++      FinishCpuThreadDiagIteration(diag, *this);
++    }
++#endif
+   }
+ #if DOLPHIN_WEB_STATIC_EXIT_LINKS && DOLPHIN_WEB_STATIC_EXIT_LINK_STATS
+   s_static_link_stats.Publish();
+diff --git a/Source/Core/Core/WasmCpuThreadDiag.h b/Source/Core/Core/WasmCpuThreadDiag.h
+new file mode 100644
+--- /dev/null
++++ b/Source/Core/Core/WasmCpuThreadDiag.h
+@@ -0,0 +1,225 @@
++// Copyright 2026 wasm-dolphin contributors
++// SPDX-License-Identifier: GPL-2.0-or-later
++//
++// CPU-thread "other" diagnostics (patch 0213, read by the harness through
++// validationReadCpuThreadDiag, harness/lib/cpu-thread-diag.mjs): the CPU
++// thread's host time outside the timed slice parts (region stats 0075:
++// regions, blocks + dispatch, Idle; installs; headroom 0113: throttle sleep),
++// cut into the work CachedInterpreter::Run does around each slice:
++//   setup         the slice set-up (policy, burst stats, region and memory
++//                 stats requests, mode checks, BeginSlice, the region stats'
++//                 own set-up)
++//   retry         RetryDeferredWasmBlocks (off-thread waiting list visits,
++//                 deferred queue drain), with the two lists' sizes after it
++//   regionService ServiceRegionInstalls less its installs
++//   advance       CoreTiming::Advance, with each event type's callbacks
++//                 (table below); the throttle's bookkeeping (Throttle less
++//                 its sleep and installs) is inside the VI event
++//   tail          the slice close-out after the slice loop
++// Every part is net of the "nested" time it contains: throttle sleep
++// (SleepUntil), region installs (TryInstallRegion) and FlushGpu waits, all
++// counted elsewhere. The parts come from consecutive clock points of one Run
++// iteration, so setup + retry + regionService + advance + tail == control
++// (the iteration's time outside its slice loop, less nested) by
++// construction; what control misses against the harness's "other" is CPU
++// thread time outside Run's iterations (or the edge of the reads).
++// Stale-region checks (nested in other parts, never added): a region
++// re-verified before it runs (TryRunRegion, in blocks/dispatch),
++// DolphinWeb_InvalidateRegions (where the invalidation came from: guest code
++// or a DMA event) and ClearOffThreadAndRegionState (a cache clear).
++//
++// Off until DolphinWeb_CpuThreadDiagStats(n >= 0), which turns g_on on and
++// asks the CPU thread to zero the counters at its next Run iteration;
++// n == -2 turns it off; any other n < 0 only reads. Every hook reads g_on
++// once and, when it is off, takes no clock and writes nothing (the guards
++// are `if (cpu_thread_diag)` / `cpu_thread_diag ? Now() : ...`). Written by
++// the CPU thread alone, as plain doubles; the worker copies the struct as
++// whole f64s, twice, and the harness refuses a torn read.
++#pragma once
++
++#ifdef __EMSCRIPTEN__
++#include <algorithm>
++#include <atomic>
++#include <chrono>
++#include <cstddef>
++#include <cstring>
++#include <string_view>
++
++#include "Common/CommonTypes.h"
++
++namespace DolphinWeb::CpuThreadDiag
++{
++// Event types get a slot by first registration (a name registered again
++// after UnregisterAllEvents keeps its slot); past EVENT_SLOTS they share the
++// last entry, "(others)".
++constexpr u32 EVENT_SLOTS = 32;
++constexpr u32 NAME_BYTES = 32;
++constexpr int OTHERS_SLOT = EVENT_SLOTS;
++
++struct EventEntry
++{
++  char name[NAME_BYTES] = {};  // NUL-terminated, cut at 31 bytes
++  double us = 0;               // callback host time, net of nested time
++  double calls = 0;
++};
++
++// Layout v1 (1856 bytes, little-endian), agreed with the harness: a 16-byte
++// header, 32 f64 fields, then EVENT_SLOTS + 1 event entries of 48 bytes.
++struct Stats
++{
++  u32 version = 1;
++  u32 size_bytes = 1856;
++  u32 on = 0;
++  u32 event_slots = EVENT_SLOTS;
++  double window_us = 0;        // host time from the reset to the last iteration's start
++  double iterations = 0;       // Run iterations (slices)
++  double control_us = 0;       // iteration time outside its slice loop, less nested
++  double slice_loop_us = 0;    // inside the slice loops (regions, blocks, dispatch, Idle)
++  double nested_us = 0;        // sleep + installs + FlushGpu waits (everywhere)
++  double setup_us = 0;
++  double retry_us = 0;
++  double region_service_us = 0;
++  double advance_us = 0;       // CoreTiming::Advance from Run
++  double tail_us = 0;
++  double events_us = 0;        // every event callback (all of Advance's callers)
++  double event_calls = 0;
++  double throttle_us = 0;      // Throttle less its sleep and installs (inside an event)
++  double throttle_calls = 0;
++  double off_thread_waiting_now = 0;  // after the last retry
++  double off_thread_waiting_max = 0;
++  double off_thread_waiting_sum = 0;  // over the iterations: mean = sum / iterations
++  double deferred_now = 0;            // deferred queue entries (stored)
++  double deferred_max = 0;
++  double deferred_sum = 0;
++  double region_waiting_now = 0;      // regions waiting for their module
++  double region_waiting_max = 0;
++  double region_waiting_sum = 0;
++  double reverify_us = 0;      // TryRunRegion: an unverified region checked again
++  double reverify_calls = 0;
++  double invalidate_us = 0;    // DolphinWeb_InvalidateRegions
++  double invalidate_calls = 0;
++  double invalidate_scans = 0; // regions those invalidations looked at
++  double clear_region_state_us = 0;  // ClearOffThreadAndRegionState
++  double clear_region_state_calls = 0;
++  double spare0 = 0;
++  double spare1 = 0;
++  EventEntry events[EVENT_SLOTS + 1];
++};
++static_assert(sizeof(EventEntry) == 48);
++static_assert(offsetof(Stats, window_us) == 16);
++static_assert(offsetof(Stats, events) == 16 + 32 * 8);
++static_assert(sizeof(Stats) == 16 + 32 * 8 + (EVENT_SLOTS + 1) * 48);
++
++using Clock = std::chrono::steady_clock;
++using TimePoint = Clock::time_point;
++alignas(8) inline Stats g_stats;
++inline std::atomic<bool> g_on{false};
++inline std::atomic<bool> g_reset_request{false};
++inline TimePoint g_reset_at;
++inline u32 g_slots_used = 0;
++
++inline bool On()
++{
++  return g_on.load(std::memory_order_relaxed);
++}
++inline TimePoint Now()
++{
++  return Clock::now();
++}
++inline double Micros(Clock::duration d)
++{
++  return std::chrono::duration<double, std::micro>(d).count();
++}
++
++// The slot of an event type, from its name (CoreTimingManager::RegisterEvent,
++// diag on or not: the names are there when it is turned on).
++inline int SlotFor(std::string_view name)
++{
++  for (u32 i = 0; i < g_slots_used; ++i)
++  {
++    const char* const held = g_stats.events[i].name;
++    if (name.substr(0, NAME_BYTES - 1) == std::string_view{held, strnlen(held, NAME_BYTES)})
++      return static_cast<int>(i);
++  }
++  if (g_slots_used >= EVENT_SLOTS)
++    return OTHERS_SLOT;
++  const u32 slot = g_slots_used++;
++  const std::size_t n = std::min<std::size_t>(name.size(), NAME_BYTES - 1);
++  std::memcpy(g_stats.events[slot].name, name.data(), n);
++  g_stats.events[slot].name[n] = '\0';
++  return static_cast<int>(slot);
++}
++
++// CPU thread, at the top of a Run iteration with the diag on: applies a
++// reset (zeroes every time and count, keeps the event names).
++inline void ApplyReset(TimePoint now)
++{
++  if (!g_reset_request.load(std::memory_order_relaxed)) [[likely]]
++    return;
++  g_reset_request.exchange(false, std::memory_order_acquire);
++  Stats fresh;
++  for (u32 i = 0; i <= EVENT_SLOTS; ++i)
++    std::memcpy(fresh.events[i].name, g_stats.events[i].name, NAME_BYTES);
++  fresh.on = 1;
++  g_stats = fresh;
++  g_reset_at = now;
++}
++
++inline void AddNested(double us)
++{
++  g_stats.nested_us += us;
++}
++inline void AddEvent(int slot, Clock::duration d, double nested_before)
++{
++  const double us = Micros(d) - (g_stats.nested_us - nested_before);
++  EventEntry& e = g_stats.events[slot >= 0 && slot <= OTHERS_SLOT ? slot : OTHERS_SLOT];
++  e.us += us;
++  e.calls += 1;
++  g_stats.events_us += us;
++  g_stats.event_calls += 1;
++}
++inline void AddThrottle(Clock::duration d, double nested_before)
++{
++  g_stats.throttle_us += Micros(d) - (g_stats.nested_us - nested_before);
++  g_stats.throttle_calls += 1;
++}
++inline void NoteListSizes(double off_thread_waiting, double deferred, double region_waiting)
++{
++  Stats& s = g_stats;
++  s.off_thread_waiting_now = off_thread_waiting;
++  s.off_thread_waiting_max = std::max(s.off_thread_waiting_max, off_thread_waiting);
++  s.off_thread_waiting_sum += off_thread_waiting;
++  s.deferred_now = deferred;
++  s.deferred_max = std::max(s.deferred_max, deferred);
++  s.deferred_sum += deferred;
++  s.region_waiting_now = region_waiting;
++  s.region_waiting_max = std::max(s.region_waiting_max, region_waiting);
++  s.region_waiting_sum += region_waiting;
++}
++
++// A timed scope for a function with several returns: no clock unless on.
++struct Scope
++{
++  bool on;
++  double* us;
++  double* calls;
++  TimePoint start;
++  double nested_before;
++  Scope(bool on_, double* us_, double* calls_)
++      : on(on_), us(us_), calls(calls_), start(on_ ? Now() : TimePoint{}),
++        nested_before(on_ ? g_stats.nested_us : 0)
++  {
++  }
++  ~Scope()
++  {
++    if (on)
++    {
++      *us += Micros(Now() - start) - (g_stats.nested_us - nested_before);
++      *calls += 1;
++    }
++  }
++  Scope(const Scope&) = delete;
++  Scope& operator=(const Scope&) = delete;
++};
++}  // namespace DolphinWeb::CpuThreadDiag
++#endif
+diff --git a/Source/Core/VideoCommon/Fifo.cpp b/Source/Core/VideoCommon/Fifo.cpp
+--- a/Source/Core/VideoCommon/Fifo.cpp
++++ b/Source/Core/VideoCommon/Fifo.cpp
+@@ -43,6 +43,7 @@
+ #include <pthread.h>
+ #include "dolphin_web_raster_profile.h"
+ #include "Core/WasmHeadroom.h"
++#include "Core/WasmCpuThreadDiag.h"
+ #endif
+ 
+ namespace Fifo
+@@ -659,7 +660,11 @@ void FifoManager::FlushGpu()
+   {
+     const auto start = DolphinWeb::Headroom::Clock::now();
+     m_gpu_mainloop.Wait();
+-    DolphinWeb::Headroom::AddFlushGpuWait(DolphinWeb::Headroom::Clock::now() - start);
++    const auto waited = DolphinWeb::Headroom::Clock::now() - start;
++    DolphinWeb::Headroom::AddFlushGpuWait(waited);
++    // Patch 0213: a wait the CPU-thread diag leaves out of the part it is in.
++    if (DolphinWeb::CpuThreadDiag::On())
++      DolphinWeb::CpuThreadDiag::AddNested(DolphinWeb::CpuThreadDiag::Micros(waited));
+     return;
+   }
+ #endif

@@ -3,8 +3,8 @@
   "normalization": "git-blob-lf",
   "root": {
     "baseCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
-    "resultTree": "f8a90b091d01f6d2b280116b5624b5f4fe1ec347",
-    "changedPathCount": 147,
+    "resultTree": "b8e3dda7eb61bd57fb0ed0729256c7202483143a",
+    "changedPathCount": 148,
     "records": [
       {
         "path": "CMakeLists.txt",
@@ -200,18 +200,18 @@
         "status": "M",
         "mode": "100644",
         "baseBlob": "1fa39d74486b5c652078c7fba67891c1e13c194f",
-        "resultBlob": "6b6c99837828a1a4f3170cb643577dbdb6e82290",
-        "size": 35136,
-        "sha256": "a80b783f89a0973dd3ecf59062af9b30af7fd61d99b900e309ff1583e95da75c"
+        "resultBlob": "37e04063de49ea08b4af6b08ff76dcf2e56b80dc",
+        "size": 36966,
+        "sha256": "90287f540e9ae4abbcaa3928a099ca05e597800ca2ef370bbb0fe471c6fef57e"
       },
       {
         "path": "Source/Core/Core/CoreTiming.h",
         "status": "M",
         "mode": "100644",
         "baseBlob": "29d636e4337177ae8ac5cdc2e8db0b596a26573e",
-        "resultBlob": "f6d77b0a65c29164ead88fd3b4bf4edce1e57f1b",
-        "size": 8132,
-        "sha256": "b770704f87dc89671871d0950f1b0331f1b61c89b71a8771558970f3b10ecc4d"
+        "resultBlob": "559017a37e37982e73b31e5f2ca7f53928382aa1",
+        "size": 8307,
+        "sha256": "a1354876ccc1fbd6d4cff55f40e4b69e300cf5b9b5dc511d17a7b4c5a32ff6e5"
       },
       {
         "path": "Source/Core/Core/FifoPlayer/FifoDataFile.cpp",
@@ -434,9 +434,9 @@
         "status": "M",
         "mode": "100644",
         "baseBlob": "3ec24a30162d97c99c2454af6af89d480d90c29d",
-        "resultBlob": "5fa31528680f8f82f609f0b265d96fd1178ae4ee",
-        "size": 631016,
-        "sha256": "8ae0ac5a096ad9d85cd05d9c964c70d18badcbd633c56b41d16efae80a22075d"
+        "resultBlob": "c35b9d74dbe07d5bec83a064227c27b01ecab609",
+        "size": 636289,
+        "sha256": "fcc97aed7248f52ffc376e0238f2dc6bab73571c632bfe709029bc07af269041"
       },
       {
         "path": "Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.h",
@@ -590,6 +590,15 @@
         "resultBlob": "414e53976cf7f09ce472df076ec8aee3b692cd66",
         "size": 5714,
         "sha256": "67b8ed41c16212fe6f1b7e700a498f4b34ca3bfb9fd8b70a75aecbefe43a003b"
+      },
+      {
+        "path": "Source/Core/Core/WasmCpuThreadDiag.h",
+        "status": "A",
+        "mode": "100644",
+        "baseBlob": null,
+        "resultBlob": "77f8a25596e5dbdf1330d05ec771deff8ca4d98e",
+        "size": 8766,
+        "sha256": "d18f76d5de8db18ca1e9e01b58d84e18f5c1030fb87f0bbf05b359c01b15e2e1"
       },
       {
         "path": "Source/Core/Core/WasmDetTrace.h",
@@ -1046,9 +1055,9 @@
         "status": "M",
         "mode": "100644",
         "baseBlob": "f183c9365514cc908bbc3641d55ff8db8c3acfe9",
-        "resultBlob": "d73ffe01c26d58b375893b584c9e6212f65ac736",
-        "size": 32982,
-        "sha256": "722be2ddcfcf9e4978413be566129918791796ff20446ec6d05dc4add1e0a0e1"
+        "resultBlob": "941bdf57bc1ca4052712d77a127047df412cf5ab",
+        "size": 33257,
+        "sha256": "55eaffcae192a9dff363118c3e9531647cd2769be4622b81a920ec7805976d99"
       },
       {
         "path": "Source/Core/VideoCommon/Fifo.h",
@@ -1365,5 +1374,5 @@
       ]
     }
   ],
-  "contentSha256": "9fac19cecda5b36a523eb2171ba2ae5747e71cde39667498067ff676c9af8407"
+  "contentSha256": "ef7effe19ad16055b370022e13459d92701137986cd77f5baf3d422893c34455"
 }
