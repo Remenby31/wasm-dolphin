@@ -36,8 +36,13 @@ test("swap ring: nothing is written unless the harness hooks AND the swap ring a
   const record = body(discio, "void DolphinWeb_HarnessRecordSwap(");
   // the first statement: the gate
   assert.match(record, /^\{\s+if \(!DolphinWeb_HarnessSwapsEnabled\(\)\)\s+return;/);
-  // the ring is written in that function only
-  assert.equal(discio.match(/s_harness_swap_ring\[/g).length, 1);
+  // the ring is written in that function only, and only once allocated
+  assert.match(record, /DolphinWebHarnessSwapEntry\* ring = s_harness_swap_ring\.load\(std::memory_order_acquire\);\s+if \(!ring\)\s+return;/);
+  assert.equal(discio.match(/ring\[head % HARNESS_SWAP_RING_CAPACITY\]/g).length, 1);
+  // no static array: allocated at the first enable, before the flag is released
+  assert.doesNotMatch(discio, /std::array<DolphinWebHarnessSwapEntry/);
+  const enable = body(discio, "void DolphinWeb_HarnessSwapsEnable(int enabled)");
+  assert.ok(enable.indexOf("new DolphinWebHarnessSwapEntry[") < enable.indexOf("s_harness_swaps_enabled.store("), "the ring before the flag");
   assert.equal(discio.match(/s_harness_swap_head\.store\(/g).length, 1);
 });
 

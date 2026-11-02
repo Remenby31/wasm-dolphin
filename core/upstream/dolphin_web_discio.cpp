@@ -1345,19 +1345,28 @@ struct DolphinWebHarnessSwapEntry
 static_assert(sizeof(DolphinWebHarnessSwapEntry) == 32, "harness swap entry layout is read from JS");
 
 constexpr std::uint32_t HARNESS_SWAP_RING_CAPACITY = 8192;  // as the VI ring
-static std::array<DolphinWebHarnessSwapEntry, HARNESS_SWAP_RING_CAPACITY> s_harness_swap_ring{};
+// Allocated at the first enable, never in the core's static data: static data
+// added ahead of other globals moves the addresses the region translator
+// embeds (tests/regshape-x64.test.mjs), and a core without the harness never
+// pays for the ring's 256 KiB.
+static std::atomic<DolphinWebHarnessSwapEntry*> s_harness_swap_ring{nullptr};
 static std::atomic<std::uint32_t> s_harness_swap_head{0};
 static std::atomic<int> s_harness_swaps_enabled{0};
 
+// The worker's thread only (validationEnableHarness, the core's load).
 EMSCRIPTEN_KEEPALIVE void DolphinWeb_HarnessSwapsEnable(int enabled)
 {
-  s_harness_swaps_enabled.store(enabled ? 1 : 0, std::memory_order_relaxed);
+  if (enabled && !s_harness_swap_ring.load(std::memory_order_acquire))
+    s_harness_swap_ring.store(new DolphinWebHarnessSwapEntry[HARNESS_SWAP_RING_CAPACITY](),
+                              std::memory_order_release);
+  // released after the ring: a writer that sees the flag sees the ring
+  s_harness_swaps_enabled.store(enabled ? 1 : 0, std::memory_order_release);
 }
 // Read on the CPU thread at each VI output, only under the harness hooks.
 EMSCRIPTEN_KEEPALIVE int DolphinWeb_HarnessSwapsEnabled()
 {
   return s_harness_enabled.load(std::memory_order_relaxed) &&
-         s_harness_swaps_enabled.load(std::memory_order_relaxed);
+         s_harness_swaps_enabled.load(std::memory_order_acquire);
 }
 // The video thread (one writer: swaps run on one thread at a time).
 EMSCRIPTEN_KEEPALIVE void DolphinWeb_HarnessRecordSwap(std::uint32_t vi_since_boot, double host_ms,
@@ -1366,8 +1375,11 @@ EMSCRIPTEN_KEEPALIVE void DolphinWeb_HarnessRecordSwap(std::uint32_t vi_since_bo
 {
   if (!DolphinWeb_HarnessSwapsEnabled())
     return;
+  DolphinWebHarnessSwapEntry* ring = s_harness_swap_ring.load(std::memory_order_acquire);
+  if (!ring)
+    return;
   const std::uint32_t head = s_harness_swap_head.load(std::memory_order_relaxed);
-  DolphinWebHarnessSwapEntry& e = s_harness_swap_ring[head % HARNESS_SWAP_RING_CAPACITY];
+  DolphinWebHarnessSwapEntry& e = ring[head % HARNESS_SWAP_RING_CAPACITY];
   e.seq.store(2 * head + 1, std::memory_order_relaxed);  // odd: being written
   std::atomic_thread_fence(std::memory_order_release);
   e.vi_since_boot = vi_since_boot;
@@ -1378,7 +1390,8 @@ EMSCRIPTEN_KEEPALIVE void DolphinWeb_HarnessRecordSwap(std::uint32_t vi_since_bo
   e.seq.store(2 * head + 2, std::memory_order_release);  // even: entry `head` complete
   s_harness_swap_head.store(head + 1, std::memory_order_release);
 }
-EMSCRIPTEN_KEEPALIVE DolphinWebHarnessSwapEntry* DolphinWeb_HarnessSwapRing() { return s_harness_swap_ring.data(); }
+// null until the swap ring was first enabled.
+EMSCRIPTEN_KEEPALIVE DolphinWebHarnessSwapEntry* DolphinWeb_HarnessSwapRing() { return s_harness_swap_ring.load(std::memory_order_acquire); }
 EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_HarnessSwapRingCapacity() { return HARNESS_SWAP_RING_CAPACITY; }
 EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_HarnessSwapRingHead() { return s_harness_swap_head.load(std::memory_order_acquire); }
 

@@ -1580,7 +1580,8 @@ function readHarnessTimeline() {
   // The pipeline diag: null when not asked for, or (swaps) when the core has
   // no swap ring; `swapsWhy` says which.
   const swapsWhy = !harnessPipeline ? "not requested (validationEnableHarness { pipeline: true })"
-    : !m?._DolphinWeb_HarnessSwapRing ? "core has no swap ring (patch 0214)" : null;
+    : !m?._DolphinWeb_HarnessSwapRing ? "core has no swap ring (patch 0214)"
+      : !m._DolphinWeb_HarnessSwapRing() ? "swap ring not allocated yet (the core not loaded)" : null;
   let swaps = null;
   if (!swapsWhy) {
     const head = m._DolphinWeb_HarnessSwapRingHead() >>> 0;
