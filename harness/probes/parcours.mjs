@@ -198,6 +198,7 @@ async function playRun(o, server, { side, run, outDir }) {
       // per present, the gap before it: its VIs and the worker's stall
       // (lib/drops.mjs parcoursWindowsForAttribution reads gapVis, gapWorkerLagMs)
       const per = presentGaps(raw.samples.at(-1), { presents, viT, lag });
+      if (o.samplerRows && drained?.rows) (raw.samplerRows ??= []).push(drained);
       raw.samples.push({ t, info, counters: countersOf(drained), presents, vi: tl?.vi?.t?.length ?? null, viT, lag, gapVis: per.vis, gapWorkerLagMs: per.workerLagMs, integrity: integrity?.unread || integrity?.unavailable ? null : integrity, film: status ? { pos: status.pos, hold: status.hold, polls: status.polls } : null });
       raw.loads.push([Date.now(), os.loadavg()[0]]);
       rows = deriveSeconds(raw.samples, { tps: raw.tps });
@@ -373,7 +374,7 @@ async function main() {
       iso: { type: "string" }, film: { type: "string" }, record: { type: "string" }, "film-out": { type: "string" },
       runs: { type: "string", default: "1" }, candidate: { type: "string" }, baseline: { type: "string" }, noise: { type: "string" },
       config: { type: "string", default: "product" }, query: { type: "string" }, "marker-timeout": { type: "string", default: "120" }, "max-sec": { type: "string", default: "1200" },
-      edge: { type: "string" }, shots: { type: "boolean", default: false }, "shot-every": { type: "string", default: "0" }, auto: { type: "string" }, verbose: { type: "boolean", default: false }, analyze: { type: "string" },
+      edge: { type: "string" }, "sampler-rows": { type: "boolean", default: false }, shots: { type: "boolean", default: false }, "shot-every": { type: "string", default: "0" }, auto: { type: "string" }, verbose: { type: "boolean", default: false }, analyze: { type: "string" },
       "max-load": { type: "string" }, "load-wait": { type: "string", default: "300" }, "lock-wait": { type: "string", default: "14400" }, "no-lock": { type: "boolean", default: false },
       port: { type: "string", default: process.env.HARNESS_PORT }, out: { type: "string" }
     }
@@ -401,7 +402,10 @@ async function main() {
     auto: values.auto ? JSON.parse(values.auto) : null,
     // --edge '{"0":[0,0,1,1]}': the autopilot steers from the picture, each
     // port in its view (lib/edge-follower.mjs); '{}' or absent: the sine
-    edge: values.edge ? JSON.parse(values.edge) : null
+    edge: values.edge ? JSON.parse(values.edge) : null,
+    // --sampler-rows: every drop sampler row (100 ms, all its counters) kept in
+    // the raw record, for an attribution of the causes (lib/drops.mjs rowsOf)
+    samplerRows: values["sampler-rows"]
   };
   const filmBytes = values.film ? readFileSync(values.film) : null;
   const filmId = filmBytes ? `${path.basename(values.film)}#${createHash("sha256").update(filmBytes).digest("hex").slice(0, 12)}` : null;
