@@ -412,4 +412,9 @@ test("drop-meter: patch 0212's audio queue and VI phase lock over a visit", asyn
     { overflowSkips: 1, underrunFills: 0, trimPpm: -620, phaseLock: lock });
   assert.deepEqual(audioQueueOfVisit({ audioQueueEnd: { unavailable: "core without patch 0212" } }), { unavailable: "core without patch 0212" });
   assert.equal(audioQueueOfVisit({}), null);
+  // per phase, from each marker's read to the next (the last to the end)
+  const q = (skips, fills) => ({ overflowSkips: skips, underrunFills: fills });
+  const perPhase = audioQueueOfVisit({ audioQueueStart: q(0, 0), audioQueueEnd: { ...q(30, 9), trimPpm: 0, phaseLock: null },
+    markers: [{ label: "boot", audioQueue: q(0, 0) }, { label: "race", audioQueue: q(10, 4) }, { label: "unlabelled-read-failed", audioQueue: null }] });
+  assert.deepEqual(perPhase.phases, { boot: q(10, 4), race: q(20, 5) });
 });

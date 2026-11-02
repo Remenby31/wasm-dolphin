@@ -221,6 +221,8 @@ async function playVisit(o, server, profileDir, shotDir, visit) {
         // The phase starts at its guest second: the analysis places it on the
         // VI ring (this host time is the poll's, up to ~20 ms late).
         if (step.label) raw.markers.push({ t, label: step.label, guest: step.at + base });
+        // patch 0212's queue at each phase start: skips and fills per phase
+        if (step.label) raw.markers.at(-1).audioQueue = await workerRequest(page, "validationReadAudioQueue", {}, 2000).catch(() => null);
         if ("tap" in step) {
           await page.keyboard.down(step.tap);
           await page.waitForTimeout(step.hold ?? 120);
@@ -289,12 +291,23 @@ export function markersOnVi(raw, vi) {
 // One visit's analysis from its raw record (pure but for the reference).
 // patch 0212's counters over the visit: the mixer queue's overflow skips
 // (an audible jump) and underrun fills (deltas), the throttle trim and the
-// VI phase lock (?vilock=1) at the end. null on a core without them.
+// VI phase lock (?vilock=1) at the end, and the skips and fills per phase
+// (read at each phase marker). null on a core without them.
 export function audioQueueOfVisit(raw) {
   const a = raw?.audioQueueStart, b = raw?.audioQueueEnd;
   if (!b || b.error || b.unavailable) return b?.unavailable || b?.error ? { unavailable: b.unavailable ?? b.error } : null;
-  const d = (k) => (Number.isFinite(b[k]) && Number.isFinite(a?.[k]) ? b[k] - a[k] : null);
-  return { overflowSkips: d("overflowSkips"), underrunFills: d("underrunFills"), trimPpm: b.trimPpm ?? null, phaseLock: b.phaseLock ?? null };
+  const delta = (x, y, k) => (Number.isFinite(y?.[k]) && Number.isFinite(x?.[k]) ? y[k] - x[k] : null);
+  const d = (k) => delta(a, b, k);
+  // per phase: from its marker's read to the next one's (the last to the end)
+  const marks = (raw.markers ?? []).filter((m) => m.label && m.audioQueue && !m.audioQueue.error && !m.audioQueue.unavailable);
+  const phases = {};
+  marks.forEach((m, i) => {
+    const next = marks[i + 1]?.audioQueue ?? b;
+    const p = phases[m.label] ??= { overflowSkips: 0, underrunFills: 0 };
+    p.overflowSkips += delta(m.audioQueue, next, "overflowSkips") ?? 0;
+    p.underrunFills += delta(m.audioQueue, next, "underrunFills") ?? 0;
+  });
+  return { overflowSkips: d("overflowSkips"), underrunFills: d("underrunFills"), trimPpm: b.trimPpm ?? null, phaseLock: b.phaseLock ?? null, ...(marks.length ? { phases } : {}) };
 }
 
 export function analyzeVisit(raw, { native = null } = {}) {
