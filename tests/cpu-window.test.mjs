@@ -238,7 +238,13 @@ test("probe contract: the three stats and headroom turned on with the worker mes
   assert.match(main, /heldWatchdog\(\{ seconds: budgetSec, release: \(\) => lock\.release\(\) \}\)/);
   assert.doesNotMatch(main, /setTimeout\(/, "no other watchdog in main");
   assert.match(src, /process\.exit\(code\)/);
-  assert.match(src, /display: "headless"/);
+  // the display comes from the environment (HARNESS_DISPLAY): headless by
+  // default, the bench screen under spark-run --headed (video=wgpu)
+  assert.doesNotMatch(src, /display: "headless"/);
+  assert.match(src, /openSession\(\{ base: server\.base, server, query: o\.query, iso: o\.iso, routes \}\)/);
+  // --counters-before-load: the reset (which clears the JIT cache) before the state load
+  const before = src.indexOf("if (o.countersBeforeLoad) {"), load = src.indexOf("await loadHarnessState(page, session.url)");
+  assert.ok(before > 0 && load > before, "counters reset before the load");
   // snapshots read only: no reset between rows
   const snapFn = src.slice(src.indexOf("export async function snapshot"), src.indexOf("// Every counter on and reset"));
   assert.doesNotMatch(snapFn, /reset: 0|sampleEvery:/);

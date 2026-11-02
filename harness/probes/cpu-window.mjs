@@ -4,7 +4,8 @@
 //
 // Where the emulated CPU thread's host time goes, second by second, and what
 // grows in the seconds that dip (speed under 100 %, or the CPU thread
-// saturated). Headless only; one tree, one run.
+// saturated). Headless by default (HARNESS_DISPLAY: the bench screen under
+// spark-run --headed, for video=wgpu); one tree, one run.
 //
 //   node harness/probes/cpu-window.mjs --iso disc.iso --port N
 //     [--state scene.sav | --steps steps.json] [--candidate dir]
@@ -142,9 +143,20 @@ async function closeBounded(session) {
 
 async function measure(o, server) {
   const routes = o.state ? { [STATE_ROUTE]: o.state } : {};
-  const session = await openSession({ base: server.base, server, query: o.query, iso: o.iso, routes, display: "headless" });
+  // the display from the environment (HARNESS_DISPLAY): headless by default,
+  // the bench's screen under spark-run --headed (video=wgpu needs it there)
+  const session = await openSession({ base: server.base, server, query: o.query, iso: o.iso, routes });
   const { page } = session;
   try {
+    // --counters-before-load: every counter reset (and so the JIT cache the
+    // memory stats' first reset clears) BEFORE the state load, so the load
+    // finds the cache refilled by the boot as in production, and the rows
+    // start at the load (the post-load seconds are the ones measured).
+    let enabled = null;
+    if (o.countersBeforeLoad) {
+      enabled = await enableStats(page);
+      await page.waitForTimeout(Math.max(o.memWarm, 1) * 1000);
+    }
     if (o.state) {
       const loaded = await loadHarnessState(page, session.url);
       if (!loaded?.loaded) throw new Error(`savestate load failed: ${JSON.stringify(loaded)}`);
@@ -153,12 +165,14 @@ async function measure(o, server) {
     }
     if (o.hold) await page.keyboard.down(o.hold);
     await page.waitForTimeout(o.warmup * 1000);
-    const enabled = await enableStats(page);
-    log(`counters: ${Object.entries(enabled).map(([k, v]) => `${k} ${v}`).join(", ")}`);
-    // The memory stats' first reset clears the JIT cache (the block
-    // recompiles stay out of the rows); every reset applies at the next
-    // slice, Throttle or mail.
-    await page.waitForTimeout(Math.max(o.memWarm, 1) * 1000);
+    if (!enabled) {
+      enabled = await enableStats(page);
+      // The memory stats' first reset clears the JIT cache (the block
+      // recompiles stay out of the rows); every reset applies at the next
+      // slice, Throttle or mail.
+      await page.waitForTimeout(Math.max(o.memWarm, 1) * 1000);
+    }
+    log(`counters: ${Object.entries(enabled).map(([k, v]) => `${k} ${v}`).join(", ")}${o.countersBeforeLoad ? " (reset before the state load)" : ""}`);
     // The untimed window (region counters only): the timing's price.
     let untimed = null;
     if (o.untimedSecs > 0) {
@@ -207,7 +221,8 @@ async function main() {
       "max-load": { type: "string" }, "load-wait": { type: "string", default: "300" }, "lock-wait": { type: "string", default: "1800" }, "calm-wait": { type: "string" },
       port: { type: "string", default: process.env.HARNESS_PORT }, out: { type: "string" },
       // set by spark-run for every probe: one tree, one window here
-      runs: { type: "string" }, baseline: { type: "string" }
+      runs: { type: "string" }, baseline: { type: "string" },
+      "counters-before-load": { type: "boolean", default: false }
     },
     allowPositionals: false
   });
@@ -229,7 +244,7 @@ async function main() {
     iso, state, steps, root,
     query: `${values.query ?? (values.config === "product" ? PRODUCT_QUERY : PRESETS[values.config] ?? values.config)}&metrics=1`,
     warmup: num(values, "warmup", { min: 0 }), secs: num(values, "secs", { min: 1 }), step: num(values, "step", { min: 0.25 }),
-    hold: values.hold || null, vi: parseViRange(values.vi),
+    hold: values.hold || null, vi: parseViRange(values.vi), countersBeforeLoad: Boolean(values["counters-before-load"]),
     dipSpeed: num(values, "dip-speed", { min: 0 }), dipBusy: num(values, "dip-busy", { min: 0 }),
     regionSample: num(values, "region-sample", { min: 0, int: true }), memWarm: num(values, "mem-warm", { min: 0 }), untimedSecs: num(values, "untimed-secs", { min: 0 }),
     maxLoad: values["max-load"] ? num(values, "max-load", { min: 0.1 }) : defaultMaxLoad(),
