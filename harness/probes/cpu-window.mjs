@@ -4,7 +4,8 @@
 //
 // Where the emulated CPU thread's host time goes, second by second, and what
 // grows in the seconds that dip (speed under 100 %, or the CPU thread
-// saturated). Headless only; one tree, one run.
+// saturated). Headless by default (HARNESS_DISPLAY: the bench screen under
+// spark-run --headed, for video=wgpu); one tree, one run.
 //
 //   node harness/probes/cpu-window.mjs --iso disc.iso --port N
 //     [--state scene.sav | --steps steps.json] [--candidate dir]
@@ -142,23 +143,41 @@ async function closeBounded(session) {
 
 async function measure(o, server) {
   const routes = o.state ? { [STATE_ROUTE]: o.state } : {};
-  const session = await openSession({ base: server.base, server, query: o.query, iso: o.iso, routes, display: "headless" });
+  // the display from the environment (HARNESS_DISPLAY): headless by default,
+  // the bench's screen under spark-run --headed (video=wgpu needs it there)
+  const session = await openSession({ base: server.base, server, query: o.query, iso: o.iso, routes });
   const { page } = session;
   try {
+    // --counters-before-load: every counter reset (and so the JIT cache the
+    // memory stats' first reset clears) BEFORE the state load. The state
+    // load empties the JIT cache itself (patch 0171), as in production; what
+    // this avoids is a SECOND clear after the load, which production never
+    // has. The block recompiles right after the load are therefore real
+    // costs, measured, not an artefact. The rows start at the load only with
+    // --warmup 0 --untimed-secs 0 (summary: rowsStartAfterLoadSec).
+    let enabled = null;
+    if (o.countersBeforeLoad) {
+      enabled = await enableStats(page);
+      await page.waitForTimeout(Math.max(o.memWarm, 1) * 1000);
+    }
+    let loadedAt = null;
     if (o.state) {
       const loaded = await loadHarnessState(page, session.url);
       if (!loaded?.loaded) throw new Error(`savestate load failed: ${JSON.stringify(loaded)}`);
+      loadedAt = performance.now();
     } else if (o.steps) {
       await runSteps(page, o.steps);
     }
     if (o.hold) await page.keyboard.down(o.hold);
     await page.waitForTimeout(o.warmup * 1000);
-    const enabled = await enableStats(page);
-    log(`counters: ${Object.entries(enabled).map(([k, v]) => `${k} ${v}`).join(", ")}`);
-    // The memory stats' first reset clears the JIT cache (the block
-    // recompiles stay out of the rows); every reset applies at the next
-    // slice, Throttle or mail.
-    await page.waitForTimeout(Math.max(o.memWarm, 1) * 1000);
+    if (!enabled) {
+      enabled = await enableStats(page);
+      // The memory stats' first reset clears the JIT cache (the block
+      // recompiles stay out of the rows); every reset applies at the next
+      // slice, Throttle or mail.
+      await page.waitForTimeout(Math.max(o.memWarm, 1) * 1000);
+    }
+    log(`counters: ${Object.entries(enabled).map(([k, v]) => `${k} ${v}`).join(", ")}${o.countersBeforeLoad ? " (reset before the state load)" : ""}`);
     // The untimed window (region counters only): the timing's price.
     let untimed = null;
     if (o.untimedSecs > 0) {
@@ -188,7 +207,8 @@ async function measure(o, server) {
       if (session.watch.fatal().length) throw new Error(`page fatal: ${JSON.stringify(session.watch.fatal()).slice(0, 300)}`);
     }
     const medianLoad = median(loads);
-    return { enabled, untimed, rows, snapshots: snaps, load1: { median: round(medianLoad, 2), max: round(Math.max(...loads), 2), limit: o.maxLoad }, overloaded: medianLoad > o.maxLoad, fatal: session.watch.fatal() };
+    const rowsStartAfterLoadSec = loadedAt != null && Number.isFinite(snaps[0]?.t) ? round((snaps[0].t - loadedAt) / 1000, 2) : null;
+    return { enabled, untimed, rows, snapshots: snaps, rowsStartAfterLoadSec, load1: { median: round(medianLoad, 2), max: round(Math.max(...loads), 2), limit: o.maxLoad }, overloaded: medianLoad > o.maxLoad, fatal: session.watch.fatal() };
   } finally {
     if (o.hold) await page.keyboard.up(o.hold).catch(() => {});
     await closeBounded(session);
@@ -205,13 +225,18 @@ async function main() {
       "dip-speed": { type: "string", default: "99" }, "dip-busy": { type: "string", default: "0.95" },
       "region-sample": { type: "string", default: "64" }, "mem-warm": { type: "string", default: "5" }, "untimed-secs": { type: "string", default: "5" },
       "max-load": { type: "string" }, "load-wait": { type: "string", default: "300" }, "lock-wait": { type: "string", default: "1800" }, "calm-wait": { type: "string" },
-      port: { type: "string", default: process.env.HARNESS_PORT }, out: { type: "string" }
+      port: { type: "string", default: process.env.HARNESS_PORT }, out: { type: "string" },
+      // set by spark-run for every probe: one tree, one window here
+      runs: { type: "string" }, baseline: { type: "string" }, "baseline-query": { type: "string" },
+      "counters-before-load": { type: "boolean", default: false }
     },
     allowPositionals: false
   });
   if (!values.iso || !values.port || (values.state && values.steps)) {
     throw new Error("usage: cpu-window.mjs --iso disc.iso --port N [--state scene.sav | --steps steps.json] [--candidate dir] [--warmup 25] [--secs 30] [--step 1] [--hold KeyX] [--vi FROM-TO] [--out dir]");
   }
+  if (values.baseline || values["baseline-query"]) throw new Error("cpu-window profiles one tree: --candidate only, no --baseline or --baseline-query");
+  if (values.runs != null && values.runs !== "1") console.error(`[cpu-window] --runs ${values.runs} ignored: one window per run (--secs sets its length)`);
   const iso = path.resolve(values.iso), state = values.state ? path.resolve(values.state) : null;
   for (const f of [iso, state].filter(Boolean)) if (!existsSync(f)) throw new Error(`not found: ${f}`);
   const steps = values.steps ? JSON.parse(readFileSync(path.resolve(values.steps), "utf8")) : null;
@@ -225,7 +250,7 @@ async function main() {
     iso, state, steps, root,
     query: `${values.query ?? (values.config === "product" ? PRODUCT_QUERY : PRESETS[values.config] ?? values.config)}&metrics=1`,
     warmup: num(values, "warmup", { min: 0 }), secs: num(values, "secs", { min: 1 }), step: num(values, "step", { min: 0.25 }),
-    hold: values.hold || null, vi: parseViRange(values.vi),
+    hold: values.hold || null, vi: parseViRange(values.vi), countersBeforeLoad: Boolean(values["counters-before-load"]),
     dipSpeed: num(values, "dip-speed", { min: 0 }), dipBusy: num(values, "dip-busy", { min: 0 }),
     regionSample: num(values, "region-sample", { min: 0, int: true }), memWarm: num(values, "mem-warm", { min: 0 }), untimedSecs: num(values, "untimed-secs", { min: 0 }),
     maxLoad: values["max-load"] ? num(values, "max-load", { min: 0.1 }) : defaultMaxLoad(),
@@ -270,6 +295,14 @@ async function main() {
       probe: "cpu-window", at: new Date().toISOString(), chrome: chromeInfo(), served: server.identity ?? null, root: o.root,
       iso: path.basename(o.iso), scene: o.state ? `state ${path.basename(o.state)}` : o.steps ? `steps ${path.basename(values.steps)}` : "boot",
       query: o.query, hold: o.hold, warmupSec: o.warmup, secs: o.secs, stepSec: o.step, regionSample: o.regionSample, memWarmSec: o.memWarm,
+      // the counters (and the JIT cache the memory stats' first reset clears)
+      // reset before the state load; the load clears the cache itself
+      // (0171), so post-load block recompiles are real, not an artefact
+      countersBeforeLoad: o.countersBeforeLoad,
+      countersNote: o.countersBeforeLoad
+        ? "counters reset before the state load: no second JIT cache clear after it; the load's own clear (0171) and its recompiles are measured"
+        : "counters reset after the warmup: the memory stats' first reset clears the JIT cache (block recompiles after it are an artefact of the probe)",
+      rowsStartAfterLoadSec: run.rowsStartAfterLoadSec,
       vi: o.vi, dipSpeed: o.dipSpeed, dipBusy: o.dipBusy, loadGate: gate, load1: run.load1, overloaded: run.overloaded, fatal: run.fatal,
       enabled: run.enabled, regionsInstalled, meanRegionCoverage: meanCoverage, regionWarning: warning,
       untimedSecs: o.untimedSecs, untimed: run.untimed, timingCost: cost,
