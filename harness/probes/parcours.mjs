@@ -213,7 +213,12 @@ async function playRun(o, server, { side, run, outDir }) {
     if (safari) await bootRemoteDisc(page, { url: `${server.base}?${o.query}`, descriptor: o.safari.descriptor, timeoutMs: 120000 });
     else await bootIso(page, { url: `${server.base}?${o.query}`, iso: o.iso, timeoutMs: 120000 });
     raw.bootMs = Date.now() - raw.launchT;
-    if (safari) await safari.assertInvisible("after boot");
+    if (safari) {
+      // every visibility check (area on screen, tolerance, app in front), in the raw record
+      raw.safariVisibility = safari.visibility;
+      raw.safariTolerance = safari.tolerance;
+      await safari.assertInvisible("after boot");
+    }
     else await context.assertInvisible("after boot");
     raw.browser = await page.evaluate(() => navigator.userAgent.match(/(?:Headless)?Chrome\/[\d.]+/)?.[0] ?? (/Version\/([\d.]+).*Safari/.exec(navigator.userAgent) ? `Safari/${/Version\/([\d.]+)/.exec(navigator.userAgent)[1]}` : navigator.userAgent)).catch(() => null);
     const progress = await workerRequest(page, "validationReadCoreProgress", {}, 5000);

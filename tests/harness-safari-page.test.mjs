@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { isSessionSafari, onSignals, sessionPid, startDiscServer, stopPid, screensTopLeft, visibleArea, maxVisiblePoints } from "../harness/lib/safari-page.mjs";
+import { isSessionSafari, onSignals, sessionPid, startDiscServer, stopPid, screensTopLeft, visibleArea, maxVisiblePoints, visibilityFailure } from "../harness/lib/safari-page.mjs";
 import { otherCpuOf } from "../harness/probes/parcours.mjs";
 
 const ORIGIN = "http://127.0.0.1:8306";
@@ -147,8 +147,14 @@ test("the window's visible area on the displays, from AppKit's frames (this Mac:
   assert.equal(screensTopLeft([[0, 0, "x", 1]]), null);
   // nothing allowed unless the run's owner says so, and never more than a corner
   assert.equal(maxVisiblePoints({}), 0);
+  assert.equal(maxVisiblePoints({ SAFARI_MAX_VISIBLE_PT: "" }), 0);
   assert.equal(maxVisiblePoints({ SAFARI_MAX_VISIBLE_PT: "2080" }), 2080);
-  for (const bad of ["5000", "-1", "1.5", "x"]) assert.equal(maxVisiblePoints({ SAFARI_MAX_VISIBLE_PT: bad }), 0, bad);
+  for (const bad of ["0x820", "1e3", "-1", "1.5", "x", " 2080"]) assert.throws(() => maxVisiblePoints({ SAFARI_MAX_VISIBLE_PT: bad }), /digits only/, bad);
+  for (const big of ["2081", "5000"]) assert.throws(() => maxVisiblePoints({ SAFARI_MAX_VISIBLE_PT: big }), /at most 2080/, big);
+  // a malformed rect is unknown (abort), never 0 visible
+  for (const bad of [{}, { x: "1", y: 0, width: 1, height: 1 }, { x: 0, y: 0, width: -5, height: 10 }, { x: NaN, y: 0, width: 1, height: 1 }, { x: 0, y: 0, width: Infinity, height: 1 }]) {
+    assert.equal(visibleArea(bad, screens), null, JSON.stringify(bad));
+  }
   const src = readFileSync(new URL("../harness/lib/safari-page.mjs", import.meta.url), "utf8");
   assert.doesNotMatch(src, /application "Finder"/, "the Finder can hang: never asked");
 });
@@ -165,7 +171,7 @@ test("parcours --browser safari boots the disc descriptor, never a file, and che
   assert.match(src, /--browser safari runs on macOS only/);
   assert.match(src, /if \(safari\) await bootRemoteDisc\(page, \{ url: `\$\{server\.base\}\?\$\{o\.query\}`, descriptor: o\.safari\.descriptor/);
   assert.match(src, /await startDiscServer\(iso, \{ port: o\.port \+ 2, origin: `http:\/\/127\.0\.0\.1:\$\{o\.port\}` \}\)/);
-  assert.match(src, /if \(safari\) await safari\.assertInvisible\("after boot"\)/);
+  assert.match(src, /await safari\.assertInvisible\("after boot"\)/);
   assert.match(src, /otherCpu\(profileDir, safari\?\.ownPids\(\) \?\? \[\]\)/);
   assert.match(src, /if \(safari\) await safari\.close\(\)/);
 });
@@ -206,4 +212,31 @@ test("a recorded pid is killed only while it is still a Safari started since the
   const src = readFileSync(new URL("../harness/lib/safari-page.mjs", import.meta.url), "utf8");
   assert.match(src, /const ours = safariPid !== null && isSessionSafari\(psLine\(safariPid\), sessionSince\);\n.*\n\s+const gone = ours \? stopPid\(safariPid\) : false;/);
   assert.match(src, /stopAll\(\);\n\s+uninstallSignals\(\);/, "the handlers go after everything is stopped");
+});
+
+test("a visibility check fails on more than the tolerance, or on a change of the app in front", () => {
+  const parcours = readFileSync(new URL("../harness/probes/parcours.mjs", import.meta.url), "utf8");
+  const capture = readFileSync(new URL("../harness/probes/safari-capture.mjs", import.meta.url), "utf8");
+  const ok = { area: 2080, allowed: 2080, front: "com.mitchellh.ghostty", frontNow: "com.mitchellh.ghostty" };
+  assert.equal(visibilityFailure(ok), null);
+  assert.equal(visibilityFailure({ ...ok, area: 0, allowed: 0 }), null);
+  assert.match(visibilityFailure({ ...ok, allowed: 0 }), /2080 pt² visible > 0/);
+  assert.match(visibilityFailure({ ...ok, area: null }), /displays unread/);
+  assert.match(visibilityFailure({ ...ok, frontNow: "com.apple.finder" }), /app in front changed: com.mitchellh.ghostty -> com.apple.finder/);
+  assert.match(visibilityFailure({ ...ok, frontNow: null }), /-> unread/);
+  assert.match(visibilityFailure({ ...ok, front: null }), /unread at the launch/);
+  // Safari in front: abort, whatever was in front before
+  assert.match(visibilityFailure({ ...ok, frontNow: "com.apple.Safari" }), /Safari is in front/);
+  assert.match(visibilityFailure({ ...ok, front: "com.apple.Safari", frontNow: "com.apple.Safari" }), /Safari is in front/);
+  // a window wholly on screen: abort even with the corner allowed
+  const screens = screensTopLeft([[0, 0, 2056, 1329]]);
+  assert.match(visibilityFailure({ ...ok, area: visibleArea({ x: 100, y: 100, width: 1280, height: 800 }, screens) }), /1024000 pt² visible > 2080/);
+  // a malformed rect: abort
+  assert.match(visibilityFailure({ ...ok, area: visibleArea({}, screens) }), /rect or the displays unread/);
+  const page = readFileSync(new URL("../harness/lib/safari-page.mjs", import.meta.url), "utf8");
+  assert.match(page, /const allowed = maxVisiblePoints\(\);\n/, "read once, before Safari starts");
+  assert.match(parcours, /raw\.safariTolerance = safari\.tolerance;/);
+  assert.match(capture, /run\.tolerance = safari\.tolerance;/);
+  assert.match(parcours, /raw\.safariVisibility = safari\.visibility;\n\s+await safari\.assertInvisible\("after boot"\);/);
+  assert.match(capture, /run\.visibility = safari\.visibility;/);
 });

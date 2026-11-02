@@ -146,6 +146,8 @@ export function screensTopLeft(frames) {
 // rect or the displays are unknown (then it counts as visible).
 export function visibleArea(rect, screens) {
   if (!rect || !screens) return null;
+  // a malformed rect (strings, a negative size) is unknown, never "0 visible"
+  if (!["x", "y", "width", "height"].every((k) => typeof rect[k] === "number" && Number.isFinite(rect[k])) || rect.width < 0 || rect.height < 0) return null;
   let area = 0;
   for (const s of screens) {
     const w = Math.min(rect.x + rect.width, s.x + s.width) - Math.max(rect.x, s.x);
@@ -169,10 +171,31 @@ const screens = () => {
 // (a window moved past every edge comes back with 40x52 points showing), so
 // a window cannot be put wholly off screen and stay rendered (minimized,
 // the page is hidden and throttled). SAFARI_MAX_VISIBLE_PT (points², default
-// 0: nothing) lets that corner through when the run's owner accepts it.
+// 0: nothing) lets that corner through when the run's owner accepts it, never
+// more than the corner itself (2080 = 40x52; Main Salon, 2026-11-02: with no
+// focus taken and the tolerance in each run's summary).
+export const MAX_VISIBLE_CORNER_PT = 40 * 52;
+// Digits only ("0x820", "1e3" are refused); a bad value is an error, never 0
+// in silence.
 export function maxVisiblePoints(env = process.env) {
-  const n = Number(env.SAFARI_MAX_VISIBLE_PT ?? 0);
-  return Number.isInteger(n) && n >= 0 && n <= 4096 ? n : 0;
+  const v = env.SAFARI_MAX_VISIBLE_PT;
+  if (v === undefined || v === "") return 0;
+  if (!/^\d+$/.test(v)) throw new Error(`SAFARI_MAX_VISIBLE_PT "${v}": points², digits only`);
+  const n = Number(v);
+  if (n > MAX_VISIBLE_CORNER_PT) throw new Error(`SAFARI_MAX_VISIBLE_PT ${n}: at most ${MAX_VISIBLE_CORNER_PT} (macOS's 40x52 corner)`);
+  return n;
+}
+
+// One visibility check: the window's area on screen within the tolerance,
+// and the app in front still the one that was before the launch (Safari
+// never takes the focus). The failure, or null.
+export function visibilityFailure({ area, allowed, front, frontNow }) {
+  if (frontNow === "com.apple.Safari") return "Safari is in front (the focus was taken)";
+  if (area === null) return "the window's rect or the displays unread";
+  if (area > allowed) return `${area} pt² visible > ${allowed}`;
+  if (!front) return "the app in front unread at the launch";
+  if (frontNow !== front) return `the app in front changed: ${front} -> ${frontNow ?? "unread"}`;
+  return null;
 }
 
 // A page exception from an evaluate (not a transport error: those retry).
@@ -180,6 +203,8 @@ class PageError extends Error {}
 
 export async function launchSafariPage({ port = 8306, log = () => {} } = {}) {
   if (pgrep(["-x", "Safari"]).length) throw new Error("Safari is already running: the user's own windows, no run");
+  // the tolerance read (and refused when malformed) before Safari starts
+  const allowed = maxVisiblePoints();
   const before = new Set(automationDirs());
   const front = frontmostBundle();
   const guardBin = process.env.SAFARI_FOCUS_GUARD;
@@ -228,15 +253,19 @@ export async function launchSafariPage({ port = 8306, log = () => {} } = {}) {
     uninstallSignals();
   };
   uninstallSignals = onSignals(stopAll);
+  // Each check is kept (visibility: for the run's summary).
+  const visibility = [];
   const assertInvisible = async (when) => {
     const rect = await cmd("GET", "/window/rect");
     const area = visibleArea(rect, screens());
-    const allowed = maxVisiblePoints();
-    if (area === null || area > allowed) {
+    const frontNow = frontmostBundle();
+    const failure = visibilityFailure({ area, allowed, front, frontNow });
+    visibility.push({ when, rect, area, allowed, front, frontNow, failure });
+    if (failure) {
       await close();
-      throw new Error(`safari: the window is on screen ${when} (${JSON.stringify(rect)}, ${area === null ? "displays unread" : `${area} pt² visible > ${allowed}`}): run aborted`);
+      throw new Error(`safari: ${when}: ${failure} (${JSON.stringify(rect)}): run aborted`);
     }
-    if (area > 0) log(`safari: ${area} pt² of the window on screen ${when} (macOS's corner, SAFARI_MAX_VISIBLE_PT ${allowed})`);
+    if (area > 0) log(`safari: ${area} pt² of the window on screen ${when} (macOS's corner, SAFARI_MAX_VISIBLE_PT ${allowed}), ${frontNow} still in front`);
   };
   let created = null;
   try {
@@ -252,8 +281,9 @@ export async function launchSafariPage({ port = 8306, log = () => {} } = {}) {
     if (safariPid !== null && !isSessionSafari(psLine(safariPid), sessionSince)) safariPid = null;
     await cmd("POST", "/timeouts", { script: 120_000, pageLoad: 120_000, implicit: 0 });
     await cmd("POST", "/window/rect", { x: 20000, y: 20000, width: 1280, height: 800 });
-    await assertInvisible("after launch");
+    // the focus given back first (Safari activates as it opens), then checked
     if (front) try { osa(`tell application id "${front}" to activate`); } catch {}
+    await assertInvisible("after launch");
   } catch (e) {
     await close();
     throw e;
@@ -316,5 +346,6 @@ export async function launchSafariPage({ port = 8306, log = () => {} } = {}) {
   // WebKit helpers born since the launch.
   const ownPids = () => [...(safariPid ? [safariPid] : []), ...pgrep(["-f", "com.apple.WebKit."]).filter((p) => !webkitBefore.includes(p))];
   log(`safari: session ${id} (${created?.capabilities?.browserVersion ?? "?"}, pid ${safariPid ?? "unidentified"})`);
-  return { page, close, assertInvisible, ownPids, pid: safariPid, browserVersion: created?.capabilities?.browserVersion ?? null };
+  // tolerance: what this run allowed on screen, for its summary (also at 0)
+  return { page, close, assertInvisible, ownPids, visibility, tolerance: { maxVisiblePt: allowed, corner: MAX_VISIBLE_CORNER_PT },  pid: safariPid, browserVersion: created?.capabilities?.browserVersion ?? null };
 }
