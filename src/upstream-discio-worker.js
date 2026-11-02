@@ -8722,7 +8722,8 @@ export async function prepareAotFirstLaunch(file, {
   // (bit 16 of the codegen mask, so its modules have their own keys).
   const assembleOptions = core?.assemble && { ...core.assemble, fragmentEntries: ((keyParts?.codegenMask ?? 0) & (1 << 16)) !== 0 };
   const aotAssemblerClient = translator && assembleOptions && aotAssemblerEnabled && typeof Worker === "function"
-    ? (await import("./aot-assembler-worker.js")).createAotAssemblerClient({ options: assembleOptions })
+    ? (await import("./aot-assembler-worker.js")).createAotAssemblerClient({ options: assembleOptions,
+      onHelperFailure: (why) => postStatus(`aot: assembler worker failed (${why}); regions assembled on this worker`) })
     : null;
   const flow = createAotFirstLaunch({
     discKey,
@@ -8802,7 +8803,7 @@ export async function prepareAotFirstLaunch(file, {
     maxBootBytes: DOLPHIN_AOT_BOOT_BYTES,
     // The regions' assembly in a worker of its own (aot-assembler-worker.js):
     // 30-60 ms of JS each, which on this worker held back presents.
-    ...(aotAssemblerClient ? { tuning: { assemble: (fragments) => aotAssemblerClient.assemble(fragments) } } : {}),
+    ...(aotAssemblerClient ? { tuning: { assemble: (fragments) => aotAssemblerClient.assemble(fragments) }, disposeAssembler: () => aotAssemblerClient.terminate() } : {}),
     onEvent: (event) => self.postMessage({ type: "aot-progress", event })
   });
   aotFirstLaunch = flow;

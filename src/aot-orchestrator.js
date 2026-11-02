@@ -70,6 +70,7 @@ export function createAotFirstLaunch({
   maxErrorEvents = 64, // per run: a flood of refusals never pushes out install/start
   runId = null,
   tuning = {}, // AotOptimizer options: maxAttempts, notReadyDelayMs, maxNotReadyWaits
+  disposeAssembler = null, // the assembler worker's end (aot-assembler-worker.js), at dispose()
   clock = epochNow,
   now = () => globalThis.performance?.now?.() ?? Date.now(),
   sleep
@@ -280,6 +281,7 @@ export function createAotFirstLaunch({
     dispose() {
       disposed = true;
       this.cancel();
+      try { disposeAssembler?.(); } catch { /* never stops a dispose */ }
     },
 
     // The probe's read: events since the boot, or since the last drain.
