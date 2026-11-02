@@ -35,7 +35,6 @@ const { values: o } = parseArgs({ options: {
   vi: { type: "string", default: "240,600" }, runs: { type: "string", default: "2" }, "lock-wait": { type: "string", default: "14400" }
 }, strict: true });
 // checked before the lock and the browser: a bad call never runs
-if (process.platform !== "darwin") throw new Error("safari-capture runs on macOS only");
 for (const k of ["iso", "state", "port", "out", "query"]) if (!o[k]) throw new Error(`--${k} is required`);
 const why = oracleQueryError(o.query);
 if (why) throw new Error(why);
@@ -47,6 +46,8 @@ const port = Number(o.port);
 if (!Number.isInteger(port) || port < 1024 || port > 65532) throw new Error("--port: the harness page's; the next three are safaridriver, the disc and the state");
 for (const f of [o.iso, o.state]) if (!existsSync(f)) throw new Error(`${f} is missing`);
 if (existsSync(o.out)) throw new Error(`${o.out} exists`);
+// the platform last: the arguments are checked the same everywhere (CI)
+if (process.platform !== "darwin") throw new Error("safari-capture runs on macOS only");
 
 const log = (m) => console.log(`[safari-capture] ${m}`);
 const release = await acquirePerfLock({ name: `safari-capture ${o.query}`, requireMains: true, waitSec: Number(o["lock-wait"]), log });
