@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import { heldWatchdog } from "../harness/probes/cpu-window.mjs";
-import { classifyDips, contrast, cpuWindowBreakdown, formatTable, PARTS, parseViRange, regionWarning, rowsInViRange, timingCost, viRangeOf } from "../harness/lib/cpu-window.mjs";
+import { classifyDips, contrast, cpuWindowBreakdown, formatTable, inflationNote, overAttributed, PARTS, parseViRange, regionWarning, rowsInViRange, timingCost, viRangeOf } from "../harness/lib/cpu-window.mjs";
 import { decodeHeadroomStats } from "../harness/lib/headroom.mjs";
 import { DIAGNOSTICS, decodeRegionStats } from "../harness/lib/jit-region-stats.mjs";
 import { KINDS } from "../harness/lib/mem-access-stats.mjs";
@@ -53,10 +53,16 @@ test("cpu window: busy / sleep / FlushGpu split and the region parts add up to t
   assert.equal(r.speedPct, 100);
   assert.equal(r.busyMs, 600);
   assert.equal(r.cpuBusyShare, 0.6);
-  assert.deepEqual(r.ms, { regions: 200, dispatch: 50, blocks: 250, interpreter: null, idle: 30, installs: 20, other: 50, sleep: 400, flushGpuWait: 0, axHle: 10 });
+  // blocks + dispatch as one part: the core's split of the two is unreliable (0075)
+  assert.deepEqual(r.ms, { regions: 200, blocksDispatch: 300, interpreter: null, idle: 30, installs: 20, other: 50, sleep: 400, flushGpuWait: 0, axHle: 10 });
+  assert.equal(r.split.blocks, 250);
+  assert.equal(r.split.dispatch, 50);
+  assert.equal(r.split.reliable, false);
+  assert.match(r.split.note, /unreliable/);
+  assert.ok(!("blocks" in r.shares) && !("dispatch" in r.perGuestSecond), "the split is never a part");
   // the parts (interpreter null: not separated by the core) add up to hostMs
   assert.equal(PARTS.reduce((n, k) => n + (r.ms[k] ?? 0), 0), r.hostMs);
-  assert.equal(r.shares.blocks, 0.25);
+  assert.equal(r.shares.blocksDispatch, 0.3);
   assert.equal(r.shares.axHle, 0.01);
   assert.equal(r.perGuestSecond.regions, 200);
   assert.match(r.why.interpreter, /does not separate the interpreter/);
@@ -82,14 +88,15 @@ test("cpu window: sampled times are the core's totals, never rescaled by sampleE
     b.region.sampleEvery = n;
     const r = cpuWindowBreakdown(a, b);
     assert.equal(r.ms.regions, 200, `sampleEvery ${n}`);
-    assert.equal(r.ms.dispatch, 50);
+    assert.equal(r.ms.blocksDispatch, 300);
     assert.equal(r.sampleEvery, n);
   }
   const [a, b] = pair();
   a.region.sampleEvery = 0;
   b.region.sampleEvery = 0;
   const r = cpuWindowBreakdown(a, b);
-  for (const k of ["regions", "dispatch", "blocks", "idle", "other"]) assert.equal(r.ms[k], null, k);
+  for (const k of ["regions", "blocksDispatch", "idle", "other"]) assert.equal(r.ms[k], null, k);
+  assert.equal(r.split, null);
   assert.equal(r.ms.installs, 20); // install time is counted with or without timing
   assert.equal(r.regionCoverage.raw, 0.5);
   assert.match(r.why.region, /sampleEvery 0/);
@@ -184,14 +191,16 @@ test("dips: speed under the threshold or a saturated CPU thread; contrast per gu
   const c = contrast(rows);
   assert.equal(c.dips.rows, 2);
   assert.equal(c.normal.rows, 2);
-  assert.equal(c.normal.msPerGuestSecond.blocks, 250);
-  assert.equal(c.dips.msPerGuestSecond.blocks, 750); // 600 ms / 0.8 guest s
-  assert.equal(c.diff.msPerGuestSecond.blocks, 500);
+  assert.equal(c.normal.msPerGuestSecond.blocksDispatch, 300);
+  assert.equal(c.dips.msPerGuestSecond.blocksDispatch, 812.5); // (600 + 50) ms / 0.8 guest s
+  assert.equal(c.diff.msPerGuestSecond.blocksDispatch, 512.5);
+  assert.ok(!("blocks" in c.diff.msPerGuestSecond), "grew rests on the combined figure");
   assert.equal(c.diff.msPerGuestSecond.sleep, -400);
-  assert.equal(c.grew[0].part, "blocks");
+  assert.equal(c.grew[0].part, "blocksDispatch");
   assert.ok(c.grew.some((g) => g.part === "axHle" && g.nestedIn), "AX listed as nested");
   assert.ok(!c.grew.some((g) => g.part === "sleep"));
-  assert.match(c.verdict, /blocks \+500 ms/);
+  assert.match(c.verdict, /blocksDispatch \+512.5 ms/);
+  assert.equal(c.overAttributed, null);
   assert.equal(c.dips.speedPct, 80);
   assert.equal(contrast(rows.filter((r) => !r.dip)).verdict, "no dip row");
   assert.match(formatTable(rows), /DIP/);
@@ -205,8 +214,11 @@ test("VI range: parsed, rows kept when they overlap, ranges from the drained tim
   assert.deepEqual(viRangeOf([{ sinceLoad: 61 }, { sinceLoad: 62 }, { sinceLoad: 120 }]), { from: 61, to: 120, count: 3 });
   assert.equal(viRangeOf([]), null);
   const rows = [{ i: 1, vi: { from: 0, to: 59 } }, { i: 2, vi: { from: 60, to: 119 } }, { i: 3, vi: { from: 120, to: 179 } }, { i: 4, vi: null }];
-  assert.deepEqual(rowsInViRange(rows, [100, 130]).map((r) => r.i), [2, 3]);
-  assert.equal(rowsInViRange(rows, null).length, 4);
+  const sel = rowsInViRange(rows, [100, 130]);
+  assert.deepEqual(sel.rows.map((r) => r.i), [2, 3]);
+  assert.equal(sel.droppedNoVi, 1);
+  assert.equal(sel.error, null);
+  assert.deepEqual(rowsInViRange(rows, null), { rows, droppedNoVi: 0, error: null });
 });
 
 test("probe contract: the three stats and headroom turned on with the worker messages, perf lock, watchdog after it, exits", () => {
@@ -233,7 +245,7 @@ test("probe contract: the three stats and headroom turned on with the worker mes
 });
 
 test("table: a saturated CPU thread prints 100.0, a null prints -, never a cut number", () => {
-  const t = formatTable([{ i: 1, vi: { from: 911, to: 945 }, speedPct: 55.4, cpuBusyShare: 0.9999, shares: { blocks: 0.78, regions: 0 }, dip: true }, { i: 2, speedPct: null, cpuBusyShare: null, shares: {}, dip: null }]);
+  const t = formatTable([{ i: 1, vi: { from: 911, to: 945 }, speedPct: 55.4, cpuBusyShare: 0.9999, shares: { blocksDispatch: 0.78, regions: 0 }, dip: true }, { i: 2, speedPct: null, cpuBusyShare: null, shares: {}, dip: null }]);
   const [head, one, two] = t.split("\n");
   assert.match(one, / 100\.0 /);
   assert.doesNotMatch(one, / 00\.0 /);
@@ -316,4 +328,57 @@ test("watchdog: counts only while armed (lock held and measuring), its exit rele
   bad.arm();
   assert.throws(() => advance(1e3), /gone/);
   assert.deepEqual(out, [2]);
+});
+
+test("--vi: a range no row covers, or past the run, is an error, never an empty result; rows without VI are counted", () => {
+  const rows = [{ i: 1, vi: { from: 0, to: 59 } }, { i: 2, vi: { from: 60, to: 119 } }, { i: 3, vi: { from: 120, to: 179 } }, { i: 4, vi: null }];
+  // past the last VI the run reached (the dip came after the run)
+  const past = rowsInViRange(rows, [150, 400]);
+  assert.match(past.error, /past the last VI the run reached \(179\)/);
+  assert.match(past.error, /1 row\(s\) without a VI range/);
+  assert.match(rowsInViRange(rows, [5000, 5100]).error, /past the last VI/);
+  // before the first VI of the rows
+  const gapRows = [{ i: 1, vi: { from: 900, to: 959 } }, { i: 2, vi: { from: 960, to: 1019 } }];
+  assert.match(rowsInViRange(gapRows, [100, 200]).error, /before the first VI of the rows \(900\)/);
+  // inside the run but in a hole between rows (VIs lost): no row covers it
+  const holes = [{ i: 1, vi: { from: 0, to: 59 } }, { i: 2, vi: { from: 200, to: 259 } }];
+  const hole = rowsInViRange(holes, [100, 150]);
+  assert.deepEqual(hole.rows, []);
+  assert.match(hole.error, /no row covers it/);
+  // no VI timeline at all
+  const none = rowsInViRange([{ i: 1, vi: null }, { i: 2 }], [0, 10]);
+  assert.equal(none.droppedNoVi, 2);
+  assert.match(none.error, /no row has a VI range/);
+});
+
+test("over-attribution in the table and the verdict; the inflation sentence; --dip-busy bounded to 1", () => {
+  const rows = classifyDips([
+    { i: 1, speedPct: 80, cpuBusyShare: 1, hostMs: 1000, guestSeconds: 0.8, overAttributedMs: 12.5, ms: { blocksDispatch: 900 }, shares: {} },
+    { i: 2, speedPct: 100, cpuBusyShare: 0.5, hostMs: 1000, guestSeconds: 1, overAttributedMs: null, ms: { blocksDispatch: 400 }, shares: {} }
+  ]);
+  assert.deepEqual(overAttributed(rows), { rows: 1, maxMs: 12.5, totalMs: 12.5 });
+  assert.equal(overAttributed([{ overAttributedMs: null }]), null);
+  const table = formatTable(rows).split("\n");
+  assert.match(table[0], /over ms/);
+  assert.match(table[1], / 12\.5 /);
+  assert.match(contrast(rows).verdict, /1 row\(s\) over-attributed \(max 12.5 ms past the busy time\)/);
+  assert.equal(inflationNote({ ratio: 1.42 }), "absolute numbers inflated x1.42 by the per-call timing, compare within a run only");
+  assert.match(inflationNote({ ratio: null, why: "no untimed window" }), /cost unknown: no untimed window\), compare within a run only/);
+  assert.throws(() => classifyDips([], { busyAbove: 1.5 }), /--dip-busy 1.5: a share of host time, 0 to 1/);
+  assert.throws(() => classifyDips([], { busyAbove: -0.1 }), /--dip-busy/);
+  assert.equal(classifyDips([{ speedPct: 100, cpuBusyShare: 1 }], { busyAbove: 1 })[0].dip, false);
+});
+
+test("probe contract: --vi failure exits non-zero, --dip-busy refused over 1 before the lock, inflation and split notes", () => {
+  const src = readFileSync(new URL("../harness/probes/cpu-window.mjs", import.meta.url), "utf8");
+  const main = src.slice(src.indexOf("async function main"));
+  assert.ok(main.indexOf("if (o.dipBusy > 1) throw") > 0 && main.indexOf("if (o.dipBusy > 1) throw") < main.indexOf("await calmLock("), "checked before the lock");
+  const failAt = main.indexOf("if (sel.error) {");
+  assert.ok(failAt > 0 && main.indexOf("code = 1;", failAt) < main.indexOf("} else {", failAt), "a --vi error sets a failing exit code");
+  assert.match(main, /rowsDroppedNoVi: sel\.droppedNoVi/);
+  assert.match(main, /log\(inflationNote\(cost\)\)/);
+  assert.match(main, /splitNote: SPLIT_NOTE/);
+  // no early return out of the try: process.exit(code) is always reached
+  const tryBody = main.slice(main.indexOf("try {"), main.indexOf("} catch (error)"));
+  assert.doesNotMatch(tryBody, /\breturn\b/);
 });

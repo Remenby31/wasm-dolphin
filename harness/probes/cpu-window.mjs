@@ -51,7 +51,7 @@ import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 
 import { ensureServer, loadHarnessState, readCoreProgress, readTimeline, REPO_ROOT, workerRequest } from "../lib/browser.mjs";
-import { classifyDips, contrast, cpuWindowBreakdown, formatTable, parseViRange, regionWarning, rowsInViRange, timingCost, viRangeOf } from "../lib/cpu-window.mjs";
+import { classifyDips, contrast, cpuWindowBreakdown, formatTable, inflationNote, parseViRange, regionWarning, rowsInViRange, SPLIT_NOTE, timingCost, viRangeOf } from "../lib/cpu-window.mjs";
 import { calmLock, defaultMaxLoad, loadGaveUp } from "../lib/env.mjs";
 import { consistentAxRead, decodeAxStats } from "../lib/ax-hle-stats.mjs";
 import { consistentHeadroomRead, decodeHeadroomStats } from "../lib/headroom.mjs";
@@ -232,6 +232,8 @@ async function main() {
     loadWait: num(values, "load-wait", { min: 0 }), port: num(values, "port", { min: 1, int: true })
   };
   if (o.secs < o.step) throw new Error(`--secs ${o.secs} < --step ${o.step}`);
+  // thresholds checked before any lock (classifyDips refuses them too)
+  if (o.dipBusy > 1) throw new Error(`--dip-busy ${o.dipBusy}: a share of host time, 0 to 1`);
   if (o.regionSample === 0) log("--region-sample 0: counters only, every region/block/dispatch/idle time will be null");
   const lockWait = num(values, "lock-wait", { min: 0 });
   const calmWait = values["calm-wait"] == null ? lockWait : num(values, "calm-wait", { min: 0 });
@@ -253,8 +255,10 @@ async function main() {
     watchdog.arm();
     const run = await measure(o, server);
     watchdog.disarm();
-    const kept = rowsInViRange(run.rows, o.vi);
-    const rows = classifyDips(kept, { speedBelow: o.dipSpeed, busyAbove: o.dipBusy });
+    // --vi: a range no row covers, or past the run, is a failure (exit 1),
+    // never an empty "no dip row"
+    const sel = rowsInViRange(run.rows, o.vi);
+    const rows = classifyDips(sel.rows, { speedBelow: o.dipSpeed, busyAbove: o.dipBusy });
     const c = contrast(rows);
     const lastRegion = run.snapshots.at(-1)?.region;
     const regionsInstalled = lastRegion && !lastRegion.error ? lastRegion.diagnostics?.regionsInstalled ?? null : null;
@@ -269,20 +273,31 @@ async function main() {
       vi: o.vi, dipSpeed: o.dipSpeed, dipBusy: o.dipBusy, loadGate: gate, load1: run.load1, overloaded: run.overloaded, fatal: run.fatal,
       enabled: run.enabled, regionsInstalled, meanRegionCoverage: meanCoverage, regionWarning: warning,
       untimedSecs: o.untimedSecs, untimed: run.untimed, timingCost: cost,
-      rowsTotal: run.rows.length, rowsKept: rows.length,
+      rowsTotal: run.rows.length, rowsKept: rows.length, rowsDroppedNoVi: sel.droppedNoVi, viError: sel.error,
+      splitNote: SPLIT_NOTE, inflation: inflationNote(cost),
       dips: rows.filter((r) => r.dip).map((r) => ({ i: r.i, vi: r.vi, speedPct: r.speedPct, cpuBusyShare: r.cpuBusyShare, why: r.dipWhy })),
       contrast: c,
       rows,
+      // with --vi, every row the run measured (the selection may be empty)
+      ...(o.vi ? { allRows: run.rows } : {}),
       snapshots: run.snapshots
     };
     writeFileSync(path.join(outDir, "summary.json"), JSON.stringify(summary, null, 1) + "\n");
     log(`query ${o.query}`);
     log(`regions: ${regionsInstalled ?? "?"} installed, coverage ${meanCoverage == null ? "?" : `${round(meanCoverage * 100, 1)} %`} of guest cycles (mean of the rows)`);
     if (warning) log(`WARNING: ${warning}`);
+    log(inflationNote(cost));
     log(`timing cost: ${cost.ratio == null ? `unknown (${cost.why})` : `x${cost.ratio} CPU-thread busy ms per guest second timed (${cost.timedBusyMsPerGuestSecond}) vs untimed (${cost.untimedBusyMsPerGuestSecond}); speed ${cost.timedSpeedPct} % timed vs ${cost.untimedSpeedPct} % untimed`}`);
     console.log(formatTable(rows));
-    log(`${rows.length} row(s)${o.vi ? ` in VI ${o.vi.join("-")}` : ""}, ${summary.dips.length} dip(s): ${c.verdict}${run.overloaded ? " (OVERLOADED: load median over the limit)" : ""} -> ${outDir}`);
-    code = run.overloaded || run.fatal?.length ? 1 : 0;
+    if (sel.droppedNoVi) log(`${sel.droppedNoVi} row(s) without a VI range left out by --vi`);
+    if (sel.error) {
+      // the rows are in summary.json, the selection failed: never exit 0
+      console.error(`[cpu-window] FAILED: ${sel.error} (all ${run.rows.length} rows in summary.json) -> ${outDir}`);
+      code = 1;
+    } else {
+      log(`${rows.length} row(s)${o.vi ? ` in VI ${o.vi.join("-")}` : ""}, ${summary.dips.length} dip(s): ${c.verdict}${run.overloaded ? " (OVERLOADED: load median over the limit)" : ""} -> ${outDir}`);
+      code = run.overloaded || run.fatal?.length ? 1 : 0;
+    }
   } catch (error) {
     console.error(`[cpu-window] ${String(error?.stack || error)}`);
     code = 1;

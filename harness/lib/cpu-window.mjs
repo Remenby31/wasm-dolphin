@@ -23,17 +23,14 @@
 //   flushGpuWait  the CPU thread waiting for the GPU thread in FlushGpu
 //                 (SyncOnSkipIdle on; 0 with it off)
 //   regions       host time inside region calls (regionTimeMs)
-//   blocks        inside ExecuteOneBlock, less its region calls, its block
-//                 lookups and CoreTiming::Idle (blockTimeMs): the JIT'd wasm
-//                 blocks, the cached-interpreter callbacks between them, and
-//                 everything they call: MMIO, memory slow paths, the gather
-//                 pipe, AX HLE (below), and the block compiles (Jit(pc)
-//                 runs inside ExecuteOneBlock after a lookup miss, 0003;
-//                 0075's own comment puts them in dispatch, its arithmetic
-//                 does not)
-//   dispatch      the rest of the CPU slice loop (dispatchTimeMs): block
-//                 lookups (1 in sampleEvery timed, scaled by the core) and
-//                 the loop itself
+//   blocksDispatch  the rest of the CPU slice loop: blockTimeMs +
+//                 dispatchTimeMs. The JIT'd wasm blocks, the
+//                 cached-interpreter callbacks between them and everything
+//                 they call (MMIO, memory slow paths, the gather pipe, AX
+//                 HLE, the block compiles after a lookup miss), the block
+//                 lookups and the loop. The sum is exact (dispatch is the
+//                 slice's residual); the split between the two is NOT
+//                 (below): kept apart in `split`, for information only
 //   interpreter   interpTimeMs: the core never separates it (0075 leaves it
 //                 at 0, interpreted instructions are inside blocks): null
 //                 when it did not move
@@ -53,11 +50,19 @@
 //
 // Sampling: with DolphinWeb_JitRegionStats(sampleEvery > 0) the core times
 // EVERY region call, EVERY ExecuteOneBlock and every Idle; only the block
-// lookups are timed 1 in sampleEvery, and the core multiplies them by
-// sampleEvery itself (0075 timed_lookup) before taking them out of blocks
-// and leaving them in dispatch. The struct's times are therefore totals:
+// lookups are timed 1 in sampleEvery (N), and the core multiplies them by N
+// itself (0075 timed_lookup). The struct's times are therefore totals:
 // never scaled again here (race-perf's regionShares does not either).
 // sampleEvery 0 = counters only: every region time is null.
+// Why the blocks/dispatch split is unreliable (0075, CachedInterpreter::Run):
+// per ExecuteOneBlock call, block_time += max(call - clock pair - its region
+// time - its lookup time - its Idle time, 0), where its lookup time is 0 on
+// the N-1 calls whose lookups are not timed and N x one lookup on the
+// sampled one; then dispatch = slice - (region + block + idle), the lookups
+// never subtracted. So the unsampled calls' lookups stay in blocks, and on a
+// sampled call N x a lookup usually exceeds the call: the clamp drops the
+// block's own time, which lands in dispatch. blocks + dispatch = the slice
+// less regions and Idle, exactly; how it splits is biased both ways.
 //
 // Edges: windowUs and guestTicks move at each Throttle (once per VI-ish
 // event), the region times at each slice, the reads are a few ms apart: a
@@ -66,9 +71,10 @@ import { KINDS } from "./mem-access-stats.mjs";
 import { round } from "./stats.mjs";
 
 // The parts of hostMs, in table order; they add up to hostMs.
-export const PARTS = ["regions", "dispatch", "blocks", "interpreter", "idle", "installs", "other", "sleep", "flushGpuWait"];
+export const PARTS = ["regions", "blocksDispatch", "interpreter", "idle", "installs", "other", "sleep", "flushGpuWait"];
 // Nested in other parts (shown, never added).
-export const NESTED = { axHle: "blocks+regions (the DSP mailbox MMIO write)" };
+export const NESTED = { axHle: "blocksDispatch+regions (the DSP mailbox MMIO write)" };
+export const SPLIT_NOTE = "blocks/dispatch as the core splits them (0075): unreliable (the unsampled lookups stay in blocks, a sampled call's block time is clamped into dispatch); their sum blocksDispatch is exact";
 export const CATEGORIES = [...PARTS, ...Object.keys(NESTED)];
 
 const ok = (s) => s != null && typeof s === "object" && !s.error;
@@ -205,8 +211,7 @@ export function cpuWindowBreakdown(start, end) {
   const timed = !rg.why && !rg.timesWhy;
   const ms = {
     regions: timed ? rg.regionsMs : null,
-    dispatch: timed ? rg.dispatchMs : null,
-    blocks: timed ? rg.blocksMs : null,
+    blocksDispatch: timed ? rg.blocksMs + rg.dispatchMs : null,
     // 0 that never moved is "not separated" (0075), not a measured 0
     interpreter: timed && rg.interpMs > 0 ? rg.interpMs : null,
     idle: timed && rg.idleRawMs != null ? Math.max(0, rg.idleRawMs - (flushGpuWait ?? 0)) : null,
@@ -220,7 +225,7 @@ export function cpuWindowBreakdown(start, end) {
   // other: busy less every attributed part; the interpreter counts as 0
   // there (its time is in blocks when the core does not separate it).
   let overAttributedMs = null;
-  const attributed = ["regions", "dispatch", "blocks", "idle", "installs"];
+  const attributed = ["regions", "blocksDispatch", "idle", "installs"];
   if (busyMs != null && attributed.every((k) => ms[k] != null)) {
     const rest = busyMs - attributed.reduce((n, k) => n + ms[k], 0) - (ms.interpreter ?? 0);
     ms.other = Math.max(0, rest);
@@ -243,6 +248,8 @@ export function cpuWindowBreakdown(start, end) {
     ms: round2,
     shares: Object.fromEntries(CATEGORIES.map((k) => [k, share(ms[k], hostMs)])),
     perGuestSecond: Object.fromEntries(CATEGORIES.map((k) => [k, ms[k] == null || !(guestSeconds > 0) ? null : round(ms[k] / guestSeconds, 2)])),
+    // for information only (SPLIT_NOTE): never in the table nor the contrast
+    split: timed ? { blocks: ms2(rg.blocksMs), dispatch: ms2(rg.dispatchMs), reliable: false, note: SPLIT_NOTE } : null,
     idleRawMs: timed ? ms2(rg.idleRawMs) : null,
     overAttributedMs,
     sampleEvery: rg.why ? null : rg.sampleEvery,
@@ -260,6 +267,8 @@ export function cpuWindowBreakdown(start, end) {
 // Each row marked dip (speed under speedBelow %, or the CPU thread busy
 // over busyAbove of its host time), normal, or null when neither is known.
 export function classifyDips(rows, { speedBelow = 99, busyAbove = 0.95 } = {}) {
+  if (!(busyAbove >= 0 && busyAbove <= 1)) throw new Error(`--dip-busy ${busyAbove}: a share of host time, 0 to 1`);
+  if (!(speedBelow >= 0)) throw new Error(`--dip-speed ${speedBelow}: a speed in %`);
   return rows.map((r) => {
     const slow = r.speedPct == null ? null : r.speedPct < speedBelow;
     const busy = r.cpuBusyShare == null ? null : r.cpuBusyShare > busyAbove;
@@ -314,7 +323,11 @@ export function contrast(rows) {
   const verdict = !dips.length ? "no dip row" : !normal.length ? "no normal row to compare with"
     : grew.length ? `in the dips, per guest second: ${grew.slice(0, 3).map((g) => `${g.part} +${g.msPerGuestSecond} ms`).join(", ")}`
       : "no part costs more per guest second in the dips";
-  return { dips: a, normal: b, diff, grew, verdict };
+  // parts past the busy time somewhere: said in the verdict (the parts of
+  // those rows overlap, their contrast is less sure)
+  const over = overAttributed(rows);
+  const overNote = over ? `; ${over.rows} row(s) over-attributed (max ${over.maxMs} ms past the busy time)` : "";
+  return { dips: a, normal: b, diff, grew, overAttributed: over, verdict: verdict + overNote };
 }
 
 // --vi FROM-TO: [from, to] (VI outputs since the savestate load).
@@ -325,11 +338,25 @@ export function parseViRange(spec) {
   return [Number(m[1]), Number(m[2])];
 }
 
-// The rows whose VI range overlaps [from, to]; rows without a VI range are left out.
+// The rows whose VI range overlaps [from, to]. Rows without a VI range are
+// left out and counted (droppedNoVi). error (the probe fails on it): a range
+// no row covers, or one past the last VI the run reached (the run ended
+// before the dip: a longer --secs), or before the first one it saw.
 export function rowsInViRange(rows, range) {
-  if (!range) return rows;
+  if (!range) return { rows, droppedNoVi: 0, error: null };
   const [from, to] = range;
-  return rows.filter((r) => r.vi && r.vi.from != null && r.vi.to >= from && r.vi.from <= to);
+  const withVi = rows.filter((r) => r.vi && Number.isFinite(r.vi.from) && Number.isFinite(r.vi.to));
+  const droppedNoVi = rows.length - withVi.length;
+  const kept = withVi.filter((r) => r.vi.to >= from && r.vi.from <= to);
+  const first = withVi.length ? Math.min(...withVi.map((r) => r.vi.from)) : null;
+  const last = withVi.length ? Math.max(...withVi.map((r) => r.vi.to)) : null;
+  const noVi = droppedNoVi ? ` (${droppedNoVi} row(s) without a VI range left out)` : "";
+  let error = null;
+  if (!withVi.length) error = `--vi ${from}-${to}: no row has a VI range (no VI timeline)${noVi}`;
+  else if (to > last) error = `--vi ${from}-${to}: past the last VI the run reached (${last}): a longer --secs or --warmup${noVi}`;
+  else if (from < first) error = `--vi ${from}-${to}: before the first VI of the rows (${first}): a shorter --warmup${noVi}`;
+  else if (!kept.length) error = `--vi ${from}-${to}: no row covers it${noVi}`;
+  return { rows: kept, droppedNoVi, error };
 }
 
 // The VIs of a drained timeline chunk (validationReadTimeline): first and
@@ -341,21 +368,22 @@ export function viRangeOf(viEntries) {
 }
 
 // A short human table: one line per row, shares of host time in %.
-const COLS = [["regions", "reg"], ["dispatch", "disp"], ["blocks", "blk"], ["idle", "idle"], ["installs", "inst"], ["other", "oth"], ["sleep", "slp"], ["flushGpuWait", "flush"], ["axHle", "ax*"]];
+const COLS = [["regions", "reg"], ["blocksDispatch", "b+d"], ["idle", "idle"], ["installs", "inst"], ["other", "oth"], ["sleep", "slp"], ["flushGpuWait", "flush"], ["axHle", "ax*"]];
 export function formatTable(rows) {
   // 5 wide: "100.0" fits (a busy CPU thread is 99.99 %, never cut)
   const pct = (v) => (v == null ? "-" : (v * 100).toFixed(1)).padStart(5);
-  const head = ["  #", "VI from-to  ", "speed%", " busy", ...COLS.map(([, h]) => h.padStart(5)), "slow/ki", "dip"].join(" ");
+  const head = ["  #", "VI from-to  ", "speed%", " busy", ...COLS.map(([, h]) => h.padStart(5)), "over ms", "slow/ki", "dip"].join(" ");
   const lines = rows.map((r) => [
     String(r.i ?? "").padStart(3),
     (r.vi ? `${r.vi.from}-${r.vi.to}` : "-").padEnd(12),
     (r.speedPct == null ? "-" : r.speedPct.toFixed(1)).padStart(6),
     pct(r.cpuBusyShare),
     ...COLS.map(([k]) => pct(r.shares?.[k])),
+    (r.overAttributedMs == null ? "" : r.overAttributedMs.toFixed(1)).padStart(7),
     (r.mem?.slowPerKiloInstr == null ? "-" : r.mem.slowPerKiloInstr.toFixed(2)).padStart(7),
     r.dip == null ? "?" : r.dip ? "DIP" : ""
   ].join(" "));
-  return [head, ...lines, "shares of the CPU thread's host time in %; ax* is inside blk/reg (not added); slow/ki: memory slow paths per 1000 guest instructions"].join("\n");
+  return [head, ...lines, "shares of the CPU thread's host time in %; b+d: JIT blocks + dispatch (their split is unreliable, summary.json split); ax* is inside b+d/reg (not added); over ms: parts past the busy time (other clamped at 0); slow/ki: memory slow paths per 1000 guest instructions"].join("\n");
 }
 
 // The cost of the per-call timing, from the same run: a window with the
@@ -392,7 +420,21 @@ export function regionWarning({ query, rows, region }) {
   const mean = cov.length ? cov.reduce((a, b) => a + b, 0) / cov.length : null;
   const installed = region && !region.error ? region.diagnostics?.regionsInstalled ?? null : null;
   if (!aot) return `no aot=1 in the query: no region runs (the product runs with aot=1&aotcompiler=1&jitoffthread=1, --config product)`;
-  if (installed === 0) return "aot=1 but the core installed no region (regionsInstalled 0): regions column is 0, blocks hold everything";
+  if (installed === 0) return "aot=1 but the core installed no region (regionsInstalled 0): regions column is 0, b+d holds everything";
   if (mean != null && mean < 0.01) return `region coverage ${round(mean * 100, 2)} % of guest cycles: regions barely ran (cache cold? a longer --warmup)`;
   return null;
+}
+
+// Rows whose parts went past the busy time (other clamped at 0): how many,
+// and the worst; null when none.
+export function overAttributed(rows) {
+  const over = rows.map((r) => r.overAttributedMs).filter((v) => v > 0);
+  return over.length ? { rows: over.length, maxMs: Math.max(...over), totalMs: round(over.reduce((a, b) => a + b, 0), 2) } : null;
+}
+
+// The console sentence on the timing's price (timingCost).
+export function inflationNote(cost) {
+  return cost?.ratio != null
+    ? `absolute numbers inflated x${cost.ratio} by the per-call timing, compare within a run only`
+    : `absolute numbers inflated by the per-call timing (cost unknown: ${cost?.why ?? "no estimate"}), compare within a run only`;
 }

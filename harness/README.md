@@ -673,8 +673,13 @@ consecutive reads (`lib/cpu-window.mjs` `cpuWindowBreakdown`), with the VI
 outputs since the load drained from the timeline in that step (`vi.from` to
 `vi.to`, the index race-perf's `hitchList` gives). For a dip another probe
 located, pass its VI range as `--vi FROM-TO`: only the rows overlapping it
-are kept, classified and contrasted. `summary.json` holds `rows`, `dips`,
-`contrast` and the decoded `snapshots` (to recompute any window).
+are kept, classified and contrasted. A range no row covers, past the last
+VI the run reached (a longer `--secs`), or before its first, FAILS the probe
+(exit 1, the reason printed, `viError`) rather than reporting "no dip row";
+rows without a VI range are left out and counted (`rowsDroppedNoVi`).
+`summary.json` holds `rows` (and `allRows` with `--vi`), `dips`, `contrast`
+and the decoded `snapshots` (to recompute any window). `--dip-busy` is a
+share of host time, 0 to 1.
 
 Each row: `hostMs` (the CPU thread's own window, headroom `windowUs`;
 `hostSource: node` when the headroom counters are missing or reset),
@@ -685,21 +690,31 @@ time) / `perGuestSecond` per part:
 | part | what it is |
 |---|---|
 | `regions` | inside region calls |
-| `blocks` | inside block calls (JIT'd blocks and the cached-interpreter callbacks between them, with everything they call: MMIO, memory slow paths, the gather pipe, AX HLE; and the block compiles after a lookup miss), less their region calls, lookups and Idle |
-| `dispatch` | the rest of the slice loop: block lookups (sampled, scaled by the core) and the loop itself |
-| `interpreter` | null: the core does not separate it (interpreted instructions are in `blocks`) |
+| `blocksDispatch` (table `b+d`) | the rest of the slice loop: JIT'd blocks and the cached-interpreter callbacks between them, with everything they call (MMIO, memory slow paths, the gather pipe, AX HLE, the block compiles after a lookup miss), the block lookups and the loop itself |
+| `interpreter` | null: the core does not separate it (interpreted instructions are in `blocksDispatch`) |
 | `idle` | `CoreTiming::Idle`, less the FlushGpu wait it contains |
 | `installs` | region module installs (slice boundaries and throttle-sleep windows) |
 | `other` | busy time left: `CoreTiming::Advance` and its events (VI, SI, DSP and audio events), the throttle's bookkeeping, slice set-up, edge noise; clamped at 0 (`overAttributedMs` keeps a negative rest) |
 | `sleep` | throttle sleep |
 | `flushGpuWait` | waiting for the GPU thread in FlushGpu (SyncOnSkipIdle on only) |
-| `axHle` | AX command lists in the DSP mailbox write: **nested** in `blocks` or `regions`, never added |
+| `axHle` | AX command lists in the DSP mailbox write: **nested** in `blocksDispatch` or `regions`, never added |
 
-The parts but `axHle` add up to `hostMs`. Also per row: `regionCoverage`
+The parts but `axHle` add up to `hostMs`; the table's `over ms` column
+shows `overAttributedMs` (parts past the busy time, `other` clamped at 0),
+also counted in the verdict line.
+
+Blocks and dispatch are ONE part. The core's split of the two (kept per
+row in `split`, `reliable: false`, information only) is biased: per block
+call, patch 0075 adds `max(call - its region time - its lookup time - its
+Idle time, 0)` to blocks, the lookup time being 0 on the calls whose lookups
+are not timed and N times one lookup on the sampled one, and dispatch is
+the slice's residual. So the unsampled lookups stay in blocks, and on a
+sampled call N lookups usually exceed the call: the clamp moves the block's
+own time to dispatch. Their sum is exact; `contrast` and `grew` use it. Also per row: `regionCoverage`
 (region cycles over all cycles, and outside idle skip), and `mem`: memory
 slow paths per 1000 guest instructions (`slowPerKiloInstr`, counted blocks
 plus the regions' estimate), `slowShare` of accesses and `slowByKind`
-(counts only: their time is inside `blocks`/`regions`). A struct the core
+(counts only: their time is inside `blocksDispatch`/`regions`). A struct the core
 lacks, or a counter that went back (a reset), gives null fields with the
 reason in `why`, never zeros.
 
@@ -718,10 +733,12 @@ with race-perf's. The header's `timing cost` prices it on the same run:
 busy CPU-thread ms per guest second in the timed rows over the untimed
 window just before (`timingCost` in `summary.json`, with both speeds); the
 scene moves between the two windows, so it is an estimate. With regions on,
-fewer block calls are timed and the cost falls. The headroom window moves at each Throttle and the region
+fewer block calls are timed and the cost falls. The console says it in so
+many words: "absolute numbers inflated x<cost> by the per-call timing,
+compare within a run only". The headroom window moves at each Throttle and the region
 times at each slice: about 1-2 % of a 1 s row is edge noise, in `other`.
 Not separated by any counter: the gather pipe and FIFO writes, MMIO and the
-memory slow paths' time (all in `blocks`/`regions`), and CoreTiming events
+memory slow paths' time (all in `blocksDispatch`/`regions`), and CoreTiming events
 (in `other`).
 
 ## Profiling the generated wasm (regions)
