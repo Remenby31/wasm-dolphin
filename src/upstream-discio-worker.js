@@ -9940,10 +9940,6 @@ const wgpuRendererRuntime = new WgpuRendererRuntime({
 // full AbstractGfx resource set.
 const webGpuObjects = {
   shaders: new Map(),
-  // Fragment-shader variants with the sampled UV pinned to the texture centre.
-  // Selected only for depth-using pipelines, so the 2D overlay -- which samples
-  // glyphs and would collapse to a flat colour -- keeps its real shader.
-  shadersUvForced: new Map(),
   pipelines: new Map(),
   buffers: new Map(),
   textures: new Map(),
@@ -11477,13 +11473,6 @@ function getFixedLayouts(unfilterableMask = 0, nonFilteringSamplerMask = unfilte
     size: [1, 1, 1], format: "rgba8unorm",
     usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
   });
-  // Unsupported integer formats and missing resources still need a float
-  // placeholder. DIAG_DUMMY_TINT makes those substitutions visible.
-  if (DIAG_DUMMY_TINT) {
-    dev.queue.writeTexture({ texture: dummyTex },
-      new Uint8Array([0, 255, 0, 255]), { bytesPerRow: 4, rowsPerImage: 1 },
-      [1, 1, 1]);
-  }
   const dummyTexView = dummyTex.createView({ dimension: "2d-array" });
   const dummySampler = dev.createSampler({});
   renderGpu._fixedLayouts = { l0, l1, l2, pipelineLayout,
@@ -11931,10 +11920,6 @@ function vpDiagNoteViewport(near, far) {
 // which rescales the scene instead of cropping it -- so any draw where raw and
 // clamped differ is rendered at the wrong scale.
 let vpDiagRect = null;
-// Scissor rect in force for each draw, raw and after the clamp. The frame's
-// hard axis-aligned boundaries look like rectangles, and a scissor that
-// collapses (sx reaching passW makes sw 0) clips a draw away entirely.
-let vpDiagScissor = "sc?";
 // Per frame: how many times the EFB pass is (re)begun, how many of those clear
 // it, and how many draws land after the LAST clear. Anything drawn before a
 // clear is discarded, so "draws after last clear" is the only geometry that can
@@ -11950,18 +11935,6 @@ function vpDiagNoteEfbPass(cleared) {
   if (vpDiagDone) return;
   vpDiagEfbPasses++;
   if (cleared) { vpDiagEfbClears++; vpDiagDrawsSinceClear = 0; }
-}
-function vpDiagIsDepthAlways(pipelineId) {
-  const tpl = webGpuObjects.pipeTpl.get(pipelineId);
-  return !!(tpl && tpl.depthBase && tpl.depthBase.depthCompare === "always");
-}
-function vpDiagNoteScissor(rx, ry, rw, rh, sx, sy, sw, sh) {
-  if (vpDiagDone) return;
-  const same = rx === sx && ry === sy && rw === sw && rh === sh;
-  vpDiagScissor = (sw === 0 || sh === 0)
-    ? `sc COLLAPSED raw(${rx},${ry} ${rw}x${rh})`
-    : same ? `sc(${sx},${sy} ${sw}x${sh})`
-      : `sc raw(${rx},${ry} ${rw}x${rh})->(${sx},${sy} ${sw}x${sh})`;
 }
 // Distinct VS-constant slices used within one frame. Dolphin re-uploads the
 // vertex-shader constants (projection, position/normal matrices) per draw into
@@ -12467,11 +12440,7 @@ function vpDiagNoteDraw(fbId, pipelineId) {
 // Called from SUBMIT_PRESENT, before the present counter increments, so the
 // tally holds exactly the draws of the frame being presented.
 function vpDiagPresent() {
-  // Isolation bookkeeping must run every frame, before the tally's early
-  // return -- otherwise it silently stops once the dump window closes.
   const pn = self._wgPresentCount || 0;
-  vpDiagIsolateSeen = 0;
-  vpDiagIsolateIdx = Math.floor(pn / 300) % 60;
   if (vpDiagDone) return;
   const n = pn;
   if (n === 0) {
@@ -12511,10 +12480,6 @@ function vpDiagPresent() {
   vpDiagTc0.clear();
   vpDiagTev.clear();
   vpDiagFog.clear();
-  // Persist the frame's most-sampled textures before clearing, so the readback
-  // at SUBMIT_PRESENT has something to inspect -- vpDiagPresent() runs first
-  // and would otherwise hand it an empty tally.
-  vpDiagLastPicks = [...vpDiagTexBind.entries()].sort((a, b) => b[1] - a[1]).slice(0, 14);
   vpDiagTexBind.clear();
   vpDiagIdxTally.clear();
   vpDiagBatchPos.clear();
@@ -12710,122 +12675,6 @@ function diagGridSignature(bytes, bpr, w, h) {
   }
   return cells.join(" | ");
 }
-// Depth readback. diagReadTexture refuses depth formats, but the question is
-// exactly what depth values the world draws leave in the buffer: the viewport
-// bands and the vertex shader together predict 0.00..0.84 for the world, and if
-// the stored values are elsewhere the viewport transform is not mapping as
-// assumed. depth32float copies with aspect "depth-only", 4 bytes a texel.
-// mapAsync on a readback buffer BEFORE the encoder that copies into it is
-// submitted makes that submit invalid ("used in submit while pending map"), and
-// Dawn then drops the whole command buffer: the frame's draws, the copy, all of
-// it. The buffer maps anyway and reads back as the zeros it was created with.
-// That is exactly what the present-time depth readback reported, and what the
-// first two depth-trace runs reported, control write included. Every readback
-// must queue its map here and drain it after queue.submit().
-function dtraceDefer(fn) {
-  (self._wgDtPending = self._wgDtPending || []).push(fn);
-}
-function dtraceDrainPending() {
-  const pend = self._wgDtPending;
-  if (!pend || !pend.length) return;
-  self._wgDtPending = [];
-  for (const fn of pend) {
-    try { fn(); } catch (e) { console.log("[dtrace] drain failed: " + (e && e.message)); }
-  }
-}
-function diagReadDepth(dev, encoder, entry, tag) {
-  if (!entry || !entry.tex) return;
-  const w = entry.tex.width, h = entry.tex.height;
-  const bpr = Math.ceil(w * 4 / 256) * 256;
-  let buf;
-  try {
-    buf = dev.createBuffer({ size: bpr * h, usage: 0x1 | 0x8 });
-    encoder.copyTextureToBuffer({ texture: entry.tex, aspect: "depth-only" },
-      { buffer: buf, bytesPerRow: bpr, rowsPerImage: h },
-      { width: w, height: h, depthOrArrayLayers: 1 });
-  } catch (e) {
-    console.log("[vpdiag] depth readback rejected: " + (e && e.message));
-    return;
-  }
-  dtraceDefer(() => buf.mapAsync(0x1).then(() => {
-    const f = new Float32Array(buf.getMappedRange());
-    const stride = bpr >> 2;
-    let mn = Infinity, mx = -Infinity, sum = 0, n = 0, zeros = 0;
-    for (let y = 0; y < h; y += 4) {
-      for (let x = 0; x < w; x += 4) {
-        const v = f[y * stride + x];
-        if (!Number.isFinite(v)) continue;
-        if (v < mn) mn = v;
-        if (v > mx) mx = v;
-        if (v === 0) zeros++;
-        sum += v; n++;
-      }
-    }
-    console.log(`[vpdiag] EFB depth ${tag} ${w}x${h}: min=${mn.toFixed(4)} ` +
-      `max=${mx.toFixed(4)} mean=${(sum / Math.max(1, n)).toFixed(4)} ` +
-      `zeros=${zeros}/${n}`);
-    buf.unmap();
-  }).catch(() => {}));
-}
-function diagReadDepthTrace(dev, encoder, entry, tag) {
-  const dt = self._wgDt;
-  if (!entry || !entry.tex) { console.log(`[dtrace] no depth texture for: ${tag}`); return; }
-  const w = entry.tex.width, h = entry.tex.height;
-  const bpr = Math.ceil(w * 4 / 256) * 256;
-  let buf;
-  try {
-    buf = dev.createBuffer({ size: bpr * h, usage: 0x1 | 0x8 });
-    encoder.copyTextureToBuffer({ texture: entry.tex, aspect: "depth-only" },
-      { buffer: buf, bytesPerRow: bpr, rowsPerImage: h },
-      { width: w, height: h, depthOrArrayLayers: 1 });
-  } catch (e) { console.log(`[dtrace] copy rejected (${tag}): ${e && e.message}`); return; }
-  if (dt) dt.issued++;
-  const seq = dt ? dt.issued : 0;
-  dtraceDefer(() => buf.mapAsync(0x1).then(() => {
-    const f = new Float32Array(buf.getMappedRange());
-    const stride = bpr >> 2;
-    let mn = Infinity, mx = -Infinity, sum = 0, n = 0, nz = 0;
-    // 4x3 grid of the fraction of NON-ZERO texels, so where the writes landed
-    // is visible, not just whether any did.
-    const grid = new Array(12).fill(0), gridN = new Array(12).fill(0);
-    for (let y = 0; y < h; y += 2) {
-      for (let x = 0; x < w; x += 2) {
-        const v = f[y * stride + x]; n++;
-        const g = Math.floor(y * 3 / h) * 4 + Math.floor(x * 4 / w); gridN[g]++;
-        if (v !== 0) {
-          nz++; grid[g]++;
-          if (v < mn) mn = v;
-          if (v > mx) mx = v;
-          sum += v;
-        }
-      }
-    }
-    console.log(`[dtrace] #${seq} ${tag}: nonzero=${nz}/${n} ` +
-      (nz ? `min=${mn.toFixed(4)} max=${mx.toFixed(4)} mean=${(sum / nz).toFixed(4)} ` : "") +
-      `grid%=[${grid.map((c, i) => Math.round(100 * c / Math.max(1, gridN[i]))).join(",")}]`);
-    buf.unmap(); buf.destroy();
-    if (dt) dt.done++;
-  }).catch((e) => console.log(`[dtrace] #${seq} map failed (${tag}): ${e && e.message}`)));
-}
-function diagReadColorTrace(dev, encoder, entry, tag) {
-  if (!entry || !entry.tex) { console.log(`[dtrace] no colour texture for: ${tag}`); return; }
-  const w = entry.tex.width, h = entry.tex.height;
-  const bpr = Math.ceil(w * 4 / 256) * 256;
-  let buf;
-  try {
-    buf = dev.createBuffer({ size: bpr * h, usage: 0x1 | 0x8 });
-    encoder.copyTextureToBuffer({ texture: entry.tex },
-      { buffer: buf, bytesPerRow: bpr, rowsPerImage: h },
-      { width: w, height: h, depthOrArrayLayers: 1 });
-  } catch (e) { console.log(`[dtrace] colour copy rejected (${tag}): ${e && e.message}`); return; }
-  const dt = self._wgDt;
-  const seq = dt ? dt.issued : 0;
-  dtraceDefer(() => buf.mapAsync(0x1).then(() => {
-    const bytes = new Uint8Array(buf.getMappedRange());
-    console.log(`[dtrace] #${seq} colour ${tag}: ${diagGridSignature(bytes, bpr, w, h)}`);
-    buf.unmap(); buf.destroy();
-  }).catch((e) => console.log(`[dtrace] #${seq} colour map failed (${tag}): ${e && e.message}`)));
-}
 function diagReadTexture(dev, encoder, entry, label, tag) {
   if (!entry || !entry.tex || String(entry.format || "").startsWith("depth")) return;
   const w = entry.tex.width, h = entry.tex.height;
@@ -12969,9 +12818,6 @@ function diagTallyDrawTarget(passFbId, srcId) {
   }
 }
 
-// DIAGNOSTIC (revertible): force depthCompare "always" on every
-// pipeline (see resolvePipeline) to bisect the black-EFB cause.
-const DIAG_DEPTH_ALWAYS = false;  // §28ag: bisect done — dark 1P menu is NOT depth (still dark with depth bypassed) ⇒ blend/TEV/material/texture construct
 // §28ad/§28af ROOT FIX: WebGPU can't carry Dolphin's reverse-Z in
 // the viewport (Dawn rejects minDepth>maxDepth). Master enable for
 // the per-PASS reverse-Z compensation (flip GX depth compare
@@ -13014,281 +12860,12 @@ const DIAG_DEPTH_ALWAYS = false;  // §28ag: bisect done — dark 1P menu is NOT
 // reference frame.
 const GX_NATIVE_DEPTH = false;
 const REVZ_COMPARE_FLIP = !GX_NATIVE_DEPTH;
-// §28aw: decisive dark-menu experiment — force FS textureSampleBias
-// array-layer to 0 (menu textures are single-layer, bound 2d-array;
-// a non-zero texgen layer ⇒ out-of-range sample ⇒ black). Gated so
-// it's toggleable/revertible; kept only if menu renders AND title/3D
-// does not regress.
-// §28aw FALSIFIED: forcing menu FS textureSampleBias layer→0 left the
-// menu identically dark (hash unchanged) ⇒ array-layer is NOT the
-// root. Flag kept inert (false) as a documented negative result.
-const S28AW_FORCE_TEXLAYER0 = false;
-// §28ax CONFIRMED: const-magenta FILLED the menu ⇒ draws reach the
-// framebuffer with valid full-screen geometry; the dark is purely
-// FS-internal. §28ay: dolphin_fn_1_→white showed only sparse white
-// lines + a dark-blue region (NOT the full menu) ⇒ the texture
-// sample WAS ~0 (secondary) AND the TEV/PS-constant chain collapses
-// the bulk output regardless (DOMINANT). Both flags reverted to
-// false (diagnostic shader rewrites must never ship); findings in
-// SESSION §28ax/§28ay. Next: pinpoint which TEV PS-constant/UBO
-// member is delivered ~0 for the menu draw.
-const S28AX_FS_CONST = false;
-const S28AY_SAMPLER_WHITE = false;
-// §28bb FALSIFIED: textureSampleLevel(…,0.0) gave the IDENTICAL dark
-// menu (hash 0x-680ec5c0, 0 valErr) ⇒ sample-mechanics (LOD/bias/
-// mip) is NOT the root. By the §28ba decision rule this isolates the
-// root to the UV addressing the WRONG atlas sub-region (the GC
-// texgen/posttransform path, §28an/al). Flag reverted (false).
-const S28BB_SAMPLE_LOD0 = false;
-// §28bf RESULT: UV-as-colour showed a spatially-VARYING gradient
-// (non-degenerate, not uniformly zero) ⇒ the texgen produces a real
-// varying UV. Combined with §28be (posttransform verified correct at
-// the right offset), every measurable value is correct yet the
-// sample is ~0 — a systemic texgen/atlas/sample mismatch needing
-// reference-texel comparison, not more value-probing. Flag reverted.
-const S28BF_SHOW_UV = false;
 // §28at: apply the compare flip uniformly (drop the per-pass `revZ`
 // gate). The single reverse-Z convention is correct for every
 // rzRelevant draw now that flag=false made all viewports uniform.
 const REVZ_COMPARE_FLIP_ALL = !GX_NATIVE_DEPTH;
-// DIAGNOSTIC (revertible): force cullMode "none" + skip scissor so no
-// primitive is culled/scissored. With EFB→canvas: geometry appears ⇒
-// it was rasterization state (cull/scissor); still black ⇒ VS math /
-// vertex fetch / clip-space.
-const DIAG_RASTER_OPEN = false;  // §28w: cull CONCLUSIVELY ruled out for the 3D region (clean A-only running repro)
-// Cull-only variant. DIAG_RASTER_OPEN also disables the scissor, so it cannot
-// separate the two. The §28w "conclusively ruled out" above was reached by
-// comparing runs driven by the harness's random input script, which diverge
-// into different scenes -- the methodology behind three retractions in
-// docs/webgpu-hardware-renderer-bugs.md. Re-testable now against the
-// deterministic save state.
-const DIAG_CULL_NONE = false;
-// Skip EFB draws whose pipeline ignores depth. The in-race frame carries ~21
-// full-screen depth=always quads; if one of them is painting over the world,
-// dropping them exposes the scene underneath. Diagnostic only -- these draws
-// are real content upstream draws too.
-const DIAG_SKIP_DEPTH_ALWAYS = false;
-// Replace the fragment shader of every depth-using pipeline with one that
-// returns a constant colour, keeping the real vertex shader so geometry is
-// still transformed and rasterised normally. Legal because the cfg pipelines
-// use an explicit fixed pipeline layout, not layout:"auto", so a fragment
-// module may declare fewer bindings than the layout provides.
-//
-// If magenta geometry appears, primitives rasterise and the defect is in the
-// TEV/texture path. If the frame stays black, the fragments are being
-// discarded or the primitives never rasterise at all.
-const DIAG_CONST_FS = false;
-const DIAG_DUMMY_TINT = false;
-const DIAG_NO_DISCARD = false;
-const DIAG_FORCE_LAYER0 = false;
-const DIAG_FORCE_UV = false;
-const DIAG_UV_FINITE = false;
-// Visualise the UV instead of judging it: red = fract(u), green = fract(v).
-// A healthy surface shows a red/green gradient across it; a UV pinned near zero
-// shows near-black, and a constant UV shows one flat colour.
-const DIAG_UV_VIS = false;
-const DIAG_UV_PERTURB = false;
-const DIAG_SHOW_VCOLOR = false;
-// Render ONLY the opaque depth-tested EFB draws -- blendEnable false -- and
-// skip the blended ones. The two busiest pipelines are noblend/wm15 with a
-// colour attribute, so they ignore alpha entirely and should be visible
-// whatever the vertex alpha does. Selecting by PROPERTY not by pipeline id:
-// bridge ids are assigned per run and shift between them.
-const DIAG_ONLY_OPAQUE = false;
-// Constant colour on the OPAQUE depth-tested pipelines only. The earlier
-// const-FS test covered every depth pipeline including the blended ones, and
-// returned alpha 1.0, so its magenta could have come entirely from those. This
-// isolates the noblend/wm15 pipelines that carry ~47,000 draws and are
-// invisible even though they ignore alpha.
-const DIAG_CONST_FS_OPAQUE = false;
-// With the constant colour forced on the opaque pipelines they still produce
-// nothing, so they are not rasterising. Force their depth compare to "always"
-// as well: if magenta then appears, the depth test is what rejects them.
-const DIAG_OPAQUE_DEPTH_ALWAYS = false;
-function vpDiagIsBlended(pipelineId) {
-  const l = vpDiagPipeVtx.get(pipelineId);
-  return !!(l && l.blendEnable);
-}
-const DIAG_ALPHA_COVERAGE = false;
-// Show vertex ALPHA as greyscale. The alpha stage reduces to
-// texAlpha * vertexAlpha, texture alpha measured 58..255, and the RGB
-// visualisation forced alpha to 1.0 -- so vertex alpha is the one operand in
-// that product still unmeasured.
-const DIAG_SHOW_VALPHA = false;
-// Drop EFB draws whose sampled texture received no non-zero data. If the empty
-// textures cover the large surfaces, what remains should be the draws that
-// sample populated textures -- and whether anything recognisable appears says
-// how much of the blackness those empty textures actually account for.
-const DIAG_SKIP_EMPTY_TEX = false;
-const DIAG_TEX_READBACK = false;
-const DIAG_DEPTH_READBACK = false;
-// Depth trace. The present-time depth readback cannot say WHEN the buffer was
-// zero: several frames share an encoder and clears re-run. This reads the EFB
-// depth buffer inside the target frame, in the same encoder, at chosen points:
-// after the Nth EFB draw (the pass is ended, copied, and re-opened with load
-// ops and its state restored), before every depth-clearing ClearRect, and at
-// every EFB pass end. Each read is tagged with how many EFB draws and
-// depth-writing draws preceded it, so "no fragment ever wrote depth" and "the
-// writes were wiped afterwards" become distinguishable.
-const DIAG_DEPTH_TRACE = false;
-const DTRACE_PRESENT = 2500;
-const DTRACE_SPLITS = new Set([1, 5, 20, 60, 119, 135, 251, 384, 419, 500, 792]);
-// Positive control: at the first split, write a known depth through the clear
-// pipeline over a 64x64 corner rect, so the readbacks that follow prove they
-// read the attachment the pass writes. A probe that cannot see its own write
-// is a null instrument, whatever else it reports.
-const DTRACE_CONTROL = true;
-// FINAL depth state per created pipeline object, so a draw can be classified
-// by what the descriptor actually carried rather than the pre-flip template.
-const vpDiagPipeFinalDs = new WeakMap();
-// Render ONE depth-tested EFB draw per frame and skip the rest, so a single
-// draw's output can be observed directly instead of inferred from texture and
-// state accounting. The index advances every 300 presents so successive
-// screenshots show different draws. Depth-less draws (the 2D overlay) are kept
-// for orientation.
-const DIAG_ISOLATE_DRAW = false;
-// Constant colour on pipelines that perform a REAL depth test (less/greater
-// family), leaving depth=always and depth=none alone. DIAG_CONST_FS covers
-// every depth-using pipeline including the always quads, which are the only
-// visible content, so it cannot show whether the less-equal world draws
-// actually cover the screen. This can.
-const DIAG_CONST_FS_TESTED_ONLY = false;
-// Substitute a trivial vertex shader (plus the constant fragment shader, since
-// a trivial VS cannot satisfy the real FS's inputs) on genuinely depth-tested
-// pipelines. It reads the position attribute at location 0 and normalises
-// model-space coordinates into clip space, so what appears is the silhouette
-// the vertex data itself describes -- independent of the translated VS, the
-// uniform blocks and the transform. If a real mesh appears, the data is fine
-// and the translated vertex shader is where the geometry goes wrong.
-const DIAG_TRIVIAL_VS = false;
-let diagTrivialVsModule = null;
-function getTrivialVsModule(dev) {
-  if (!diagTrivialVsModule) {
-    diagTrivialVsModule = dev.createShaderModule({
-      label: "diag-trivial-vs",
-      code: "@vertex fn main(@location(0) p: vec2<f32>) -> @builtin(position) vec4<f32> " +
-            "{ return vec4<f32>(p.x / 400.0, p.y / 400.0, 0.5, 1.0); }"
-    });
-  }
-  return diagTrivialVsModule;
-}
-let vpDiagIsolateIdx = 0;
-let vpDiagIsolateSeen = 0;
-function vpDiagIsolateAllows(fbId, pipelineId) {
-  if (!DIAG_ISOLATE_DRAW || fbId !== self._wgEfbColorId) return true;
-  const tpl = webGpuObjects.pipeTpl.get(pipelineId);
-  const cmp = tpl && tpl.depthBase ? tpl.depthBase.depthCompare : "none";
-  if (cmp === "none") return true;              // 2D overlay: always keep
-  const n = vpDiagIsolateSeen++;
-  return n === vpDiagIsolateIdx;
-}
-let vpDiagReadbackDone = false;
-let vpDiagLastPicks = [];
-function vpDiagTexIsEmpty(texId) {
-  const rec = vpDiagTexData.get(texId);
-  if (!rec) return false;                 // never uploaded: unknown, keep it
-  return rec.nonZero === 0 || (rec.samples && rec.nzBytes === 0);
-}
-let vpDiagUvFinite = 0;
-// Replace the sample with a verdict colour instead of a texel: magenta when the
-// sampled UV is finite, green when it is NaN or infinite. WGSL has no isNan, so
-// NaN is caught by (uv != uv) and infinities by abs(uv) > 1e30. The verdict
-// still flows through the TEV maths, so read the HUE, not the exact colour.
-function pickVariantFs(fsId) {
-  const v = webGpuObjects.shadersUvForced.get(fsId);
-  if (v && ++vpDiagVariantUsed <= 1) {
-    console.log("[vpdiag] variant fragment module selected for a depth pipeline");
-  }
-  return v;
-}
-let vpDiagVariantUsed = 0;
-// Perturb the sample instead of replacing it: keep the real call, add a
-// constant blue to its result. Every earlier probe substituted the sample, so
-// the verdict always flowed through the TEV maths afterwards and could not tell
-// "the texel is black" from "TEV zeroes a good texel".
-//   blue appears  -> the sample result reaches the output, so the texel is black
-//   stays black   -> TEV discards it regardless of what was sampled
-// Return the interpolated vertex colour0 instead of the TEV result, keeping the
-// shader's own signature and bindings. The combine is
-// texture.rgb + vertexColour0.rgb, so if this comes back black the lighting
-// path supplies nothing and the dark texel is only half the story.
-function vcolorRewrite(src) {
-  const sig = /@location\(0\)\s+(\w+)\s*:\s*vec4<f32>/.exec(src);
-  if (!sig) return null;
-  const name = sig[1];
-  // The fragment entry's final `return _eN;` is the last return in the module.
-  const m = [...src.matchAll(/return\s+(\w+)\s*;/g)];
-  if (!m.length) return null;
-  const last = m[m.length - 1];
-  const out = src.slice(0, last.index) +
-    // Alpha in red, a constant 1.0 in green as a coverage marker. This is what
-    // ad77cd6's greyscale version could not do: there, black meant "alpha zero"
-    // OR "no draw covered this pixel", and the two are not the same claim.
-    //   black  = not covered by any depth-tested draw
-    //   green  = covered, vertex alpha 0
-    //   yellow = covered, vertex alpha 1
-    (DIAG_ALPHA_COVERAGE
-      ? `return vec4<f32>(${name}.w, 1.0, 0.0, 1.0);`
-      : DIAG_SHOW_VALPHA
-        ? `return vec4<f32>(${name}.w, ${name}.w, ${name}.w, 1.0);`
-        : `return vec4<f32>(${name}.x, ${name}.y, ${name}.z, 1.0);`) +
-    src.slice(last.index + last[0].length);
-  if (out !== src && ++vpDiagVcolor <= 1) {
-    console.log("[vpdiag] built vertex-colour visualisation variants");
-  }
-  return out === src ? null : out;
-}
-let vpDiagVcolor = 0;
-function uvPerturbRewrite(src) {
-  const out = src.replace(
-    /(textureSample[A-Za-z]*\([^;]*?\));/g,
-    "($1 + vec4<f32>(0.0, 0.0, 0.5, 0.0));");
-  if (out !== src && ++vpDiagUvPerturb <= 1) {
-    console.log("[vpdiag] built sample-perturbation variants");
-  }
-  return out === src ? null : out;
-}
-let vpDiagUvPerturb = 0;
-function uvFiniteRewrite(src) {
-  const out = src.replace(
-    // Match the WHOLE call up to its terminating ");", so textureSampleBias --
-    // which carries a trailing bias argument -- is rewritten too. Requiring the
-    // call to end right after the layer matched only plain textureSample, which
-    // is why the first version left the frame untouched.
-    /textureSample[A-Za-z]*\(([^,]+),\s*([^,]+),\s*(vec2<f32>\([^)]*\))[^;]*?\);/g,
-    (DIAG_UV_VIS
-      ? "vec4<f32>(fract($3.x), fract($3.y), 0.0, 1.0);"
-      : "select(vec4<f32>(1.0, 0.0, 1.0, 1.0), vec4<f32>(0.0, 1.0, 0.0, 1.0), " +
-        "any($3 != $3) || any(abs($3) > vec2<f32>(1e30, 1e30)));"));
-  if (out !== src && ++vpDiagUvFinite <= 1) {
-    console.log("[vpdiag] built UV-finiteness probe variants");
-  }
-  return out === src ? null : out;
-}
-function uvForceRewrite(src) {
-  const out = src.replace(
-    /textureSample([A-Za-z]*)\(([^,]+),\s*([^,]+),\s*vec2<f32>\([^)]*\)/g,
-    "textureSample$1($2, $3, vec2<f32>(0.5, 0.5)");
-  if (out !== src && ++vpDiagUvForced <= 1) {
-    console.log("[vpdiag] built UV-forced fragment variants");
-  }
-  return out === src ? null : out;
-}
-let vpDiagUvForced = 0;
-let vpDiagLayerForced = 0;
-let vpDiagDiscardStripped = 0;
 const vpDiagShaderStage = {};
 let vpDiagShaderWithDiscard = 0;
-let diagConstFsModule = null;
-function getConstFsModule(dev) {
-  if (!diagConstFsModule) {
-    diagConstFsModule = dev.createShaderModule({
-      label: "diag-const-fs",
-      code: "@fragment fn main() -> @location(0) vec4<f32> { return vec4<f32>(1.0, 0.0, 1.0, 1.0); }"
-    });
-  }
-  return diagConstFsModule;
-}
 
 // Set true once the WebGPU hardware renderer (cmd-ring executor) has
 // presented a frame; suppresses the legacy CPU-framebuffer canvas blit
@@ -14178,11 +13755,6 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
   // both for its clear triangle and must put the game's back afterwards.
   let lastAppliedViewport = null;
   let lastAppliedScissor = null;
-  // DIAG_DEPTH_TRACE: the rest of the last-applied pass state, so a split pass
-  // can be re-opened with the same state the game had set.
-  let dtLastPipe = null;
-  const dtLastBg = [null, null, null];
-  let dtLastVb = null, dtLastIb = null, dtPassDesc = null;
   let currentBackbufferSourceTextureId = 0;
   let lastBackbufferSourceTextureId = wgpuLastBackbufferSourceTextureId;
   let lastBackbufferTexture = null;
@@ -14450,7 +14022,6 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
       gpuCompletionTracker.recordSubmittedWork(q, "hardware-replay");
       acceptMappedBatch(mappedBatch);
       submitted = true;
-      dtraceDrainPending();
     } catch (e) {
       lastSubmitFailureReason = "submit-error";
       rejectMappedBatch(mappedBatch, e);
@@ -14501,14 +14072,6 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
         wgpuLastBackbufferSourceTextureId = currentBackbufferSourceTextureId;
       }
       try { pass.end(); } catch (e) {}
-      if (DIAG_DEPTH_TRACE && self._wgDt && self._wgDt.armed &&
-          endedFramebufferId === self._wgEfbColorId && passDepthId) {
-        const dt = self._wgDt;
-        diagReadDepthTrace(dev, ensureEnc(), webGpuObjects.textures.get(passDepthId),
-          `end of pass#${dt.passSeq} (${reason}) | efbDraws=${dt.draws} depthWrites=${dt.writes} clearRects=${dt.clears}`);
-        diagReadColorTrace(dev, ensureEnc(), webGpuObjects.textures.get(endedFramebufferId),
-          `end of pass#${dt.passSeq} | efbDraws=${dt.draws}`);
-      }
       // Read the copy destination AND the EFB immediately after the copy pass
       // ends, so both reads sit adjacent in the command stream. Reading at
       // present time instead was confounded by encoder batching: several
@@ -14625,73 +14188,6 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
       return true;
     }
     return false;
-  };
-  // DIAG_DEPTH_TRACE: end the open EFB pass, copy its depth buffer in the same
-  // encoder, and re-open the pass with load ops and the last-applied state.
-  const dtraceSplit = (tag) => {
-    const dt = self._wgDt;
-    if (!DIAG_DEPTH_TRACE || !dt || !dt.armed || !pass ||
-        passFbId !== self._wgEfbColorId) return;
-    if (!dtPassDesc || !dtPassDesc.depthStencilAttachment) {
-      console.log(`[dtrace] split skipped, no depth attachment: ${tag}`);
-      return;
-    }
-    const dtex = webGpuObjects.textures.get(passDepthId);
-    try { pass.end(); } catch (e) { console.log(`[dtrace] end failed: ${e && e.message}`); }
-    diagReadDepthTrace(dev, ensureEnc(), dtex,
-      `${tag} | efbDraws=${dt.draws} depthWrites=${dt.writes} clearRects=${dt.clears} pass#${dt.passSeq}`);
-    diagReadColorTrace(dev, ensureEnc(), webGpuObjects.textures.get(passFbId),
-      `${tag} | efbDraws=${dt.draws}`);
-    const d2 = {
-      colorAttachments: dtPassDesc.colorAttachments.map((c) => ({ ...c, loadOp: "load" })),
-      depthStencilAttachment: { ...dtPassDesc.depthStencilAttachment, depthLoadOp: "load" }
-    };
-    if (d2.depthStencilAttachment.stencilLoadOp) d2.depthStencilAttachment.stencilLoadOp = "load";
-    try {
-      pass = enc.beginRenderPass(d2);
-      if (wgpuConsumerStateCacheEnabled) wgpuPassStateCache.reset("dtrace-split");
-      if (lastAppliedViewport) pass.setViewport(...lastAppliedViewport);
-      if (lastAppliedScissor) pass.setScissorRect(...lastAppliedScissor);
-      if (dtLastPipe) pass.setPipeline(dtLastPipe);
-      for (let sl = 0; sl < 3; sl++) {
-        const g = dtLastBg[sl];
-        if (!g) continue;
-        if (g.off) pass.setBindGroup(sl, g.bg, g.off); else pass.setBindGroup(sl, g.bg);
-      }
-      if (dtLastVb) pass.setVertexBuffer(dtLastVb.slot, dtLastVb.b, dtLastVb.offset);
-      if (dtLastIb) pass.setIndexBuffer(dtLastIb.b, dtLastIb.format, dtLastIb.offset);
-      dt.splits++;
-      if (DTRACE_CONTROL && !dt.controlDone) {
-        dt.controlDone = true;
-        const cp = ensureClearPipeline(dev, passColorFmt, passDepthFmt, false, true, 0, 0.5);
-        if (cp) {
-          pass.setScissorRect(0, 0, 64, 64);
-          pass.setPipeline(cp);
-          pass.draw(3, 1, 0, 0);
-          if (lastAppliedScissor) pass.setScissorRect(...lastAppliedScissor); else pass.setScissorRect(0, 0, passW, passH);
-          if (dtLastPipe) pass.setPipeline(dtLastPipe);
-          console.log(`[dtrace] control: clear-pipeline depth write z=0.5 over (0,0 64x64) ` +
-            `with viewport ${lastAppliedViewport ? lastAppliedViewport.map((v) => +v.toFixed(2)).join(",") : "unset"}`);
-        } else {
-          console.log("[dtrace] control: clear pipeline unavailable");
-        }
-      }
-    } catch (e) {
-      console.log(`[dtrace] re-open failed: ${e && e.message}`);
-    }
-  };
-  const dtraceAfterDraw = () => {
-    const dt = self._wgDt;
-    if (!DIAG_DEPTH_TRACE || !dt || !dt.armed || passFbId !== self._wgEfbColorId) return;
-    dt.draws++;
-    const ds = dtLastPipe ? vpDiagPipeFinalDs.get(dtLastPipe) : null;
-    const k = ds ? `${ds.cmp}/${ds.write ? "write" : "nowrite"}` : "nodepth";
-    dt.cmpTally.set(k, (dt.cmpTally.get(k) || 0) + 1);
-    if (ds && ds.write && ds.cmp !== "never") dt.writes++;
-    if (DTRACE_SPLITS.has(dt.draws)) {
-      const z = vpDiagRaw ? vpDiagRaw.map((v) => v.toFixed(2)).join(",") : "?";
-      dtraceSplit(`after draw ${dt.draws} (${k} ${vpDiagRect || "vp?"} z=${z} ${vpDiagScissor})`);
-    }
   };
 
   const heapCopy = (off, len) => heap.slice(off, off + len);
@@ -15283,13 +14779,13 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
               // Older producers leave this word zero. Preserve their single
               // mip allocation while accepting the game's complete mip chain.
               mipLevelCount: Math.max(1, u32[recWord + 7] || 1),
-              // DIAG_TEX_READBACK adds COPY_SRC so the texture can be copied
+              // The harness adds COPY_SRC so the texture can be copied
               // back and inspected. Upload-byte accounting has proved
               // unreliable twice; reading the actual texels replaces the whole
               // inference chain with a direct observation.
               format: fmt,
               usage: u32[recWord + 5] |
-                ((harnessEnabled || DIAG_TEX_READBACK || DIAG_DEPTH_READBACK || DIAG_DEPTH_TRACE) ? 0x1 : 0)
+                (harnessEnabled ? 0x1 : 0)
             });
             webGpuObjects.textures.set(id,
               { tex, format: fmt, layers, view2dArray: null,
@@ -15544,7 +15040,6 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
           const depthLoadOpResolved = clearDepth ? "clear" : "load";
           const depthId = u32[recWord + 7];
           passDepthId = depthId;
-          if (fbId === self._wgEfbColorId && depthId) self._wgEfbDepthId = depthId;
           passLoadOp = loadOp;
           // §28af: the producer emits SET_VIEWPORT immediately after
           // BEGIN_PASS (cached vp re-emit). Peek it to learn this
@@ -15725,13 +15220,7 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
           }
           if (fbId === self._wgEfbColorId) vpDiagNoteEfbPass(loadOp === "clear");
           pass = enc.beginRenderPass(desc);
-          dtPassDesc = desc;
-          lastAppliedViewport = lastAppliedScissor = dtLastPipe = dtLastVb = dtLastIb = null;
-          dtLastBg.fill(null);
-          if (DIAG_DEPTH_TRACE && self._wgDt && self._wgDt.armed &&
-              fbId === self._wgEfbColorId) {
-            self._wgDt.passSeq++;
-          }
+          lastAppliedViewport = lastAppliedScissor = null;
           if (causalMetricsEnabled) wgpuUploadAttribution.recordPassBegin();
           wgpuReplayClassifier?.recordPassBegin({ framebufferId: fbId, recordIndex: read });
           if (depthId && loadOp === "clear") {
@@ -15814,7 +15303,6 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
                 if (wgpuConsumerStateCacheEnabled) wgpuPassStateCache.recordPipelineApplied(p);
               }
               passHasPipe = true;
-              dtLastPipe = p;
               passNeedsVertexBuffer = Boolean(
                 webGpuObjects.pipeTpl.get(pid)?.desc?.vertex?.buffers?.length
               );
@@ -15859,7 +15347,6 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
                 if (pipeline) {
                   try {
                     pass.setPipeline(pipeline);
-                    dtLastPipe = pipeline;
                     if (wgpuConsumerStateCacheEnabled) {
                       wgpuPassStateCache.recordPipelineApplied(pipeline);
                     }
@@ -15917,7 +15404,6 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
               WGPU_DYN_OFF_SCRATCH[k] = u32[recWord + 4 + k];
               if (bgSlot === 0) vpDiagNoteVsOffset(u32[recWord + 4 + k]);
             }
-            dtLastBg[bgSlot] = { bg, off: nOff ? Array.from(WGPU_DYN_OFF_SCRATCH.subarray(0, nOff)) : null };
             const needsApply = !wgpuConsumerStateCacheEnabled ||
               wgpuPassStateCache.bindGroupNeedsApply(
                 bgSlot,
@@ -15968,7 +15454,6 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
           if (!b) noteMissingResource("vertex-buffer", bufferId);
           if (pass && b) {
             const offset = u32[recWord + 3];
-            dtLastVb = { slot, b, offset };
             const needsApply = !wgpuConsumerStateCacheEnabled ||
               wgpuPassStateCache.vertexBufferNeedsApply(slot, b, offset);
             try {
@@ -16000,7 +15485,6 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
           if (pass && b) {
             const format = u32[recWord + 2] === 1 ? "uint32" : "uint16";
             const offset = u32[recWord + 3];
-            dtLastIb = { b, format, offset };
             const needsApply = !wgpuConsumerStateCacheEnabled ||
               wgpuPassStateCache.indexBufferNeedsApply(b, format, offset);
             try {
@@ -16137,14 +15621,6 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
           const colorWriteMask = (cflags & 8)
             ? ((cflags & 1) ? 0x7 : 0) | ((cflags & 4) ? 0x8 : 0)
             : ((cflags & 1) ? 0xF : 0);
-          if (DIAG_DEPTH_TRACE && self._wgDt && self._wgDt.armed &&
-              passFbId === self._wgEfbColorId) {
-            if (cflags & 2) {
-              dtraceSplit(`before clearrect(${cx},${cy} ${cw}x${ch}) flags=${cflags} depth=${cdepth} ` +
-                `vpz=${lastAppliedViewport ? lastAppliedViewport[4] + "," + lastAppliedViewport[5] : "default"}`);
-            }
-            self._wgDt.clears++;
-          }
           const cpipe = ensureClearPipeline(dev, passColorFmt, passDepthFmt,
                                             colorWriteMask, (cflags & 2) !== 0,
                                             crgba, cdepth);
@@ -16157,7 +15633,7 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
             // across the whole EFB -- a plane NEARER than the entire world
             // band z(0.00,0.84) under reverse-Z. Every world fragment then
             // failed greater-equal and the world was black, while the HUD at
-            // >= 0.89 passed. Measured with DIAG_DEPTH_TRACE: 0.89 at every
+            // >= 0.89 passed. Measured with a depth trace: 0.89 at every
             // viewport texel right after the clear with only non-writing
             // draws in between, and a control write of 0.5 under the world
             // viewport landing as 0.42. Clear through a full [0,1] range and
@@ -16223,15 +15699,13 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
                 `pass=${passW}x${passH}`);
             }
           }
-          if (pass && passW > 0 && !DIAG_RASTER_OPEN) {
+          if (pass && passW > 0) {
             let sx = u32[recWord + 1], sy = u32[recWord + 2];
             let sw = u32[recWord + 3], sh = u32[recWord + 4];
             if (sx > passW) sx = passW;
             if (sy > passH) sy = passH;
             sw = Math.min(sw, passW - sx);
             sh = Math.min(sh, passH - sy);
-            vpDiagNoteScissor(u32[recWord + 1], u32[recWord + 2],
-                              u32[recWord + 3], u32[recWord + 4], sx, sy, sw, sh);
             pass.setScissorRect(sx, sy, sw, sh);
             lastAppliedScissor = [sx, sy, sw, sh];
             if (drawState) drawState.scissor = [sx, sy, sw, sh];
@@ -16249,17 +15723,6 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
               (!passNeedsVertexBuffer || vertexBufferValid)) {
             diagTallyDrawTarget(passFbId, currentBackbufferSourceTextureId);
             vpDiagNoteDraw(passFbId, self._wgCurPipe);
-            if (!vpDiagIsolateAllows(passFbId, self._wgCurPipe)) break;
-            if (DIAG_ONLY_OPAQUE && passFbId === self._wgEfbColorId &&
-                vpDiagIsBlended(self._wgCurPipe)) break;
-            if (DIAG_SKIP_DEPTH_ALWAYS && vpDiagIsDepthAlways(self._wgCurPipe)) break;
-            if (DIAG_SKIP_EMPTY_TEX && passFbId === self._wgEfbColorId) {
-              const _l = vpDiagPipeVtx.get(self._wgCurPipe);
-              const _wb = _l ? vpDiagFsTexBinding.get(_l.fsId) : undefined;
-              const _bb = vpDiagBgTexByBinding.get(self._wgCurBg1);
-              const _t = (_bb && _wb !== undefined) ? _bb[_wb] : undefined;
-              if (_t !== undefined && vpDiagTexIsEmpty(_t)) break;
-            }
             if (VP_SKIP_RESCALED && vpRescaled) {
               self._wgVpSkipN = (self._wgVpSkipN || 0) + 1;
               break;
@@ -16267,7 +15730,6 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
             frameCapPush(`  DRAW     fb#${passFbId}`);
             if (!vpDiagDone) vpDiagVerts += u32[recWord + 1] * Math.max(1, u32[recWord + 2]);
             pass.draw(u32[recWord + 1], u32[recWord + 2], u32[recWord + 3], 0);
-            dtraceAfterDraw();
             webGpuExecStats.draw++; pd.draw++;
             wgpuReplayClassifier?.recordRealDraw({
               framebufferId: passFbId,
@@ -16300,17 +15762,6 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
           } else if (pass) {
             diagTallyDrawTarget(passFbId, currentBackbufferSourceTextureId);
             vpDiagNoteDraw(passFbId, self._wgCurPipe);
-            if (!vpDiagIsolateAllows(passFbId, self._wgCurPipe)) break;
-            if (DIAG_ONLY_OPAQUE && passFbId === self._wgEfbColorId &&
-                vpDiagIsBlended(self._wgCurPipe)) break;
-            if (DIAG_SKIP_DEPTH_ALWAYS && vpDiagIsDepthAlways(self._wgCurPipe)) break;
-            if (DIAG_SKIP_EMPTY_TEX && passFbId === self._wgEfbColorId) {
-              const _l = vpDiagPipeVtx.get(self._wgCurPipe);
-              const _wb = _l ? vpDiagFsTexBinding.get(_l.fsId) : undefined;
-              const _bb = vpDiagBgTexByBinding.get(self._wgCurBg1);
-              const _t = (_bb && _wb !== undefined) ? _bb[_wb] : undefined;
-              if (_t !== undefined && vpDiagTexIsEmpty(_t)) break;
-            }
             if (VP_SKIP_RESCALED && vpRescaled) {
               self._wgVpSkipN = (self._wgVpSkipN || 0) + 1;
               break;
@@ -16322,7 +15773,6 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
             }
             pass.drawIndexed(u32[recWord + 1], u32[recWord + 2],
                              u32[recWord + 3], u32[recWord + 4], 0);
-            dtraceAfterDraw();
             webGpuExecStats.drawIdx++; pd.drawIdx++;
             wgpuReplayClassifier?.recordRealDraw({
               framebufferId: passFbId,
@@ -16756,31 +16206,6 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
                 `formats=${[...(self._wgDummyFormats || [])].join(",")}`);
             }
           }
-          if (DIAG_TEX_READBACK && !vpDiagReadbackDone &&
-              (self._wgPresentCount || 0) >= 2500 && vpDiagLastPicks.length) {
-            vpDiagReadbackDone = true;
-            try {
-              ensureEnc();
-              const picks = vpDiagLastPicks;
-              for (const [k] of picks) {
-                const m = /tex#(\d+)/.exec(k);
-                if (!m) continue;
-                const e = webGpuObjects.textures.get(Number(m[1]));
-                if (e) diagReadTexture(dev, enc, e, k.slice(0, 60), "texcheck");
-              }
-            } catch (e) {
-              console.log("[vpdiag] readback queue failed: " + (e && e.message));
-            }
-          }
-          if (DIAG_DEPTH_READBACK && !self._wgDepthRbDone &&
-              (self._wgPresentCount || 0) >= 2500 && self._wgEfbDepthId) {
-            self._wgDepthRbDone = true;
-            try {
-              ensureEnc();
-              diagReadDepth(dev, enc, webGpuObjects.textures.get(self._wgEfbDepthId),
-                            "after-frame");
-            } catch (e) { console.log("[vpdiag] depth rb failed: " + (e && e.message)); }
-          }
           frameCapFinish();
           self._wgPresentCount = (self._wgPresentCount || 0) + 1;
           diagFrameEnd();
@@ -16791,23 +16216,6 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
               kind: "submit-present",
               complete: true
             });
-          }
-          if (DIAG_DEPTH_TRACE) {
-            const pn = self._wgPresentCount || 0;
-            const dt = self._wgDt;
-            if (dt && dt.armed) {
-              dt.armed = false;
-              console.log(`[dtrace] frame done: efbDraws=${dt.draws} depthWrites=${dt.writes} ` +
-                `clearRects=${dt.clears} efbPasses=${dt.passSeq} splits=${dt.splits} ` +
-                `readbacksIssued=${dt.issued}`);
-              for (const [k, n] of [...dt.cmpTally.entries()].sort((a, b) => b[1] - a[1])) {
-                console.log(`[dtrace]   ${String(n).padStart(4)}x ${k}`);
-              }
-            } else if (!dt && pn >= DTRACE_PRESENT && self._wgEfbColorId) {
-              self._wgDt = { armed: true, draws: 0, writes: 0, clears: 0, passSeq: 0,
-                             splits: 0, issued: 0, done: 0, cmpTally: new Map() };
-              console.log(`[dtrace] armed for the frame after present #${pn}`);
-            }
           }
           let presentAlreadySubmitted = false;
           // The texture this present shows: in vsync mode the frame's pooled
@@ -17796,29 +17204,13 @@ function replayCreatePipelineCfg(pipelineId, blobPtr, blobLen) {
     label: `dolphin-pcfg-${pipelineId}`,
     layout: getFixedLayouts().pipelineLayout,
     vertex: {
-      module: (DIAG_TRIVIAL_VS && hasDepth && depthTest &&
-               ["less", "greater", "less-equal", "greater-equal"]
-                 .includes(WGPU_COMPARE[depthCompare]))
-        ? getTrivialVsModule(renderGpu.device) : vs,
+      module: vs,
       buffers: attrCount > 0
         ? [{ arrayStride: stride, stepMode: "vertex", attributes }]
         : []
     },
     fragment: {
-      module: ((DIAG_CONST_FS && hasDepth) ||
-               (DIAG_CONST_FS_OPAQUE && hasDepth && depthTest && !blendEnable &&
-                ["less", "greater", "less-equal", "greater-equal"]
-                  .includes(WGPU_COMPARE[depthCompare])) ||
-               (DIAG_TRIVIAL_VS && hasDepth && depthTest &&
-                ["less", "greater", "less-equal", "greater-equal"]
-                  .includes(WGPU_COMPARE[depthCompare])) ||
-               (DIAG_CONST_FS_TESTED_ONLY && hasDepth && depthTest &&
-                ["less", "greater", "less-equal", "greater-equal"]
-                  .includes(WGPU_COMPARE[depthCompare])))
-        ? getConstFsModule(renderGpu.device)
-        : (((DIAG_FORCE_UV || DIAG_UV_FINITE || DIAG_UV_PERTURB || DIAG_SHOW_VCOLOR) &&
-            hasDepth &&
-            pickVariantFs(fsId)) || fs),
+      module: fs,
       targets: [target]
     },
     primitive: {
@@ -17829,12 +17221,12 @@ function replayCreatePipelineCfg(pipelineId, blobPtr, blobLen) {
       // Dolphin-driven back/front cull then removes exactly the
       // geometry that should be visible — the confirmed cause of the
       // black difficulty-select roster/scene (bisected via
-      // DIAG_RASTER_OPEN → DIAG_CULL_NONE_ONLY: cull-none renders it
+      // a raster-open → cull-none-only diagnostic: cull-none renders it
       // fully, scissor innocent). Declaring frontFace "cw" compensates
       // for the VS Y-flip so Dolphin's cull semantics are correct;
       // cull-none draws (boot/text/2D UI) are unaffected.
       frontFace: "cw",
-      cullMode: (DIAG_RASTER_OPEN || DIAG_CULL_NONE) ? "none" : (CULL[cullCode] || "none")
+      cullMode: CULL[cullCode] || "none"
     },
     multisample: { count: 1 }
   };
@@ -17936,15 +17328,6 @@ function resolvePipeline(pipelineId, colorFmt, depthFmt, dbg, revZ, samplingKey 
       const c = d.depthStencil.depthCompare;
       if (F[c]) d.depthStencil.depthCompare = F[c];
     }
-    // DIAGNOSTIC (revertible): force depth-test off so nothing is
-    // depth-rejected. With the EFB→canvas DIAG, this bisects "black
-    // EFB": geometry appears ⇒ uniform depth-rejection (EFB depth
-    // clear / GX-vs-Vulkan z convention); still black ⇒ transform/
-    // vertex bug. Flip false to restore real depth state.
-    if (DIAG_DEPTH_ALWAYS) {
-      d.depthStencil.depthCompare = "always";
-      d.depthStencil.depthWriteEnabled = false;
-    }
   } else {
     delete d.depthStencil;
   }
@@ -17971,10 +17354,6 @@ function resolvePipeline(pipelineId, colorFmt, depthFmt, dbg, revZ, samplingKey 
     const createdAt = dropSampler?.running && !prewarmed ? performance.now() : 0;
     pipe = prewarmed ?? renderGpu.device.createRenderPipeline(d);
     if (createdAt) { dropWgpu.pipelines += 1; dropWgpu.pipelineMs += performance.now() - createdAt; }
-    if (pipe && d.depthStencil) {
-      vpDiagPipeFinalDs.set(pipe, { cmp: d.depthStencil.depthCompare,
-                                    write: !!d.depthStencil.depthWriteEnabled });
-    }
     renderGpu.device.popErrorScope().then((err) => {
       if (err) {
         recordRendererError("validation", err.message);
@@ -18028,7 +17407,6 @@ function replayCreateShader(id, blobPtr, blobLen, stage) {
     return;
   }
   let wgsl;
-  let uvForcedWgsl = null;
   try {
     // TextDecoder.decode() rejects SharedArrayBuffer-backed views in
     // several engines ("cannot decode from a shared ArrayBuffer"), so
@@ -18038,12 +17416,6 @@ function replayCreateShader(id, blobPtr, blobLen, stage) {
     const local = new Uint8Array(blobLen);
     local.set(shared);
     wgsl = webGpuTextDecoder.decode(local);
-    // Strip `discard` from fragment shaders. Dolphin bakes the GX alpha test
-    // into the pixel shader as a discard; if it rejects every world fragment
-    // the EFB keeps its clear colour and the geometry is invisible -- which is
-    // also what the constant-colour FS test bypassed, so it is consistent with
-    // everything measured so far. Diagnostic only: removing it draws fragments
-    // the game intended to throw away.
     vpDiagShaderStage[stage] = (vpDiagShaderStage[stage] || 0) + 1;
     if (stage === 2 && /discard/.test(wgsl)) {
       if (++vpDiagShaderWithDiscard === 1) {
@@ -18067,34 +17439,6 @@ function replayCreateShader(id, blobPtr, blobLen, stage) {
       if (mb) vpDiagFsTexBinding.set(id, Number(mb[1]));
       const decls = wgsl.match(/@group\([0-9]+\)\s*@binding\([0-9]+\)\s*var[^;]*;/g) || [];
       console.log("[vpdiag] FS bindings: " + JSON.stringify(decls));
-    }
-    // Force the texture-array layer to 0. The translated sampling call is
-    // textureSample(tex, samp, vec2<f32>(uv), i32(coord.z)), so the layer comes
-    // from the third texcoord. Every texture the world binds is single-layer,
-    // so a non-zero layer samples out of range.
-    if (DIAG_FORCE_LAYER0 && stage === 2) {
-      const before = wgsl;
-      wgsl = wgsl.replace(
-        /textureSample([A-Za-z]*)\(([^,]+),\s*([^,]+),\s*(vec2<f32>\([^)]*\)),\s*i32\([^)]*\)/g,
-        "textureSample$1($2, $3, $4, 0i");
-      if (before !== wgsl && ++vpDiagLayerForced <= 1) {
-        console.log("[vpdiag] forced texture array layer to 0");
-      }
-    }
-    // Force the sampled UV to the middle of the texture. The textures these
-    // draws bind begin with black rows -- that is what made a head-only scan
-    // misread them as empty -- so texcoords stuck near zero would sample that
-    // black corner and produce exactly the observed black.
-    if (DIAG_SHOW_VCOLOR && stage === 2) uvForcedWgsl = vcolorRewrite(wgsl);
-    else if (DIAG_UV_PERTURB && stage === 2) uvForcedWgsl = uvPerturbRewrite(wgsl);
-    else if (DIAG_UV_FINITE && stage === 2) uvForcedWgsl = uvFiniteRewrite(wgsl);
-    else if (DIAG_FORCE_UV && stage === 2) uvForcedWgsl = uvForceRewrite(wgsl);
-    if (DIAG_NO_DISCARD && stage === 2) {
-      const before = wgsl;
-      wgsl = wgsl.replace(/discard;/g, "");
-      if (before !== wgsl && ++vpDiagDiscardStripped <= 1) {
-        console.log("[vpdiag] stripped discard from fragment shaders");
-      }
     }
   } catch (e) {
     webGpuObjects.shaderFail += 1;
@@ -18179,84 +17523,6 @@ function replayCreateShader(id, blobPtr, blobLen, stage) {
     }
   }
 
-  // [s28aw] DECISIVE dark-menu experiment (JS-only, gated, revertible):
-  // §28av proved the menu sampled UV is valid [0,1]; the remaining
-  // strong candidate is the textureSampleBias array-LAYER index. The
-  // menu textures are single-layer but bound as 2d-array views; if the
-  // texgen 3rd coord makes i32(_eN.z) ≥ 1 the sample is out-of-range ⇒
-  // 0 ⇒ black. Force the layer to 0 in FS textureSampleBias calls and
-  // see if the menu renders. Verified against BOTH the menu (must
-  // render) and title/3D (must NOT regress) before keeping.
-  if (S28AW_FORCE_TEXLAYER0 && stage === 2 &&
-      wgsl.indexOf("textureSampleBias(") >= 0) {
-    const before = wgsl;
-    wgsl = wgsl.replace(/(textureSampleBias\([^;]*?,\s*)i32\(_e\d+\.z\)/g,
-                        "$1" + "0i");
-    if (wgsl !== before &&
-        (self._wgS28awN = (self._wgS28awN || 0) + 1) <= 4) {
-      console.log(`[s28aw] forced textureSampleBias layer→0 in fs id=${id}`);
-    }
-  }
-  // [s28ax] decisive bisection: replace the textured-FS entry body
-  // (the only `-> @location(0) vec4<f32> { … }`, no nested braces in
-  // Naga's main) with a constant magenta return.
-  if (S28AX_FS_CONST && stage === 2 &&
-      wgsl.indexOf("textureSampleBias(") >= 0) {
-    const before = wgsl;
-    wgsl = wgsl.replace(
-      /(->\s*@location\(0\)\s*vec4<f32>\s*\{)[^{}]*\}/,
-      "$1 return vec4<f32>(1.0, 0.0, 1.0, 1.0); }");
-    if (wgsl !== before &&
-        (self._wgS28axN = (self._wgS28axN || 0) + 1) <= 4) {
-      console.log(`[s28ax] forced const-magenta FS id=${id}`);
-    }
-  }
-  // [s28bf] visualise the sampled UV: replace textureSampleBias(t,s,
-  // vec2<f32>(UV), layer, bias) with vec4(UV.x, UV.y, 0, 1) so the
-  // TEV carries the texgen UV as colour. Naga form:
-  // textureSampleBias(p6, p7, vec2<f32>(_eN.x, _eN.y), i32(_eN.z), _eM)
-  if (S28BF_SHOW_UV && stage === 2 &&
-      wgsl.indexOf("textureSampleBias(") >= 0) {
-    const before = wgsl;
-    wgsl = wgsl.replace(
-      /textureSampleBias\(\s*\w+\s*,\s*\w+\s*,\s*(vec2<f32>\([^()]*\))\s*,\s*[^,]*,\s*\w+\s*\)/g,
-      "vec4<f32>(($1).x, ($1).y, 0.0, 1.0)");
-    if (wgsl !== before &&
-        (self._wgS28bfN = (self._wgS28bfN || 0) + 1) <= 4) {
-      console.log(`[s28bf] showing UV-as-colour fs id=${id}`);
-    }
-  }
-  // [s28bb] isolate sample mechanics: textureSampleBias(t,s,c,l,bias)
-  // → textureSampleLevel(t,s,c,l,0.0). Naga emits the bias as the
-  // final `_e<N>` arg right after `i32(_e<N>.z)`; swap the call name
-  // and replace that last arg with explicit LOD 0.0.
-  if (S28BB_SAMPLE_LOD0 && stage === 2 &&
-      wgsl.indexOf("textureSampleBias(") >= 0) {
-    const before = wgsl;
-    wgsl = wgsl
-      .replace(/textureSampleBias\(/g, "textureSampleLevel(")
-      .replace(/(textureSampleLevel\([^;]*?,\s*i32\(_e\d+\.z\)\s*),\s*_e\d+\)/g,
-               "$1, 0.0)");
-    if (wgsl !== before &&
-        (self._wgS28bbN = (self._wgS28bbN || 0) + 1) <= 4) {
-      console.log(`[s28bb] textureSampleBias→Level(…,0.0) fs id=${id}`);
-    }
-  }
-  // [s28ay] sample-vs-TEV bisect: dolphin_fn_1_ is the texture-sampler
-  // helper (`-> vec4<i32> { …no nested braces… return _eN; }`). Force
-  // it to return white so the TEV runs with a known-good "sample".
-  if (S28AY_SAMPLER_WHITE && stage === 2 &&
-      wgsl.indexOf("fn dolphin_fn_1_(") >= 0 &&
-      wgsl.indexOf("textureSampleBias(") >= 0) {
-    const before = wgsl;
-    wgsl = wgsl.replace(
-      /(fn dolphin_fn_1_\([^{]*\{)[^{}]*\}/,
-      "$1 return vec4<i32>(255i, 255i, 255i, 255i); }");
-    if (wgsl !== before &&
-        (self._wgS28ayN = (self._wgS28ayN || 0) + 1) <= 4) {
-      console.log(`[s28ay] forced dolphin_fn_1_→white FS id=${id}`);
-    }
-  }
   let module;
   const createdAt = dropSampler?.running ? performance.now() : 0;
   try {
@@ -18280,12 +17546,6 @@ function replayCreateShader(id, blobPtr, blobLen, stage) {
   if (harnessWgslCorpus && harnessWgslCorpus.size < HARNESS_WGSL_CORPUS_MAX) {
     const hash = wgslHash(wgsl);
     if (!harnessWgslCorpus.has(hash)) harnessWgslCorpus.set(hash, { stage, wgsl });
-  }
-  if (uvForcedWgsl) {
-    try {
-      webGpuObjects.shadersUvForced.set(id,
-        renderGpu.device.createShaderModule({ label: `uvforced-${id}`, code: uvForcedWgsl }));
-    } catch { /* variant is diagnostic only; fall back to the real module */ }
   }
   if (webGpuObjects.shaders.size <= 4) {
     console.log(

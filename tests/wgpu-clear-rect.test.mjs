@@ -41,7 +41,7 @@ function clearRect(viewport, scissor = [4, 4, 4, 4], flags = 3, onPipeline = () 
       u32, f32, recWord: 0, WGPU_CMD_OP_CLEAR_RECT: 25,
       dev: {}, ensureClearPipeline: (...args) => { onPipeline(args); return pipeline; },
       GX_NATIVE_DEPTH: false, CLEARRECT_FULL_VIEWPORT: true, gxClearDepthToStored,
-      DIAG_DEPTH_TRACE: false, vpDiagDone: true,
+      vpDiagDone: true,
       lastAppliedViewport: viewport, lastAppliedScissor: scissor, self,
       recordRendererError: (...args) => errors.push(args),
     }

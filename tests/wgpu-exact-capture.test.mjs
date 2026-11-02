@@ -196,7 +196,7 @@ test("the worker routes video=wgpu captures to the tagged presents", async () =>
   // The copy starts at the presented rectangle's origin.
   assert.match(worker, /copyTextureToBuffer\(\{ texture: entry\.tex, origin: \{ x: rect\.x, y: rect\.y, z: 0 \} \}/);
   assert.match(worker, /wgpuPresentedSource = \{\n\s*textureId: wgpuLastBackbufferSourceTextureId, rect: wgpuNextPresentSource\n\s*\};\n\s*wgpuNextPresentSource = null;\n\s*wgpuExactCapture\.onPresent\(readbackWgpuPresentSource\);/);
-  assert.match(worker, /\(\(harnessEnabled \|\| DIAG_TEX_READBACK/);
+  assert.match(worker, /usage: u32\[recWord \+ 5\] \|\n\s*\(harnessEnabled \? 0x1 : 0\)/);
   const patch = await readFile(new URL(
     "../patches/dolphin-wasm/snapshot/0069-webgpu-tag-presents-with-vi-output.patch", import.meta.url), "utf8");
   assert.match(patch, /\+  ViTag = 26,/);
