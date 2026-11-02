@@ -305,7 +305,10 @@ export function benchNoiseArgs(noise, resultsDir) {
 
 // The Spark command that starts the pair detached and returns at once.
 export const SPARK_PROBES = ["race-perf", "drop-meter", "replay-gates", "parcours", "cpu-window"];
-export const PRESENTATION_PROBES = ["drop-meter", "replay-gates", "parcours"];
+// Every probe judges the presentation (--headed, video=wgpu) unless exempt:
+// a new probe is checked by default. race-perf and cpu-window (the CPU
+// thread's time) run headless like any pair.
+export const PRESENTATION_EXEMPT = ["race-perf", "cpu-window"];
 // drop-meter, replay-gates and parcours judge the presentation (?wgpureplayms is read
 // by the wgpu path only): headless, the bench turns video=wgpu into
 // video=null (benchQuery) and such a gate would pass without exercising
@@ -664,7 +667,7 @@ async function main() {
   const bench = benchRaceArgs(positionals, { keepVideo: values["keep-video"] || Boolean(values.headed) });
   // the probes that judge the presentation; race-perf and cpu-window (the
   // CPU thread's time) run headless like any pair
-  if (PRESENTATION_PROBES.includes(values.probe)) checkPresentationProbe(values.probe, positionals, bench.args, values.headed);
+  if (!PRESENTATION_EXEMPT.includes(values.probe)) checkPresentationProbe(values.probe, positionals, bench.args, values.headed);
   // replay-gates serves both sides from --candidate: refused here, not after the queue
   if (values.probe === "replay-gates" && (values.baseline || splitEquals(positionals).includes("--baseline-query"))) throw new Error("--probe replay-gates: one tree (--candidate) serves both sides, --extra makes the candidate; no --baseline or --baseline-query");
   for (const s of bench.swaps) console.log(`[spark-run] ${s.option} on the bench: ${s.to} (was ${s.from})`);

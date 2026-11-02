@@ -553,16 +553,22 @@ test("spark-run --loaded: correctness runs skip the cores wait, speed probes kee
 });
 
 // cpu-window (the CPU thread's time per second) runs headless on the bench,
-// like race-perf: only the probes that judge the presentation need --headed.
-test("spark-run --probe cpu-window: headless, no presentation check, one tree", async () => {
-  const { PRESENTATION_PROBES, SPARK_PROBES } = await import("../harness/remote/spark-run.mjs");
-  assert.ok(SPARK_PROBES.includes("cpu-window"));
-  assert.ok(!PRESENTATION_PROBES.includes("cpu-window"));
-  assert.deepEqual(PRESENTATION_PROBES, ["drop-meter", "replay-gates", "parcours"]);
+// like race-perf. The presentation check is the default: every probe is
+// checked unless it is exempt, so a new probe cannot skip it by omission.
+test("spark-run --probe: every probe is presentation-checked unless exempt; cpu-window exempt, one tree", async () => {
+  const { PRESENTATION_EXEMPT, SPARK_PROBES } = await import("../harness/remote/spark-run.mjs");
+  assert.deepEqual(PRESENTATION_EXEMPT, ["race-perf", "cpu-window"]);
+  for (const p of PRESENTATION_EXEMPT) assert.ok(SPARK_PROBES.includes(p), `${p} is a probe`);
+  const checked = SPARK_PROBES.filter((p) => !PRESENTATION_EXEMPT.includes(p));
+  assert.deepEqual(checked, ["drop-meter", "replay-gates", "parcours"]);
   const { readFile } = await import("node:fs/promises");
   const run = await readFile(new URL("../harness/remote/spark-run.mjs", import.meta.url), "utf8");
-  assert.match(run, /if \(PRESENTATION_PROBES\.includes\(values\.probe\)\) checkPresentationProbe\(/);
+  assert.match(run, /if \(!PRESENTATION_EXEMPT\.includes\(values\.probe\)\) checkPresentationProbe\(/);
+  assert.doesNotMatch(run, /PRESENTATION_PROBES/);
   const probe = await readFile(new URL("../harness/probes/cpu-window.mjs", import.meta.url), "utf8");
-  assert.match(probe, /runs: \{ type: "string" \}, baseline: \{ type: "string" \}/);
-  assert.match(probe, /if \(values\.baseline\) throw new Error\("cpu-window profiles one tree/);
+  assert.match(probe, /runs: \{ type: "string" \}, baseline: \{ type: "string" \}, "baseline-query": \{ type: "string" \}/);
+  assert.match(probe, /if \(values\.baseline \|\| values\["baseline-query"\]\) throw new Error\("cpu-window profiles one tree/);
+  assert.match(probe, /console\.error\(`\[cpu-window\] --runs \$\{values\.runs\} ignored/);
+  assert.match(probe, /countersBeforeLoad: o\.countersBeforeLoad,/);
+  assert.match(probe, /rowsStartAfterLoadSec: run\.rowsStartAfterLoadSec,/);
 });
