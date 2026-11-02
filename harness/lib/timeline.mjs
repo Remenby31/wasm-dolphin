@@ -45,6 +45,9 @@ export function mergeTimeline(chunks) {
     }
   }
   if (out.lost.presents || out.lost.vi) out.complete = false;
+  // a pipeline diag ring that overflowed: the no-present causes would miss
+  // stages, the run is not used either
+  if (out.swapsLost || out.pipelineLost) out.complete = false;
   // Both rings must be on one clock (timeOrigin + now). Presentations and VI
   // outputs of one run cannot be minutes apart; if they are, the timeline is
   // unusable rather than silently wrong.

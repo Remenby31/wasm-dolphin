@@ -291,13 +291,16 @@ export function markersOnVi(raw, vi) {
 // scenario (from its marker to the next one, the last to the end): with the
 // pipeline diag (--pipeline) each miss is followed down the pipeline, else
 // only the VI's phase on the BeginFrame grid speaks. The frames themselves
-// are left out (the table only).
-export function noPresentByPhase(raw, timeline, rows) {
+// are left out (the table only). dips: attributeDips' dip seconds as
+// [t0, t1) spans, for the column restricted to them (null: none).
+export function noPresentByPhase(raw, timeline, rows, dips = null) {
   const tl = { vi: timeline.vi, displayed: timeline.displayed, swaps: timeline.swaps, pipeline: timeline.pipeline };
   const out = { swapsWhy: timeline.swapsWhy ?? null, swapsLost: timeline.swapsLost ?? 0, pipelineLost: timeline.pipelineLost ?? 0, phases: {} };
   const markers = [...(raw.markers ?? [])].filter((m) => Number.isFinite(m.t)).sort((a, b) => a.t - b.t);
   markers.forEach((m, i) => {
-    const { frames, ...table } = analyzeNoPresent(tl, { from: m.t, to: markers[i + 1]?.t ?? raw.endT ?? Infinity, rows });
+    const { frames, ...table } = analyzeNoPresent(tl, { from: m.t, to: markers[i + 1]?.t ?? raw.endT ?? Infinity, rows, dips });
+    table.swapsLost = out.swapsLost;
+    table.pipelineLost = out.pipelineLost;
     let key = m.label ?? `phase-${i}`;
     while (out.phases[key]) key += "'";
     out.phases[key] = table;
@@ -306,20 +309,37 @@ export function noPresentByPhase(raw, timeline, rows) {
 }
 
 // The no-present tables of every usable run (as attributionAcross), per side,
-// visit and phase, summed.
+// visit and phase, summed. A run left out for a pipeline ring loss is counted
+// (runsLostRings, with its losses) in every phase of its side and visit, and
+// makes `pipeline` false there: losses are never silent.
 export function noPresentAcross(analyses) {
   const groups = new Map();
+  const lostRuns = new Map();
   for (const { side, visit, analysis: a } of analyses) {
+    const l = a?.diagLost;
+    if (a?.error && l && (l.swaps || l.pipeline)) {
+      const k = `${side}|${visit}`;
+      const x = lostRuns.get(k) ?? { runs: 0, swaps: 0, pipeline: 0 };
+      x.runs += 1; x.swaps += l.swaps ?? 0; x.pipeline += l.pipeline ?? 0;
+      lostRuns.set(k, x);
+    }
     if (!a?.noPresent || a.error || a.overloaded || a.powerDrained) continue;
     for (const [phase, table] of Object.entries(a.noPresent.phases)) {
       const key = `${side}|${visit}|${phase}`;
       if (!groups.has(key)) groups.set(key, { side, visit, phase, tables: [], pipeline: true });
       const g = groups.get(key);
       g.tables.push(table);
-      g.pipeline &&= table.hasSwaps && table.hasPipeline;
+      g.pipeline &&= table.hasSwaps && table.hasPipeline && !table.swapsLost && !table.pipelineLost;
     }
   }
-  return [...groups.values()].map((g) => ({ side: g.side, visit: g.visit, phase: g.phase, pipeline: g.pipeline, ...sumNoPresent(g.tables) }));
+  return [...groups.values()].map((g) => {
+    const lost = lostRuns.get(`${g.side}|${g.visit}`) ?? { runs: 0, swaps: 0, pipeline: 0 };
+    const sum = sumNoPresent(g.tables);
+    return {
+      side: g.side, visit: g.visit, phase: g.phase, pipeline: g.pipeline && lost.runs === 0, ...sum,
+      swapsLost: sum.swapsLost + lost.swaps, pipelineLost: sum.pipelineLost + lost.pipeline, runsLostRings: lost.runs
+    };
+  });
 }
 
 // One visit's analysis from its raw record (pure but for the reference).
@@ -329,7 +349,7 @@ export function analyzeVisit(raw, { native = null } = {}) {
   const timeline = mergeTimeline(raw.chunks);
   // A ring that overflowed or a read that failed leaves holes a drop could
   // hide in: the run is not used.
-  if (!timeline.complete) return { error: `timeline incomplete (lost presents ${timeline.lost.presents}, VI ${timeline.lost.vi}, failed reads ${timeline.failedReads})` };
+  if (!timeline.complete) return { error: `timeline incomplete (lost presents ${timeline.lost.presents}, VI ${timeline.lost.vi}, swaps ${timeline.swapsLost}, pipeline log ${timeline.pipelineLost}, failed reads ${timeline.failedReads})`, diagLost: { swaps: timeline.swapsLost, pipeline: timeline.pipelineLost } };
   const rows = rowsOf(raw.rows);
   raw = { ...raw, ...markersOnVi(raw, timeline.vi) };
   const page = raw.page.map(([t, lagMs, underruns, rafs, audioMs, mixerMs]) => ({ t, lagMs, underruns, rafs: rafs ?? null, audioMs: audioMs ?? null, mixerMs: mixerMs ?? null }));
@@ -350,7 +370,7 @@ export function analyzeVisit(raw, { native = null } = {}) {
     const aw = dropWindowsForAttribution(windows, { presents: timeline.presents, vi: timeline.vi, displayed: timeline.displayed, rows });
     attribution = { ...attributeDips(aw, { cadence: viHz }), beat: { ...aw.beat, proven: aw.beat.proven.length } };
   }
-  const noPresent = displayed ? noPresentByPhase(raw, timeline, rows) : null;
+  const noPresent = displayed ? noPresentByPhase(raw, timeline, rows, attribution ? attribution.dips.map((d) => [d.t, d.t + d.hostMs]) : null) : null;
   if (native) for (const p of phases) {
     const ws = windows.filter((w) => w.label === p.label && w.guestStart != null);
     p.nativeFps = ws.length ? nativeFps(native, ws[0].guestStart, ws.at(-1).guestStart + 0.1) : null;
@@ -655,7 +675,7 @@ async function analyzeDir(dir, native, log, noiseFile = null, { attribute = fals
     const np = noPresentAcross(analyses);
     writeFileSync(path.join(dir, "no-present.json"), JSON.stringify(np, null, 1) + "\n");
     for (const g of np) {
-      log(`no-present ${g.side} visit ${g.visit} ${g.phase} (${g.pipeline ? "pipeline recorded" : "VI phase only: record with --pipeline"}):`);
+      log(`no-present ${g.side} visit ${g.visit} ${g.phase} (${g.pipeline ? "pipeline recorded" : g.runsLostRings || g.swapsLost || g.pipelineLost ? `pipeline ring losses: ${g.runsLostRings} run(s) left out` : "VI phase only: record with --pipeline"}):`);
       for (const l of noPresentLines(g)) log(`  ${l}`);
     }
   }

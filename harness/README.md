@@ -459,6 +459,19 @@ jitter repeats: 21-26 % of such drops are labelled beat (synthetic
 60 / 59.94 Hz at σ 0.7-0.9 ms). On a screen locked to the VI rate, nothing
 is labelled beat (slowdowns from 0.1 % to 7 % included).
 
+No-present causes (`harness/lib/no-present.mjs`, `--attribute` writes
+`no-present.json`; record with `--pipeline` for the stages): every
+BeginFrame of a phase that showed nothing new while an output was due,
+classed fifo-behind (a 0211 hold), fifo-lag-minor, gpu-busy, replay-late,
+beat-phase, swap-not-ready, other or unknown. **This is not the set the
+attribution counts:** attributeDips counts its `no-present` frames over the
+dip seconds only, after the proven beat and the presenter-blocked frames.
+The `in dips` column restricts the table to those dip seconds. `beat-phase`
+is a classification by the VI's phase on the BeginFrame grid (band 0.8-0.1
+by default), not beatEvidence's frame-by-frame proof. Missing stages
+(swap, tag or queued present absent, an excess no stage explains) are
+`unknown`; a ring loss leaves the run out and is reported.
+
 A second at full speed with a thread between 0.7 and 0.85 busy (no margin,
 not saturated) is `marginal`: content or game, undecided. It is reported
 apart (`marginalFrames`), not counted in the frames lost. The expected

@@ -80,7 +80,7 @@ test("classifyMissed without the pipeline: the phase alone, beat in the band", (
   const s = scene({ skip: [10, 20], viAt: { 10: 1000 + 10 * T - 1, 20: 1000 + 20 * T - 6 } });
   const r = analyzeNoPresent(s);
   assert.equal(r.missed, 2);
-  assert.equal(r.frames[0].cause, "beat");
+  assert.equal(r.frames[0].cause, "beat-phase");
   assert.equal(r.frames[1].cause, "swap-not-ready");
   assert.equal(r.frames[1].reason, "pipeline not recorded");
   assert.equal(r.hasSwaps, false);
@@ -89,30 +89,64 @@ test("classifyMissed without the pipeline: the phase alone, beat in the band", (
 
 test("classifyMissed: a VI after the deadline is beat in the band, vi-late outside it", () => {
   const b = { total: 2.5, swap: 1, replay: 1, present: 0.5 };
-  assert.deepEqual(classifyMissed({ viT: 1001, deadline: 1000, phase: 0.05 }, b), { cause: "beat", reason: "vi-after-vsync" });
+  assert.deepEqual(classifyMissed({ viT: 1001, deadline: 1000, phase: 0.05 }, b), { cause: "beat-phase", reason: "vi-after-vsync" });
   assert.deepEqual(classifyMissed({ viT: 1008, deadline: 1000, phase: 0.45 }, b), { cause: "other", reason: "vi-late" });
-  assert.deepEqual(classifyMissed({ viT: null, deadline: 1000, phase: null }, b), { cause: "other", reason: "vi-unknown" });
+  assert.deepEqual(classifyMissed({ viT: null, deadline: 1000, phase: null }, b), { cause: "unknown", reason: "vi-unknown" });
 });
 
-test("classifyMissed: the swap overtook its copy (FIFO behind) - duplicate or 0211 hold", () => {
-  const s = withPipeline(scene({ skip: [10], viAt: { 10: 1000 + 10 * T - 8 } }), { per: { 10: { fresh: false, behind: 4 } } });
-  const r = analyzeNoPresent(s);
-  assert.equal(r.missed, 1);
-  assert.equal(r.frames[0].cause, "fifo-behind");
-  assert.equal(r.frames[0].reason, "duplicate");
+test("classifyMissed: a 0211 hold is fifo-behind; a duplicate not held, behind, is only fifo-lag-minor", () => {
   const held = withPipeline(scene({ skip: [10], viAt: { 10: 1000 + 10 * T - 8 } }), { per: { 10: { fresh: true, held: true, behind: 2, presentMs: 30 } } });
-  assert.equal(analyzeNoPresent(held).frames[0].cause, "fifo-behind");
-  assert.equal(analyzeNoPresent(held).frames[0].reason, "held");
+  assert.deepEqual(analyzeNoPresent(held).frames.map((f) => [f.cause, f.reason]), [["fifo-behind", "held"]]);
+  const dup = withPipeline(scene({ skip: [10], viAt: { 10: 1000 + 10 * T - 8 } }), { per: { 10: { fresh: false, behind: 1 } } });
+  const r = analyzeNoPresent(dup);
+  assert.equal(r.missed, 1);
+  assert.deepEqual([r.frames[0].cause, r.frames[0].reason], ["fifo-lag-minor", "duplicate, 1 chunk(s) behind"]);
+  assert.equal(r.byCause["fifo-behind"], 0);
 });
 
-test("classifyMissed: a duplicate with the FIFO caught up is the game's own repeat; behind unknown is not 0", () => {
+test("classifyMissed: a duplicate with the FIFO caught up is the game's own repeat; FIFO lag unknown is unknown, not 0", () => {
   const dup = withPipeline(scene({ skip: [10], viAt: { 10: 1000 + 10 * T - 8 } }), { per: { 10: { fresh: false, behind: 0 } } });
   assert.deepEqual(analyzeNoPresent(dup).frames.map((f) => [f.cause, f.reason]), [["other", "duplicate"]]);
-  // behind null (single core): neither fifo-behind nor a duplicate of the game
   const unknown = withPipeline(scene({ skip: [10], viAt: { 10: 1000 + 10 * T - 8 } }), { per: { 10: { fresh: false, behind: null } } });
-  const f = analyzeNoPresent(unknown).frames[0];
-  assert.notEqual(f.cause, "fifo-behind");
-  assert.notEqual(f.reason, "duplicate");
+  assert.deepEqual(analyzeNoPresent(unknown).frames.map((f) => [f.cause, f.reason]), [["unknown", "duplicate, FIFO lag unknown"]]);
+});
+
+test("classifyMissed: recorded swaps or pipeline missing the due output give unknown, never a class", () => {
+  const base = () => withPipeline(scene({ skip: [10], viAt: { 10: 1000 + 10 * T - 8 } }));
+  const noSwap = base();
+  noSwap.swaps = noSwap.swaps.filter((x) => x.vi !== 10);
+  assert.deepEqual(analyzeNoPresent(noSwap).frames.map((f) => [f.cause, f.reason]), [["unknown", "swap missing"]]);
+  // VI off by one: a swap for output 11 never stands in for output 10's
+  const offByOne = base();
+  offByOne.swaps = offByOne.swaps.filter((x) => x.vi !== 11).map((x) => (x.vi === 10 ? { ...x, vi: 11 } : x));
+  const f = analyzeNoPresent(offByOne).frames[0];
+  assert.equal(f.dueVi, 10);
+  assert.equal(f.swap, null);
+  assert.deepEqual([f.cause, f.reason], ["unknown", "swap missing"]);
+  const noTag = base();
+  noTag.pipeline.tags = noTag.pipeline.tags.filter((x) => x.vi !== 10);
+  assert.deepEqual(analyzeNoPresent(noTag).frames.map((f) => [f.cause, f.reason]), [["unknown", "tag missing"]]);
+  const noQueued = base();
+  noQueued.pipeline.queued = noQueued.pipeline.queued.filter((x) => x.vi !== 10);
+  assert.deepEqual(analyzeNoPresent(noQueued).frames.map((f) => [f.cause, f.reason]), [["unknown", "queued missing"]]);
+});
+
+test("classifyMissed: a total excess over the threshold that no stage explains is unknown", () => {
+  // stages each at their median, the total 21 ms against a 6 ms median: inconsistent, unexplained
+  const m = { viT: 980, deadline: 1000, phase: 0.4, queuedT: 1001, replayT: 999, swap: { t: 982, fresh: true, held: false, behind: 0 }, shownAt: 1016, recorded: { swaps: true, pipeline: true }, slackMs: 20, delays: { swap: 2, replay: 3, present: 1, total: 21 } };
+  assert.deepEqual(classifyMissed(m, { swap: 2, replay: 3, present: 1, total: 6 }), { cause: "unknown", reason: "excess unexplained" });
+  // a small excess (under the threshold) stays swap-not-ready
+  assert.deepEqual(classifyMissed({ ...m, slackMs: 6.5, delays: { swap: 2, replay: 3, present: 1, total: 7 } }, { swap: 2, replay: 3, present: 1, total: 6 }), { cause: "swap-not-ready", reason: "small excess" });
+});
+
+test("duplicates: a second record for an output is kept out and counted", () => {
+  const s = withPipeline(scene({ skip: [10], viAt: { 10: 1000 + 10 * T - 8 } }), { per: { 10: { swapMs: 9 } } });
+  s.swaps.push({ vi: 10, t: s.vi[10].t + 1, behind: 0, fifoBytes: 0, fresh: true, held: false });
+  s.pipeline.tags.push({ vi: 3, t: 0 });
+  const r = analyzeNoPresent(s);
+  assert.deepEqual(r.duplicates, { swaps: 1, tags: 1, queued: 0 });
+  assert.equal(r.frames[0].cause, "gpu-busy", "the first record is the one used");
+  assert.deepEqual(sumNoPresent([r, r]).duplicates, { swaps: 2, tags: 2, queued: 0 });
 });
 
 test("classifyMissed: the stage over its median names the cause (gpu-busy, replay-late)", () => {
@@ -132,9 +166,9 @@ test("classifyMissed: a normal pipeline that could not make the vsync is beat in
   const r = analyzeNoPresent(s, { band: { from: 0.95, to: 0.1 } });
   assert.deepEqual(r.frames.map((f) => f.cause), ["swap-not-ready", "swap-not-ready"]);
   const r2 = analyzeNoPresent(s);
-  assert.deepEqual(r2.frames.map((f) => f.cause), ["beat", "beat"]);
-  assert.equal(r2.byCause.beat, 2);
-  assert.equal(r2.share.beat, 1);
+  assert.deepEqual(r2.frames.map((f) => f.cause), ["beat-phase", "beat-phase"]);
+  assert.equal(r2.byCause["beat-phase"], 2);
+  assert.equal(r2.share["beat-phase"], 1);
 });
 
 test("classifyMissed: queued before the deadline yet not shown", () => {
@@ -167,7 +201,11 @@ test("analyzeNoPresent: phase deciles of every VI and of the missed ones; sums o
   assert.equal(r.phaseDeciles.missed[9], 1);
   const sum = sumNoPresent([r, r]);
   assert.equal(sum.missed, 2);
-  assert.equal(sum.byCause.beat, 2);
+  assert.equal(sum.byCause["beat-phase"], 2);
+  assert.equal(sum.inDips, null, "no dip seconds given");
+  const d = analyzeNoPresent(s, { dips: [[1000 + 10 * T, 1000 + 11 * T]] });
+  assert.equal(d.inDips.missed, 1);
+  assert.equal(analyzeNoPresent(s, { dips: [[0, 1]] }).inDips.missed, 0, "outside the dip seconds");
   assert.equal(sum.phaseDeciles.all.reduce((a, b) => a + b, 0), 118);
 });
 
@@ -198,7 +236,8 @@ test("mergeTimeline: swaps and the pipeline log, null when not recorded", () => 
   assert.deepEqual(on.swaps, [{ vi: 3, t: 9, behind: null, fifoBytes: null, fresh: true, held: false }]);
   assert.equal(on.swapsLost, 1);
   assert.deepEqual(on.pipeline, { tags: [{ vi: 3, t: 10 }], queued: [{ vi: 3, t: 11 }], ticks: [{ t: 16.7, cb: 17, vi: 3 }] });
-  assert.equal(on.complete, true, "the diag never makes an older timeline incomplete");
+  assert.equal(on.complete, false, "a lost swap entry makes the timeline incomplete");
+  assert.equal(off.complete, true, "an older timeline without the diag stays complete");
 });
 
 test("missedFrames: the presenter's callback time is the deadline when the log has it", () => {
@@ -224,5 +263,17 @@ test("drop-meter: the no-present table per phase of the scenario, summed over us
   const race = across.find((g) => g.phase === "race");
   assert.equal(race.runs, 1, "an overloaded run is left out");
   assert.equal(race.pipeline, false);
-  assert.equal(race.byCause.beat, 1);
+  assert.equal(race.byCause["beat-phase"], 1);
+  assert.equal(race.runsLostRings, 0);
+  // a run left out for ring losses is reported, and pipeline is false
+  const withLoss = noPresentAcross([...runs, { side: "candidate", visit: 1, analysis: { error: "timeline incomplete", diagLost: { swaps: 3, pipeline: 0 } } }]);
+  const r2 = withLoss.find((g) => g.phase === "race");
+  assert.equal(r2.runsLostRings, 1);
+  assert.equal(r2.swapsLost, 3);
+  assert.equal(r2.pipeline, false);
+  // losses inside a used run's tables are summed too
+  const lossy = { ...np, phases: { race: { ...np.phases.race, hasSwaps: true, hasPipeline: true, pipelineLost: 2 } } };
+  const r3 = noPresentAcross([{ side: "candidate", visit: 1, analysis: { noPresent: lossy } }])[0];
+  assert.equal(r3.pipelineLost, 2);
+  assert.equal(r3.pipeline, false);
 });
