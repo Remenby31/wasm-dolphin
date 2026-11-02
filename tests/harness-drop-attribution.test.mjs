@@ -415,6 +415,15 @@ test("drop-meter: patch 0212's audio queue and VI phase lock over a visit", asyn
   // per phase, from each marker's read to the next (the last to the end)
   const q = (skips, fills) => ({ overflowSkips: skips, underrunFills: fills });
   const perPhase = audioQueueOfVisit({ audioQueueStart: q(0, 0), audioQueueEnd: { ...q(30, 9), trimPpm: 0, phaseLock: null },
-    markers: [{ label: "boot", audioQueue: q(0, 0) }, { label: "race", audioQueue: q(10, 4) }, { label: "unlabelled-read-failed", audioQueue: null }] });
+    markers: [{ label: "boot", audioQueue: q(0, 0) }, { label: "race", audioQueue: q(10, 4) }] });
   assert.deepEqual(perPhase.phases, { boot: q(10, 4), race: q(20, 5) });
+  // a failed read at a marker: the phase before it and its own are unknown,
+  // never stretched over the failed one nor counted 0
+  const failed = audioQueueOfVisit({ audioQueueStart: q(0, 0), audioQueueEnd: q(30, 9),
+    markers: [{ label: "boot", audioQueue: q(0, 0) }, { label: "menus", audioQueue: { error: "timeout" } }, { label: "race", audioQueue: q(10, 4) }] });
+  assert.deepEqual(failed.phases, { boot: null, menus: null, race: q(20, 5) });
+  // a read without the counters (a delta not computable): null, not 0
+  const partial = audioQueueOfVisit({ audioQueueStart: q(0, 0), audioQueueEnd: q(30, 9),
+    markers: [{ label: "boot", audioQueue: q(0, 0) }, { label: "race", audioQueue: { overflowSkips: 10 } }] });
+  assert.deepEqual(partial.phases, { boot: null, race: null });
 });

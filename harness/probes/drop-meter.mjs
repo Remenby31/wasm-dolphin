@@ -298,16 +298,25 @@ export function audioQueueOfVisit(raw) {
   if (!b || b.error || b.unavailable) return b?.unavailable || b?.error ? { unavailable: b.unavailable ?? b.error } : null;
   const delta = (x, y, k) => (Number.isFinite(y?.[k]) && Number.isFinite(x?.[k]) ? y[k] - x[k] : null);
   const d = (k) => delta(a, b, k);
-  // per phase: from its marker's read to the next one's (the last to the end)
-  const marks = (raw.markers ?? []).filter((m) => m.label && m.audioQueue && !m.audioQueue.error && !m.audioQueue.unavailable);
+  // per phase: from its marker's read to the next labelled marker's (the
+  // last to the end). Unknown stays unknown: a failed read at either end, or
+  // a delta not computable, makes the phase null (never 0, never stretched
+  // over the next phase).
+  const ok = (q) => Boolean(q) && !q.error && !q.unavailable && Number.isFinite(q.overflowSkips) && Number.isFinite(q.underrunFills);
+  const marks = (raw.markers ?? []).filter((m) => m.label);
   const phases = {};
   marks.forEach((m, i) => {
-    const next = marks[i + 1]?.audioQueue ?? b;
+    const from = m.audioQueue, to = i + 1 < marks.length ? marks[i + 1].audioQueue : b;
+    const skips = ok(from) && ok(to) ? delta(from, to, "overflowSkips") : null;
+    const fills = ok(from) && ok(to) ? delta(from, to, "underrunFills") : null;
+    if (m.label in phases && phases[m.label] === null) return;
+    if (skips == null || fills == null) { phases[m.label] = null; return; }
     const p = phases[m.label] ??= { overflowSkips: 0, underrunFills: 0 };
-    p.overflowSkips += delta(m.audioQueue, next, "overflowSkips") ?? 0;
-    p.underrunFills += delta(m.audioQueue, next, "underrunFills") ?? 0;
+    p.overflowSkips += skips;
+    p.underrunFills += fills;
   });
-  return { overflowSkips: d("overflowSkips"), underrunFills: d("underrunFills"), trimPpm: b.trimPpm ?? null, phaseLock: b.phaseLock ?? null, ...(marks.length ? { phases } : {}) };
+  const anyRead = marks.some((m) => ok(m.audioQueue));
+  return { overflowSkips: d("overflowSkips"), underrunFills: d("underrunFills"), trimPpm: b.trimPpm ?? null, phaseLock: b.phaseLock ?? null, ...(anyRead ? { phases } : {}) };
 }
 
 export function analyzeVisit(raw, { native = null } = {}) {
