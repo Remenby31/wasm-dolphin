@@ -55,21 +55,26 @@ export const GAME_DRAWS_PER_FRAME = 200;
 // still picture, a pause), it keeps the phase before it.
 export const MIN_NEW_FPS = 5;
 export const HITCH_MS = [50, 100];
-// Present gaps past this get their detail (gapDetail): the attribution's unit.
-export const GAP_DETAIL_MS = 25;
-
-// One present gap [a, b] (host ms): its length, the VI outputs inside it
-// (viT: their host times), and the presenting worker's longest stall inside
-// it (lag: the drop sampler's [t, lagMs] rows: a tick that ran lagMs late
-// means the worker could not run during [t - lagMs, t]; the part inside the
-// gap). Pure.
-export function gapDetail(a, b, viT = [], lag = []) {
-  let workerLagMs = 0;
-  for (const [t, l] of lag) {
-    const over = Math.min(b, t) - Math.max(a, t - l);
-    if (over > workerLagMs) workerLagMs = over;
+// One present gap [a, b) (host ms): its length, the VI outputs inside it
+// (viT: their host times, null when the ring lost entries: unknown), and the
+// presenting worker's longest stall inside it from the drop sampler's ticks
+// (ticks: EVERY tick [t, lagMs] of the sampler, null when it was not read: a
+// tick that ran lagMs late means the worker could not run during
+// [t - lagMs, t]). An absent datum stays unknown, never 0 (lib/drops.mjs
+// attribution): no tick due in the gap nor stalled across it, or no ticks
+// read, gives null; an on-time tick inside it, 0. Pure.
+export function gapDetail(a, b, viT = null, ticks = null) {
+  const vis = Array.isArray(viT) ? viT.filter((v) => v >= a && v < b).length : null;
+  let workerLagMs = null;
+  if (Array.isArray(ticks)) {
+    for (const [t, l] of ticks) {
+      const due = t - l;
+      const over = Math.min(b, t) - Math.max(a, due);
+      if (!(due >= a && due < b) && !(over > 0)) continue;
+      workerLagMs = Math.max(workerLagMs ?? 0, Math.max(0, over));
+    }
   }
-  return { at: a, ms: round(b - a, 1), vis: viT.filter((v) => v > a && v < b).length, workerLagMs: round(workerLagMs, 1) };
+  return { at: a, ms: round(b - a, 1), vis, workerLagMs: workerLagMs == null ? null : round(workerLagMs, 1) };
 }
 
 // The site's smoothness (salon packages/core/src/smoothness.ts): a window
@@ -131,17 +136,12 @@ export function deriveSeconds(samples, { tps = null } = {}) {
     const viRate = num(b.vi) != null ? b.vi / dt : null;
     // present intervals ending in this second, the last one before it included
     let hitches50 = 0, hitches100 = 0, maxGapMs = 0;
-    const gaps = [];
     for (const p of b.presents ?? []) {
       if (lastPresent != null) {
         const gap = p - lastPresent;
         if (gap > HITCH_MS[0]) hitches50 += 1;
         if (gap > HITCH_MS[1]) hitches100 += 1;
         maxGapMs = Math.max(maxGapMs, gap);
-        // a present gap past GAP_DETAIL_MS: its VI outputs (the core went on,
-        // or not) and how long the presenting worker's sampler ran late in it
-        // (the worker itself blocked)
-        if (gap > GAP_DETAIL_MS) gaps.push(gapDetail(lastPresent, p, [...(a.viT ?? []), ...(b.viT ?? [])], [...(a.lag ?? []), ...(b.lag ?? [])]));
       }
       lastPresent = p;
     }
@@ -156,9 +156,9 @@ export function deriveSeconds(samples, { tps = null } = {}) {
       i: rows.length, t: round((b.t - t0) / 1000, 2), at: b.t, booted,
       speed: round(speed, 1), newFps: round(newFps, 1), producedFps: round(producedFps, 1),
       cadence: ref, smoothness: newFps == null ? null : round(Math.max(0, Math.min(100, (newFps / ref) * 100)), 1),
-      viRate: round(viRate, 1), presents: (b.presents ?? []).length, hitches50, hitches100, maxGapMs: round(maxGapMs, 1), gaps,
+      viRate: round(viRate, 1), presents: (b.presents ?? []).length, hitches50, hitches100, maxGapMs: round(maxGapMs, 1),
       // the presenting worker's longest stall in the second (sampler rows)
-      workerLagMs: (b.lag ?? []).length ? Math.max(...b.lag.map((x) => x[1])) : (Array.isArray(b.lag) ? 0 : null),
+      workerLagMs: Array.isArray(b.samplerTicks) && b.samplerTicks.length ? Math.max(...b.samplerTicks.map((x) => x[1])) : null,
       discBps: carried?.discBps == null ? null : Math.round(carried.discBps),
       xfbPerFrame: carried?.xfbPerSec != null && producedFps > 0 ? round(carried.xfbPerSec / producedFps, 2) : null,
       drawsPerFrame: draws != null && made ? round(draws / made, 1) : null,
