@@ -11,7 +11,8 @@
 //               charged to that drain's wake (timer0: a 0 ms timer chained
 //               from the previous drain; timerIdle: the idle or blocked poll;
 //               parker: waitAsync on the write index; presentation: the
-//               presentation loop's own drain)
+//               presentation loop's own drain; message: ?replaywake=1's
+//               MessageChannel task in place of the 0 ms timer)
 //   lag         that drain's start minus when it was scheduled or parked
 //               (the timer's clamp, the event loop's queue, the parker's
 //               wake); null when unknown
@@ -22,7 +23,7 @@
 // Missing data is null, never 0. Nothing here knows a game or a scene.
 import { median, round } from "./stats.mjs";
 
-export const WAKE_NAMES = Object.freeze(["timer0", "timerIdle", "parker", "presentation"]);
+export const WAKE_NAMES = Object.freeze(["timer0", "timerIdle", "parker", "presentation", "message"]);
 
 const pct = (xs, p) => {
   if (!xs.length) return null;

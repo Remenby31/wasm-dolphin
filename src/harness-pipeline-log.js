@@ -25,9 +25,10 @@ export const PIPELINE_DRAIN = 4;
 // How a drain was woken: a timer asked for 0 ms (a backlog chained from the
 // previous drain), a timer asked for more (the idle poll, a blocked upload),
 // the parker (waitAsync on the write index: notified or timed out), or the
-// presentation loop's own drain.
-export const PIPELINE_WAKE = Object.freeze({ timer0: 0, timerIdle: 1, parker: 2, presentation: 3 });
-export const PIPELINE_WAKE_NAMES = Object.freeze(["timer0", "timerIdle", "parker", "presentation"]);
+// presentation loop's own drain, or (?replaywake=1) a MessageChannel task in
+// place of the 0 ms timer.
+export const PIPELINE_WAKE = Object.freeze({ timer0: 0, timerIdle: 1, parker: 2, presentation: 3, message: 4 });
+export const PIPELINE_WAKE_NAMES = Object.freeze(["timer0", "timerIdle", "parker", "presentation", "message"]);
 
 export function createPipelineLog({ capacity = 32768 } = {}) {
   const ring = new Float64Array(capacity * 4);

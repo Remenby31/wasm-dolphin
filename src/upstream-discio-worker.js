@@ -932,6 +932,30 @@ let wgpuLoadEpochFence = false;
 let wgpuLoadFenceActive = false;
 let wgpuReplayPumpEnabled = false;
 let wgpuReplayPumpTimer = null;
+// ?replaywake=1 (off by default): a backlog drain chained at 0 ms runs from a
+// MessageChannel task, not setTimeout(0). Timers nested five deep are clamped
+// to 4 ms (HTML), and the pump chains them while the producer writes a
+// frame: a ViTag published meanwhile waited 4-5 ms for its replay (94 % of the
+// replay's wait, research/no-present-2p.md). The parker and the idle poll
+// are unchanged.
+let wgpuReplayWake = false;
+let wgpuReplayWakeChannel = null;
+let wgpuReplayWakeCallback = null;
+let wgpuReplayWakeGeneration = 0;
+function postWgpuReplayWake(callback) {
+  if (!wgpuReplayWakeChannel) {
+    wgpuReplayWakeChannel = new MessageChannel();
+    // a message posted before a cancel carries an older generation: dropped
+    wgpuReplayWakeChannel.port1.onmessage = (event) => {
+      if (event.data !== wgpuReplayWakeGeneration || !wgpuReplayWakeCallback) return;
+      const run = wgpuReplayWakeCallback;
+      wgpuReplayWakeCallback = null;
+      run();
+    };
+  }
+  wgpuReplayWakeCallback = callback;
+  wgpuReplayWakeChannel.port2.postMessage(wgpuReplayWakeGeneration);
+}
 let wgpuReplayBudgetMs = 0;
 let wgpuPowerPreference = "high-performance";
 let wgpuReplayFatal = null;
@@ -2170,6 +2194,7 @@ async function handleMessage(type, payload) {
         presentGamePace: payload.presentGamePace,
         presentPaceStats: payload.presentPaceStats,
         viLock: payload.viLock,
+        replayWake: payload.replayWake,
         coreLog: payload.coreLog,
         memcardSlotB: payload.memcardSlotB,
         internalResolution: payload.internalResolution,
@@ -2913,6 +2938,7 @@ async function loadCore({
   presentGamePace = false,
   presentPaceStats = false,
   viLock = false,
+  replayWake = false,
   coreLog = false,
   memcardSlotB = false,
   internalResolution = 1,
@@ -3440,6 +3466,7 @@ async function loadCore({
   // ?vilock=1: only on the vsync presenter (its rAF measures the refresh) and
   // at the normal speed (an unlimited or other speed is the user's)
   wgpuViLock = viLock === true && wgpuPresentVsync && Number(emulationSpeed) === 1 ? createViPhaseLock() : null;
+  wgpuReplayWake = replayWake === true;
   wgpuGamePacer.reset({ arrival: true });
   wgpuRefreshHistogram.reset();
   releaseWgpuReadback();
@@ -10512,14 +10539,23 @@ function scheduleWgpuReplayPump(callback, delayMs) {
   wgpuReplayPumpScheduledAt = trackWakeDelay ? performance.now() : 0;
   wgpuReplayPumpDueAt = trackWakeDelay ? wgpuReplayPumpScheduledAt + delay : 0;
   webGpuCausalStats.replayPumpScheduleCount += 1;
-  if (harnessPipeline) { harnessPumpWake = delay === 0 ? PIPELINE_WAKE.timer0 : PIPELINE_WAKE.timerIdle; harnessPumpSetAt = harnessNow(); }
+  const message = delay === 0 && wgpuReplayWake;
+  if (harnessPipeline) { harnessPumpWake = message ? PIPELINE_WAKE.message : delay === 0 ? PIPELINE_WAKE.timer0 : PIPELINE_WAKE.timerIdle; harnessPumpSetAt = harnessNow(); }
   if (delay === 0) webGpuCausalStats.replayPumpBacklogScheduleCount += 1;
   else webGpuCausalStats.replayPumpIdleScheduleCount += 1;
+  if (message) {
+    wgpuReplayPumpTimer = "message";
+    postWgpuReplayWake(callback);
+    return;
+  }
   wgpuReplayPumpTimer = setTimeout(callback, delay);
 }
 
 function cancelWgpuReplayPump() {
-  if (wgpuReplayPumpTimer !== null && wgpuReplayPumpTimer !== "parked") clearTimeout(wgpuReplayPumpTimer);
+  if (wgpuReplayPumpTimer === "message") {
+    wgpuReplayWakeGeneration += 1;
+    wgpuReplayWakeCallback = null;
+  } else if (wgpuReplayPumpTimer !== null && wgpuReplayPumpTimer !== "parked") clearTimeout(wgpuReplayPumpTimer);
   wgpuReplayParker?.cancel(webGpuCmdRing);
   wgpuReplayPumpTimer = null;
   wgpuReplayYieldPending = false;

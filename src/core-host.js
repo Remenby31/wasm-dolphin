@@ -554,6 +554,7 @@ export class EmulatorHost {
             presentGamePace: this.pacing.presentGamePace,
             presentPaceStats: this.pacing.presentPaceStats,
             viLock: this.pacing.viLock,
+            replayWake: this.pacing.replayWake,
             coreLog: this.coreLog,
             memcardSlotB: this.memcardSlotB,
             internalResolution: this.enhancements.internalResolution,
@@ -2001,7 +2002,11 @@ export function requestedPacing(search = window.location.search) {
     // on the screen's refresh (the speed nudged by at most 0.2 %), so the
     // 59.94/60 Hz drift no longer crosses a BeginFrame every ~16.7 s. Off by
     // default until measured.
-    viLock: params.get("vilock") === "1"
+    viLock: params.get("vilock") === "1",
+    // ?replaywake=1: the replay's backlog drains chained by a MessageChannel
+    // task instead of setTimeout(0) (clamped to 4 ms once nested). Off by
+    // default until measured (research/no-present-2p.md, lever 2).
+    replayWake: params.get("replaywake") === "1"
   };
 }
 
