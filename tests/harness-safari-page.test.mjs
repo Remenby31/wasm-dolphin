@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { isSessionSafari, onSignals, sessionPid, startDiscServer, stopPid, windowOnScreen } from "../harness/lib/safari-page.mjs";
+import { isSessionSafari, onSignals, sessionPid, startDiscServer, stopPid, screensTopLeft, visibleArea, maxVisiblePoints } from "../harness/lib/safari-page.mjs";
 import { otherCpuOf } from "../harness/probes/parcours.mjs";
 
 const ORIGIN = "http://127.0.0.1:8306";
@@ -132,14 +132,25 @@ test("the session's Safari is stopped by its exact pid only: SIGTERM, then SIGKI
   assert.doesNotMatch(src, /for \(const pid of pgrep|pkill|killall|tell application "Safari" to quit/, "never by name");
 });
 
-test("a window overlapping the desktop is visible; one beyond it or unread is not trusted", () => {
-  const desk = [0, 0, 3008, 1692];
-  assert.equal(windowOnScreen({ x: 20000, y: 20000, width: 1280, height: 800 }, desk), false);
-  assert.equal(windowOnScreen({ x: 2900, y: 100, width: 1280, height: 800 }, desk), true, "a corner on screen");
-  assert.equal(windowOnScreen({ x: -1500, y: 0, width: 1280, height: 800 }, [-1920, 0, 3008, 1692]), true, "a display on the left");
-  assert.equal(windowOnScreen({ x: 3008, y: 0, width: 1280, height: 800 }, desk), false, "just past the edge");
-  assert.equal(windowOnScreen(null, desk), true);
-  assert.equal(windowOnScreen({ x: 20000, y: 20000, width: 1, height: 1 }, null), true, "bounds unread: assumed visible");
+test("the window's visible area on the displays, from AppKit's frames (this Mac: a 6K display above the built-in one)", () => {
+  // NSScreen frames read on 2026-11-02: built-in 2056x1329, a 3360x1890 display above it
+  const screens = screensTopLeft([[0, 0, 2056, 1329], [-519, 1329, 3360, 1890]]);
+  assert.deepEqual(screens, [{ x: 0, y: 0, width: 2056, height: 1329 }, { x: -519, y: -1890, width: 3360, height: 1890 }]);
+  // where macOS put the window asked at 20000,20000: its 40x52 corner shows
+  assert.equal(visibleArea({ x: 2016, y: 1277, width: 1280, height: 800 }, screens), 40 * 52);
+  assert.equal(visibleArea({ x: 20000, y: 20000, width: 1280, height: 800 }, screens), 0);
+  assert.equal(visibleArea({ x: 0, y: -100, width: 100, height: 200 }, screens), 100 * 200, "across both displays");
+  assert.equal(visibleArea({ x: 2056, y: 0, width: 100, height: 100 }, screens), 0, "just past the built-in display's edge");
+  assert.equal(visibleArea(null, screens), null);
+  assert.equal(visibleArea({ x: 1, y: 1, width: 1, height: 1 }, null), null, "displays unread: visible");
+  assert.equal(screensTopLeft([]), null);
+  assert.equal(screensTopLeft([[0, 0, "x", 1]]), null);
+  // nothing allowed unless the run's owner says so, and never more than a corner
+  assert.equal(maxVisiblePoints({}), 0);
+  assert.equal(maxVisiblePoints({ SAFARI_MAX_VISIBLE_PT: "2080" }), 2080);
+  for (const bad of ["5000", "-1", "1.5", "x"]) assert.equal(maxVisiblePoints({ SAFARI_MAX_VISIBLE_PT: bad }), 0, bad);
+  const src = readFileSync(new URL("../harness/lib/safari-page.mjs", import.meta.url), "utf8");
+  assert.doesNotMatch(src, /application "Finder"/, "the Finder can hang: never asked");
 });
 
 test("otherCpu counts the session's Safari and WebKit helpers as ours", () => {

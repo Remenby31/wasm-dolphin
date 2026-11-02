@@ -132,14 +132,48 @@ export function onSignals(cleanupSync, { proc = process, exit = (code) => proces
   return uninstall;
 }
 
-// A window rect ({ x, y, width, height }) against the desktop's bounds
-// ([left, top, right, bottom], every display): any overlap is visible.
-export function windowOnScreen(rect, bounds) {
-  if (!rect || !bounds || bounds.length !== 4 || bounds.some((n) => !Number.isFinite(n))) return true; // unknown: assumed visible
-  const [l, t, r, b] = bounds;
-  return rect.x < r && rect.x + rect.width > l && rect.y < b && rect.y + rect.height > t;
+// The displays as WebDriver sees them: AppKit's NSScreen frames ([x, y,
+// width, height], points, origin at the main display's bottom left, y up)
+// turned to the window rect's coordinates (origin at the main display's top
+// left, y down). The main display comes first.
+export function screensTopLeft(frames) {
+  if (!Array.isArray(frames) || !frames.length || frames.some((f) => !Array.isArray(f) || f.length !== 4 || f.some((n) => !Number.isFinite(n)))) return null;
+  const mainHeight = frames[0][3];
+  return frames.map(([x, y, w, h]) => ({ x, y: mainHeight - (y + h), width: w, height: h }));
 }
-const desktopBounds = () => { try { return osa('tell application "Finder" to get bounds of window of desktop').split(",").map((s) => Number(s.trim())); } catch { return null; } };
+
+// The window's area on the displays, in points (0: on none). null when the
+// rect or the displays are unknown (then it counts as visible).
+export function visibleArea(rect, screens) {
+  if (!rect || !screens) return null;
+  let area = 0;
+  for (const s of screens) {
+    const w = Math.min(rect.x + rect.width, s.x + s.width) - Math.max(rect.x, s.x);
+    const h = Math.min(rect.y + rect.height, s.y + s.height) - Math.max(rect.y, s.y);
+    if (w > 0 && h > 0) area += w * h;
+  }
+  return area;
+}
+
+// The displays read through AppKit (osascript JavaScript; never the Finder,
+// which can hang for minutes).
+const screens = () => {
+  try {
+    return screensTopLeft(JSON.parse(execFileSync("osascript", ["-l", "JavaScript", "-e",
+      'ObjC.import("AppKit"); const s = $.NSScreen.screens; const out = []; for (let i = 0; i < s.count; i++) { const f = s.objectAtIndex(i).frame; out.push([f.origin.x, f.origin.y, f.size.width, f.size.height]); } JSON.stringify(out)'],
+    { encoding: "utf8", timeout: 20_000, killSignal: "SIGKILL" })));
+  } catch { return null; }
+};
+
+// What may stay on screen: macOS keeps a corner of any window on a display
+// (a window moved past every edge comes back with 40x52 points showing), so
+// a window cannot be put wholly off screen and stay rendered (minimized,
+// the page is hidden and throttled). SAFARI_MAX_VISIBLE_PT (points², default
+// 0: nothing) lets that corner through when the run's owner accepts it.
+export function maxVisiblePoints(env = process.env) {
+  const n = Number(env.SAFARI_MAX_VISIBLE_PT ?? 0);
+  return Number.isInteger(n) && n >= 0 && n <= 4096 ? n : 0;
+}
 
 // A page exception from an evaluate (not a transport error: those retry).
 class PageError extends Error {}
@@ -196,10 +230,13 @@ export async function launchSafariPage({ port = 8306, log = () => {} } = {}) {
   uninstallSignals = onSignals(stopAll);
   const assertInvisible = async (when) => {
     const rect = await cmd("GET", "/window/rect");
-    if (windowOnScreen(rect, desktopBounds())) {
+    const area = visibleArea(rect, screens());
+    const allowed = maxVisiblePoints();
+    if (area === null || area > allowed) {
       await close();
-      throw new Error(`safari: the window is on screen ${when} (${JSON.stringify(rect)}): run aborted`);
+      throw new Error(`safari: the window is on screen ${when} (${JSON.stringify(rect)}, ${area === null ? "displays unread" : `${area} pt² visible > ${allowed}`}): run aborted`);
     }
+    if (area > 0) log(`safari: ${area} pt² of the window on screen ${when} (macOS's corner, SAFARI_MAX_VISIBLE_PT ${allowed})`);
   };
   let created = null;
   try {
