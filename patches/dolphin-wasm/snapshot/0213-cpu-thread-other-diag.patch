@@ -136,7 +136,19 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    if (handle == -3 || handle == -4)
    {
      s_wasm_off_thread_used = true;  // a cache clear must reset what was posted
-@@ -10661,6 +10671,11 @@ bool TryRunRegion(PowerPC::PowerPCState& ppc_state)
+@@ -10610,6 +10620,11 @@ void ApplyRegionStatsRequest()
+   }
+   else if (s_region_stats_on && (++s_publish_counter & 63) == 0)
+   {
++    // Patch 0213 v3: the publication's cost (it walks s_miss_cycles).
++    const bool cpu_thread_diag = DolphinWeb::CpuThreadDiag::On();
++    const DolphinWeb::CpuThreadDiag::Scope diag_scope{
++        cpu_thread_diag, &DolphinWeb::CpuThreadDiag::g_stats.stats_publish_us,
++        &DolphinWeb::CpuThreadDiag::g_stats.stats_publish_calls};
+     PublishRegionStats();
+   }
+ }
+@@ -10661,6 +10676,11 @@ bool TryRunRegion(PowerPC::PowerPCState& ppc_state)
    InstalledRegion& region = s_regions[index];
    if (!region.verified)
    {
@@ -148,7 +160,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      // The RAM may have been allocated again (a stop and a new boot in the same
      // page): the code embeds the old address, whatever the guest code says.
      const bool moved = std::pair{region.ram_base, region.l1_base} != RegionHeapBases() ||
-@@ -10895,6 +10910,11 @@ extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_JitRegionChainStats()
+@@ -10895,6 +10915,11 @@ extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_JitRegionChainStats()
  // dropped then if it changed. From JitInterface.
  void DolphinWeb_InvalidateRegions(u32 address, u32 size, bool forced)
  {
@@ -160,7 +172,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    // MEM1 offsets: the 0x8 and 0xC views and DMA (physical) addresses meet.
    const u64 begin = address & 0x01ffffff;
    const u64 end = size >= 0x01800000 ? u64{0x01800000} : begin + size;
-@@ -10935,6 +10955,8 @@ void DolphinWeb_InvalidateRegions(u32 address, u32 size, bool forced)
+@@ -10935,6 +10960,8 @@ void DolphinWeb_InvalidateRegions(u32 address, u32 size, bool forced)
      if (!region.live || (!region.verified && !forced))
        continue;
      s_region_invalidation_scans += 1;
@@ -169,14 +181,14 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      for (std::size_t i = 0; i + 1 < region.ranges.size(); i += 2)
      {
        const u64 start = region.ranges[i] & 0x01ffffff;
-@@ -11206,6 +11228,116 @@ extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_JitRegionStats(int sample_every)
+@@ -11206,6 +11233,118 @@ extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_JitRegionStats(int sample_every)
      s_region_stats_request.store(sample_every, std::memory_order_release);
    return static_cast<u32>(reinterpret_cast<std::uintptr_t>(&s_region_stats));
  }
 +
 +namespace
 +{
-+// Patch 0213, CPU-thread diag (Core/WasmCpuThreadDiag.h, layout v2): one Run
++// Patch 0213, CPU-thread diag (Core/WasmCpuThreadDiag.h, layout v3): one Run
 +// iteration's clock points and the nested time at each (taken only with the
 +// diag on): 0 start, 1 before RetryDeferredWasmBlocks, 2 after it, 3 after
 +// ServiceRegionInstalls, 4 before Advance, 5 after it, 6 before the slice
@@ -253,6 +265,8 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +  const double advance = it.Span(4, 5);
 +  const double tail = it.Span(7, 8);
 +  s.setup_us += setup;
++  s.setup_policy_us += it.Span(0, 1);
++  s.setup_requests_us += it.Span(3, 4);
 +  s.retry_us += retry;
 +  s.region_service_us += service;
 +  s.advance_us += advance;
@@ -286,7 +300,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  #endif
  
  void CachedInterpreter::ExecuteOneBlock([[maybe_unused]] bool allow_redispatch)
-@@ -11507,6 +11639,16 @@ void CachedInterpreter::Run()
+@@ -11507,6 +11646,16 @@ void CachedInterpreter::Run()
    while (*state_ptr == CPU::State::Running)
    {
  #ifdef __EMSCRIPTEN__
@@ -303,7 +317,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      ApplyArmedWasmPolicy();
      ApplyRequestedWasmPolicy(*this);
      ServiceBlockDumpRequest(*this);
-@@ -11539,8 +11681,20 @@ void CachedInterpreter::Run()
+@@ -11539,8 +11688,20 @@ void CachedInterpreter::Run()
        s_wasm_compile_us_this_slice = 0;
      }
      // The compile budget has been replenished and no cached callback is active.
@@ -324,7 +338,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      ApplyRegionStatsRequest();
      if (ApplyMemStatsRequest())
      {
-@@ -11577,7 +11731,15 @@ void CachedInterpreter::Run()
+@@ -11577,7 +11738,15 @@ void CachedInterpreter::Run()
      // NOTE: Exceptions may change PC
      const auto _advance_start =
          _profile_slice ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
@@ -340,7 +354,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      const auto _advance_end =
          _profile_slice ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
  
-@@ -11595,6 +11757,8 @@ void CachedInterpreter::Run()
+@@ -11595,6 +11764,8 @@ void CachedInterpreter::Run()
      const auto slice_start =
          timing ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
      s_sampling_lookups = timing;
@@ -349,7 +363,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  #endif
      do
      {
-@@ -11635,6 +11799,8 @@ void CachedInterpreter::Run()
+@@ -11635,6 +11806,8 @@ void CachedInterpreter::Run()
        ExecuteOneBlock();
      } while (m_ppc_state.downcount > 0 && *state_ptr == CPU::State::Running);
  #ifdef __EMSCRIPTEN__
@@ -358,7 +372,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      s_sampling_lookups = false;
      if (s_mem_stats_on)
      {
-@@ -11705,6 +11871,13 @@ void CachedInterpreter::Run()
+@@ -11705,6 +11878,13 @@ void CachedInterpreter::Run()
                                                                  std::memory_order_relaxed)) {}
        }
      }
@@ -372,7 +386,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    }
  #if DOLPHIN_WEB_STATIC_EXIT_LINKS && DOLPHIN_WEB_STATIC_EXIT_LINK_STATS
    s_static_link_stats.Publish();
-@@ -16932,6 +17105,11 @@ bool CachedInterpreter::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
+@@ -16932,6 +17112,11 @@ bool CachedInterpreter::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
  #ifdef __EMSCRIPTEN__
    if (auto deferred = s_deferred_wasm_queues.find(this); deferred != s_deferred_wasm_queues.end())
      deferred->second.Recompiled(em_address, static_cast<u32>(m_ppc_state.feature_flags));
@@ -384,7 +398,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  #if DOLPHIN_WEB_STATIC_EXIT_LINKS
    if (TryWriteWasmBlock(nextPC))
      return !HasWriteFailed();
-@@ -16941,6 +17119,23 @@ bool CachedInterpreter::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
+@@ -16941,6 +17126,23 @@ bool CachedInterpreter::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
      return true;
  #endif
  #line 12372
@@ -408,7 +422,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  #endif
  
    if (IsProfilingEnabled())
-@@ -17038,6 +17233,16 @@ bool CachedInterpreter::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
+@@ -17038,6 +17240,16 @@ bool CachedInterpreter::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
      WARN_LOG_FMT(DYNA_REC, "JIT ran out of space in code region during code generation.");
      return false;
    }
@@ -429,7 +443,7 @@ diff --git a/Source/Core/Core/WasmCpuThreadDiag.h b/Source/Core/Core/WasmCpuThre
 new file mode 100644
 --- /dev/null
 +++ b/Source/Core/Core/WasmCpuThreadDiag.h
-@@ -0,0 +1,293 @@
+@@ -0,0 +1,297 @@
 +// Copyright 2026 wasm-dolphin contributors
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +//
@@ -521,12 +535,16 @@ new file mode 100644
 +constexpr u32 DEFERRED_OFF_THREAD = 1;
 +constexpr u32 DEFERRED_SAMPLE_EVERY = 8;
 +
-+// Layout v2 (1984 bytes, little-endian), agreed with the harness: a 16-byte
++// Layout v3 (1984 bytes, little-endian), agreed with the harness: a 16-byte
 +// header, 32 f64 fields, EVENT_SLOTS + 1 event entries of 48 bytes, then 16
-+// f64 fields (two DeferredRuns, clockPairUs, sampleEvery, two spares).
++// f64 fields (two DeferredRuns, clockPairUs, sampleEvery, the region stats'
++// publication time and count). v3 splits setup: setupPolicyUs and
++// setupRequestsUs are two of its three spans (the third, the region stats'
++// own set-up before the slice loop, is setup less both); statsPublishUs is
++// inside setupRequestsUs (a harness cost: only with the region stats on).
 +struct Stats
 +{
-+  u32 version = 2;
++  u32 version = 3;
 +  u32 size_bytes = 1984;
 +  u32 on = 0;
 +  u32 event_slots = EVENT_SLOTS;
@@ -560,14 +578,14 @@ new file mode 100644
 +  double invalidate_scans = 0; // regions those invalidations looked at
 +  double clear_region_state_us = 0;  // ClearOffThreadAndRegionState
 +  double clear_region_state_calls = 0;
-+  double spare0 = 0;
-+  double spare1 = 0;
++  double setup_policy_us = 0;    // setup from the iteration's start to RetryDeferredWasmBlocks (v3)
++  double setup_requests_us = 0;  // setup from ServiceRegionInstalls to Advance: stats requests, mode checks (v3)
 +  EventEntry events[EVENT_SLOTS + 1];
 +  DeferredRuns deferred[2];  // DEFERRED_THROTTLE, DEFERRED_OFF_THREAD
 +  double clock_pair_us = 0;  // two back-to-back clock reads, min of 32, at the reset
 +  double sample_every = DEFERRED_SAMPLE_EVERY;
-+  double spare2 = 0;
-+  double spare3 = 0;
++  double stats_publish_us = 0;   // PublishRegionStats from the slice set-up (region stats on, v3)
++  double stats_publish_calls = 0;
 +};
 +static_assert(sizeof(EventEntry) == 48);
 +static_assert(offsetof(Stats, window_us) == 16);

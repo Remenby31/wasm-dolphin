@@ -20,7 +20,7 @@ const SLOTS = 32;
 
 // Bytes as the core lays them out (v2): header, 32 f64, 33 event entries,
 // 16 f64 of deferred runs.
-function diagBytes({ version = 2, size = CPU_THREAD_DIAG_BYTES, on = 1, slots = SLOTS, fields = {}, events = [], others = null } = {}) {
+function diagBytes({ version = 3, size = CPU_THREAD_DIAG_BYTES, on = 1, slots = SLOTS, fields = {}, events = [], others = null } = {}) {
   const buf = new ArrayBuffer(CPU_THREAD_DIAG_BYTES);
   const view = new DataView(buf), u8 = new Uint8Array(buf);
   [version, size, on, slots].forEach((v, i) => view.setUint32(4 * i, v, true));
@@ -51,7 +51,9 @@ function fieldsAt(k, g = 0) {
     // 0213 v2: throttle-deferred blocks run 8000 times a second, 1000 timed
     // at 2.1 µs each (0.1 µs of clock reads); off-thread ones not at all
     throttleBlocks: 40 * k, throttleRuns: 8000 * k, throttleInstructions: 96000 * k, throttleCycles: 120000 * k,
-    throttleSampledRuns: 1000 * k, throttleSampledUs: 2100 * k, clockPairUs: 0.1, sampleEvery: 8
+    throttleSampledRuns: 1000 * k, throttleSampledUs: 2100 * k, clockPairUs: 0.1, sampleEvery: 8,
+    // v3: setup's spans (1000 + 2500 of setup's 4000 µs a second) and the region stats' publication
+    setupPolicyUs: 1000 * k, setupRequestsUs: 2500 * k, statsPublishUs: 2000 * k, statsPublishCalls: 300 * k
   };
 }
 const decoded = (k, g = 0) => decodeCpuThreadDiag(diagBytes({ fields: fieldsAt(k, g), events: EVENTS(k), others: [10 * k, k] }));
@@ -73,9 +75,9 @@ test("decoder: v2 fields, named event slots, the (others) bucket; bad versions, 
   assert.equal(s.throttleRuns, 16000);
   assert.equal(s.clockPairUs, 0.1);
   assert.equal(DEFERRED_FIELDS.length, 16);
-  assert.match(decodeCpuThreadDiag(diagBytes({ version: 1 })).error, /layout version 1/);
+  assert.match(decodeCpuThreadDiag(diagBytes({ version: 2 })).error, /layout version 2/);
   assert.match(decodeCpuThreadDiag(diagBytes({ size: 96 })).error, /struct of 96 bytes/);
-  assert.match(decodeCpuThreadDiag(diagBytes().slice(0, 100)).error, /v2 needs 1984/);
+  assert.match(decodeCpuThreadDiag(diagBytes().slice(0, 100)).error, /v3 needs 1984/);
   assert.match(decodeCpuThreadDiag(diagBytes({ slots: 64 })).error, /64 event slots/);
   assert.match(decodeCpuThreadDiag([]).error, /no header/);
   assert.equal(decodeCpuThreadDiag(diagBytes({ on: 0 })).on, false);
@@ -114,6 +116,8 @@ test("deferred runs: by reason, est. time = runs x (sampled mean - clock pair), 
   assert.deepEqual(d.throttle, { blocks: 80, runs: 16000, instructions: 192000, cycles: 240000, sampledRuns: 2000, usPerRun: 2, estMs: 32 });
   assert.deepEqual(d.offThread, { blocks: 0, runs: 0, instructions: 0, cycles: 0, sampledRuns: 0, usPerRun: null, estMs: 0 });
   assert.equal(d.estMs, 32);
+  const split = cpuThreadDiagDelta(decoded(1), decoded(3)).setupSplit;
+  assert.deepEqual(split, { policyMs: 2, requestsMs: 5, regionStatsSetupMs: 1, statsPublishMs: 4, statsPublishes: 600, usPerIteration: 0.2 });
   // runs with no timed sample: unknown, not zero
   const a = { ...decoded(1), offThreadRuns: 0 }, b = { ...decoded(1), offThreadRuns: 5 };
   const u = deferredRunsDelta(a, b);
@@ -193,8 +197,16 @@ test("probe contract: the diag turned on with the others (also before the load),
   const enable = src.slice(src.indexOf("async function enableStats"), src.indexOf("const timeRegions"));
   assert.match(enable, /cpuThread: status\(await req\("validationReadCpuThreadDiag", \{ reset: 0 \}\)\)/);
   // --counters-before-load and the default both go through enableStats
-  assert.equal(src.match(/enabled = await enableStats\(page\)/g).length, 2);
+  assert.equal(src.match(/enabled = await enableStats\(page, \{ light: o\.light \}\)/g).length, 2);
+  // --light: headroom and the diag only; no region, memory or AX read, no region timing
+  const light = enable.slice(enable.indexOf("if (light) {"), enable.indexOf("  return {\n    mem: status"));
+  assert.match(light, /validationReadHeadroomStats/);
+  assert.match(light, /validationReadCpuThreadDiag/);
+  assert.doesNotMatch(light, /validationReadJitRegionStats|validationReadMemAccessStats|validationReadAxHleStats/);
+  assert.match(src, /const timed = o\.light \? null : await timeRegions\(page, o\);/);
+  assert.equal(src.match(/await snapshot\(page, \{ light: o\.light \}\)/g).length, 4);
   const snapFn = src.slice(src.indexOf("export async function snapshot"), src.indexOf("// Every counter on and reset"));
+  assert.match(snapFn, /const region = light \? off : decoded\(await req\("validationReadJitRegionStats"/);
   assert.match(snapFn, /"validationReadCpuThreadDiag", \{ reset: -1 \}\), decodeCpuThreadDiag, consistentCpuThreadDiagRead/);
   assert.match(snapFn, /return \{ t: [^}]*diag, progress, screen \}/);
   assert.match(src, /log\(cpuThreadLine\(c, run\.rows\)\)/);
@@ -302,7 +314,7 @@ test("0213 contract: the export (EMSCRIPTEN_KEEPALIVE, as the 0113/0075 stats), 
   // the other stats exports of the series are KEEPALIVE the same way (no
   // EXPORTED_FUNCTIONS entry: the series exports them with the attribute)
   assert.match(read("../patches/dolphin-wasm/snapshot/0113-headroom-counters.patch"), /EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_HeadroomStats\(int reset\)/);
-  assert.match(patch, /\+  u32 version = 2;\n\+  u32 size_bytes = 1984;/);
+  assert.match(patch, /\+  u32 version = 3;\n\+  u32 size_bytes = 1984;/);
   assert.match(patch, /\+constexpr u32 EVENT_SLOTS = 32;/);
   assert.match(patch, /\+static_assert\(sizeof\(Stats\) == 16 \+ 32 \* 8 \+ \(EVENT_SLOTS \+ 1\) \* 48 \+ 16 \* 8\);/);
   // the f64 fields in the decoder's order

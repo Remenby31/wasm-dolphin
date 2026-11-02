@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "c6d1a5af5070ecce243b2118b087d6ccfcad17510071f09fcaa18db64666761a",
+  "patchSeriesSha256": "3b35324506d05cc07432b19163a9fcd1e19fa42c3385fa9575b5867f186ac0cd",
   "patches": [
     {
       "order": 1,
@@ -1176,8 +1176,8 @@
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0213-cpu-thread-other-diag.patch",
-      "size": 31221,
-      "sha256": "c112844f167d246ddf89ee94594fa74601fe86d433f7683ce1efff4294101139"
+      "size": 32377,
+      "sha256": "fd0d5d771ca4fbc82c23bf60d72be963f23bc7b7323cdfa897c8ae68d6b8dd1b"
     },
     {
       "order": 145,

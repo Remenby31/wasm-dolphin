@@ -5,14 +5,19 @@
 // host time goes outside the timed slice parts (cpu-window's "other").
 // Cumulative since the last reset; the CPU thread alone writes it.
 //
-// Layout v2 (1984 bytes, little-endian): u32 version, sizeBytes, on (1 once
+// Layout v3 (1984 bytes, little-endian): u32 version, sizeBytes, on (1 once
 // a reset was applied), eventSlots (32); 32 f64 fields (FIELDS, host µs or
 // counts); then eventSlots + 1 entries of 48 bytes: char name[32]
 // (NUL-terminated), f64 us, f64 calls. Event types take a slot at their
 // first registration; past 32 they share the last entry, "(others)". Then
 // 16 f64 (DEFERRED_FIELDS): the deferred blocks' runs by reason, throttle
 // then offThread (blocks, runs, instructions, cycles, sampledRuns,
-// sampledUs), clockPairUs, sampleEvery and two spares.
+// sampledUs), clockPairUs, sampleEvery, statsPublishUs and
+// statsPublishCalls. v3 splits setupUs: setupPolicyUs (to
+// RetryDeferredWasmBlocks), setupRequestsUs (from ServiceRegionInstalls to
+// Advance: the stats requests, mode checks; statsPublishUs, the region
+// stats' publication every 64 slices, is inside it), the rest being the
+// region stats' own set-up before the slice loop.
 //
 // Deferred blocks: blocks the core wrote as interpreter callbacks for lack
 // of their WebAssembly module, "throttle" (the slice's compile budget was
@@ -35,7 +40,7 @@
 // events), never added.
 import { round } from "./stats.mjs";
 
-export const CPU_THREAD_DIAG_VERSION = 2;
+export const CPU_THREAD_DIAG_VERSION = 3;
 export const CPU_THREAD_DIAG_BYTES = 1984;
 export const FIELDS = [
   "windowUs", "iterations", "controlUs", "sliceLoopUs", "nestedUs",
@@ -45,13 +50,13 @@ export const FIELDS = [
   "deferredNow", "deferredMax", "deferredSum",
   "regionWaitingNow", "regionWaitingMax", "regionWaitingSum",
   "reverifyUs", "reverifyCalls", "invalidateUs", "invalidateCalls", "invalidateScans",
-  "clearRegionStateUs", "clearRegionStateCalls", "spare0", "spare1"
+  "clearRegionStateUs", "clearRegionStateCalls", "setupPolicyUs", "setupRequestsUs"
 ];
 export const DEFERRED_REASONS = ["throttle", "offThread"];
 const DEFERRED_RUN_FIELDS = ["blocks", "runs", "instructions", "cycles", "sampledRuns", "sampledUs"];
 export const DEFERRED_FIELDS = [
   ...DEFERRED_REASONS.flatMap((r) => DEFERRED_RUN_FIELDS.map((f) => `${r}${f[0].toUpperCase()}${f.slice(1)}`)),
-  "clockPairUs", "sampleEvery", "spare2", "spare3"
+  "clockPairUs", "sampleEvery", "statsPublishUs", "statsPublishCalls"
 ];
 // The parts that add up to controlUs.
 export const PARTS = ["setupUs", "retryUs", "regionServiceUs", "advanceUs", "tailUs"];
@@ -60,7 +65,7 @@ const EVENTS_AT = 16 + FIELDS.length * 8, EVENT_BYTES = 48, NAME_BYTES = 32;
 // going back). Times net of nested time could dip by a rounding: compared
 // with a tolerance.
 const COUNTS = ["windowUs", "iterations", "eventCalls", "throttleCalls", "offThreadWaitingSum", "deferredSum", "regionWaitingSum", "reverifyCalls", "invalidateCalls", "invalidateScans", "clearRegionStateCalls", "nestedUs", "sliceLoopUs",
-  ...DEFERRED_REASONS.flatMap((r) => ["Blocks", "Runs", "Instructions", "Cycles", "SampledRuns"].map((f) => `${r}${f}`))];
+  ...DEFERRED_REASONS.flatMap((r) => ["Blocks", "Runs", "Instructions", "Cycles", "SampledRuns"].map((f) => `${r}${f}`)), "statsPublishCalls"];
 const DEFERRED_AT = EVENTS_AT + 33 * EVENT_BYTES;
 const TIMES = ["controlUs", ...PARTS, "eventsUs", "throttleUs", "reverifyUs", "invalidateUs", "clearRegionStateUs"];
 
@@ -70,9 +75,9 @@ export function decodeCpuThreadDiag(bytes) {
   const view = new DataView(buf.buffer);
   const version = view.getUint32(0, true), size = view.getUint32(4, true);
   if (version !== CPU_THREAD_DIAG_VERSION) return { error: `CPU-thread diag: layout version ${version}, this harness reads ${CPU_THREAD_DIAG_VERSION}` };
-  if (size < CPU_THREAD_DIAG_BYTES || bytes.length < CPU_THREAD_DIAG_BYTES) return { error: `CPU-thread diag: struct of ${size} bytes (${bytes.length} copied), v2 needs ${CPU_THREAD_DIAG_BYTES}` };
+  if (size < CPU_THREAD_DIAG_BYTES || bytes.length < CPU_THREAD_DIAG_BYTES) return { error: `CPU-thread diag: struct of ${size} bytes (${bytes.length} copied), v3 needs ${CPU_THREAD_DIAG_BYTES}` };
   const slots = view.getUint32(12, true);
-  if (slots !== 32) return { error: `CPU-thread diag: ${slots} event slots, v2 has 32` };
+  if (slots !== 32) return { error: `CPU-thread diag: ${slots} event slots, v3 has 32` };
   const out = { on: view.getUint32(8, true) === 1, eventSlots: slots };
   FIELDS.forEach((name, i) => { out[name] = view.getFloat64(16 + i * 8, true); });
   DEFERRED_FIELDS.forEach((name, i) => { out[name] = view.getFloat64(DEFERRED_AT + i * 8, true); });
@@ -130,7 +135,15 @@ export function cpuThreadDiagDelta(a, b, { otherMs = null, topEvents = 3 } = {})
     // the parts add up to control by construction: a gap is a core bug
     partsGapMs: round(controlMs - partsMs, 3),
     sliceLoopMs: ms("sliceLoopUs"), nestedMs: ms("nestedUs"),
-    setupMs: ms("setupUs"), retryMs: ms("retryUs"), regionServiceMs: ms("regionServiceUs"),
+    setupMs: ms("setupUs"),
+    // setup's three spans (v3); statsPublishMs is inside setupRequestsMs
+    setupSplit: {
+      policyMs: ms("setupPolicyUs"), requestsMs: ms("setupRequestsUs"),
+      regionStatsSetupMs: round((d("setupUs") - d("setupPolicyUs") - d("setupRequestsUs")) / 1000, 3),
+      statsPublishMs: ms("statsPublishUs"), statsPublishes: d("statsPublishCalls"),
+      usPerIteration: iterations > 0 ? round(d("setupUs") / iterations, 3) : null
+    },
+    retryMs: ms("retryUs"), regionServiceMs: ms("regionServiceUs"),
     advanceMs: ms("advanceUs"), tailMs: ms("tailUs"),
     eventsMs: ms("eventsUs"), eventCalls: d("eventCalls"),
     throttleMs: ms("throttleUs"), throttleCalls: d("throttleCalls"),

@@ -88,13 +88,16 @@ function decoded(reply, decode, consistent) {
 
 // The counters' structs and the core ticks, read only (no reset). `t`:
 // the node time halfway through the reads.
-export async function snapshot(page) {
+// light: the product's counters only (headroom, the 0213 diag): the region,
+// memory and AX stats are never read (a read can turn them on).
+export async function snapshot(page, { light = false } = {}) {
   const t0 = performance.now();
   const req = (type, payload) => workerRequest(page, type, payload, 10000).catch((e) => ({ error: String(e?.message || e) }));
+  const off = { error: LIGHT_OFF };
   const headroom = decoded(await req("validationReadHeadroomStats", { reset: -1 }), decodeHeadroomStats, consistentHeadroomRead);
-  const region = decoded(await req("validationReadJitRegionStats", {}), decodeRegionStats, consistentRead);
-  const ax = decoded(await req("validationReadAxHleStats", { reset: -1 }), decodeAxStats, consistentAxRead);
-  const mem = decoded(await req("validationReadMemAccessStats", {}), decodeMemStats, consistentMemRead);
+  const region = light ? off : decoded(await req("validationReadJitRegionStats", {}), decodeRegionStats, consistentRead);
+  const ax = light ? off : decoded(await req("validationReadAxHleStats", { reset: -1 }), decodeAxStats, consistentAxRead);
+  const mem = light ? off : decoded(await req("validationReadMemAccessStats", {}), decodeMemStats, consistentMemRead);
   const diag = decoded(await req("validationReadCpuThreadDiag", { reset: -1 }), decodeCpuThreadDiag, consistentCpuThreadDiagRead);
   const p = await readCoreProgress(page).catch(() => null);
   const progress = p && !p.error ? { coreTicks: Number(p.coreTicks), coreTicksPerSecond: Number(p.coreTicksPerSecond), frame: p.frame ?? null } : { error: p?.error ?? "no core progress" };
@@ -111,9 +114,19 @@ export async function snapshot(page) {
 
 // Every counter on and reset (n >= 0), once: what each reset answered. The
 // region stats untimed here (sampleEvery 0); timeRegions() times them.
-async function enableStats(page) {
+export const LIGHT_OFF = "--light: not read (the product's counters only)";
+async function enableStats(page, { light = false } = {}) {
   const req = (type, payload) => workerRequest(page, type, payload, 10000).catch((e) => ({ error: String(e?.message || e) }));
   const status = (r) => (r?.error ? unknown(r.error) : "on");
+  // --light: headroom and the 0213 diag only, what a product run has (the
+  // region stats publish a sorted copy of their miss map every 64 slices)
+  if (light) {
+    return {
+      mem: "off (--light)", ax: "off (--light)", region: "off (--light)",
+      headroom: status(await req("validationReadHeadroomStats", { reset: 0 })),
+      cpuThread: status(await req("validationReadCpuThreadDiag", { reset: 0 }))
+    };
+  }
   return {
     mem: status(await req("validationReadMemAccessStats", { reset: 0 })),
     ax: status(await req("validationReadAxHleStats", { reset: 0 })),
@@ -187,7 +200,7 @@ async function measure(o, server) {
     // --warmup 0 --untimed-secs 0 (summary: rowsStartAfterLoadSec).
     let enabled = null;
     if (o.countersBeforeLoad) {
-      enabled = await enableStats(page);
+      enabled = await enableStats(page, { light: o.light });
       await page.waitForTimeout(Math.max(o.memWarm, 1) * 1000);
     }
     let loadedAt = null;
@@ -201,7 +214,7 @@ async function measure(o, server) {
     if (o.hold) await page.keyboard.down(o.hold);
     await page.waitForTimeout(o.warmup * 1000);
     if (!enabled) {
-      enabled = await enableStats(page);
+      enabled = await enableStats(page, { light: o.light });
       // The memory stats' first reset clears the JIT cache (the block
       // recompiles stay out of the rows); every reset applies at the next
       // slice, Throttle or mail.
@@ -211,15 +224,15 @@ async function measure(o, server) {
     // The untimed window (region counters only): the timing's price.
     let untimed = null;
     if (o.untimedSecs > 0) {
-      const u0 = await snapshot(page);
+      const u0 = await snapshot(page, { light: o.light });
       await page.waitForTimeout(o.untimedSecs * 1000);
-      untimed = cpuWindowBreakdown(u0, await snapshot(page));
+      untimed = cpuWindowBreakdown(u0, await snapshot(page, { light: o.light }));
     }
-    const timed = await timeRegions(page, o);
+    const timed = o.light ? null : await timeRegions(page, o);
     if (timed?.error) enabled.regionTimed = unknown(timed.error);
     await page.waitForTimeout(1000); // the region reset applies at the next slice
     await readTimeline(page); // drop the VIs before the first snapshot
-    const snaps = [await snapshot(page)];
+    const snaps = [await snapshot(page, { light: o.light })];
     const rows = [], loads = [];
     const start = performance.now();
     // played alongside the rows; an error is kept and thrown after them
@@ -229,7 +242,7 @@ async function measure(o, server) {
       // a fixed schedule: a slow read does not shift the next one
       const wait = start + i * o.step * 1000 - performance.now();
       if (wait > 0) await new Promise((r) => setTimeout(r, wait));
-      const snap = await snapshot(page);
+      const snap = await snapshot(page, { light: o.light });
       const chunk = await readTimeline(page).catch((e) => ({ error: String(e?.message || e) }));
       const timeline = mergeTimeline([chunk]);
       loads.push(os.loadavg()[0]);
@@ -263,7 +276,7 @@ async function main() {
       port: { type: "string", default: process.env.HARNESS_PORT }, out: { type: "string" },
       // set by spark-run for every probe: one tree, one window here
       runs: { type: "string" }, baseline: { type: "string" }, "baseline-query": { type: "string" },
-      "counters-before-load": { type: "boolean", default: false }
+      "counters-before-load": { type: "boolean", default: false }, light: { type: "boolean", default: false }
     },
     allowPositionals: false
   });
@@ -287,7 +300,7 @@ async function main() {
     iso, state, steps, during, root,
     query: `${values.query ?? (values.config === "product" ? PRODUCT_QUERY : PRESETS[values.config] ?? values.config)}&metrics=1`,
     warmup: num(values, "warmup", { min: 0 }), secs: num(values, "secs", { min: 1 }), step: num(values, "step", { min: 0.25 }),
-    hold: values.hold || null, vi: parseViRange(values.vi), countersBeforeLoad: Boolean(values["counters-before-load"]),
+    hold: values.hold || null, vi: parseViRange(values.vi), countersBeforeLoad: Boolean(values["counters-before-load"]), light: Boolean(values.light),
     dipSpeed: num(values, "dip-speed", { min: 0 }), dipBusy: num(values, "dip-busy", { min: 0 }),
     regionSample: num(values, "region-sample", { min: 0, int: true }), memWarm: num(values, "mem-warm", { min: 0 }), untimedSecs: num(values, "untimed-secs", { min: 0 }),
     maxLoad: values["max-load"] ? num(values, "max-load", { min: 0.1 }) : defaultMaxLoad(),
@@ -336,6 +349,8 @@ async function main() {
       // reset before the state load; the load clears the cache itself
       // (0171), so post-load block recompiles are real, not an artefact
       countersBeforeLoad: o.countersBeforeLoad,
+      // --light: the product's counters only (no region, memory or AX stats)
+      light: o.light,
       countersNote: o.countersBeforeLoad
         ? "counters reset before the state load: no second JIT cache clear after it; the load's own clear (0171) and its recompiles are measured"
         : "counters reset after the warmup: the memory stats' first reset clears the JIT cache (block recompiles after it are an artefact of the probe)",
