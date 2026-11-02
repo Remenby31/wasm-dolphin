@@ -3696,7 +3696,6 @@ async function loadCore({
       `(${wgpuScissoredClearRect ? "on" : "off"})`
     );
   }
-  startFrameRingDrainLoop();
   configurePresentationQueue(presentationQueueSize);
   if (presentationPacing === "tick") presentationPacingMode = "tick";
   else if (presentationPacing === "direct") presentationPacingMode = "direct";
@@ -4137,22 +4136,6 @@ function bindApi(module) {
     getCachedInterpreterDisableMask:
       typeof module._GetCachedInterpreterDisableMask === "function"
         ? () => ccall("GetCachedInterpreterDisableMask", "number", [], []) >>> 0
-        : null,
-    getFrameRingEntryPtr:
-      typeof module._GetFrameRingEntryPtr === "function"
-        ? () => ccall("GetFrameRingEntryPtr", "number", [], []) >>> 0
-        : null,
-    getFrameRingCapacity:
-      typeof module._GetFrameRingCapacity === "function"
-        ? () => ccall("GetFrameRingCapacity", "number", [], []) | 0
-        : null,
-    getFrameRingEntrySize:
-      typeof module._GetFrameRingEntrySize === "function"
-        ? () => ccall("GetFrameRingEntrySize", "number", [], []) | 0
-        : null,
-    getFrameRingHead:
-      typeof module._GetFrameRingHead === "function"
-        ? () => ccall("GetFrameRingHead", "number", [], []) >>> 0
         : null,
     bootDisc:
       typeof module._BootDisc === "function"
@@ -18395,68 +18378,6 @@ function handleDetachedOglFrame(event) {
     }
     try { data.bitmap.close(); } catch {}
   }
-}
-
-// Day-1 instrumentation: drain the C++ per-frame ring buffer ~1Hz and print
-// new entries to console. The C side pushes one entry per OGL swap; entries
-// are 32 bytes / 8 × u32 (see DolphinWebFrameRingEntry in
-// core/upstream/dolphin_web_discio.cpp). Layout:
-//   u32 frame, prim, draw, verts, xfb_hash, glerr; i32 commit_result; u32 debug_bits
-//
-// `head` is monotonic so we can detect overflow (newEntries > capacity).
-let frameRingDrainTimer = null;
-let frameRingLastDrainHead = 0;
-function startFrameRingDrainLoop() {
-  if (frameRingDrainTimer || !api?.getFrameRingHead || !api?.getFrameRingEntryPtr) {
-    return;
-  }
-  const capacity = api.getFrameRingCapacity?.() | 0;
-  const entrySize = api.getFrameRingEntrySize?.() | 0;
-  if (capacity <= 0 || entrySize !== 32) {
-    postStatus(`frame-ring drain disabled: capacity=${capacity} entrySize=${entrySize}`);
-    return;
-  }
-  const ptr = api.getFrameRingEntryPtr();
-  if (!ptr || !moduleInstance?.HEAPU32) {
-    postStatus("frame-ring drain disabled: no HEAPU32 or null ptr");
-    return;
-  }
-  frameRingLastDrainHead = api.getFrameRingHead?.() >>> 0;
-  postStatus(
-    `frame-ring drain online: capacity=${capacity} ptr=0x${ptr.toString(16)} startHead=${frameRingLastDrainHead}`
-  );
-  frameRingDrainTimer = setInterval(() => {
-    const heap = moduleInstance.HEAPU32;
-    if (!heap || !api?.getFrameRingHead) return;
-    const head = api.getFrameRingHead() >>> 0;
-    if (head === frameRingLastDrainHead) return;
-    const total = (head - frameRingLastDrainHead) >>> 0;
-    const overflowed = total > capacity;
-    const startIndex = overflowed ? head - capacity : frameRingLastDrainHead;
-    const baseIndex = (ptr >>> 2);
-    const u32sPerEntry = 8;
-    if (overflowed) {
-      postStatus(`frame-ring overflow: ${total} entries dropped (capacity=${capacity})`);
-    }
-    for (let n = startIndex; (n >>> 0) !== head; n = (n + 1) >>> 0) {
-      const slot = (n >>> 0) % capacity;
-      const off = baseIndex + slot * u32sPerEntry;
-      const frame = heap[off + 0] >>> 0;
-      const prim = heap[off + 1] >>> 0;
-      const draw = heap[off + 2] >>> 0;
-      const verts = heap[off + 3] >>> 0;
-      const xfbHash = heap[off + 4] >>> 0;
-      const glerr = heap[off + 5] >>> 0;
-      const commit = heap[off + 6] | 0; // signed
-      const debugBits = heap[off + 7] >>> 0;
-      console.log(
-        `[frame-ring] f=${frame} prim=${prim} draw=${draw} verts=${verts} ` +
-          `xfb=0x${xfbHash.toString(16)} glerr=${glerr} commit=${commit} ` +
-          `dbg=0x${debugBits.toString(16)}`
-      );
-    }
-    frameRingLastDrainHead = head;
-  }, 1000);
 }
 
 function formatHex(value) {
