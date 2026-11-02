@@ -6,9 +6,9 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 
-import { analyzeRun, classifySecond, completionOf, currentPhase, deriveSeconds, GAME_DRAWS_PER_FRAME, LOAD_DISC_BPS, markerIndexes, MIN_PHASE_SEC, parcoursVerdict, phaseLabels, phaseMetrics, phaseNoise, renderTimeline, sectionsOf, segmentsOf, summarizeSeconds, windowCadence } from "../harness/lib/parcours.mjs";
+import { analyzeRun, classifySecond, contentSecond, gapDetail, completionOf, currentPhase, deriveSeconds, GAME_DRAWS_PER_FRAME, LOAD_DISC_BPS, markerIndexes, MIN_PHASE_SEC, parcoursVerdict, phaseLabels, phaseMetrics, phaseNoise, renderTimeline, sectionsOf, segmentsOf, summarizeSeconds, windowCadence } from "../harness/lib/parcours.mjs";
 import { filmMarkers, filmWithMarks, keyToPad, padStateOf, recordPorts, runRecordSteps, validateFilm, validateRecordSteps } from "../harness/lib/pad-film.mjs";
-import { analyzeRaw, countersOf, exitCodeOf, humanSummary, markerStep } from "../harness/probes/parcours.mjs";
+import { analyzeRaw, countersOf, otherCpuOf, presentGaps, samplerTicksOf, viTimesOf, exitCodeOf, humanSummary, markerStep } from "../harness/probes/parcours.mjs";
 import { decodePng, encodePng } from "../harness/lib/png.mjs";
 
 const TPS = 486e6;
@@ -434,4 +434,160 @@ test("film player: the picture's steering replaces the sine under the autopilot,
   const out = p.onPoll(3, { released: 0, stuck: 1, steer: { 0: 60 } });
   assert.equal(out.writes[0][1].mask, 2, "B: backing off");
   assert.notEqual(p.onPoll(4, { released: 0, stuck: 1, steer: { 0: null } }).writes.length ? 1 : 0, 2);
+});
+
+// Review of #413 (#411's rule): an absent datum stays unknown, never 0.
+test("a present gap's VIs in [a, b) and the worker's stall: null when unknown, 0 only for an on-time tick inside it", () => {
+  // VIs in [a, b): the one at a counts, the one at b does not
+  assert.equal(gapDetail(1000, 1100, [1000, 1050, 1100], []).vis, 2);
+  // a 60 ms late tick ending inside: 60; a stall across the gap's end: its part inside
+  assert.equal(gapDetail(1000, 1100, [], [[1080, 60], [1300, 40]]).workerLagMs, 60);
+  assert.equal(gapDetail(1000, 1100, [], [[1150, 100]]).workerLagMs, 50);
+  // an on-time tick due inside: 0
+  assert.equal(gapDetail(1000, 1100, [], [[1050, 0]]).workerLagMs, 0);
+  // no tick due inside nor stalled across it (the 100 ms blind spot): unknown
+  assert.equal(gapDetail(1000, 1040, [], [[990, 0], [1090, 0]]).workerLagMs, null);
+  // the sampler not read, the ring lost entries: unknown
+  assert.equal(gapDetail(1000, 1100, null, null).workerLagMs, null);
+  assert.equal(gapDetail(1000, 1100, null, null).vis, null);
+});
+
+test("per present, the gap before it (the adapter's gapVis, gapWorkerLagMs): unknown when either second's data is", () => {
+  const prev = { presents: [900, 983], viT: [950], samplerTicks: [[960, 0]] };
+  const r = presentGaps(prev, { presents: [1000, 1100], viT: [990, 1016, 1050], samplerTicks: [[1060, 0], [1090, 50]] });
+  assert.deepEqual(r.vis, [1, 2]);
+  assert.deepEqual(r.workerLagMs, [null, 50], "983-1000: no tick due in it");
+  assert.deepEqual(presentGaps(undefined, { presents: [5, 21], viT: [10], samplerTicks: [[12, 0]] }), { vis: [null, 1], workerLagMs: [null, 0] });
+  // this second's ring lost entries, or its drain failed
+  assert.deepEqual(presentGaps(prev, { presents: [1000], viT: null, samplerTicks: [[990, 0]] }).vis, [null]);
+  assert.deepEqual(presentGaps(prev, { presents: [1000], viT: [990], samplerTicks: null }).workerLagMs, [null]);
+  // the previous second's data unknown: the gap spanning both is too
+  assert.deepEqual(presentGaps({ ...prev, viT: null }, { presents: [1000], viT: [990], samplerTicks: [[990, 0]] }).vis, [null]);
+  // the probe's readers
+  assert.deepEqual(samplerTicksOf({ columns: ["t", "lagMs", "ticks"], rows: [[1, 5, 0], [2, 30, 0]] }), [[1, 5], [2, 30]], "every tick, on time ones too");
+  assert.equal(samplerTicksOf({ error: "timeout" }), null);
+  assert.equal(samplerTicksOf(null), null);
+  assert.equal(viTimesOf({ presents: { t: [], lost: 0 }, vi: { t: [1, 2], lost: 0 } }).length, 2);
+  assert.equal(viTimesOf({ presents: { t: [], lost: 3 }, vi: { t: [1, 2], lost: 0 } }), null, "presents lost");
+  assert.equal(viTimesOf({ presents: { t: [] }, vi: { t: [1], lost: 1 } }), null, "VIs lost");
+  assert.equal(viTimesOf({ error: "x" }), null);
+  // the row's workerLagMs: unknown without ticks
+  const s = samplesOf([["menu", 2]]);
+  s[1].samplerTicks = [[1, 0], [2, 40]];
+  s[2].samplerTicks = null;
+  const rows = deriveSeconds(s, { tps: TPS });
+  assert.equal(rows[0].workerLagMs, 40);
+  assert.equal(rows[1].workerLagMs, null);
+  assert.equal("gaps" in rows[0], false, "no invented per-row gaps");
+  const probe = readFileSync(new URL("../harness/probes/parcours.mjs", import.meta.url), "utf8");
+  assert.ok(probe.indexOf("const tl = await readTimeline(page)") < probe.indexOf('"validationDropSampler", { action: "drain" }'), "the timeline read before the sampler is drained");
+  assert.match(probe, /raw\.samplerMissing = /);
+});
+
+test("the other processes' CPU: this run's process tree left out (helpers without the profile directory included), the top three", () => {
+  const ps = [
+    "  10     1  50.0 /usr/libexec/fseventsd",
+    "  12     1  30.0 node probe",
+    "  20    12  40.0 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --user-data-dir=/tmp/gc-harness-parcours-abc",
+    "  21    20  80.0 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Helper (GPU) --type=gpu-process",
+    "  22    20  60.0 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Helper (Renderer) --type=renderer",
+    "  23    22   5.0 /some/grandchild",
+    "  30     1  70.0 /Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Helper (GPU) --type=gpu-process",
+    "  40     1  12.0 /opt/other/cfd-solver --mesh x",
+    "  41     1   2.0 /bin/zsh"
+  ].join("\n");
+  const [t, pct, top] = otherCpuOf(ps, { profileDir: "/tmp/gc-harness-parcours-abc", selfPid: 12, now: 5 });
+  assert.equal(t, 5);
+  assert.equal(pct, 50 + 70 + 12 + 2, "the run's node, browser, helpers and their children left out; another Chrome's GPU counted");
+  assert.deepEqual(top, [["Google Chrome Helper (GPU)", 70], ["fseventsd", 50], ["cfd-solver", 12]]);
+});
+
+// #415 used `sec` above its declaration: every run failed with a TDZ
+// ReferenceError ("Cannot access 'sec' before initialization").
+test("probe: the sampling loop declares each name before its first use", () => {
+  const src = readFileSync(new URL("../harness/probes/parcours.mjs", import.meta.url), "utf8");
+  const loop = src.slice(src.indexOf("while (!ended) {"), src.indexOf("raw.ended = ended;"));
+  for (const name of ["sec", "phase", "status", "drained", "tl"]) {
+    const decl = new RegExp(`(?:const|let) (?:\\{[^}]*\\b)?${name}\\b`).exec(loop);
+    assert.ok(decl, `${name} declared in the loop`);
+    const use = new RegExp(`(?<![\\w.])${name}(?![\\w:])`).exec(loop.slice(0, decl.index));
+    assert.equal(use, null, `${name} used before its declaration`);
+  }
+});
+
+// Content, not a loss (parcours A/A of 2026-11-01: 31 % of the menus' deficit):
+// the game made fewer frames than the cadence at full speed with margin.
+test("smoothness: a content second (made that few at full speed, with margin) is judged against what was made", () => {
+  const s = samplesOf([["menu", 3]]);
+  for (const x of s.slice(1)) { x.info.newShown = (x.info.newShown / 60) * 45; x.info.producedFps = 45; }
+  const rows = deriveSeconds(s, { tps: TPS });
+  assert.deepEqual(rows.map((r) => r.smoothness), [100, 100, 100]);
+  assert.deepEqual(rows.map((r) => r.content), [true, true, true]);
+  assert.equal(rows[0].sceneCadence, 60);
+  // a frame made and not shown is still a loss
+  const lost = samplesOf([["menu", 2]]);
+  for (const x of lost.slice(1)) { x.info.newShown = (x.info.newShown / 60) * 40; x.info.producedFps = 45; }
+  assert.deepEqual(deriveSeconds(lost, { tps: TPS }).map((r) => r.smoothness), [88.9, 88.9]);
+  // no margin (a saturated thread can be why it made few) or slow: against the cadence
+  const busy = samplesOf([["menu", 2]], { busy: 0.9 });
+  for (const x of busy.slice(1)) { x.info.newShown = (x.info.newShown / 60) * 45; x.info.producedFps = 45; }
+  assert.deepEqual(deriveSeconds(busy, { tps: TPS }).map((r) => r.smoothness), [75, 75]);
+  assert.equal(contentSecond({ producedFps: 45, speed: 90, cadence: 60, cpuBusy: 0.2, gpuBusy: 0.2, replayBusy: 0.2 }), false);
+  assert.equal(contentSecond({ producedFps: 59, speed: 100, cadence: 60, cpuBusy: 0.2, gpuBusy: 0.2, replayBusy: 0.2 }), false, "within the shown share: no content second");
+  assert.equal(contentSecond({ producedFps: 45, speed: 100, cadence: 60, cpuBusy: 0.2, gpuBusy: null, replayBusy: 0.2 }), false, "unknown occupancy is no margin");
+  // a loading screen animating at 45 is still a loading when the disc reads
+  const load = deriveSeconds(samplesOf([["loading", 2]]), { tps: TPS });
+  assert.equal(classifySecond(load[0]), "loading");
+  const a = analyzeRun({ samples: s, tps: TPS });
+  assert.equal(a.phases.menu.contentSeconds, 3);
+});
+
+test("one definition of content: parcours' contentSecond is lib/drops.mjs contentRule", async () => {
+  const { contentRule } = await import("../harness/lib/drops.mjs");
+  for (const speed of [95, 98.9, 99, 100]) for (const producedFps of [30, 56, 58]) for (const busy of [0.5, 0.69, 0.7, 0.9, null]) {
+    const r = { producedFps, speed, cadence: 60, cpuBusy: busy, gpuBusy: 0.2, replayBusy: 0.2 };
+    assert.equal(contentSecond(r), contentRule({ speed, produced: producedFps, expected: 60, occupancy: { cpu: busy, gpu: 0.2, replay: 0.2 } }), JSON.stringify(r));
+  }
+  const src = readFileSync(new URL("../harness/lib/parcours.mjs", import.meta.url), "utf8");
+  assert.doesNotMatch(src, /CONTENT_MIN_SPEED/, "no second set of thresholds");
+});
+
+// Review of #410: an unknown value never passes as content (null >= 0 is
+// true in JS), a second with nothing made is no content reference (0/0).
+test("content: an unknown production, speed or cadence is no content; none made is no reference; the smoothness stays judged", async () => {
+  const { contentRule } = await import("../harness/lib/drops.mjs");
+  const calm = { cpu: 0.2, gpu: 0.2, replay: 0.2 };
+  assert.equal(contentRule({ speed: 100, produced: null, expected: 60, occupancy: calm }), false);
+  assert.equal(contentRule({ speed: 100, produced: NaN, expected: 60, occupancy: calm }), false);
+  assert.equal(contentRule({ speed: null, produced: 30, expected: 60, occupancy: calm }), false);
+  assert.equal(contentRule({ speed: 100, produced: 30, expected: null, occupancy: calm }), false);
+  assert.equal(contentRule({ speed: 100, produced: 30, expected: NaN, occupancy: calm }), false);
+  assert.equal(contentRule({ speed: 100, produced: 30, expected: 60, occupancy: { ...calm, cpu: null } }), false);
+  assert.equal(contentRule({ speed: 100, produced: 0, expected: 60, occupancy: calm }), true, "the attribution: a still screen is content");
+  assert.equal(contentSecond({ producedFps: null, speed: 100, cadence: 60, cpuBusy: 0.2, gpuBusy: 0.2, replayBusy: 0.2 }), false);
+  assert.equal(contentSecond({ producedFps: 0, speed: 100, cadence: 60, cpuBusy: 0.2, gpuBusy: 0.2, replayBusy: 0.2 }), false, "0/0: no reference");
+  // producedFps missing: judged against the cadence, never 100 % by an Infinity
+  const s = samplesOf([["menu", 2]]);
+  for (const x of s.slice(1)) { x.info.newShown = (x.info.newShown / 60) * 40; x.info.producedFps = null; }
+  assert.deepEqual(deriveSeconds(s, { tps: TPS }).map((r) => [r.content, r.smoothness]), [[false, 66.7], [false, 66.7]]);
+  const z = samplesOf([["menu", 2]]);
+  for (const x of z.slice(1)) { x.info.newShown = 0; x.info.producedFps = 0; }
+  assert.deepEqual(deriveSeconds(z, { tps: TPS }).map((r) => r.smoothness), [0, 0]);
+});
+
+test("readNoise refuses an A/A analysed under another analysis version (its noise is of another metric)", async () => {
+  const { mkdtempSync, writeFileSync } = await import("node:fs");
+  const os = await import("node:os");
+  const { readNoise } = await import("../harness/probes/parcours.mjs");
+  const { ANALYSIS_VERSION } = await import("../harness/lib/parcours.mjs");
+  const dir = mkdtempSync(`${os.tmpdir()}/parcours-noise-`);
+  const base = { probe: "parcours", probeVersion: 2, film: "f#1", query: "q", noise: { "kind:menu": {} } };
+  const expect = { probeVersion: 2, film: "f#1", query: "q" };
+  writeFileSync(`${dir}/old.json`, JSON.stringify(base));
+  assert.throws(() => readNoise(`${dir}/old.json`, expect), /analysed with analysis version 1, this probe judges with \d+: re-analyse it/);
+  writeFileSync(`${dir}/new.json`, JSON.stringify({ ...base, analysisVersion: ANALYSIS_VERSION }));
+  assert.deepEqual(readNoise(`${dir}/new.json`, expect), base.noise);
+  const probe = readFileSync(new URL("../harness/probes/parcours.mjs", import.meta.url), "utf8");
+  assert.match(probe, /analysisVersion: ANALYSIS_VERSION, reanalyzedAt/, "--analyze writes the current version");
+  assert.match(probe, /probeVersion: PROBE_VERSION, analysisVersion: ANALYSIS_VERSION, at:/);
 });

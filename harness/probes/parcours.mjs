@@ -16,6 +16,9 @@
 //     [--shots [--shot-every N]] [--max-load L] [--load-wait 300] [--lock-wait 14400 | --no-lock] [--out dir]
 //   node harness/probes/parcours.mjs --iso disc.iso --port N --record steps.json --film-out film.json [--auto '{"bias":0}'] [--shots [--shot-every N]]
 //   node harness/probes/parcours.mjs --analyze <out dir> [--noise <A/A>/summary.json]
+//   --browser safari: the real Safari of this Mac instead of headless Chrome
+//   (lib/safari-page.mjs: off screen, the disc by HTTP ranges on 127.0.0.1,
+//   the screen unlocked); a Safari run's noise is a Safari A/A
 //
 // A run boots the disc on a new, empty Chrome profile and plays the film
 // (lib/pad-film.mjs, pad-film-worker.js): pad states written into the core's
@@ -40,6 +43,7 @@
 // a first film is scripted, then replayed.
 // The disc and the films are local data: never in the repo (probe-out.mjs
 // puts a local disc's results under ../measures/harness).
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
@@ -54,12 +58,14 @@ import { calmLock, defaultMaxLoad, loadGaveUp, loadLimit } from "../lib/env.mjs"
 import { readIntegrity, treeHasIntegrity } from "../lib/integrity.mjs";
 import { claim } from "../lib/ownership.mjs";
 import { filmMarkers, filmWithMarks, padFilmStatus, recordPorts, releaseMarker, runRecordSteps, signalStuck, startPadFilm, stopPadFilm, validateFilm, validateRecordSteps } from "../lib/pad-film.mjs";
-import { analyzeRun, currentPhase, deriveSeconds, frameDiff, markerIndexes, STILL_DIFF, phaseNoise, parcoursVerdict, renderTimeline, usable } from "../lib/parcours.mjs";
+import { ANALYSIS_VERSION, analyzeRun, currentPhase, deriveSeconds, frameDiff, gapDetail, markerIndexes, STILL_DIFF, phaseNoise, parcoursVerdict, renderTimeline, usable } from "../lib/parcours.mjs";
 import { acquirePerfLock } from "../lib/perf-lock.mjs";
+import { descendantsOf } from "../lib/lock-run.mjs";
 import { chromeInfo, isLocalOnly, probeOutDir } from "../lib/probe-out.mjs";
 import { decodePng } from "../lib/png.mjs";
 import { savePng } from "../lib/session.mjs";
 import { startEdgeFollower, stopEdgeFollower } from "../lib/edge-follower.mjs";
+import { bootRemoteDisc, launchSafariPage, startDiscServer } from "../lib/safari-page.mjs";
 import { median, round } from "../lib/stats.mjs";
 import { machineSnapshot, powerDrained, powerSnapshot } from "../lib/system.mjs";
 import { PRODUCT_QUERY } from "./drop-meter.mjs";
@@ -67,7 +73,11 @@ import { num, sideOrder } from "./race-perf.mjs";
 
 // What this probe runs in the page and the worker: an A/A's noise holds only
 // for the same version. Raised with each such change.
-export const PROBE_VERSION = 1;
+export const PROBE_VERSION = 2; // 2: the drop sampler every SAMPLER_MS (100 ms, was 1 s), its stalls and the VI times kept per second (present gap detail)
+
+// The drop sampler's period: its counters are drained once a second, its
+// rows' lateness says when the presenting worker was blocked.
+export const SAMPLER_MS = 100;
 
 // The autopilot's stuck signal: while the worker says a port is under the
 // autopilot, a picture of the screen every STILL_EVERY_SEC (an element
@@ -100,6 +110,70 @@ async function readInfo(page) {
   });
 }
 
+// Per present of a second, the gap since the present before it (the last of
+// the previous second for the first): the VI outputs inside it and the
+// presenting worker's stall inside it (gapDetail); null for a first present
+// with none before it, and wherever either second's data is unknown (a ring
+// that lost entries: viT null; ticks not read: samplerTicks null). Pure.
+export function presentGaps(prev, { presents, viT, samplerTicks }) {
+  const vis = [], workerLagMs = [];
+  const known = (x, y) => (prev && x === null) || y === null ? null : [...(x ?? []), ...y];
+  const vAll = known(prev?.viT, viT), lAll = known(prev?.samplerTicks, samplerTicks);
+  let from = prev?.presents?.at(-1) ?? null;
+  for (const p of presents) {
+    if (from == null) { vis.push(null); workerLagMs.push(null); from = p; continue; }
+    const g = gapDetail(from, p, vAll, lAll);
+    vis.push(g.vis); workerLagMs.push(g.workerLagMs);
+    from = p;
+  }
+  return { vis, workerLagMs };
+}
+
+// Every tick of a drain, [t, lagMs] (an on-time one too: "no tick" and "on
+// time" differ); null when the drain failed or has no rows array (unknown).
+export function samplerTicksOf(drained) {
+  if (!drained || drained.error || !Array.isArray(drained.rows)) return null;
+  const it = drained.columns?.indexOf("t") ?? -1, il = drained.columns?.indexOf("lagMs") ?? -1;
+  if (it < 0 || il < 0) return null;
+  return drained.rows.map((r) => [Math.round(r[it] * 10) / 10, Math.round(r[il] * 10) / 10]);
+}
+// The timeline's VI times, null when the read failed or a ring lost entries
+// (the VIs inside a gap would be undercounted).
+export function viTimesOf(tl) {
+  if (!tl || tl.error || tl.presents?.lost || tl.vi?.lost || !Array.isArray(tl.vi?.t)) return null;
+  return tl.vi.t;
+}
+
+// The CPU of every process but this run's, summed from ps (% of one core):
+// [t, pct, the top three]; null when ps fails. This run is a process TREE:
+// this node, every process carrying the profile directory (the browser
+// itself), and every descendant of either (Chrome's GPU, renderer and
+// network helpers do not all carry --user-data-dir). macOS ps %cpu is a
+// decaying average over the last seconds, not an instantaneous reading.
+// Async: never on the sampling loop's path.
+export const OTHER_CPU_EVERY_SEC = 5;
+export function otherCpuOf(psOutput, { profileDir, ownPids = [], selfPid = process.pid, now = Date.now() } = {}) {
+  const procs = [];
+  for (const line of psOutput.split("\n")) {
+    const m = /^\s*(\d+)\s+(\d+)\s+([\d.]+)\s+(.*)$/.exec(line);
+    if (m) procs.push({ pid: Number(m[1]), ppid: Number(m[2]), pct: Number(m[3]), command: m[4] });
+  }
+  // --browser safari: the session's Safari and its WebKit helpers (ownPids)
+  const roots = procs.filter((p) => p.pid === selfPid || ownPids.includes(p.pid) || (profileDir && p.command.includes(profileDir))).map((p) => p.pid);
+  const ours = new Set([...roots, ...descendantsOf(procs.map((p) => [p.pid, p.ppid]), roots)]);
+  let total = 0;
+  const top = [];
+  for (const p of procs) {
+    if (ours.has(p.pid)) continue;
+    total += p.pct;
+    if (p.pct >= 5) top.push([p.command.split(" --")[0].split("/").pop().slice(0, 40), p.pct]);
+  }
+  return [now, Math.round(total), top.sort((a, b) => b[1] - a[1]).slice(0, 3)];
+}
+function otherCpu(profileDir, ownPids = []) {
+  return new Promise((resolve) => execFile("ps", ["-A", "-o", "pid=,ppid=,pcpu=,command="], { maxBuffer: 32 << 20, timeout: 5000 }, (error, out) => resolve(error ? null : otherCpuOf(out, { profileDir, ownPids }))));
+}
+
 // The drop sampler's last row of a drain, as named counters (null: no row).
 export function countersOf(drained) {
   const row = drained?.rows?.at(-1);
@@ -125,23 +199,35 @@ async function playRun(o, server, { side, run, outDir }) {
   const raw = { side, run, samples: [], reached: [], marks: [], stuckAt: [], loads: [], markers: o.film ? filmMarkers(o.film) : [] };
   const profileDir = mkdtempSync(path.join(os.tmpdir(), "gc-harness-parcours-"));
   const releaseProfile = claim(profileDir, REPO_ROOT, "chrome-profile");
-  const context = await launchChrome({ profileDir });
+  // --browser safari: the real Safari of this Mac (lib/safari-page.mjs), the
+  // disc by HTTP ranges; else headless Chrome on a new profile.
+  const safari = o.browser === "safari" ? await launchSafariPage({ port: o.safari.driverPort, log: o.log }) : null;
+  const context = safari ? null : await launchChrome({ profileDir });
   const shotDir = o.shots ? path.join(outDir, `shots-${side}-${run}`) : null;
   const shot = async (page, name) => { if (shotDir) savePng(await screenFrame(page).catch(() => null) ?? { width: 1, height: 1, data: new Uint8Array(4) }, path.join(shotDir, `${name}.png`)); };
   try {
-    await context.assertInvisible("after launch");
-    const page = context.pages()[0] ?? (await context.newPage());
+    if (!safari) await context.assertInvisible("after launch");
+    const page = safari ? safari.page : context.pages()[0] ?? (await context.newPage());
     raw.power = powerSnapshot();
     raw.launchT = Date.now();
-    await bootIso(page, { url: `${server.base}?${o.query}`, iso: o.iso, timeoutMs: 120000 });
+    if (safari) await bootRemoteDisc(page, { url: `${server.base}?${o.query}`, descriptor: o.safari.descriptor, timeoutMs: 120000 });
+    else await bootIso(page, { url: `${server.base}?${o.query}`, iso: o.iso, timeoutMs: 120000 });
     raw.bootMs = Date.now() - raw.launchT;
-    await context.assertInvisible("after boot");
-    raw.browser = await page.evaluate(() => navigator.userAgent.match(/(?:Headless)?Chrome\/[\d.]+/)?.[0] ?? navigator.userAgent).catch(() => null);
+    if (safari) {
+      // every visibility check (area on screen, tolerance, app in front), in the raw record
+      raw.safariVisibility = safari.visibility;
+      raw.safariTolerance = safari.tolerance;
+      await safari.assertInvisible("after boot");
+    }
+    else await context.assertInvisible("after boot");
+    raw.browser = await page.evaluate(() => navigator.userAgent.match(/(?:Headless)?Chrome\/[\d.]+/)?.[0] ?? (/Version\/([\d.]+).*Safari/.exec(navigator.userAgent) ? `Safari/${/Version\/([\d.]+)/.exec(navigator.userAgent)[1]}` : navigator.userAgent)).catch(() => null);
     const progress = await workerRequest(page, "validationReadCoreProgress", {}, 5000);
     raw.tps = progress?.coreTicksPerSecond ?? null;
     // the 0113 headroom counters (XFB copies) on, as drop-meter turns them on
     raw.headroom = (await workerRequest(page, "validationReadHeadroomStats", { reset: 0 }, 5000))?.error ?? "on";
-    raw.sampler = await workerRequest(page, "validationDropSampler", { action: "start", everyMs: 1000 }, 5000);
+    raw.sampler = await workerRequest(page, "validationDropSampler", { action: "start", everyMs: SAMPLER_MS }, 5000);
+    // no sampler (an older tree): its counters and the worker's stalls unknown
+    if (!raw.sampler?.started) raw.samplerMissing = raw.sampler?.error ?? "engine without validationDropSampler";
     raw.integrityStart = await readIntegrity(page, { expected: o.integrityExpected });
     raw.film = await startPadFilm(page, o.film ? { film: o.film } : { record: { ports: recordPorts(o.recordSteps), auto: o.auto } });
     if (raw.film?.error) throw new Error(`pad film: ${raw.film.error}`);
@@ -159,18 +245,28 @@ async function playRun(o, server, { side, run, outDir }) {
     while (!ended) {
       await page.waitForTimeout(1000 - ((Date.now() - t0) % 1000));
       const { t, info } = await readInfo(page);
-      const drained = await workerRequest(page, "validationDropSampler", { action: "drain" }, 5000);
+      // the timeline first, then the sampler: its ticks then cover every gap
+      // ending at the last present read
       const tl = await readTimeline(page).catch((e) => ({ error: String(e.message || e) }));
+      const drained = raw.samplerMissing ? null : await workerRequest(page, "validationDropSampler", { action: "drain" }, 5000);
       if (tl?.presents?.lost || tl?.vi?.lost) raw.timelineLost = (raw.timelineLost ?? 0) + (tl.presents?.lost ?? 0) + (tl.vi?.lost ?? 0);
       const integrity = await readIntegrity(page, { expected: o.integrityExpected });
       const status = await padFilmStatus(page);
-      // patch 0212's audio queue events (null on a core without them)
+      // patch 0212's audio queue events and the VI lock's counters (null on a core without them)
       const audioQ = await workerRequest(page, "validationReadAudioQueue", {}, 5000).catch(() => null);
-      raw.samples.push({ t, info, counters: countersOf(drained), presents: tl?.presents?.t ?? [], vi: tl?.vi?.t?.length ?? null, viT: tl?.vi?.t ?? null, audioQ: audioQ?.unavailable ? null : audioQ, integrity: integrity?.unread || integrity?.unavailable ? null : integrity, film: status ? { pos: status.pos, hold: status.hold, polls: status.polls } : null });
+      const presents = tl?.presents?.t ?? [], viT = viTimesOf(tl), samplerTicks = samplerTicksOf(drained);
+      // per present, the gap before it: its VIs and the worker's stall
+      // (lib/drops.mjs parcoursWindowsForAttribution reads gapVis, gapWorkerLagMs)
+      const per = presentGaps(raw.samples.at(-1), { presents, viT, samplerTicks });
+      if (o.samplerRows && drained?.rows) (raw.samplerRows ??= []).push(drained);
+      raw.samples.push({ t, info, counters: countersOf(drained), presents, vi: tl?.vi?.t?.length ?? null, viT, samplerTicks, gapVis: per.vis, gapWorkerLagMs: per.workerLagMs, audioQ: audioQ?.unavailable ? null : audioQ, integrity: integrity?.unread || integrity?.unavailable ? null : integrity, film: status ? { pos: status.pos, hold: status.hold, polls: status.polls } : null });
       raw.loads.push([Date.now(), os.loadavg()[0]]);
+      const sec = Math.round((Date.now() - t0) / 1000);
+      // the other processes' CPU every OTHER_CPU_EVERY_SEC, off the loop
+      // (an async ps): how loaded the machine was, by what is not this run
+      if (sec % OTHER_CPU_EVERY_SEC === 0) otherCpu(profileDir, safari?.ownPids() ?? []).then((x) => { if (x) (raw.otherCpu ??= []).push(x); });
       rows = deriveSeconds(raw.samples, { tps: raw.tps });
       const phase = phaseNow();
-      const sec = Math.round((Date.now() - t0) / 1000);
       if (o.film) {
         const step = markerStep({ status, markers: raw.markers, phase, now: Date.now(), state: markerState, defaultTimeoutSec: o.markerTimeout });
         if (step.action === "release") {
@@ -224,7 +320,8 @@ async function playRun(o, server, { side, run, outDir }) {
   } catch (error) {
     return { ...raw, error: String(error?.message || error).slice(0, 400) };
   } finally {
-    await context.close().catch(() => {});
+    if (safari) await safari.close().catch(() => {});
+    else await context.close().catch(() => {});
     releaseProfile();
     rmSync(profileDir, { recursive: true, force: true });
   }
@@ -240,6 +337,8 @@ export function analyzeRaw(raw, { maxLoad, outDir = null, tag = null } = {}) {
   const a = analyzeRun({ samples: raw.samples, tps: raw.tps, markers, reached: withAt, detect: raw.detect ?? {} });
   const loads = (raw.loads ?? []).map((x) => x[1]);
   a.load1 = { median: round(median(loads), 2), max: loads.length ? round(Math.max(...loads), 2) : null };
+  const others = (raw.otherCpu ?? []).map((x) => x[1]);
+  a.otherCpu = others.length ? { median: round(median(others), 0), max: Math.max(...others) } : null;
   a.overloaded = a.load1.median > loadLimit(raw.gate?.limit ?? maxLoad);
   a.powerDrained = powerDrained(raw.power, raw.powerEnd);
   a.ended = raw.ended ?? null;
@@ -275,6 +374,8 @@ export function humanSummary(summary) {
 export function readNoise(file, expect) {
   const s = JSON.parse(readFileSync(file, "utf8"));
   if (s.probe !== "parcours") throw new Error(`--noise ${file}: not a parcours summary`);
+  // the noise of another analysis (an older, wider smoothness) would loosen the gate in silence
+  if ((s.analysisVersion ?? 1) !== ANALYSIS_VERSION) throw new Error(`--noise ${file}: analysed with analysis version ${s.analysisVersion ?? 1}, this probe judges with ${ANALYSIS_VERSION}: re-analyse it (parcours.mjs --analyze <its dir>) or rerun the A/A`);
   // --edge drives (a capture stream in the page): another measure; unset is none
   const differ = ["probeVersion", "film", "query", "edge"].filter((k) => JSON.stringify(s[k] ?? null) !== JSON.stringify(expect[k] ?? null));
   if (expect.cpuModel && s.machine?.cpuModel && s.machine.cpuModel !== expect.cpuModel) differ.push("cpuModel");
@@ -330,7 +431,7 @@ async function analyzeDir(dir, { noiseFile, log }) {
   }
   const noise = noiseFile ? readNoise(noiseFile, { ...meta, cpuModel: meta.machine?.cpuModel }) : null;
   const { runs, verdict, noise: n, human, noVerdict, ...rest } = meta;
-  const summary = writeSummary(dir, { ...rest, reanalyzedAt: new Date().toISOString() }, analyses, noise);
+  const summary = writeSummary(dir, { ...rest, analysisVersion: ANALYSIS_VERSION, reanalyzedAt: new Date().toISOString() }, analyses, noise);
   for (const l of summary.human) log(l);
   return summary;
 }
@@ -341,9 +442,10 @@ async function main() {
       iso: { type: "string" }, film: { type: "string" }, record: { type: "string" }, "film-out": { type: "string" },
       runs: { type: "string", default: "1" }, candidate: { type: "string" }, baseline: { type: "string" }, noise: { type: "string" },
       config: { type: "string", default: "product" }, query: { type: "string" }, "marker-timeout": { type: "string", default: "120" }, "max-sec": { type: "string", default: "1200" },
-      edge: { type: "string" }, shots: { type: "boolean", default: false }, "shot-every": { type: "string", default: "0" }, auto: { type: "string" }, verbose: { type: "boolean", default: false }, analyze: { type: "string" },
+      edge: { type: "string" }, "sampler-rows": { type: "boolean", default: false }, shots: { type: "boolean", default: false }, "shot-every": { type: "string", default: "0" }, auto: { type: "string" }, verbose: { type: "boolean", default: false }, analyze: { type: "string" },
       "max-load": { type: "string" }, "load-wait": { type: "string", default: "300" }, "lock-wait": { type: "string", default: "14400" }, "no-lock": { type: "boolean", default: false },
-      port: { type: "string", default: process.env.HARNESS_PORT }, out: { type: "string" }
+      port: { type: "string", default: process.env.HARNESS_PORT }, out: { type: "string" },
+      browser: { type: "string", default: "chrome" }
     }
   });
   const log = (m) => console.log(`[parcours] ${m}`);
@@ -369,8 +471,15 @@ async function main() {
     auto: values.auto ? JSON.parse(values.auto) : null,
     // --edge '{"0":[0,0,1,1]}': the autopilot steers from the picture, each
     // port in its view (lib/edge-follower.mjs); '{}' or absent: the sine
-    edge: values.edge ? JSON.parse(values.edge) : null
+    edge: values.edge ? JSON.parse(values.edge) : null,
+    // --sampler-rows: every drop sampler row (100 ms, all its counters) kept in
+    // the raw record, for an attribution of the causes (lib/drops.mjs rowsOf)
+    samplerRows: values["sampler-rows"],
+    // --browser safari (macOS): safaridriver on --port + 1, the disc on --port + 2
+    browser: values.browser
   };
+  if (!["chrome", "safari"].includes(o.browser)) throw new Error("--browser chrome|safari");
+  if (o.browser === "safari" && process.platform !== "darwin") throw new Error("--browser safari runs on macOS only");
   const filmBytes = values.film ? readFileSync(values.film) : null;
   const filmId = filmBytes ? `${path.basename(values.film)}#${createHash("sha256").update(filmBytes).digest("hex").slice(0, 12)}` : null;
   const machine = machineSnapshot();
@@ -387,13 +496,18 @@ async function main() {
   const watchdog = setTimeout(() => { log("watchdog: the probe overran, exiting"); lock.release(); process.exit(4); }, (o.runs * Object.keys(sides).length * (o.maxSec + 240) + 600) * 1000);
   const outDir = probeOutDir("parcours", iso, values.out);
   const meta = {
-    probe: "parcours", probeVersion: PROBE_VERSION, at: new Date().toISOString(), locked: !values["no-lock"], machine, chrome: chromeInfo(), iso: path.basename(iso),
+    probe: "parcours", probeVersion: PROBE_VERSION, analysisVersion: ANALYSIS_VERSION, at: new Date().toISOString(), locked: !values["no-lock"], machine, chrome: chromeInfo(), iso: path.basename(iso),
     film: filmId, edge: o.edge, record: values.record ? path.basename(values.record) : null, query: o.query, runs: o.runs, maxLoad: o.maxLoad, markerTimeout: o.markerTimeout,
     sides: Object.fromEntries(Object.entries(sides).map(([k, s]) => [k, s.label])), noiseFrom: values.noise ?? null,
     definition: "one sample a second; speed = guest/host time (core ticks); smoothness = new frames shown / the game's cadence learnt as the site does; phases from disc reads, new frames, EFB→XFB copies and replay draws per frame, ≥ 2 s each; A/B per phase and per film section against the A/A noise"
   };
   const analyses = [];
   let gaveUp = null;
+  // only the harness page's origin may read the disc (server.mjs serves it
+  // on 127.0.0.1:--port)
+  const disc = o.browser === "safari" ? await startDiscServer(iso, { port: o.port + 2, origin: `http://127.0.0.1:${o.port}` }) : null;
+  if (disc) o.safari = { descriptor: disc.descriptor, driverPort: o.port + 1 };
+  meta.browserKind = o.browser;
   try {
     for (let run = 1; run <= o.runs && !gaveUp; run += 1) {
       for (const name of sideOrder(run).filter((n) => sides[n])) {
@@ -426,6 +540,7 @@ async function main() {
     }
   } finally {
     lock.release();
+    disc?.close();
     for (const s of Object.values(sides)) if (s.temp) rmSync(s.root, { recursive: true, force: true });
   }
   const summary = writeSummary(outDir, { ...meta, gaveUp }, analyses, noise);

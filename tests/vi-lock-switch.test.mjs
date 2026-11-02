@@ -77,3 +77,10 @@ test("vilock: host, worker and patch 0212 (a trim of the throttle's wall rate on
   assert.equal(Math.round(ticksPerSec * 1 * factor(0)), ticksPerSec);
   assert.equal(Math.round(ticksPerSec * 1 * factor(1001)), 486486486);
 });
+
+test("vilock: an --exact run (replay-gates G3) proves the lock was engaged in every candidate visit", async () => {
+  const gates = await readFile(new URL("../harness/probes/replay-gates.mjs", import.meta.url), "utf8");
+  assert.match(gates, /const aq = await workerRequest\(session\.page, "validationReadAudioQueue", \{\}, 10000\)\.catch\(\(\) => null\);/);
+  assert.match(gates, /const unlocked = summary\.phaseLock\.filter\(\(x\) => !\(x\.locks >= 1\) \|\| !Number\.isFinite\(x\.trimPpm\) \|\| x\.trimPpm === 0\);/);
+  assert.match(gates, /verdict\.failures\.push\(`\?vilock=1: the lock was never engaged/);
+});

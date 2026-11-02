@@ -432,7 +432,40 @@ node harness/probes/drop-meter.mjs --iso ../roms/<disc>.iso --port 8113 --runs 3
 node harness/probes/drop-meter.mjs --false-positives <A/A dir>:candidate --noise <A/A dir>/summary.json
 # again from the raw data, e.g. against a native reference (game frames per guest second)
 node harness/probes/drop-meter.mjs --analyze <dir> --native <native-ref.json>
+# dip attribution (runs recorded with --display): each second under 95 % or
+# with a hitch over 25 ms split into causes that add up to its lost frames
+node harness/probes/drop-meter.mjs --analyze <dir> --attribute
 ```
+
+Attribution and the beat label (`harness/lib/drops.mjs`): the screen's
+refresh and the core's VI rate are both fitted by regression
+(`fitPeriod`). Blocks of 300 timestamps are each fitted alone. For the VI,
+a block off the median block by more than 3.5 of its own standard errors
+is cut out of the fit: slowdowns of 0.1 % over 12 s or 3-7 % over a few
+seconds never bend the VI rate. For the refresh, such a block makes it null
+(one screen rate or none: 60 → 59.94, 60 → 72, 60 → 120). A fit less
+precise than 5 mHz is also null. This check is a fail-safe and sometimes
+nulls a steady 60 Hz screen: from 1-2 runs in 20 up to 8 in 20 over 300 s
+with 10 % of vsyncs missed (review of #414). A null refresh only means no
+beat is proven in that run. On real Mac runs the VI fit keeps about
+half the VIs: the game's speed varies a little from block to block.
+
+A repeat is labelled `beat` only when the two rates drift, the repeat
+falls at the common phase boundary within 3 sigma of the VI timestamps'
+measured jitter (Mac: 0.7-0.95 ms, so about 2.1-2.8 ms), and it is a single
+tick. **Read `beat` as an upper bound.** On a drifting screen, an isolated
+random drop inside a crossing window cannot be told from the beat's own
+jitter repeats: 21-26 % of such drops are labelled beat (synthetic
+60 / 59.94 Hz at σ 0.7-0.9 ms). On a screen locked to the VI rate, nothing
+is labelled beat (slowdowns from 0.1 % to 7 % included).
+
+A second at full speed with a thread between 0.7 and 0.85 busy (no margin,
+not saturated) is `marginal`: content or game, undecided. It is reported
+apart (`marginalFrames`), not counted in the frames lost. The expected
+cadence is capped at the run's standard VI rate (59.94 or 50, from the
+median over the run of VIs × 100 / speed), never at a second's own VI
+count: in a stall that count falls while the speed read may be stale, and
+the frames owed must not fall with it.
 
 ## Parcours (the whole play-through)
 
@@ -444,11 +477,15 @@ a second (nothing per frame) it reads `__lastFrameInfo` (speed, new frames
 shown and produced, occupancy of the CPU thread, GPU thread and replay
 worker, the replay's draws), the drop sampler at 1 s (core ticks, disc
 bytes, EFB→XFB copies), the timeline (every present and VI output) and the
-replay's integrity counters. `lib/parcours.mjs` (pure) derives per second
+replay's integrity counters, and every present gap past 25 ms with its VI
+outputs and the presenting worker's stall inside it (the drop sampler runs
+every 100 ms, drained once a second; PROBE_VERSION 2). `lib/parcours.mjs` (pure) derives per second
 the speed (guest/host time from the core ticks), new frames per second,
 smoothness (new frames against the game's cadence, learnt as the site
 learns it: VI/n snapped, below the VI rate only with occupancy margin, else
-the VI rate), present hitches over 50 and 100 ms, and summarises each phase
+the VI rate; in a content second, where the game itself made fewer frames
+at full speed with margin on every thread, against what it made), present
+hitches over 50 and 100 ms, and summarises each phase
 and each film section: min, p5 and median of speed, new frames and
 smoothness, the 3 worst seconds, hitches, integrity, occupancy, seconds.
 
@@ -633,6 +670,114 @@ sleeps in the throttle is not understated), `msPerSecond`, `mailsPerSecond`,
 `meanMailUs` and `mailMaxMs`, medians of the good runs. Calm machine first,
 then the perf lock, as race-perf.
 
+## CPU thread time per second (dip windows)
+
+`harness/probes/cpu-window.mjs` splits the emulated CPU thread's host time,
+second by second, into the parts the core counts, and says which part grows
+in the seconds that dip (speed under 100 %, or the CPU thread saturated).
+Headless, one tree (`--candidate <dir>` serves another exported tree), one
+run, under the perf lock (calm machine first; a loaded or unplugged machine
+gives the lock back while it waits; the watchdog counts only the measure,
+with the lock held, and releases the lock when it fires):
+
+```
+node harness/probes/cpu-window.mjs --iso ../roms/<disc>.iso --port 8092 \
+  --state ../measures/harness/race-after.sav [--hold KeyX] \
+  [--warmup 25] [--secs 30] [--step 1] [--vi 1200-1500] \
+  [--dip-speed 99] [--dip-busy 0.95] [--region-sample 64] [--mem-warm 5] \
+  [--untimed-secs 5] [--config product | wgpu | --query "..."] [--out dir]
+```
+
+The query defaults to the product's (drop-meter's `PRODUCT_QUERY`, what
+Salon runs: `aot=1&aotcompiler=1&jitoffthread=1`, so regions run);
+`--config wgpu` (the race-perf preset) has no `aot=1` and no region ever
+runs there. The header prints the query, the regions installed and their
+mean coverage of guest cycles, and a WARNING when the query has no `aot=1`,
+no region was installed, or they cover under 1 % of the cycles.
+
+After `--warmup`, it turns on (one reset each) the region JIT stats
+(`validationReadJitRegionStats`, `sampleEvery` = `--region-sample`), the
+memory access stats (`validationReadMemAccessStats`; its first reset clears
+the JIT cache, hence `--mem-warm` s before the first read: the blocks
+recompile, the installed regions stay and are only checked again before
+their next run, 0075 `ClearOffThreadAndRegionState`), AX HLE
+(`validationReadAxHleStats`) and the headroom counters
+(`validationReadHeadroomStats`). The region stats run `--untimed-secs`
+untimed first (`sampleEvery` 0, the window that prices the timing, below),
+then timed; the probe reads all four and the core ticks every `--step` s,
+never resetting again. Each row is the difference of two
+consecutive reads (`lib/cpu-window.mjs` `cpuWindowBreakdown`), with the VI
+outputs since the load drained from the timeline in that step (`vi.from` to
+`vi.to`, the index race-perf's `hitchList` gives). For a dip another probe
+located, pass its VI range as `--vi FROM-TO`: only the rows overlapping it
+are kept, classified and contrasted. A range no row covers, past the last
+VI the run reached (a longer `--secs`), or before its first, FAILS the probe
+(exit 1, the reason printed, `viError`) rather than reporting "no dip row";
+rows without a VI range are left out and counted (`rowsDroppedNoVi`).
+`summary.json` holds `rows` (and `allRows` with `--vi`), `dips`, `contrast`
+and the decoded `snapshots` (to recompute any window). `--dip-busy` is a
+share of host time, 0 to 1.
+
+Each row: `hostMs` (the CPU thread's own window, headroom `windowUs`;
+`hostSource: node` when the headroom counters are missing or reset),
+`guestSeconds`, `speedPct`, `cpuBusyShare` (host minus throttle sleep minus
+FlushGpu wait, as `src/occupancy-stats.js`), and `ms` / `shares` (of host
+time) / `perGuestSecond` per part:
+
+| part | what it is |
+|---|---|
+| `regions` | inside region calls |
+| `blocksDispatch` (table `b+d`) | the rest of the slice loop: JIT'd blocks and the cached-interpreter callbacks between them, with everything they call (MMIO, memory slow paths, the gather pipe, AX HLE, the block compiles after a lookup miss), the block lookups and the loop itself |
+| `interpreter` | null: the core does not separate it (interpreted instructions are in `blocksDispatch`) |
+| `idle` | `CoreTiming::Idle`, less the FlushGpu wait it contains |
+| `installs` | region module installs (slice boundaries and throttle-sleep windows) |
+| `other` | busy time left: `CoreTiming::Advance` and its events (VI, SI, DSP and audio events), the throttle's bookkeeping, slice set-up, edge noise; clamped at 0 (`overAttributedMs` keeps a negative rest) |
+| `sleep` | throttle sleep |
+| `flushGpuWait` | waiting for the GPU thread in FlushGpu (SyncOnSkipIdle on only) |
+| `axHle` | AX command lists in the DSP mailbox write: **nested** in `blocksDispatch` or `regions`, never added |
+
+The parts but `axHle` add up to `hostMs`; the table's `over ms` column
+shows `overAttributedMs` (parts past the busy time, `other` clamped at 0),
+also counted in the verdict line.
+
+Blocks and dispatch are ONE part. The core's split of the two (kept per
+row in `split`, `reliable: false`, information only) is biased: per block
+call, patch 0075 adds `max(call - its region time - its lookup time - its
+Idle time, 0)` to blocks, the lookup time being 0 on the calls whose lookups
+are not timed and N times one lookup on the sampled one, and dispatch is
+the slice's residual. So the unsampled lookups stay in blocks, and on a
+sampled call N lookups usually exceed the call: the clamp moves the block's
+own time to dispatch. Their sum is exact; `contrast` and `grew` use it. Also per row: `regionCoverage`
+(region cycles over all cycles, and outside idle skip), and `mem`: memory
+slow paths per 1000 guest instructions (`slowPerKiloInstr`, counted blocks
+plus the regions' estimate), `slowShare` of accesses and `slowByKind`
+(counts only: their time is inside `blocksDispatch`/`regions`). A struct the core
+lacks, or a counter that went back (a reset), gives null fields with the
+reason in `why`, never zeros.
+
+`contrast` compares the dip rows with the normal ones in host ms per guest
+second (a dip has no throttle sleep, so every part's share of host time
+grows; per guest second only what costs more for the same emulated time
+does); `grew` lists the parts that did, largest first.
+
+Sampling: with `sampleEvery` > 0 the core times every region call, every
+block call and every Idle; only the block lookups are timed 1 in N, and the
+core multiplies them by N itself. The struct's times are totals and are not
+rescaled; `--region-sample 0` gives counters only (every time null). Two
+clock reads per block call slow the CPU thread: the speed under the profiler
+is lower than without it, so compare rows of the same run, never this speed
+with race-perf's. The header's `timing cost` prices it on the same run:
+busy CPU-thread ms per guest second in the timed rows over the untimed
+window just before (`timingCost` in `summary.json`, with both speeds); the
+scene moves between the two windows, so it is an estimate. With regions on,
+fewer block calls are timed and the cost falls. The console says it in so
+many words: "absolute numbers inflated x<cost> by the per-call timing,
+compare within a run only". The headroom window moves at each Throttle and the region
+times at each slice: about 1-2 % of a 1 s row is edge noise, in `other`.
+Not separated by any counter: the gather pipe and FIFO writes, MMIO and the
+memory slow paths' time (all in `blocksDispatch`/`regions`), and CoreTiming events
+(in `other`).
+
 ## Profiling the generated wasm (regions)
 
 Where the CPU thread's cycles go inside the generated code
@@ -750,6 +895,49 @@ Across renderers, VI output N is the same emulated frame only with one CPU
 thread: in dual core a slower GPU thread makes each frame consume more
 emulated time. `diff` between two renderers therefore runs both sides with
 `cpu=single`.
+
+## Replay gates under WebKit
+
+`replay-gates --exact` holds the default rendering to the reference's very
+pixels: in cpu=single the XFB at a VI is bit-exact, Chrome against Chrome is
+0 pixel apart. Safari cannot meet that and should not be asked to: WebKit has
+no dual-source blending, so the core blends with a fallback whose rounding
+differs from Chrome's on blended edges. A real Safari 26 against Chrome (IR 2,
+2026-11-01, two VIs, 1.09 M pixels each): 4 % of pixels 1 to 3 levels apart,
+8 pixels more than 3 apart, one of them at 17, all on edges.
+
+`--webkit-frames 'cap.vi{vi}.png'` (with `--exact`; comma-separated for
+several runs) compares the frames a real Safari captured (measure-safari
+`--capture-vi`, the same VIs, internal resolution and query) against the
+Chrome reference, which this run plays and checks bit for bit across its own
+visits. The criterion counts pixels by distance instead of trusting the single
+worst one, a fragile statistic (one pixel at 17 says nothing a threshold of 16
+would not get wrong the next scene). A bounded blending error gives many
+pixels a little apart and almost none far apart; a real rendering error (a
+wrong texture, a block drawn at the wrong place) gives a patch of pixels tens
+to hundreds of levels apart:
+
+| pixels more than | at most | why |
+|---|---|---|
+| 3 levels | 0.1 % | the blending rounding itself stays at 1-3 (measured: 0.0007 %) |
+| 16 levels | 0.001 % (~11 px at IR 2) | an isolated pixel past the rounding passes |
+| 64 levels | none | a wrong texel or a moved block is far above it |
+
+The shares are of the frame's pixels, so what they let through grows with
+the internal resolution: at IR 2 (1216x896, 1.09 M pixels) a 33x33 patch
+16 levels off, or 10 pixels 64 levels off, passes; at native (608x448,
+0.27 M) neither does. Compare at the same IR on both sides (a size that
+differs fails), and read a pass at a high IR with that in mind. Every
+reference visit must have its frame and the same hash (a visit without one
+fails, it is never left out), and an integrity counter or an A-B-A under
+`--flicker` fails the run as in `--exact`. The frames come from
+`harness/probes/safari-capture.mjs` (a fresh Safari per run, the state
+loaded, `run<k>.vi<VI>.png`).
+
+`--webkit-tolerance "over=0.1%,big=0.001%,max=64"` changes them; raising one
+to make a failing scene pass defeats the gate: look at the kept pictures
+(`out/webkit-<VI>-reference.png`, `-run<k>.png`, `-run<k>-diff-x8.png`)
+first. It never applies to the default `--exact` (Chrome against Chrome).
 
 ## Worker API for exact frames (stable contract)
 
