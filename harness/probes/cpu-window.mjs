@@ -8,7 +8,7 @@
 // spark-run --headed, for video=wgpu); one tree, one run.
 //
 //   node harness/probes/cpu-window.mjs --iso disc.iso --port N
-//     [--state scene.sav | --steps steps.json] [--candidate dir]
+//     [--state scene.sav | --steps steps.json] [--steps-during steps.json] [--candidate dir]
 //     [--config product | wgpu | --query "..."] [--warmup 25] [--secs 30] [--step 1]
 //     [--hold KeyX | --hold ""] [--vi FROM-TO] [--dip-speed 99] [--dip-busy 0.95]
 //     [--region-sample 64] [--mem-warm 5] [--untimed-secs 5]
@@ -38,6 +38,9 @@
 // cpuWindowBreakdown of two consecutive snapshots. --vi keeps the rows that
 // overlap a VI range (VI outputs since the savestate load, as race-perf's
 // hitchList gives them); classifyDips and contrast run on the rows kept.
+// --steps-during: input steps played from the first snapshot on, while the
+// rows run (a transition measured as it happens: a menu's last presses and
+// the load they start); the run fails if they do not finish within --secs.
 //
 // The counters cost the CPU thread time (two clock reads per block call):
 // the speed under the profiler is below the speed without it; dips are
@@ -211,6 +214,8 @@ async function measure(o, server) {
     const snaps = [await snapshot(page)];
     const rows = [], loads = [];
     const start = performance.now();
+    // played alongside the rows; an error is kept and thrown after them
+    const duringRun = o.during ? runSteps(page, o.during).then(() => ({ doneS: round((performance.now() - start) / 1000, 2) }), (e) => ({ error: e })) : null;
     const steps = Math.max(1, Math.round(o.secs / o.step));
     for (let i = 1; i <= steps; i += 1) {
       // a fixed schedule: a slow read does not shift the next one
@@ -225,9 +230,12 @@ async function measure(o, server) {
       rows.push(row);
       if (session.watch.fatal().length) throw new Error(`page fatal: ${JSON.stringify(session.watch.fatal()).slice(0, 300)}`);
     }
+    const duringDone = duringRun ? await Promise.race([duringRun, Promise.resolve({ unfinished: true })]) : null;
+    if (duringDone?.error) throw duringDone.error;
+    if (duringDone?.unfinished) throw new Error(`--steps-during did not finish within --secs ${o.secs}: lengthen --secs`);
     const medianLoad = median(loads);
     const rowsStartAfterLoadSec = loadedAt != null && Number.isFinite(snaps[0]?.t) ? round((snaps[0].t - loadedAt) / 1000, 2) : null;
-    return { enabled, untimed, rows, snapshots: snaps, rowsStartAfterLoadSec, load1: { median: round(medianLoad, 2), max: round(Math.max(...loads), 2), limit: o.maxLoad }, overloaded: medianLoad > o.maxLoad, fatal: session.watch.fatal() };
+    return { enabled, untimed, rows, snapshots: snaps, rowsStartAfterLoadSec, stepsDuringDoneS: duringDone?.doneS ?? null, load1: { median: round(medianLoad, 2), max: round(Math.max(...loads), 2), limit: o.maxLoad }, overloaded: medianLoad > o.maxLoad, fatal: session.watch.fatal() };
   } finally {
     if (o.hold) await page.keyboard.up(o.hold).catch(() => {});
     await closeBounded(session);
@@ -237,7 +245,7 @@ async function measure(o, server) {
 async function main() {
   const { values } = parseArgs({
     options: {
-      iso: { type: "string" }, state: { type: "string" }, steps: { type: "string" }, candidate: { type: "string" },
+      iso: { type: "string" }, state: { type: "string" }, steps: { type: "string" }, "steps-during": { type: "string" }, candidate: { type: "string" },
       config: { type: "string", default: "product" }, query: { type: "string" },
       warmup: { type: "string", default: "25" }, secs: { type: "string", default: "30" }, step: { type: "string", default: "1" },
       hold: { type: "string", default: "KeyX" }, vi: { type: "string" },
@@ -260,13 +268,15 @@ async function main() {
   for (const f of [iso, state].filter(Boolean)) if (!existsSync(f)) throw new Error(`not found: ${f}`);
   const steps = values.steps ? JSON.parse(readFileSync(path.resolve(values.steps), "utf8")) : null;
   if (steps) validateSteps(steps);
+  const during = values["steps-during"] ? JSON.parse(readFileSync(path.resolve(values["steps-during"]), "utf8")) : null;
+  if (during) validateSteps(during);
   let root = REPO_ROOT;
   if (values.candidate) {
     root = path.resolve(values.candidate);
     if (!existsSync(root) || !statSync(root).isDirectory()) throw new Error(`--candidate ${values.candidate}: a tree directory (git archive one first)`);
   }
   const o = {
-    iso, state, steps, root,
+    iso, state, steps, during, root,
     query: `${values.query ?? (values.config === "product" ? PRODUCT_QUERY : PRESETS[values.config] ?? values.config)}&metrics=1`,
     warmup: num(values, "warmup", { min: 0 }), secs: num(values, "secs", { min: 1 }), step: num(values, "step", { min: 0.25 }),
     hold: values.hold || null, vi: parseViRange(values.vi), countersBeforeLoad: Boolean(values["counters-before-load"]),
@@ -322,6 +332,7 @@ async function main() {
         ? "counters reset before the state load: no second JIT cache clear after it; the load's own clear (0171) and its recompiles are measured"
         : "counters reset after the warmup: the memory stats' first reset clears the JIT cache (block recompiles after it are an artefact of the probe)",
       rowsStartAfterLoadSec: run.rowsStartAfterLoadSec,
+      stepsDuring: values["steps-during"] ? { file: path.basename(values["steps-during"]), doneAtS: run.stepsDuringDoneS } : null,
       vi: o.vi, dipSpeed: o.dipSpeed, dipBusy: o.dipBusy, loadGate: gate, load1: run.load1, overloaded: run.overloaded, fatal: run.fatal,
       enabled: run.enabled, regionsInstalled, meanRegionCoverage: meanCoverage, regionWarning: warning,
       untimedSecs: o.untimedSecs, untimed: run.untimed, timingCost: cost,
