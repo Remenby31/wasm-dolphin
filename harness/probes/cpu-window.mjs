@@ -230,7 +230,7 @@ async function measure(o, server) {
     }
     const timed = o.light ? null : await timeRegions(page, o);
     if (timed?.error) enabled.regionTimed = unknown(timed.error);
-    await page.waitForTimeout(1000); // the region reset applies at the next slice
+    if (!o.light) await page.waitForTimeout(1000); // the region reset applies at the next slice (--light: no region stats, rows from the load on)
     await readTimeline(page); // drop the VIs before the first snapshot
     const snaps = [await snapshot(page, { light: o.light })];
     const rows = [], loads = [];
