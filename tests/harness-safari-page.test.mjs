@@ -237,6 +237,6 @@ test("a visibility check fails on more than the tolerance, or on a change of the
   assert.match(page, /const allowed = maxVisiblePoints\(\);\n/, "read once, before Safari starts");
   assert.match(parcours, /raw\.safariTolerance = safari\.tolerance;/);
   assert.match(capture, /run\.tolerance = safari\.tolerance;/);
-  assert.match(parcours, /raw\.safariVisibility = safari\.visibility;\n\s+await safari\.assertInvisible\("after boot"\);/);
+  assert.match(parcours, /raw\.safariVisibility = safari\.visibility;\n\s+raw\.safariTolerance = safari\.tolerance;\n\s+await safari\.assertInvisible\("after boot"\);/);
   assert.match(capture, /run\.visibility = safari\.visibility;/);
 });
