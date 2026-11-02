@@ -1,19 +1,19 @@
 {
   "schemaVersion": 1,
   "abiVersion": 1,
-  "coreId": "sha256:c84934e9f907918dbaefea1df8ea2c264cc859a6fc429ea339d4967ca28c7508",
+  "coreId": "sha256:df18582abe897d69b3eb4e0981007b4c062f358ae267be3ac18952bbe9da92bf",
   "upstreamCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
   "artifacts": [
     {
       "path": "cores/dolphin/dolphin-core-upstream.js",
       "hashMode": "lf-normalized",
-      "size": 290035,
-      "sha256": "fd0d10a3a207865c735bb4615c3e5ded1a251f215e69ce0df6ca4a4a1be4e000"
+      "size": 290262,
+      "sha256": "3010a924994b7f09a9172c90cb4f30e82e1f578df3d99bbf389ae1e736035340"
     },
     {
       "path": "cores/dolphin/dolphin-core-upstream.wasm",
-      "size": 13262577,
-      "sha256": "c84934e9f907918dbaefea1df8ea2c264cc859a6fc429ea339d4967ca28c7508"
+      "size": 13263560,
+      "sha256": "df18582abe897d69b3eb4e0981007b4c062f358ae267be3ac18952bbe9da92bf"
     }
   ],
   "contractSources": [
@@ -86,8 +86,8 @@
     {
       "path": "src/core-host.js",
       "hashMode": "lf-normalized",
-      "size": 102918,
-      "sha256": "707e1d0a7da935b342f41daa0333d068b48e6390a2397320c1d61e3d8e0dddf2"
+      "size": 103268,
+      "sha256": "21f7cc32aa5b3770e734b7e73b203b37f0fe737c15649b3e9101fdf255f3c063"
     },
     {
       "path": "src/diagnostic-log-filter.js",
@@ -140,8 +140,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 798159,
-      "sha256": "14320ad22260a68bac4381df01b50c93e0331d841214a013051ba0eefa8843c7"
+      "size": 799481,
+      "sha256": "66b2c9c83522ec01b7700c392c5bb0a197829e3351c6e37aa9ae0143e3ae8f51"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",
@@ -164,8 +164,8 @@
     {
       "path": "src/upstream-worker-adapter.js",
       "hashMode": "lf-normalized",
-      "size": 63284,
-      "sha256": "1d9e2deb6f451fc2671b410d7afe249ea2ad56ff9cdb59c96c6d0ebb9725b81e"
+      "size": 63459,
+      "sha256": "e6691422325c4dce636714d836f1e45c32f58376c544604578177dc8ca141fb1"
     },
     {
       "path": "src/upstream-worker-protocol.js",
@@ -512,6 +512,8 @@
     "_DolphinWeb_SetThrottleSleepMarginUs",
     "_DolphinWeb_SetThrottleSleepStepUs",
     "_DolphinWeb_SetWidescreen",
+    "_DolphinWeb_StaleXfbHeld",
+    "_DolphinWeb_StaleXfbHeldPreload",
     "_DolphinWeb_ThrottleSleepCascade",
     "_DolphinWeb_ThrottleSleepStepUs",
     "_DolphinWeb_UnverifyRegions",
