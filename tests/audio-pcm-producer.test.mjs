@@ -176,3 +176,59 @@ test("0186's queue time: 4,000 µs a granule for the 32 kHz DMA FIFO, 2,666 at 4
   const fn = core.slice(core.indexOf("double DolphinWeb_AudioQueuedMs()"));
   assert.match(fn.slice(0, fn.indexOf("\n}\n")), /if \(!s_runtime_initialized\)\n\s*return -1;[\s\S]*: -1;/);
 });
+
+test("trace: off until started, one sample per period with the pulls since the last, skips and fills from the core, drained", () => {
+  const ring = createAudioPcmRing();
+  const f = fixture();
+  let skips = 3, fills = 7;
+  f.core.audioQueueEvents = (which) => (which === 0 ? skips : fills);
+  f.core.audioQueuedMs = () => 12.34;
+  f.producer.install(ring.sab, { muted: false, targetFrames: 1920 });
+  consumeAudioPcm(ring, new Float32Array(1), new Float32Array(1));
+  // not started: nothing recorded
+  f.producer.traceTick(0);
+  assert.deepEqual(f.producer.traceDrain(), { samples: [], lost: 0, active: false });
+  assert.deepEqual(f.producer.traceStart({ everyMs: 100, max: 2 }), { started: true, everyMs: 100, max: 2 });
+  f.producer.refill(1);
+  f.producer.traceTick(1000);
+  f.producer.traceTick(1050); // within the period: no sample
+  skips = 5;
+  f.producer.traceTick(1100);
+  f.producer.traceTick(1200);
+  const out = f.producer.traceDrain();
+  assert.equal(out.samples.length, 2, "max 2 kept");
+  assert.equal(out.lost, 1);
+  const [a, b] = out.samples;
+  assert.equal(a.skips, 5);
+  assert.equal(a.fills, 7);
+  assert.equal(a.mixerMs, 12.3);
+  assert.equal(a.target, AUDIO_PCM_TARGET_FRAMES);
+  assert.equal(a.floor, 1920);
+  assert.equal(b.asked, 0, "pulls counted since the previous sample");
+  assert.deepEqual(f.producer.traceDrain({ stop: true }).samples, []);
+  assert.equal(f.producer.trace, null);
+});
+
+test("trace: a pull's frames, its size and an empty mix land in the next sample", () => {
+  const ring = createAudioPcmRing();
+  const f = fixture();
+  f.producer.install(ring.sab, { muted: false });
+  consumeAudioPcm(ring, new Float32Array(1), new Float32Array(1));
+  f.producer.traceStart({ everyMs: 100 });
+  f.producer.refill(1);
+  f.producer.traceTick(0);
+  const [s] = f.producer.traceDrain().samples;
+  assert.equal(s.pulls, 1);
+  assert.equal(s.asked, Math.min(4096, AUDIO_PCM_TARGET_FRAMES));
+  assert.equal(s.got, s.asked);
+  assert.equal(s.maxPull, s.asked);
+  assert.equal(s.empty, 0);
+  assert.equal(s.skips, null, "a core without patch 0212");
+});
+
+test("worker: validationAudioTrace is harness-gated and reaches the producer; the producer reads the core's queue events", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const worker = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
+  assert.match(worker, /case "validationAudioTrace":\n\s+\/\/[^\n]*\n\s+if \(!harnessEnabled\) return \{ error: "harness hooks are off" \};/);
+  assert.match(worker, /audioQueueEvents: api\?\.audioQueueEvents,\n\s+heapU8: moduleInstance\?\.HEAPU8,/);
+});

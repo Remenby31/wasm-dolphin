@@ -972,6 +972,7 @@ const workletAudioProducer = new AudioPcmProducer({
     audioChannels: api?.audioChannels,
     audioSampleRate: api?.audioSampleRate,
     audioQueuedMs: api?.audioQueuedMs,
+    audioQueueEvents: api?.audioQueueEvents,
     heapU8: moduleInstance?.HEAPU8,
   }),
   recordMix: (requested, returned, durationMs) =>
@@ -2446,6 +2447,12 @@ async function handleMessage(type, payload) {
             trimPpm: typeof moduleInstance?._DolphinWeb_ThrottleRatePpm === "function" ? moduleInstance._DolphinWeb_ThrottleRatePpm() : null,
             phaseLock: wgpuViLock ? { ...wgpuViLock.stats } : null }
         : { unavailable: "core without patch 0212" };
+    case "validationAudioTrace":
+      // the AudioWorklet producer's 100 ms trace (audio-pcm-producer.js)
+      if (!harnessEnabled) return { error: "harness hooks are off" };
+      if (payload?.action === "start") return workletAudioProducer.traceStart({ everyMs: Number(payload.everyMs) || 100 });
+      if (payload?.action === "drain" || payload?.action === "stop") return workletAudioProducer.traceDrain({ stop: payload.action === "stop" });
+      return { error: `validationAudioTrace: unknown action ${payload?.action}` };
     case "validationFlickerWatch":
       return harnessFlickerRequest(payload);
     case "validationUniqueFrames":

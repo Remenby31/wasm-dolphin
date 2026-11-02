@@ -68,8 +68,8 @@
     {
       "path": "src/audio-pcm-producer.js",
       "hashMode": "lf-normalized",
-      "size": 8735,
-      "sha256": "327b19af563461353d5ed7a0e871c3f09af3ba497d1f247416348de5f72e2cf5"
+      "size": 10966,
+      "sha256": "37d2567710d380f1e71be5dd8a66f7b408b4f6424ccabff2f407380b9ce3ee8e"
     },
     {
       "path": "src/audio-worklet-processor.js",
@@ -140,8 +140,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 787524,
-      "sha256": "247b3fc396cab01c805227f3f94206f0acc27487bcc263bf98745aa0044dd30f"
+      "size": 788099,
+      "sha256": "a706dd075f533081102b553e71878614fd1c5c5cfb6ffba6db7c0adee834f7e0"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",
@@ -724,6 +724,7 @@
       "streamCaptureStats",
       "streamCaptureStop",
       "validationAotCacheProbe",
+      "validationAudioTrace",
       "validationBeginWgpuRendererProbeMeasurement",
       "validationCaptureAtVi",
       "validationDropSampler",

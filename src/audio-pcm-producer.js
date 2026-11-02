@@ -110,6 +110,50 @@ export class AudioPcmProducer {
     return true;
   }
 
+  // Harness trace (validationAudioTrace): every `everyMs` one sample of the
+  // ring's target and fill, its underruns, the mixer's queue and its
+  // overflow skips and underrun fills (patch 0212), and the frames pulled
+  // since the previous sample (asked, returned, the largest single pull).
+  // Off unless started; at most `max` samples kept (the oldest dropped).
+  traceStart({ everyMs = 100, max = 6000 } = {}) {
+    this.trace = { everyMs, max, samples: [], lost: 0, nextAt: 0, asked: 0, got: 0, pulls: 0, maxPull: 0, empty: 0 };
+    return { started: true, everyMs, max };
+  }
+
+  traceDrain({ stop = false } = {}) {
+    const t = this.trace;
+    if (!t) return { samples: [], lost: 0, active: false };
+    const out = { samples: t.samples, lost: t.lost, everyMs: t.everyMs, active: !stop };
+    t.samples = [];
+    t.lost = 0;
+    if (stop) this.trace = null;
+    return out;
+  }
+
+  traceTick(now) {
+    const t = this.trace;
+    if (!t || now < t.nextAt) return;
+    t.nextAt = now + t.everyMs;
+    const ring = this.ring;
+    const core = this.api();
+    const events = core?.audioQueueEvents;
+    const queuedMs = core?.audioQueuedMs?.();
+    t.samples.push({
+      t: performance.timeOrigin + now,
+      target: Math.round(this.targetFrames ?? 0),
+      floor: this.floorFrames ?? null,
+      fill: ring ? audioPcmAvailableFrames(ring.header) : null,
+      underruns: ring ? Atomics.load(ring.header, AUDIO_PCM_HEADER.UNDERRUN_EVENTS) >>> 0 : null,
+      mixerMs: Number.isFinite(queuedMs) && queuedMs >= 0 ? Math.round(queuedMs * 10) / 10 : null,
+      skips: typeof events === "function" ? events(0) : null,
+      fills: typeof events === "function" ? events(1) : null,
+      asked: t.asked, got: t.got, pulls: t.pulls, maxPull: t.maxPull, empty: t.empty,
+      muted: this.muted,
+    });
+    t.asked = t.got = t.pulls = t.maxPull = t.empty = 0;
+    if (t.samples.length > t.max) { t.samples.shift(); t.lost += 1; }
+  }
+
   timerTick() {
     const now = performance.now();
     const gapMs = this.lastTimerAt ? now - this.lastTimerAt : 0;
@@ -122,6 +166,7 @@ export class AudioPcmProducer {
     this.lastTimerAt = now;
     this.adapt(now, gapMs);
     this.refill(2);
+    if (this.trace) this.traceTick(now);
   }
 
   // The ring's target between the page's floor and 120 ms: +20 ms at each
@@ -175,6 +220,13 @@ export class AudioPcmProducer {
       const started = performance.now();
       const mixed = Math.max(0, Math.min(requested, core.mixAudio(requested) | 0));
       this.recordMix(requested, mixed, performance.now() - started);
+      if (this.trace) {
+        this.trace.asked += requested;
+        this.trace.got += mixed;
+        this.trace.pulls += 1;
+        this.trace.maxPull = Math.max(this.trace.maxPull, requested);
+        if (mixed <= 0) this.trace.empty += 1;
+      }
       if (mixed <= 0) {
         Atomics.add(ring.header, AUDIO_PCM_HEADER.PRODUCER_EMPTY_MIXES, 1);
         break;
