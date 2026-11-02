@@ -147,6 +147,7 @@ export function consumeAudioPcm(
     result.consumedFrames = 0;
     result.underrunFrames = 0;
     result.flushed = true;
+    if (result.frac) result.frac = 0;
     result.epoch = epoch;
     return result;
   }

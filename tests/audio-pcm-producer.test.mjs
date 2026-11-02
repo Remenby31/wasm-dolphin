@@ -273,7 +273,7 @@ test("consumer: at 0 ppm the plain copy; at +5000 ppm 0.5 % more input per outpu
 test("producer rate: proportional to the latency's excess (ring and mixer) over the target, smoothed, a dead band, bounded, slewed", () => {
   const ring = createAudioPcmRing();
   const f = fixture();
-  f.producer.install(ring.sab, { muted: false, rateControl: true, mixerCapMs: 40 });
+  f.producer.install(ring.sab, { muted: false, rateControl: true });
   const setFill = (frames) => { Atomics.store(ring.header, AUDIO_PCM_HEADER.READ_INDEX, 0); Atomics.store(ring.header, AUDIO_PCM_HEADER.WRITE_INDEX, frames); };
   f.producer.targetFrames = 1920;
   setFill(1920 + 48); // 1 ms over: inside the dead band
@@ -313,7 +313,7 @@ test("producer mixer bounds: never more than the queue holds while the ring has 
   const f = fixture();
   let queued = 20;
   f.core.audioQueuedMs = () => queued;
-  f.producer.install(ring.sab, { muted: false, rateControl: true, mixerCapMs: 40 });
+  f.producer.install(ring.sab, { muted: false, rateControl: true });
   // ring at 60 ms: at most the queue less a granule (16 ms), at least down to 8 ms (12 ms)
   assert.deepEqual(f.producer.mixerBounds(f.core, 60 * 48), { maxFrames: 16 * 48, minFrames: 12 * 48 });
   // ring nearly empty: the mixer may loop (no cap)
@@ -360,7 +360,7 @@ function simulate({ rateControl, speedAt, seconds = 30, capMs = 40, rateMaxPpm, 
     },
   };
   const producer = new AudioPcmProducer({ api: () => core, setTimer: () => 1, clearTimer() {} });
-  producer.install(ring.sab, { muted: false, targetFrames: 1920, rateControl, mixerCapMs: capMs, rateMaxPpm });
+  producer.install(ring.sab, { muted: false, targetFrames: 1920, rateControl, rateMaxPpm });
   const L = new Float32Array(128), R = new Float32Array(128), res = {};
   consumeAudioPcm(ring, L, R, 128, res); // ack the epoch
   let now = 0, nextTick = 0, nextQuantum = 0, overMs = 0, ticks = 0;
@@ -400,7 +400,7 @@ test("model of the load: a 3 s slow core then a catch-up, and the ring's descent
   assert.ok(onLate.skips <= Math.max(1, offLate.skips / 4) && onLate.fills <= offLate.fills, JSON.stringify({ onLate, offLate }));
 });
 
-test("plumbing: ?audiorate reaches the producer with the boot's AudioBufferSize", async () => {
+test("plumbing: ?audiorate and ?audioratemax reach the producer", async () => {
   const { readFile } = await import("node:fs/promises");
   const read = (p) => readFile(new URL(p, import.meta.url), "utf8");
   const [audio, adapter, worker] = await Promise.all([read("../src/audio.js"), read("../src/upstream-worker-adapter.js"), read("../src/upstream-discio-worker.js")]);
@@ -411,13 +411,13 @@ test("plumbing: ?audiorate reaches the producer with the boot's AudioBufferSize"
   assert.match(worker, /rateMaxPpm: Number\(payload\.rateMaxPpm\) \|\| undefined,/);
   assert.match(adapter, /async configureAudioWorklet\(\{ enabled, muted, sab, targetFrames, rateControl = false, rateMaxPpm = 5000 \}\)/);
   assert.match(adapter, /rateControl: Boolean\(rateControl\),/);
-  assert.match(worker, /rateControl: Boolean\(payload\.rateControl\),\n\s+mixerCapMs: configuredAudioBufferMs > 0 \? configuredAudioBufferMs : 80,/);
-  assert.match(worker, /configuredAudioBufferMs = api\.setAudioBufferMs && Number\(audioBufferMs\) > 0 \? Number\(audioBufferMs\) : 0;/);
+  assert.match(worker, /rateControl: Boolean\(payload\.rateControl\),\n\s+rateMaxPpm: Number\(payload\.rateMaxPpm\) \|\| undefined,/);
+  assert.doesNotMatch(worker, /mixerCapMs/);
 });
 
 test("rate bound: 0.5 % by default, up to the 1 % ceiling when asked, never above", () => {
   const ring = createAudioPcmRing();
-  const mk = (opts) => { const f = fixture(); f.producer.install(ring.sab, { muted: false, rateControl: true, mixerCapMs: 40, ...opts }); return f.producer; };
+  const mk = (opts) => { const f = fixture(); f.producer.install(ring.sab, { muted: false, rateControl: true, ...opts }); return f.producer; };
   const fill = () => { Atomics.store(ring.header, AUDIO_PCM_HEADER.READ_INDEX, 0); Atomics.store(ring.header, AUDIO_PCM_HEADER.WRITE_INDEX, 8000); };
   for (const [opts, bound] of [[{}, 5000], [{ rateMaxPpm: 10000 }, 10000], [{ rateMaxPpm: 50000 }, 10000]]) {
     const p = mk(opts);
@@ -441,7 +441,7 @@ test("0216: pulls sized on the shorter FIFO, the overflow guard on the longer, a
   let dma = 6, streaming = 30;
   f.core.audioQueuedMs = () => Math.max(dma, streaming);
   f.core.audioQueuedFifoMs = (which) => (which === 0 ? dma : which === 1 ? streaming : -1);
-  f.producer.install(ring.sab, { muted: false, rateControl: true, mixerCapMs: 40 });
+  f.producer.install(ring.sab, { muted: false, rateControl: true });
   assert.deepEqual(f.producer.mixerQueues(f.core), { lo: 6, hi: 30, dma: 6, streaming: 30 });
   // at most the DMA's 6 ms less a granule; the streaming's 30 ms asks for 22: capped at 2
   const b = f.producer.mixerBounds(f.core, 60 * 48);
@@ -466,4 +466,22 @@ test("0216 export: per FIFO, read-only, beside 0186; the worker reaches it", asy
   assert.match(patch, /\+  u64 GetStreamingQueuedMicroseconds\(\) const \{ return m_streaming_mixer\.QueuedMicroseconds\(\); \}/);
   assert.doesNotMatch(patch, /Mixer\.cpp/, "the mixer itself is unchanged");
   assert.match(worker, /audioQueuedFifoMs:\n\s+typeof module\._DolphinWeb_AudioQueuedFifoMs === "function"/);
+});
+
+test("review of #430: an epoch flush drops the resampler's fraction; the trace keeps an unknown FIFO null", () => {
+  const ring = createAudioPcmRing();
+  Atomics.store(ring.header, AUDIO_PCM_HEADER.STATE, AUDIO_PCM_STATE_RUNNING);
+  const res = { frac: 0.4 };
+  Atomics.add(ring.header, AUDIO_PCM_HEADER.EPOCH, 1);
+  consumeAudioPcm(ring, new Float32Array(4), new Float32Array(4), 4, res);
+  assert.equal(res.flushed, true);
+  assert.equal(res.frac, 0);
+  const f = fixture();
+  f.core.audioQueuedFifoMs = () => -1;
+  f.producer.install(createAudioPcmRing().sab, { muted: false });
+  f.producer.traceStart({ everyMs: 1 });
+  f.producer.traceTick(10);
+  const [s] = f.producer.traceDrain().samples;
+  assert.equal(s.dmaMs, null);
+  assert.equal(s.streamingMs, null);
 });

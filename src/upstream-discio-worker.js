@@ -964,8 +964,6 @@ const causalAudioStats = {
   workerMixTotalMs: 0,
   workerMixMaxMs: 0
 };
-// the mixer's AudioBufferSize set at the boot (0: the core's default)
-let configuredAudioBufferMs = 0;
 const workletAudioProducer = new AudioPcmProducer({
   api: () => ({
     mixAudio: api?.mixAudio,
@@ -2865,10 +2863,7 @@ async function handleMessage(type, payload) {
       const result = workletAudioProducer.install(payload.sab, {
         muted: Boolean(payload.muted),
         targetFrames: Number(payload.targetFrames) || undefined,
-        // ?audiorate=1: the mixer's queue is the AudioBufferSize the boot
-        // set (0: the core's default, 80 ms)
         rateControl: Boolean(payload.rateControl),
-        mixerCapMs: configuredAudioBufferMs > 0 ? configuredAudioBufferMs : 80,
         rateMaxPpm: Number(payload.rateMaxPpm) || undefined,
       });
       if (result.active) api?.setAudioMuted?.(payload.muted ? 1 : 0);
@@ -3719,7 +3714,6 @@ async function loadCore({
   // ?audiobuffer: the mixer's queue (0: Dolphin's default, 80 ms); a core
   // without the setter keeps its default
   if (Number(audioBufferMs) > 0) api.setAudioBufferMs?.(Number(audioBufferMs));
-  configuredAudioBufferMs = api.setAudioBufferMs && Number(audioBufferMs) > 0 ? Number(audioBufferMs) : 0;
   api.setPresentationScale?.(Number(presentationScale));
   api.setFastSoftwareRaster?.(Math.min(3, Math.max(0, Number(fastSoftwareRaster) || 0)));
   api.setSoftwareTevHotCaseMode?.(softwareTevHotCaseMode);

@@ -76,7 +76,7 @@ export class AudioPcmProducer {
   // targetFrames: the ring's fill the producer keeps (the AudioWorklet
   // path's latency, before the mixer's own queue); 120 ms by default, the
   // page passes ?audiolead. Playback starts at half of it (at most 50 ms).
-  install(sab, { muted = true, targetFrames = AUDIO_PCM_TARGET_FRAMES, rateControl = false, mixerCapMs = 80, rateMaxPpm = AUDIO_PCM_MAX_RATE_PPM } = {}) {
+  install(sab, { muted = true, targetFrames = AUDIO_PCM_TARGET_FRAMES, rateControl = false, rateMaxPpm = AUDIO_PCM_MAX_RATE_PPM } = {}) {
     this.requestedTransport = "worklet";
     try {
       const ring = validateAudioPcmRing(openAudioPcmRing(sab));
@@ -95,7 +95,6 @@ export class AudioPcmProducer {
       this.calmSince = 0;
       this.underrunsSeen = 0;
       this.rateControl = Boolean(rateControl);
-      this.mixerCapMs = Math.max(16, Number(mixerCapMs) || 80);
       this.rateMaxPpm = Math.max(0, Math.min(AUDIO_PCM_RATE_CEILING_PPM, Math.round(Number(rateMaxPpm) || AUDIO_PCM_MAX_RATE_PPM)));
       this.ratePpm = 0;
       this.excessMs = null;
@@ -169,6 +168,8 @@ export class AudioPcmProducer {
     const core = this.api();
     const events = core?.audioQueueEvents;
     const queuedMs = core?.audioQueuedMs?.();
+    // a FIFO's queue, null when unknown (-1, or a core without 0216)
+    const fifoMs = (which) => { const v = core?.audioQueuedFifoMs?.(which); return Number.isFinite(v) && v >= 0 ? Math.round(v * 10) / 10 : null; };
     t.samples.push({
       t: performance.timeOrigin + now,
       target: Math.round(this.targetFrames ?? 0),
@@ -176,8 +177,8 @@ export class AudioPcmProducer {
       fill: ring ? audioPcmAvailableFrames(ring.header) : null,
       underruns: ring ? Atomics.load(ring.header, AUDIO_PCM_HEADER.UNDERRUN_EVENTS) >>> 0 : null,
       mixerMs: Number.isFinite(queuedMs) && queuedMs >= 0 ? Math.round(queuedMs * 10) / 10 : null,
-      dmaMs: Number.isFinite(core?.audioQueuedFifoMs?.(0)) ? Math.round(core.audioQueuedFifoMs(0) * 10) / 10 : null,
-      streamingMs: Number.isFinite(core?.audioQueuedFifoMs?.(1)) ? Math.round(core.audioQueuedFifoMs(1) * 10) / 10 : null,
+      dmaMs: fifoMs(0),
+      streamingMs: fifoMs(1),
       skips: typeof events === "function" ? events(0) : null,
       fills: typeof events === "function" ? events(1) : null,
       asked: t.asked, got: t.got, pulls: t.pulls, maxPull: t.maxPull, empty: t.empty,
@@ -274,7 +275,10 @@ export class AudioPcmProducer {
     if (!q) return null;
     return {
       // never more than the shorter FIFO holds while the ring has slack (a
-      // pull drains both at the same rate: more empties it into a gap fill)
+      // pull drains both at the same rate: more empties it into a gap fill).
+      // This cap comes first: when the FIFOs drift far apart (more than about
+      // AudioBufferSize less MIXER_HIGH_MS), the longer can still overflow,
+      // a skip in the one ahead rather than a loop in the one behind.
       maxFrames: fill >= RING_LOW_MS * 48 ? Math.max(0, Math.floor((q.lo - MIXER_GRANULE_MS) * 48)) : Infinity,
       // the longer back down once over MIXER_HIGH_MS (it overflows first)
       minFrames: q.hi > MIXER_HIGH_MS ? Math.round((q.hi - MIXER_LOW_MS) * 48) : 0,
