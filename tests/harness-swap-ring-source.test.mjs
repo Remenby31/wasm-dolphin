@@ -2,9 +2,17 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 // Patch 0214 (harness pipeline diag): the swap ring costs nothing without the
-// harness, and the FIFO lag is read in patch 0211's order.
+// harness, and the FIFO lag is read in patch 0211's order. Mode off (no
+// harness, or the harness without { pipeline: true }) is the same core code
+// as main: no static data is added (the ring is allocated at the first
+// enable), so the region translator's output is byte for byte main's, which
+// tests/regshape-x64.test.mjs ("mode off translates byte for byte as before
+// 0184", a digest over translated code that embeds static addresses) checks
+// on the CI core.
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
@@ -36,8 +44,13 @@ test("swap ring: nothing is written unless the harness hooks AND the swap ring a
   const record = body(discio, "void DolphinWeb_HarnessRecordSwap(");
   // the first statement: the gate
   assert.match(record, /^\{\s+if \(!DolphinWeb_HarnessSwapsEnabled\(\)\)\s+return;/);
-  // the ring is written in that function only
-  assert.equal(discio.match(/s_harness_swap_ring\[/g).length, 1);
+  // the ring is written in that function only, and only once allocated
+  assert.match(record, /DolphinWebHarnessSwapEntry\* ring = s_harness_swap_ring\.load\(std::memory_order_acquire\);\s+if \(!ring\)\s+return;/);
+  assert.equal(discio.match(/ring\[head % HARNESS_SWAP_RING_CAPACITY\]/g).length, 1);
+  // no static array: allocated at the first enable, before the flag is released
+  assert.doesNotMatch(discio, /std::array<DolphinWebHarnessSwapEntry/);
+  const enable = body(discio, "void DolphinWeb_HarnessSwapsEnable(int enabled)");
+  assert.ok(enable.indexOf("new DolphinWebHarnessSwapEntry[") < enable.indexOf("s_harness_swaps_enabled.store("), "the ring before the flag");
   assert.equal(discio.match(/s_harness_swap_head\.store\(/g).length, 1);
 });
 
@@ -78,4 +91,75 @@ sourceContractTest("patch 0214: the FIFO lag is read in 0211's order, consumed f
   // ViSwap reports a duplicate (no new picture) to the recorded swap
   assert.match(present, /bool Presenter::ViSwap\(/);
   assert.match(body(present, "bool Presenter::ViSwap("), /return is_duplicate;\s*\}$/);
+});
+
+const worker = readFileSync(join(root, "src/upstream-discio-worker.js"), "utf8");
+
+test("worker: the ring's address is read at each timeline read, after the enable, never kept; null is no ring", () => {
+  const read = body(worker, "function readHarnessTimeline()");
+  // the address comes from the core inside the read, and a null one is "no ring"
+  assert.match(read, /!m\._DolphinWeb_HarnessSwapRing\(\) \? "swap ring not allocated yet/);
+  assert.match(read, /ptr: m\._DolphinWeb_HarnessSwapRing\(\),/);
+  // no copy of the address anywhere else in the worker
+  assert.equal(worker.match(/_DolphinWeb_HarnessSwapRing\(\)/g).length, 2);
+  assert.doesNotMatch(worker, /=\s*(moduleInstance|m)\??\._DolphinWeb_HarnessSwapRing\(\)/);
+  // no ring: swaps null (the analysis then has no swaps: pipeline false), never zeros
+  assert.match(read, /let swaps = null;\s+if \(!swapsWhy\)/);
+});
+
+// The ring's own functions compiled natively, as the core has them:
+// enable -> disable -> enable keeps one allocation; nothing is written before
+// the flag, nor with the harness hooks off.
+const compilerOk = spawnSync("clang++", ["--version"], { encoding: "utf8" }).status === 0;
+test("swap ring, native: allocated once; enable -> disable -> enable keeps the address; no write before the flag", { skip: compilerOk ? false : "requires clang++" }, () => {
+  const from = discio.indexOf("struct DolphinWebHarnessSwapEntry");
+  const end = discio.indexOf("\n", discio.indexOf("DolphinWeb_HarnessSwapRingHead()"));
+  assert.ok(from > 0 && end > from, "swap ring seam");
+  const dir = mkdtempSync(join(tmpdir(), "swap-ring-"));
+  try {
+    writeFileSync(join(dir, "main.cpp"), String.raw`
+#include <array>
+#include <atomic>
+#include <cstdint>
+#include <cstdio>
+#define EMSCRIPTEN_KEEPALIVE
+static std::atomic<int> s_harness_enabled{0};
+${discio.slice(from, end)}
+int main() {
+  int fail = 0;
+#define CHECK(c) do { if (!(c)) { std::printf("FAIL %d: %s\n", __LINE__, #c); fail = 1; } } while (0)
+  s_harness_enabled = 1;
+  CHECK(DolphinWeb_HarnessSwapRing() == nullptr);
+  DolphinWeb_HarnessRecordSwap(1, 1.0, 0, 0, 1);  // before any enable: nothing
+  CHECK(DolphinWeb_HarnessSwapRingHead() == 0);
+  DolphinWeb_HarnessSwapsEnable(1);
+  DolphinWebHarnessSwapEntry* first = DolphinWeb_HarnessSwapRing();
+  CHECK(first != nullptr);
+  CHECK(first[0].seq.load() == 0);
+  DolphinWeb_HarnessRecordSwap(7, 2.0, 3, 96, 1);
+  CHECK(DolphinWeb_HarnessSwapRingHead() == 1);
+  CHECK(first[0].seq.load() == 2 && first[0].vi_since_boot == 7 && first[0].behind_chunks == 3 && first[0].fifo_bytes == 96 && first[0].flags == 1);
+  DolphinWeb_HarnessSwapsEnable(0);
+  DolphinWeb_HarnessRecordSwap(8, 3.0, 0, 0, 1);  // disabled: nothing
+  CHECK(DolphinWeb_HarnessSwapRingHead() == 1);
+  CHECK(DolphinWeb_HarnessSwapRing() == first);
+  DolphinWeb_HarnessSwapsEnable(1);
+  CHECK(DolphinWeb_HarnessSwapRing() == first);  // reused, never reallocated
+  s_harness_enabled = 0;
+  DolphinWeb_HarnessRecordSwap(9, 4.0, 0, 0, 1);  // harness hooks off: nothing
+  CHECK(DolphinWeb_HarnessSwapRingHead() == 1);
+  s_harness_enabled = 1;
+  DolphinWeb_HarnessRecordSwap(9, 4.0, 0xFFFFFFFFu, 0xFFFFFFFFu, 3);
+  CHECK(DolphinWeb_HarnessSwapRingHead() == 2 && first[1].seq.load() == 4 && first[1].behind_chunks == 0xFFFFFFFFu);
+  return fail;
+}
+`);
+    const exe = join(dir, "ring");
+    const c = spawnSync("clang++", ["-std=c++20", "-Wall", "-Werror", "-Wno-unused-function", join(dir, "main.cpp"), "-o", exe], { encoding: "utf8" });
+    assert.equal(c.status, 0, c.stderr);
+    const r = spawnSync(exe, { encoding: "utf8" });
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
