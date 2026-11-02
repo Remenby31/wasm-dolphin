@@ -1,19 +1,19 @@
 {
   "schemaVersion": 1,
   "abiVersion": 1,
-  "coreId": "sha256:df18582abe897d69b3eb4e0981007b4c062f358ae267be3ac18952bbe9da92bf",
+  "coreId": "sha256:11aa00a208e32d062a32cc216387687dd25876e7a660a3ceb2e5fbe4b021657c",
   "upstreamCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
   "artifacts": [
     {
       "path": "cores/dolphin/dolphin-core-upstream.js",
       "hashMode": "lf-normalized",
-      "size": 290262,
-      "sha256": "3010a924994b7f09a9172c90cb4f30e82e1f578df3d99bbf389ae1e736035340"
+      "size": 291345,
+      "sha256": "850630b550e632c2a858809af16ff8b749bda4bc6fae9e6318f5f99419f7d4e0"
     },
     {
       "path": "cores/dolphin/dolphin-core-upstream.wasm",
-      "size": 13263560,
-      "sha256": "df18582abe897d69b3eb4e0981007b4c062f358ae267be3ac18952bbe9da92bf"
+      "size": 13265023,
+      "sha256": "11aa00a208e32d062a32cc216387687dd25876e7a660a3ceb2e5fbe4b021657c"
     }
   ],
   "contractSources": [
@@ -412,6 +412,7 @@
     "_DolphinWeb_AotTranslate",
     "_DolphinWeb_AotTranslateForTest",
     "_DolphinWeb_AotUnverifyForTest",
+    "_DolphinWeb_AudioQueueEvents",
     "_DolphinWeb_AudioQueuedMs",
     "_DolphinWeb_AxHleStats",
     "_DolphinWeb_DirectPadBlock",
@@ -444,6 +445,12 @@
     "_DolphinWeb_HarnessFifoRecordState",
     "_DolphinWeb_HarnessLoadGeneration",
     "_DolphinWeb_HarnessPcAddress",
+    "_DolphinWeb_HarnessRecordSwap",
+    "_DolphinWeb_HarnessSwapRing",
+    "_DolphinWeb_HarnessSwapRingCapacity",
+    "_DolphinWeb_HarnessSwapRingHead",
+    "_DolphinWeb_HarnessSwapsEnable",
+    "_DolphinWeb_HarnessSwapsEnabled",
     "_DolphinWeb_HarnessViRing",
     "_DolphinWeb_HarnessViRingCapacity",
     "_DolphinWeb_HarnessViRingHead",
@@ -508,12 +515,14 @@
     "_DolphinWeb_SetGpuSpinBudget",
     "_DolphinWeb_SetJitTimeStatsEnabled",
     "_DolphinWeb_SetPresentOnArrival",
+    "_DolphinWeb_SetThrottleRatePpm",
     "_DolphinWeb_SetThrottleSleepCascade",
     "_DolphinWeb_SetThrottleSleepMarginUs",
     "_DolphinWeb_SetThrottleSleepStepUs",
     "_DolphinWeb_SetWidescreen",
     "_DolphinWeb_StaleXfbHeld",
     "_DolphinWeb_StaleXfbHeldPreload",
+    "_DolphinWeb_ThrottleRatePpm",
     "_DolphinWeb_ThrottleSleepCascade",
     "_DolphinWeb_ThrottleSleepStepUs",
     "_DolphinWeb_UnverifyRegions",
