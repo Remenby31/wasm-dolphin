@@ -10,6 +10,7 @@
 //   region    decodeRegionStats (patch 0075, lib/jit-region-stats.mjs)
 //   ax        decodeAxStats (patch 0099, lib/ax-hle-stats.mjs)
 //   mem       decodeMemStats (patch 0104, lib/mem-access-stats.mjs)
+//   diag      decodeCpuThreadDiag (patch 0213, lib/cpu-thread-diag.mjs)
 //   progress  validationReadCoreProgress: { coreTicks, coreTicksPerSecond }
 // Any of them may be null or { error } (a core without the export, a torn
 // read): the fields that need it are then null, with the reason in `why`.
@@ -47,6 +48,19 @@
 // axHle is NESTED, never added: the AX command list runs inside the DSP
 // mailbox MMIO write from guest code, so its time is already in blocks or
 // regions (which of the two is not known).
+// The CPU-thread diag (0213) cuts `other` (all NESTED, never added; null on a
+// core without it): advance (CoreTiming::Advance from the slice loop, its
+// event callbacks inside), throttle (Throttle's bookkeeping, inside advance:
+// the VI event), sliceSetup (the slice set-up, ServiceRegionInstalls less
+// its installs, the slice close-out), retryDeferred
+// (RetryDeferredWasmBlocks), and otherDirect, the core's own count of the
+// time outside the slice loops less sleep, installs and FlushGpu waits (the
+// four parts add up to it by construction). staleCheck (regions re-verified,
+// invalidated, their state cleared) is nested where it ran: blocks or
+// events. Per row, cpuThread.coverageOfOther = (advance + sliceSetup +
+// retryDeferred) / other, controlOfOther = otherDirect / other: what other
+// holds beyond them is CPU-thread time outside the slice loop's iterations
+// (or the edges of the reads).
 //
 // Sampling: with DolphinWeb_JitRegionStats(sampleEvery > 0) the core times
 // EVERY region call, EVERY ExecuteOneBlock and every Idle; only the block
@@ -67,13 +81,24 @@
 // Edges: windowUs and guestTicks move at each Throttle (once per VI-ish
 // event), the region times at each slice, the reads are a few ms apart: a
 // 1 s window carries ~1-2 % of edge noise, which lands in `other`.
+import { cpuThreadDiagDelta } from "./cpu-thread-diag.mjs";
 import { KINDS } from "./mem-access-stats.mjs";
 import { round } from "./stats.mjs";
 
 // The parts of hostMs, in table order; they add up to hostMs.
 export const PARTS = ["regions", "blocksDispatch", "interpreter", "idle", "installs", "other", "sleep", "flushGpuWait"];
 // Nested in other parts (shown, never added).
-export const NESTED = { axHle: "blocksDispatch+regions (the DSP mailbox MMIO write)" };
+export const NESTED = {
+  axHle: "blocksDispatch+regions (the DSP mailbox MMIO write)",
+  advance: "other (CoreTiming::Advance and its events, 0213)",
+  throttle: "other, inside advance (the VI event, 0213)",
+  sliceSetup: "other (slice set-up, region service, close-out, 0213)",
+  retryDeferred: "other (RetryDeferredWasmBlocks, 0213)",
+  staleCheck: "blocksDispatch or other, where the check ran (0213)",
+  otherDirect: "other (the core's own count, 0213)"
+};
+// The 0213 parts whose sum is compared with other (coverageOfOther).
+export const OTHER_PARTS = ["advance", "sliceSetup", "retryDeferred"];
 export const SPLIT_NOTE = "blocks/dispatch as the core splits them (0075): unreliable (the unsampled lookups stay in blocks, a sampled call's block time is clamped into dispatch); their sum blocksDispatch is exact";
 export const CATEGORIES = [...PARTS, ...Object.keys(NESTED)];
 
@@ -219,7 +244,8 @@ export function cpuWindowBreakdown(start, end) {
     other: null,
     sleep,
     flushGpuWait,
-    axHle: null
+    axHle: null,
+    advance: null, throttle: null, sliceSetup: null, retryDeferred: null, staleCheck: null, otherDirect: null
   };
   if (timed && ms.interpreter == null) why.interpreter = "the core does not separate the interpreter (interpTimeMs did not move): interpreted instructions are in blocks";
   // other: busy less every attributed part; the interpreter counts as 0
@@ -236,6 +262,16 @@ export function cpuWindowBreakdown(start, end) {
   else ms.axHle = ax.mailMs;
   const mem = memDelta(start?.mem, end?.mem);
   if (mem.why) why.mem = mem.why;
+  const ct = cpuThreadDiagDelta(start?.diag, end?.diag, { otherMs: ms.other });
+  if (ct.why) why.cpuThread = ct.why;
+  else {
+    ms.advance = ct.advanceMs;
+    ms.throttle = ct.throttleMs;
+    ms.sliceSetup = ct.setupMs + ct.regionServiceMs + ct.tailMs;
+    ms.retryDeferred = ct.retryMs;
+    ms.staleCheck = ct.staleCheck.ms;
+    ms.otherDirect = ct.controlMs;
+  }
 
   const round2 = Object.fromEntries(Object.entries(ms).map(([k, v]) => [k, ms2(v)]));
   return {
@@ -260,6 +296,9 @@ export function cpuWindowBreakdown(start, end) {
     regionCalls: rg.why ? null : rg.regionCalls,
     ax: ax.why ? null : { mails: ax.mails, mailMs: ms2(ax.mailMs), meanMailUs: ax.mails > 0 ? round((1000 * ax.mailMs) / ax.mails, 1) : null },
     mem: mem.why ? null : mem,
+    // 0213: the parts in ms, per event type (largest first), the retry
+    // lists, the stale checks; coverageOfOther, controlOfOther
+    cpuThread: ct.why ? null : ct,
     why
   };
 }
@@ -299,8 +338,18 @@ function pool(rows) {
   out.cpuBusyShare = mean((r) => r.cpuBusyShare);
   out.regionCoverage = mean((r) => r.regionCoverage?.outsideIdle ?? r.regionCoverage?.raw);
   out.slowPerKiloInstr = mean((r) => r.mem?.slowPerKiloInstr);
+  out.coverageOfOther = mean((r) => r.cpuThread?.coverageOfOther);
+  // 0213: each CoreTiming event type's callback ms per guest second
+  const withEvents = rows.filter((r) => r.cpuThread && r.guestSeconds > 0);
+  const guest = withEvents.reduce((n, r) => n + r.guestSeconds, 0);
+  const sums = new Map();
+  for (const r of withEvents) for (const e of r.cpuThread.events ?? []) sums.set(e.name, (sums.get(e.name) ?? 0) + e.ms);
+  out.eventsMsPerGuestSecond = guest > 0 ? Object.fromEntries([...sums].map(([k, v]) => [k, round(v / guest, 3)]).sort((a, b) => b[1] - a[1])) : null;
   return out;
 }
+
+// The n event types with the most ms per guest second ([name, ms] pairs).
+const topOf = (byName, n = 3) => (byName ? Object.entries(byName).sort((a, b) => b[1] - a[1]).slice(0, n) : []);
 
 // Dip rows against normal rows (classifyDips first). The comparison that
 // says what grew is host ms per GUEST second: a dip has no throttle sleep,
@@ -327,7 +376,12 @@ export function contrast(rows) {
   // those rows overlap, their contrast is less sure)
   const over = overAttributed(rows);
   const overNote = over ? `; ${over.rows} row(s) over-attributed (max ${over.maxMs} ms past the busy time)` : "";
-  return { dips: a, normal: b, diff, grew, overAttributed: over, verdict: verdict + overNote };
+  // 0213: the event types, per guest second: the top 3 of each group and
+  // the 3 that grew most in the dips
+  const ea = a.eventsMsPerGuestSecond, eb = b.eventsMsPerGuestSecond;
+  const eventDiff = ea && eb ? Object.fromEntries([...new Set([...Object.keys(ea), ...Object.keys(eb)])].map((k) => [k, round((ea[k] ?? 0) - (eb[k] ?? 0), 3)])) : null;
+  const events = { dips: topOf(ea), normal: topOf(eb), grew: topOf(eventDiff).filter(([, v]) => v > 0) };
+  return { dips: a, normal: b, diff, grew, events, overAttributed: over, verdict: verdict + overNote };
 }
 
 // --vi FROM-TO: [from, to] (VI outputs since the savestate load).
@@ -368,22 +422,28 @@ export function viRangeOf(viEntries) {
 }
 
 // A short human table: one line per row, shares of host time in %.
-const COLS = [["regions", "reg"], ["blocksDispatch", "b+d"], ["idle", "idle"], ["installs", "inst"], ["other", "oth"], ["sleep", "slp"], ["flushGpuWait", "flush"], ["axHle", "ax*"]];
+const COLS = [["regions", "reg"], ["blocksDispatch", "b+d"], ["idle", "idle"], ["installs", "inst"], ["other", "oth"], ["sleep", "slp"], ["flushGpuWait", "flush"], ["axHle", "ax*"],
+  ["advance", "adv*"], ["throttle", "thr*"], ["sliceSetup", "set*"], ["retryDeferred", "rdw*"], ["staleCheck", "stl*"]];
 export function formatTable(rows) {
   // 5 wide: "100.0" fits (a busy CPU thread is 99.99 %, never cut)
   const pct = (v) => (v == null ? "-" : (v * 100).toFixed(1)).padStart(5);
-  const head = ["  #", "VI from-to  ", "speed%", " busy", ...COLS.map(([, h]) => h.padStart(5)), "over ms", "slow/ki", "dip"].join(" ");
+  const ratio = (v) => (v == null ? "-" : (v * 100).toFixed(0)).padStart(4);
+  const list = (l) => (l?.mean == null ? "-" : `${Math.round(l.mean)}/${l.max}`).padStart(9);
+  const head = ["  #", "VI from-to  ", "speed%", " busy", ...COLS.map(([, h]) => h.padStart(5)), "cov%", "ctl%", "wait m/M ", "over ms", "slow/ki", "dip"].join(" ");
   const lines = rows.map((r) => [
     String(r.i ?? "").padStart(3),
     (r.vi ? `${r.vi.from}-${r.vi.to}` : "-").padEnd(12),
     (r.speedPct == null ? "-" : r.speedPct.toFixed(1)).padStart(6),
     pct(r.cpuBusyShare),
     ...COLS.map(([k]) => pct(r.shares?.[k])),
+    ratio(r.cpuThread?.coverageOfOther),
+    ratio(r.cpuThread?.controlOfOther),
+    list(r.cpuThread?.retryLists?.offThreadWaiting),
     (r.overAttributedMs == null ? "" : r.overAttributedMs.toFixed(1)).padStart(7),
     (r.mem?.slowPerKiloInstr == null ? "-" : r.mem.slowPerKiloInstr.toFixed(2)).padStart(7),
     r.dip == null ? "?" : r.dip ? "DIP" : ""
   ].join(" "));
-  return [head, ...lines, "shares of the CPU thread's host time in %; b+d: JIT blocks + dispatch (their split is unreliable, summary.json split); ax* is inside b+d/reg (not added); over ms: parts past the busy time (other clamped at 0); slow/ki: memory slow paths per 1000 guest instructions"].join("\n");
+  return [head, ...lines, "shares of the CPU thread's host time in %; b+d: JIT blocks + dispatch (their split is unreliable, summary.json split); ax* is inside b+d/reg (not added); adv* thr* set* rdw* (0213) are inside oth, stl* inside b+d or oth (thr* inside adv*); cov%: (adv + set + rdw) / oth; ctl%: the core's own count of oth / oth; wait m/M: off-thread waiting list mean/max; over ms: parts past the busy time (other clamped at 0); slow/ki: memory slow paths per 1000 guest instructions"].join("\n");
 }
 
 // The cost of the per-call timing, from the same run: a window with the

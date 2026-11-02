@@ -54,7 +54,10 @@ test("cpu window: busy / sleep / FlushGpu split and the region parts add up to t
   assert.equal(r.busyMs, 600);
   assert.equal(r.cpuBusyShare, 0.6);
   // blocks + dispatch as one part: the core's split of the two is unreliable (0075)
-  assert.deepEqual(r.ms, { regions: 200, blocksDispatch: 300, interpreter: null, idle: 30, installs: 20, other: 50, sleep: 400, flushGpuWait: 0, axHle: 10 });
+  assert.deepEqual(r.ms, { regions: 200, blocksDispatch: 300, interpreter: null, idle: 30, installs: 20, other: 50, sleep: 400, flushGpuWait: 0, axHle: 10, advance: null, throttle: null, sliceSetup: null, retryDeferred: null, staleCheck: null, otherDirect: null });
+  // no CPU-thread diag read (an engine before 0213): its parts null, said why
+  assert.equal(r.cpuThread, null);
+  assert.match(r.why.cpuThread, /no CPU-thread diag read/);
   assert.equal(r.split.blocks, 250);
   assert.equal(r.split.dispatch, 50);
   assert.equal(r.split.reliable, false);

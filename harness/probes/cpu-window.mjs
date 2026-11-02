@@ -23,12 +23,16 @@
 // JIT cache: the blocks recompile, the installed regions stay, unverified
 // until their next run (0075 ClearOffThreadAndRegionState), so --mem-warm s
 // pass first), AX HLE (validationReadAxHleStats), headroom
-// (validationReadHeadroomStats), and the region JIT stats
-// (validationReadJitRegionStats) first untimed (sampleEvery 0) for
+// (validationReadHeadroomStats), the CPU-thread diag when the core has it
+// (validationReadCpuThreadDiag, patch 0213: CoreTiming events by type, the
+// throttle's bookkeeping, the slice set-up, RetryDeferredWasmBlocks, the
+// stale-region checks; an engine without it leaves those columns empty),
+// and the region JIT stats (validationReadJitRegionStats) first untimed
+// (sampleEvery 0) for
 // --untimed-secs, the window that prices the timing (timingCost), then with
 // sampleEvery --region-sample: every region call, block call and Idle
 // timed, block lookups 1 in N, scaled by the core.
-// Then a snapshot of the four structs and the core ticks every --step s for
+// Then a snapshot of the structs and the core ticks every --step s for
 // --secs s (reads only, never a reset), and the VIs drained from the
 // timeline between two snapshots; each row is lib/cpu-window.mjs
 // cpuWindowBreakdown of two consecutive snapshots. --vi keeps the rows that
@@ -55,6 +59,7 @@ import { ensureServer, loadHarnessState, readCoreProgress, readTimeline, REPO_RO
 import { classifyDips, contrast, cpuWindowBreakdown, formatTable, inflationNote, parseViRange, regionWarning, rowsInViRange, SPLIT_NOTE, timingCost, viRangeOf } from "../lib/cpu-window.mjs";
 import { calmLock, defaultMaxLoad, loadGaveUp } from "../lib/env.mjs";
 import { consistentAxRead, decodeAxStats } from "../lib/ax-hle-stats.mjs";
+import { consistentCpuThreadDiagRead, decodeCpuThreadDiag } from "../lib/cpu-thread-diag.mjs";
 import { consistentHeadroomRead, decodeHeadroomStats } from "../lib/headroom.mjs";
 import { consistentRead, decodeRegionStats } from "../lib/jit-region-stats.mjs";
 import { PRESETS } from "../lib/matrix.mjs";
@@ -78,7 +83,7 @@ function decoded(reply, decode, consistent) {
   return consistent(decode(reply.bytes), decode(reply.again));
 }
 
-// The four counters' structs and the core ticks, read only (no reset). `t`:
+// The counters' structs and the core ticks, read only (no reset). `t`:
 // the node time halfway through the reads.
 export async function snapshot(page) {
   const t0 = performance.now();
@@ -87,9 +92,10 @@ export async function snapshot(page) {
   const region = decoded(await req("validationReadJitRegionStats", {}), decodeRegionStats, consistentRead);
   const ax = decoded(await req("validationReadAxHleStats", { reset: -1 }), decodeAxStats, consistentAxRead);
   const mem = decoded(await req("validationReadMemAccessStats", {}), decodeMemStats, consistentMemRead);
+  const diag = decoded(await req("validationReadCpuThreadDiag", { reset: -1 }), decodeCpuThreadDiag, consistentCpuThreadDiagRead);
   const p = await readCoreProgress(page).catch(() => null);
   const progress = p && !p.error ? { coreTicks: Number(p.coreTicks), coreTicksPerSecond: Number(p.coreTicksPerSecond), frame: p.frame ?? null } : { error: p?.error ?? "no core progress" };
-  return { t: (t0 + performance.now()) / 2, headroom, region, ax, mem, progress };
+  return { t: (t0 + performance.now()) / 2, headroom, region, ax, mem, diag, progress };
 }
 
 // Every counter on and reset (n >= 0), once: what each reset answered. The
@@ -101,6 +107,9 @@ async function enableStats(page) {
     mem: status(await req("validationReadMemAccessStats", { reset: 0 })),
     ax: status(await req("validationReadAxHleStats", { reset: 0 })),
     headroom: status(await req("validationReadHeadroomStats", { reset: 0 })),
+    // 0213; a core without DolphinWeb_CpuThreadDiagStats answers an error:
+    // its columns stay empty (why.cpuThread)
+    cpuThread: status(await req("validationReadCpuThreadDiag", { reset: 0 })),
     region: status(await req("validationReadJitRegionStats", { sampleEvery: 0 }))
   };
 }
@@ -135,6 +144,16 @@ export function heldWatchdog({ seconds, release, exit = (c) => process.exit(c), 
       return timer != null;
     }
   };
+}
+
+// The 0213 line: coverage of other over the rows, and the top 3 CoreTiming
+// event types per guest second in the dips, the normal rows and grown.
+export function cpuThreadLine(c, rows) {
+  const cov = rows.map((r) => r.cpuThread?.coverageOfOther).filter(Number.isFinite);
+  if (!cov.length) return `CPU-thread diag: none (${rows.find((r) => r.why?.cpuThread)?.why.cpuThread ?? "no row"})`;
+  const mean = cov.reduce((a, b) => a + b, 0) / cov.length;
+  const fmt = (l) => (l.length ? l.map(([k, v]) => `${k} ${v}`).join(", ") : "-");
+  return `CPU-thread diag: coverage of other ${round(mean * 100, 1)} % (mean of ${cov.length} rows); event ms per guest s, dips: ${fmt(c.events.dips)}; normal: ${fmt(c.events.normal)}; grew: ${fmt(c.events.grew)}`;
 }
 
 async function closeBounded(session) {
@@ -322,6 +341,7 @@ async function main() {
     log(inflationNote(cost));
     log(`timing cost: ${cost.ratio == null ? `unknown (${cost.why})` : `x${cost.ratio} CPU-thread busy ms per guest second timed (${cost.timedBusyMsPerGuestSecond}) vs untimed (${cost.untimedBusyMsPerGuestSecond}); speed ${cost.timedSpeedPct} % timed vs ${cost.untimedSpeedPct} % untimed`}`);
     console.log(formatTable(rows));
+    log(cpuThreadLine(c, run.rows));
     if (sel.droppedNoVi) log(`${sel.droppedNoVi} row(s) without a VI range left out by --vi`);
     if (sel.error) {
       // the rows are in summary.json, the selection failed: never exit 0
