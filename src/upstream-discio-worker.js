@@ -655,6 +655,26 @@ function harnessHeadroomStats({ reset } = {}) {
   return { bytes: copy(), again: copy() };
 }
 
+// CPU-thread diag (patch 0213, WasmCpuThreadDiag.h,
+// harness/lib/cpu-thread-diag.mjs): the CPU thread's time outside the timed
+// slice parts, by part and by CoreTiming event type. reset >= 0 turns it on
+// and zeroes it at the CPU thread's next slice; reset -2 turns it off; else a
+// read. Copied twice as whole f64s so a torn read is refused.
+function harnessCpuThreadDiag({ reset } = {}) {
+  if (!harnessEnabled) return { error: "harness hooks are off" };
+  const stats = moduleInstance?._DolphinWeb_CpuThreadDiagStats;
+  if (!stats) return { error: "core has no DolphinWeb_CpuThreadDiagStats" };
+  const n = Number.isInteger(reset) && (reset >= 0 || reset === -2) ? reset : -1;
+  const ptr = stats(n) >>> 0;
+  const heap = moduleInstance.HEAPU8;
+  if (!ptr || ptr + 8 > heap.length) return { error: `DolphinWeb_CpuThreadDiagStats returned ${ptr}` };
+  const size = Math.min(new DataView(heap.buffer, ptr, 8).getUint32(4, true), 1856);
+  if (ptr + size > heap.length) return { error: `CPU-thread diag of ${size} bytes past the heap` };
+  if (ptr % 8 !== 0 || size % 8 !== 0) return { error: `CPU-thread diag at ${ptr} (${size} bytes): not 8-aligned` };
+  const copy = () => Array.from(new Uint8Array(new Float64Array(heap.buffer, ptr, size / 8).slice().buffer));
+  return { bytes: copy(), again: copy() };
+}
+
 // Present cadence (patch 0162, WasmPresentCadence.h): per-field histograms of
 // the throttle's wake-up lateness, the CPU burst from Throttle to OutputXFB and
 // a present's arrival against its intended time. reset >= 0 zeroes and turns
@@ -2484,6 +2504,8 @@ async function handleMessage(type, payload) {
       return harnessAxHleStats(payload);
     case "validationReadHeadroomStats":
       return harnessHeadroomStats(payload);
+    case "validationReadCpuThreadDiag":
+      return harnessCpuThreadDiag(payload);
     case "validationReadPresentCadence":
       return harnessPresentCadence(payload);
     case "validationReadMemAccessStats":
