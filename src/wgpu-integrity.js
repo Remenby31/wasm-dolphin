@@ -79,7 +79,11 @@ export const INTEGRITY_FATAL = Object.freeze([
 // stalePresents: a present of a new frame showing a texture not rewritten
 // since it was last shown (src/wgpu-stale-present.js), the late-XFB jump
 // back; fatal once the core shows the last picture instead (patch 0211).
-export const INTEGRITY_REPORTED = Object.freeze(["stalePresents"]);
+// staleXfbHeld (patch 0211): the swaps the core held on the last picture
+// instead (a duplicate shown rather than a jump back).
+// staleXfbHeldPreload: of those, a hold that showed a picture from before
+// the last state load (a stale record; 0 by construction since the review).
+export const INTEGRITY_REPORTED = Object.freeze(["stalePresents", "staleXfbHeld", "staleXfbHeldPreload"]);
 
 // The first missing resource of a skipped draw (SKIP), or -1 when it has all.
 export function skippedDrawCause(hasPass, hasPipeline, bindGroupsValid, needsVertexBuffer, vertexBufferValid, indexed, indexBufferValid) {

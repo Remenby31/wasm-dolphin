@@ -3,8 +3,8 @@
   "normalization": "git-blob-lf",
   "root": {
     "baseCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
-    "resultTree": "47ec4750407320f899b7f111c480b38d779afe82",
-    "changedPathCount": 146,
+    "resultTree": "f8a90b091d01f6d2b280116b5624b5f4fe1ec347",
+    "changedPathCount": 147,
     "records": [
       {
         "path": "CMakeLists.txt",
@@ -1046,18 +1046,18 @@
         "status": "M",
         "mode": "100644",
         "baseBlob": "f183c9365514cc908bbc3641d55ff8db8c3acfe9",
-        "resultBlob": "54189177c40a3b5484ba8fdbd687a0c3b384bc23",
-        "size": 32218,
-        "sha256": "1f644f00a683a961fd5059cc404857ebed834a38a0ca8d9398e1777d94c618e4"
+        "resultBlob": "d73ffe01c26d58b375893b584c9e6212f65ac736",
+        "size": 32982,
+        "sha256": "722be2ddcfcf9e4978413be566129918791796ff20446ec6d05dc4add1e0a0e1"
       },
       {
         "path": "Source/Core/VideoCommon/Fifo.h",
         "status": "M",
         "mode": "100644",
         "baseBlob": "2afa110532edc7120dc10ce3d56713b56c3dd1a2",
-        "resultBlob": "9d690553891afd5e9c1d14487c61b99b93127735",
-        "size": 6053,
-        "sha256": "4d70f4b5bb5c272c4b1f517cc1bb7f5ed8f7d053809d8937e263806d50e8227b"
+        "resultBlob": "cdee507515a557cbe81403662704b9e8fa001d32",
+        "size": 6450,
+        "sha256": "d0fa55c045d6b2d937046480f0dc15e8293e41d66a309de8a08b0d6f75640559"
       },
       {
         "path": "Source/Core/VideoCommon/FramebufferManager.cpp",
@@ -1136,9 +1136,18 @@
         "status": "M",
         "mode": "100644",
         "baseBlob": "0691323c545c12839b77b5c243b11c5e4373e347",
-        "resultBlob": "0c58fadb1eaef809e6ab110c3f92a9f359e46b47",
-        "size": 38175,
-        "sha256": "65fd9d2ec076ae93a9a6308bbd4618911fd6ee8fd700f56d7b4ee0744520ac08"
+        "resultBlob": "3795ab39a3f9cf589b6c1077660ae034b48e1f92",
+        "size": 41482,
+        "sha256": "61fe493bbdd23a8177956ee15e4bdba6b4baafce751d1329d8280fe7c946c17d"
+      },
+      {
+        "path": "Source/Core/VideoCommon/Present.h",
+        "status": "M",
+        "mode": "100644",
+        "baseBlob": "7e5ce651e36ac252d339e1052a4bc50221637383",
+        "resultBlob": "01664b5a47fe5b09ed71e07719dd0744799adacd",
+        "size": 8109,
+        "sha256": "cd3a1f13d61c37c2540d68ee2b4e0032b55b3a0fe43cbaa580f056f46872e8e9"
       },
       {
         "path": "Source/Core/VideoCommon/ShaderCache.cpp",
@@ -1253,9 +1262,9 @@
         "status": "M",
         "mode": "100644",
         "baseBlob": "7eeefb718782a57de56a4873624e539d42cbe49b",
-        "resultBlob": "668d36af6b6e4b23af77c86b572625e48ee7a41f",
-        "size": 16950,
-        "sha256": "9a42f1ca93bffbda08936181b9eb4f5b539766e5d4463de24adabe4e787a190b"
+        "resultBlob": "4d93578b1ec2257cddf2d47253261ffc497a8315",
+        "size": 17352,
+        "sha256": "eacc2f9f09d46fcd2055a150d3f933c7b7b2b1bd733ac59f652eff571e4fd622"
       },
       {
         "path": "Source/Core/VideoCommon/VideoConfig.cpp",
@@ -1356,5 +1365,5 @@
       ]
     }
   ],
-  "contentSha256": "cad8f21c2151a84070c8ce32362cdbeb5ec8ce16916b29a4e70f64635fae677c"
+  "contentSha256": "9fac19cecda5b36a523eb2171ba2ae5747e71cde39667498067ff676c9af8407"
 }
