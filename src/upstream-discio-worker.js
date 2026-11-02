@@ -1,6 +1,7 @@
 import { asDiscBlob } from "./remote-disc.js";
 import { readSwapRing, readViRing } from "./harness-vi-ring.js";
 import { createPipelineLog, PIPELINE_WAKE } from "./harness-pipeline-log.js";
+import { createReplayWakePolicy } from "./wgpu-replay-wake.js";
 import { startPcSampler } from "./harness-pc-sampler.js";
 import { createDropSampler, histogramSum } from "./harness-drop-sampler.js";
 import {
@@ -938,7 +939,9 @@ let wgpuReplayPumpTimer = null;
 // frame: a ViTag published meanwhile waited 4-5 ms for its replay (94 % of the
 // replay's wait, research/no-present-2p.md). The parker and the idle poll
 // are unchanged.
-let wgpuReplayWake = false;
+let wgpuReplayWake = "off";
+// which 0 ms links go by MessageChannel (src/wgpu-replay-wake.js)
+let wgpuReplayWakePolicy = createReplayWakePolicy("off");
 let wgpuReplayWakeChannel = null;
 let wgpuReplayWakeCallback = null;
 let wgpuReplayWakeGeneration = 0;
@@ -2938,7 +2941,7 @@ async function loadCore({
   presentGamePace = false,
   presentPaceStats = false,
   viLock = false,
-  replayWake = false,
+  replayWake = "off",
   coreLog = false,
   memcardSlotB = false,
   internalResolution = 1,
@@ -3466,7 +3469,8 @@ async function loadCore({
   // ?vilock=1: only on the vsync presenter (its rAF measures the refresh) and
   // at the normal speed (an unlimited or other speed is the user's)
   wgpuViLock = viLock === true && wgpuPresentVsync && Number(emulationSpeed) === 1 ? createViPhaseLock() : null;
-  wgpuReplayWake = replayWake === true;
+  wgpuReplayWakePolicy = createReplayWakePolicy(replayWake);
+  wgpuReplayWake = wgpuReplayWakePolicy.mode;
   wgpuGamePacer.reset({ arrival: true });
   wgpuRefreshHistogram.reset();
   releaseWgpuReadback();
@@ -10519,6 +10523,8 @@ function startWgpuReplayPump() {
 // polls. Created lazily: webGpuCausalStats is declared further down.
 let wgpuReplayParker = null;
 function parkWgpuReplayPump(pump, observedWrite) {
+  // the ring was found empty: the next burst may have its fast link (=first)
+  wgpuReplayWakePolicy.parked();
   wgpuReplayParker ??= createWgpuReplayParker({
     stats: webGpuCausalStats,
     schedule: scheduleWgpuReplayPump,
@@ -10539,7 +10545,8 @@ function scheduleWgpuReplayPump(callback, delayMs) {
   wgpuReplayPumpScheduledAt = trackWakeDelay ? performance.now() : 0;
   wgpuReplayPumpDueAt = trackWakeDelay ? wgpuReplayPumpScheduledAt + delay : 0;
   webGpuCausalStats.replayPumpScheduleCount += 1;
-  const message = delay === 0 && wgpuReplayWake;
+  const message = delay === 0 && wgpuReplayWake !== "off" && webGpuCmdRing !== null &&
+    wgpuReplayWakePolicy.fast(Atomics.load(webGpuCmdRing.headerI32, 0) >>> 0, performance.now());
   if (harnessPipeline) { harnessPumpWake = message ? PIPELINE_WAKE.message : delay === 0 ? PIPELINE_WAKE.timer0 : PIPELINE_WAKE.timerIdle; harnessPumpSetAt = harnessNow(); }
   if (delay === 0) webGpuCausalStats.replayPumpBacklogScheduleCount += 1;
   else webGpuCausalStats.replayPumpIdleScheduleCount += 1;

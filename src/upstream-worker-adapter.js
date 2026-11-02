@@ -118,7 +118,7 @@ export class UpstreamWorkerAdapter {
     presentGamePace = false,
     presentPaceStats = false,
     viLock = false,
-    replayWake = false,
+    replayWake = "off",
     coreLog = false,
     memcardSlotB = false,
     internalResolution = 1,
@@ -266,7 +266,7 @@ export class UpstreamWorkerAdapter {
     this.presentGamePace = presentGamePace === true;
     this.presentPaceStats = presentPaceStats === true;
     this.viLock = viLock === true;
-    this.replayWake = replayWake === true;
+    this.replayWake = ["chain", "first", "spaced"].includes(replayWake) ? replayWake : "off";
     this.coreLog = Boolean(coreLog);
     this.memcardSlotB = Boolean(memcardSlotB);
     this.internalResolution = Number(internalResolution) || 1;

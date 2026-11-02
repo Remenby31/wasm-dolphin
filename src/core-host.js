@@ -2003,11 +2003,20 @@ export function requestedPacing(search = window.location.search) {
     // 59.94/60 Hz drift no longer crosses a BeginFrame every ~16.7 s. Off by
     // default until measured.
     viLock: params.get("vilock") === "1",
-    // ?replaywake=1: the replay's backlog drains chained by a MessageChannel
-    // task instead of setTimeout(0) (clamped to 4 ms once nested). Off by
-    // default until measured (research/no-present-2p.md, lever 2).
-    replayWake: params.get("replaywake") === "1"
+    // ?replaywake= (research/no-present-2p.md, lever 2): the replay's 0 ms
+    // backlog drains chained by a MessageChannel task instead of
+    // setTimeout(0) (clamped to 4 ms once nested). Off by default until
+    // measured: replayWakeMode.
+    replayWake: replayWakeMode(params.get("replaywake"))
   };
+}
+
+// ?replaywake=1: every 0 ms link of the drain chain by MessageChannel
+// ("chain"); =first: only the first link after the ring was found empty;
+// =spaced: a fast link only once the backlog grew enough or long enough
+// after the last one. Anything else: off.
+export function replayWakeMode(value) {
+  return value === "1" ? "chain" : value === "first" || value === "spaced" ? value : "off";
 }
 
 function requestedCorrectTimeDrift() {
