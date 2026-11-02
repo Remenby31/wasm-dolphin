@@ -46,7 +46,7 @@ test("vilock: host, worker and patch 0212 (a trim of the throttle's wall rate on
   // the lock only on the vsync presenter at the normal speed, and only through the core's trim
   assert.match(worker, /wgpuViLock = viLock === true && wgpuPresentVsync && Number\(emulationSpeed\) === 1 \? createViPhaseLock\(\) : null;/);
   assert.match(worker, /module\._DolphinWeb_SetThrottleRatePpm\(Math\.round\(Number\(ppm\)\) \| 0\)/);
-  assert.match(worker, /if \(r\.changed\) api\.setThrottleRatePpm\(wgpuViLock\.stats\.ppm\);/);
+  assert.match(worker, /if \(r\.changed\) \{\n\s+api\.setThrottleRatePpm\(wgpuViLock\.stats\.ppm\);/);
   assert.doesNotMatch(worker, /setEmulationSpeed\?\.\(r\.factor\)/, "never the pre-boot speed setter");
   // the patch: the throttle, its header, and the mixer that follows the trim
   assert.deepEqual([...patch.matchAll(/^\+\+\+ b\/(.+)$/gm)].map((m) => m[1]).sort(),
