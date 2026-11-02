@@ -2164,6 +2164,7 @@ async function handleMessage(type, payload) {
         wasmEngine: payload.wasmEngine,
         regionCap: payload.regionCap,
         regionChain: payload.regionChain,
+        aotAssembler: payload.aotAssembler,
         fusedMadd: payload.fusedMadd,
         reportedCoreSelection: payload.coreSelection,
         wgpuReplayDiagnostics: payload.wgpuReplayDiagnostics,
@@ -2887,6 +2888,7 @@ async function loadCore({
   wasmEngine: requestedWasmEngine = null,
   regionCap = null,
   regionChain = true,
+  aotAssembler = null,
   fusedMadd = true,
   reportedCoreSelection = null,
   wgpuReplayDiagnostics = false,
@@ -3338,6 +3340,7 @@ async function loadCore({
   aotProfileSampleMs = Number.isInteger(aotSampleMs) && aotSampleMs >= 0 ? aotSampleMs : AOT_PROFILE_SAMPLE_MS;
   wasmEngineName = resolveWasmEngineName(requestedWasmEngine);
   aotRegionCapRequested = Number.isInteger(regionCap) && regionCap >= 0 ? regionCap : null;
+  aotAssemblerRequestedFlag = typeof aotAssembler === "boolean" ? aotAssembler : null;
   dolphinJitBootLoadComplete = false;
   dolphinJitBootLoadedEntries = 0;
   coreBuildFingerprint = String(buildFingerprint ?? "");
@@ -8702,14 +8705,20 @@ export async function prepareAotFirstLaunch(file, {
       yieldNow: discAwareYield({ lastReadAt: () => lastDiscReadAt }) })
     : null;
   const opfs = translator ? await Promise.resolve(storageRoot()).catch(() => null) : null;
+  // 0189 (on by default): the entry -> fragment section only in its mode
+  // (bit 16 of the codegen mask, so its modules have their own keys).
+  const assembleOptions = core?.assemble && { ...core.assemble, fragmentEntries: ((keyParts?.codegenMask ?? 0) & (1 << 16)) !== 0 };
+  const assemblerModule = translator && assembleOptions && typeof Worker === "function" ? await import("./aot-assembler-worker.js") : null;
+  const aotAssemblerClient = assemblerModule && (aotAssemblerRequestedFlag ?? assemblerModule.aotAssemblerDefault(wasmEngineName))
+    ? assemblerModule.createAotAssemblerClient({ options: assembleOptions,
+      onHelperFailure: (why) => postStatus(`aot: assembler worker failed (${why}); regions assembled on this worker`) })
+    : null;
   const flow = createAotFirstLaunch({
     discKey,
     coreHash,
     keyParts,
     translator,
-    // 0189 (on by default): the entry -> fragment section only in its mode
-    // (bit 16 of the codegen mask, so its modules have their own keys).
-    assembleOptions: core?.assemble && { ...core.assemble, fragmentEntries: ((keyParts?.codegenMask ?? 0) & (1 << 16)) !== 0 },
+    assembleOptions,
     // Regions loaded back from the cache go through the compiler worker as
     // those of a first launch do (precompileAotRegion): handed over at once,
     // then every function called once in the background, so V8's lazy
@@ -8780,7 +8789,14 @@ export async function prepareAotFirstLaunch(file, {
     },
     maxBootModules: Math.max(0, DOLPHIN_JIT_CACHE_MAX - dolphinJitCacheMap.size),
     maxBootBytes: DOLPHIN_AOT_BOOT_BYTES,
-    onEvent: (event) => self.postMessage({ type: "aot-progress", event })
+    // The regions' assembly in a worker of its own (aot-assembler-worker.js):
+    // 30-60 ms of JS each, which on this worker held back presents.
+    ...(aotAssemblerClient ? { tuning: { assemble: (fragments) => aotAssemblerClient.assemble(fragments) }, disposeAssembler: () => aotAssemblerClient.terminate() } : {}),
+    onEvent: (event) => {
+      // the optimisation done: the assembler worker's memory goes back (made again on demand)
+      if (event?.type === "done") aotAssemblerClient?.idle();
+      self.postMessage({ type: "aot-progress", event });
+    }
   });
   aotFirstLaunch = flow;
   // Where this player's game spends its time, recorded into the local
@@ -8967,6 +8983,9 @@ export function setAotCoreBootedForTest(on) {
 }
 // ?regioncap=N|0 (core-host): the region function cap forced, else null (by engine).
 let aotRegionCapRequested = null;
+// ?aotasm=0|1 (core-host), null when absent: the default by engine
+// (aotAssemblerDefault: off under JSC until measured on an iPhone).
+let aotAssemblerRequestedFlag = null;
 export function regionFunctionCap(jscCap) {
   return aotRegionCapRequested ?? (wasmEngineName === "jsc" ? jscCap : 0);
 }
