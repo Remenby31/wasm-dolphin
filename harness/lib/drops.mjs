@@ -815,6 +815,9 @@ export const ATTRIBUTION_EMULATION_CAUSES = ["jit", "regions", "disc", "slot", "
 const OCCUPANCY_THREADS = ["cpu", "gpu", "replay"];
 
 const sumOf = (xs, f) => xs.reduce((a, x) => a + (Number.isFinite(f(x)) ? f(x) : 0), 0);
+// a window's cause in ms, floored at 0 per window (a negative counter delta
+// in one window never cancels a positive one in another)
+const causeMs = (w, c) => { const v = w?.causes?.[c]; return Number.isFinite(v) && v > 0 ? v : 0; };
 const allKnown = (xs, f) => xs.length > 0 && xs.every((x) => Number.isFinite(f(x)));
 
 // One second's split (frames). null when it lacks produced or shown.
@@ -843,7 +846,7 @@ export function attributeSecond(ws, { cadence, fullSpeed = ATTRIBUTION_FULL_SPEE
       // counted ms exceed the time lost, scaled down together (no cause is
       // favoured by its place in a list)
       const lostMs = Math.max(1, hostMs - (speed * hostMs) / 100);
-      const ms = Object.fromEntries(ATTRIBUTION_EMULATION_CAUSES.map((c) => [c, Math.max(0, sumOf(ws, (w) => w.causes?.[c]))]));
+      const ms = Object.fromEntries(ATTRIBUTION_EMULATION_CAUSES.map((c) => [c, sumOf(ws, (w) => causeMs(w, c))]));
       const counted = Object.values(ms).reduce((a, x) => a + x, 0);
       const scale = counted > lostMs ? lostMs / counted : 1;
       let left = productionGap;
@@ -880,7 +883,7 @@ export function attributeSecond(ws, { cadence, fullSpeed = ATTRIBUTION_FULL_SPEE
       add("old-frame", presentationGap - noPresent);
     }
   }
-  const counted = sumOf(ws, (w) => sumOf(ATTRIBUTION_EMULATION_CAUSES, (c) => w.causes?.[c]));
+  const counted = sumOf(ws, (w) => sumOf(ATTRIBUTION_EMULATION_CAUSES, (c) => causeMs(w, c)));
   const markers = [];
   if (sumOf(ws, (w) => w.mainLagMs) >= stallMs) markers.push("main-stall");
   if (sumOf(ws, (w) => w.workerLagMs) >= stallMs && counted < stallMs) markers.push("gc-probable");
@@ -932,7 +935,7 @@ export function hitchCause(gap, window, { frameMs } = {}) {
     const lag = gap.workerLagMs ?? window.workerLagMs;
     return gap.vis > 0 && lag != null && lag >= gap.ms / 2 ? "presenter-blocked" : "no-present";
   }
-  const top = ATTRIBUTION_EMULATION_CAUSES.map((c) => [c, window.causes?.[c] ?? 0]).sort((a, b) => b[1] - a[1])[0];
+  const top = ATTRIBUTION_EMULATION_CAUSES.map((c) => [c, causeMs(window, c)]).sort((a, b) => b[1] - a[1])[0];
   return top && top[1] > 0 ? `emulation:${top[0]}` : "emulation:unexplained";
 }
 
@@ -941,11 +944,14 @@ export function hitchCause(gap, window, { frameMs } = {}) {
 // k = round(Δt / median) periods (a missed vsync counts whole when
 // `wholeSkips`, else k > 1 breaks); it is steady when Δt is within
 // `tolerance` periods of k AND the local median interval (±`localSpan`, per
-// period) is within `localTolerance` of the global one, so a slow stretch
-// (a VI at 80 % speed) breaks the fit and never bends the period, while
-// jitter on single timestamps does not. Then `trims` passes cut out the
-// timestamps more than `trimSigmas` residual sigmas off the fit (the edges
-// of a slow stretch the local median let in) and fit again. Returns { periodMs, sigmaMs (the
+// period) is within the local tolerance of the global one, so a slow stretch
+// (a VI at 80 % speed) breaks the fit and never bends the period. The local
+// tolerance is `localTolerance` or, when the timestamps jitter more, 4
+// standard errors of that local median (the intervals' spread by MAD), so
+// jitter alone does not cut the run into pieces. Then `trims` passes drop
+// the timestamps more than `trimSigmas` residual sigmas off the fit (the
+// edges of a slow stretch the local median let in; a dropped point leaves
+// its stretch whole) and fit again. Returns { periodMs, sigmaMs (the
 // residual jitter of one timestamp), n } or null with fewer than `min`
 // timestamps, or fewer than half of them kept in stretches of at least
 // `minStretch`.
@@ -957,16 +963,31 @@ export function fitPeriod(times, { tolerance = 0.45, localTolerance = 0.05, loca
   if (!(med > 0)) return null;
   const k = d.map((x) => Math.round(x / med));
   const per = d.map((x, i) => (k[i] >= 1 ? x / k[i] : null));
+  const dev = per.filter((v) => v != null).map((v) => Math.abs(v - med)).sort((x, y) => x - y);
+  const spread = 1.4826 * (dev[dev.length >> 1] ?? 0);
+  const localTol = Math.max(localTolerance, (4 * 1.25 * spread) / Math.sqrt(2 * localSpan + 1) / med);
   const steady = d.map((x, i) => {
-    if (!(k[i] >= 1) || (!wholeSkips && k[i] !== 1) || Math.abs(x / med - k[i]) > tolerance) return false;
+    if (!(k[i] >= 1)) return true; // two timestamps in one period: the count below decides
     const near = per.slice(Math.max(0, i - localSpan), i + localSpan + 1).filter((v) => v != null).sort((p, q) => p - q);
-    return Math.abs(near[near.length >> 1] / med - 1) <= localTolerance;
+    return Math.abs(near[near.length >> 1] / med - 1) <= localTol;
   });
+  // the period number of each timestamp, from the stretch's smoothed
+  // intercept (the mean of t − n·median over its last `localSpan` points), so
+  // one jittered timestamp never shifts the count of the ones after it
+  // A lone timestamp off the count is skipped (one jittered outlier never
+  // splits a stretch); two in a row end it.
   const stretches = [];
-  let cur = [{ t: times[0], n: 0 }];
+  let cur = [{ t: times[0], n: 0 }], skipped = false;
   for (let i = 0; i < d.length; i += 1) {
-    if (steady[i]) cur.push({ t: times[i + 1], n: cur.at(-1).n + k[i] });
-    else { if (cur.length >= minStretch) stretches.push(cur); cur = [{ t: times[i + 1], n: 0 }]; }
+    const t = times[i + 1];
+    const tail = cur.slice(-localSpan);
+    const c = tail.reduce((a, p) => a + p.t - p.n * med, 0) / tail.length;
+    const n = Math.round((t - c) / med);
+    const last = cur.at(-1).n;
+    const ok = steady[i] && n > last && (wholeSkips || n === last + 1 + (skipped ? 1 : 0)) && Math.abs(t - c - n * med) <= tolerance * med;
+    if (ok) { cur.push({ t, n }); skipped = false; }
+    else if (!skipped && cur.length > 1) skipped = true;
+    else { if (cur.length >= minStretch) stretches.push(cur); cur = [{ t, n: 0 }]; skipped = false; }
   }
   if (cur.length >= minStretch) stretches.push(cur);
   const fit = (parts) => {
@@ -991,12 +1012,9 @@ export function fitPeriod(times, { tolerance = 0.45, localTolerance = 0.05, loca
     const next = [];
     let cut = false;
     for (const { st, res } of best.centred) {
-      let piece = [];
-      st.forEach((p, i) => {
-        if (Math.abs(res[i]) <= limit) piece.push(p);
-        else { cut = true; if (piece.length >= minStretch) next.push(piece); piece = []; }
-      });
-      if (piece.length >= minStretch) next.push(piece);
+      const kept = st.filter((_, i) => Math.abs(res[i]) <= limit);
+      if (kept.length < st.length) cut = true;
+      if (kept.length >= minStretch) next.push(kept);
     }
     if (!cut) break;
     const refit = fit(next);

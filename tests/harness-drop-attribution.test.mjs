@@ -238,6 +238,38 @@ test("drop-meter: 60/40/60 new frames with replay unsampled keeps the VI cadence
   assert.deepEqual(Object.keys(r.dips[0].parts), ["game:unknown"], "replay not sampled: never content");
 });
 
+test("causes floor at 0 per window: a negative window never cancels a positive one, nor fires gc-probable", () => {
+  // the jit counter: +100 ms in one window, −100 ms in another
+  const ws = second(0, { speed: 80, produced: 48, shown: 48, presents: 48 });
+  ws[0].causes = { jit: 100 };
+  ws[1].causes = { jit: -100 };
+  const d = attributeSecond(ws, { cadence: 60 });
+  assert.ok(d.parts["emulation:jit"] > 0, JSON.stringify(d.parts));
+  // worker late 60 ms with 100 ms of counted work: not GC, even if another window says −100
+  const late = second(0, { produced: 60, shown: 55, workerLagMs: 60 });
+  late[0].causes = { jit: 100 };
+  late[1].causes = { jit: -100 };
+  assert.deepEqual(attributeSecond(late, { cadence: 60 }).markers, []);
+  const neg = second(0, { produced: 60, shown: 55, workerLagMs: 60 });
+  neg[0].causes = { disc: -500 };
+  assert.deepEqual(attributeSecond(neg, { cadence: 60 }).markers, ["gc-probable"], "a negative counter is not counted work");
+  assert.equal(hitchCause({ ms: 100, vis: 1 }, { causes: { jit: -30, disc: -5 } }, { frameMs: 1000 / 60 }), "emulation:unexplained");
+});
+
+test("fitPeriod: 600 timestamps with 2 ms of jitter, the error stays at the regression's own (σ·√12/N^1.5)", () => {
+  const errs = [];
+  for (let seed = 1; seed <= 100; seed += 1) {
+    let x = seed * 31;
+    const rnd = () => ((x = (x * 1103515245 + 12345) % 2 ** 31) / 2 ** 31);
+    const gauss = () => Math.sqrt(-2 * Math.log(rnd() + 1e-12)) * Math.cos(2 * Math.PI * rnd());
+    const f = fitPeriod(Array.from({ length: 600 }, (_, j) => (j * 1000) / 59.94 + 2 * gauss()));
+    errs.push(1000 / f.periodMs - 59.94);
+  }
+  const sd = Math.sqrt(errs.reduce((a, e) => a + e * e, 0) / errs.length);
+  const theory = ((59.94 ** 2) / 1000) * 2 * Math.sqrt(12) / 600 ** 1.5;
+  assert.ok(sd < 1.5 * theory, `sd ${sd} vs ${theory}`);
+});
+
 test("a negative cause counter never gives a negative part", () => {
   const d = attributeSecond(second(0, { speed: 80, produced: 48, shown: 48, presents: 48, causes: { jit: 300, disc: -200 } }), { cadence: 60 });
   assert.ok(Object.values(d.parts).every((f) => f > 0), JSON.stringify(d.parts));
