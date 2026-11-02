@@ -6,9 +6,9 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 
-import { analyzeRun, classifySecond, completionOf, currentPhase, deriveSeconds, GAME_DRAWS_PER_FRAME, LOAD_DISC_BPS, markerIndexes, MIN_PHASE_SEC, parcoursVerdict, phaseLabels, phaseMetrics, phaseNoise, renderTimeline, sectionsOf, segmentsOf, summarizeSeconds, windowCadence } from "../harness/lib/parcours.mjs";
+import { analyzeRun, classifySecond, gapDetail, completionOf, currentPhase, deriveSeconds, GAME_DRAWS_PER_FRAME, LOAD_DISC_BPS, markerIndexes, MIN_PHASE_SEC, parcoursVerdict, phaseLabels, phaseMetrics, phaseNoise, renderTimeline, sectionsOf, segmentsOf, summarizeSeconds, windowCadence } from "../harness/lib/parcours.mjs";
 import { filmMarkers, filmWithMarks, keyToPad, padStateOf, recordPorts, runRecordSteps, validateFilm, validateRecordSteps } from "../harness/lib/pad-film.mjs";
-import { analyzeRaw, countersOf, exitCodeOf, humanSummary, markerStep } from "../harness/probes/parcours.mjs";
+import { analyzeRaw, countersOf, lagsOf, exitCodeOf, humanSummary, markerStep } from "../harness/probes/parcours.mjs";
 import { decodePng, encodePng } from "../harness/lib/png.mjs";
 
 const TPS = 486e6;
@@ -434,4 +434,19 @@ test("film player: the picture's steering replaces the sine under the autopilot,
   const out = p.onPoll(3, { released: 0, stuck: 1, steer: { 0: 60 } });
   assert.equal(out.writes[0][1].mask, 2, "B: backing off");
   assert.notEqual(p.onPoll(4, { released: 0, stuck: 1, steer: { 0: null } }).writes.length ? 1 : 0, 2);
+});
+
+test("present gaps past 25 ms: their VI outputs and the presenting worker's stall inside them", () => {
+  assert.deepEqual(gapDetail(1000, 1100, [990, 1016, 1033, 1050, 1110], [[1080, 60], [1300, 40]]), { at: 1000, ms: 100, vis: 3, workerLagMs: 60 });
+  assert.equal(gapDetail(1000, 1100, [], [[1150, 100]]).workerLagMs, 50, "only the part inside the gap");
+  const s = samplesOf([["menu", 3]], { presentGap: { at: 1 } });
+  s[2].viT = [s[2].presents[9] + 30, s[2].presents[9] + 60];
+  s[2].lag = [[s[2].presents[9] + 100, 90]];
+  const rows = deriveSeconds(s, { tps: TPS });
+  assert.equal(rows[1].gaps.length, 1);
+  assert.equal(rows[1].gaps[0].vis, 2);
+  assert.equal(rows[1].gaps[0].workerLagMs, 90);
+  assert.deepEqual(rows[0].gaps, []);
+  assert.deepEqual(lagsOf({ columns: ["t", "lagMs", "ticks"], rows: [[1, 5, 0], [2, 30, 0]] }), [[2, 30]]);
+  assert.deepEqual(lagsOf(null), []);
 });

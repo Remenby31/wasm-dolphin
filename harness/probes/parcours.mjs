@@ -67,7 +67,13 @@ import { num, sideOrder } from "./race-perf.mjs";
 
 // What this probe runs in the page and the worker: an A/A's noise holds only
 // for the same version. Raised with each such change.
-export const PROBE_VERSION = 1;
+export const PROBE_VERSION = 2; // 2: the drop sampler every SAMPLER_MS (100 ms, was 1 s), its stalls and the VI times kept per second (present gap detail)
+
+// The drop sampler's period: its counters are drained once a second, its
+// rows' lateness says when the presenting worker was blocked.
+export const SAMPLER_MS = 100;
+// A sampler row this late is kept (the worker blocked at least that long).
+export const LAG_KEEP_MS = 20;
 
 // The autopilot's stuck signal: while the worker says a port is under the
 // autopilot, a picture of the screen every STILL_EVERY_SEC (an element
@@ -98,6 +104,13 @@ async function readInfo(page) {
       info: { speed: n(f.gameSpeed), newFps: n(f.newFramesPerSec), producedFps: n(f.newFramesProducedPerSec), newShown: n(f.newFramesShown), outOfOrder: n(f.framesOutOfOrder), cpuBusy: n(f.cpuThreadBusy), gpuBusy: n(f.gpuThreadBusy), replayBusy: n(f.replayBusy), draws: d ? Number(d[1]) : null }
     };
   });
+}
+
+// The drop sampler's late rows of a drain: [t, lagMs] when lagMs >= LAG_KEEP_MS.
+export function lagsOf(drained) {
+  const it = drained?.columns?.indexOf("t") ?? -1, il = drained?.columns?.indexOf("lagMs") ?? -1;
+  if (it < 0 || il < 0) return [];
+  return (drained.rows ?? []).filter((r) => r[il] >= LAG_KEEP_MS).map((r) => [r[it], Math.round(r[il] * 10) / 10]);
 }
 
 // The drop sampler's last row of a drain, as named counters (null: no row).
@@ -141,7 +154,7 @@ async function playRun(o, server, { side, run, outDir }) {
     raw.tps = progress?.coreTicksPerSecond ?? null;
     // the 0113 headroom counters (XFB copies) on, as drop-meter turns them on
     raw.headroom = (await workerRequest(page, "validationReadHeadroomStats", { reset: 0 }, 5000))?.error ?? "on";
-    raw.sampler = await workerRequest(page, "validationDropSampler", { action: "start", everyMs: 1000 }, 5000);
+    raw.sampler = await workerRequest(page, "validationDropSampler", { action: "start", everyMs: SAMPLER_MS }, 5000);
     raw.integrityStart = await readIntegrity(page, { expected: o.integrityExpected });
     raw.film = await startPadFilm(page, o.film ? { film: o.film } : { record: { ports: recordPorts(o.recordSteps), auto: o.auto } });
     if (raw.film?.error) throw new Error(`pad film: ${raw.film.error}`);
@@ -164,7 +177,7 @@ async function playRun(o, server, { side, run, outDir }) {
       if (tl?.presents?.lost || tl?.vi?.lost) raw.timelineLost = (raw.timelineLost ?? 0) + (tl.presents?.lost ?? 0) + (tl.vi?.lost ?? 0);
       const integrity = await readIntegrity(page, { expected: o.integrityExpected });
       const status = await padFilmStatus(page);
-      raw.samples.push({ t, info, counters: countersOf(drained), presents: tl?.presents?.t ?? [], vi: tl?.vi?.t?.length ?? null, integrity: integrity?.unread || integrity?.unavailable ? null : integrity, film: status ? { pos: status.pos, hold: status.hold, polls: status.polls } : null });
+      raw.samples.push({ t, info, counters: countersOf(drained), presents: tl?.presents?.t ?? [], vi: tl?.vi?.t?.length ?? null, viT: tl?.vi?.t ?? [], lag: lagsOf(drained), integrity: integrity?.unread || integrity?.unavailable ? null : integrity, film: status ? { pos: status.pos, hold: status.hold, polls: status.polls } : null });
       raw.loads.push([Date.now(), os.loadavg()[0]]);
       rows = deriveSeconds(raw.samples, { tps: raw.tps });
       const phase = phaseNow();
