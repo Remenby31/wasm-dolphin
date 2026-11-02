@@ -930,7 +930,11 @@ export function attributeDips(windows, { cadence, viHz = null, fluidity = ATTRIB
   const seconds = [];
   let group = [];
   for (const w of ws) {
-    if (group.length && (w.t - group[0].t >= secondMs || (w.phase ?? null) !== (group[0].phase ?? null) || (w.cadence ?? cadence) !== (group[0].cadence ?? cadence))) {
+    // a second closes on its span from the first window's start, or when the
+    // window would take its duration past 5 % over a second (rows of 0.99 s
+    // and 1.01 s are two seconds, never one of 2 s)
+    const groupMs = sumOf(group, (x) => x.ms);
+    if (group.length && (w.t - group[0].t >= secondMs || groupMs + w.ms > 1.05 * secondMs || (w.phase ?? null) !== (group[0].phase ?? null) || (w.cadence ?? cadence) !== (group[0].cadence ?? cadence))) {
       seconds.push(group);
       group = [];
     }
@@ -1334,6 +1338,13 @@ export function dropWindowsForAttribution(windows, { presents = [], vi = [], dis
 // beat needs per-frame VI and vsync times: not proven from parcours rows.
 export function parcoursWindowsForAttribution(rows, raw = null) {
   return rows.map((r, i) => {
+    // a row covers (previous row's t, its t] in seconds: rows are not spaced
+    // exactly 1 s (0.99, 1.01). The first row, and a row after a sampling
+    // hole (over 1.5 s since the previous: a row missing), cover their last
+    // second only: the hole stays unmeasured, never a stretched second
+    const gap = i > 0 && Number.isFinite(rows[i - 1].t) ? r.t - rows[i - 1].t : null;
+    const prevT = gap > 0 && gap <= 1.5 ? rows[i - 1].t : r.t - 1;
+    const perRow = (rate) => (Number.isFinite(rate) ? rate * (r.t - prevT) : null);
     const sample = raw?.samples?.[i + 1] ?? null;
     const times = Array.isArray(sample?.presents) ? [...sample.presents].sort((a, b) => a - b) : null;
     const prev = Array.isArray(raw?.samples?.[i]?.presents) ? raw.samples[i].presents.at(-1) : null;
@@ -1344,8 +1355,9 @@ export function parcoursWindowsForAttribution(rows, raw = null) {
       gaps.push({ ms: times[k] - from, vis: sample.gapVis?.[k] ?? null, workerLagMs: sample.gapWorkerLagMs?.[k] ?? null });
     }
     return {
-      t: (r.t - 1) * 1000, ms: 1000, phase: r.phase ?? null, cadence: r.cadence ?? null, speed: r.speed ?? null, vis: r.viRate ?? null,
-      produced: r.producedFps ?? null, shown: r.newFps ?? null, presents: r.presents ?? null, gaps,
+      t: prevT * 1000, ms: (r.t - prevT) * 1000, phase: r.phase ?? null, cadence: r.cadence ?? null, speed: r.speed ?? null,
+      // rates per second over the row's own duration; presents is a count
+      vis: perRow(r.viRate), produced: perRow(r.producedFps), shown: perRow(r.newFps), presents: r.presents ?? null, gaps,
       occupancy: { cpu: r.cpuBusy ?? null, gpu: r.gpuBusy ?? null, replay: r.replayBusy ?? null },
       workerLagMs: r.workerLagMs ?? null
     };
