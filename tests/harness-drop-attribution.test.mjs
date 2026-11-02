@@ -4,7 +4,7 @@ import test from "node:test";
 
 import {
   attributeDips, attributeSecond, attributionLines, beatEvidence, dropWindowsForAttribution, hitchCause,
-  fitPeriod, learnedCadences, measuredRefreshHz, parcoursWindowsForAttribution
+  attributionTable, fitPeriod, learnedCadences, measuredRefreshHz, parcoursWindowsForAttribution
 } from "../harness/lib/drops.mjs";
 
 const quiet = { cpu: 0.3, gpu: 0.3, replay: 0.2 };
@@ -57,8 +57,9 @@ test("full speed: saturated → game, content only with every occupancy known an
   assert.equal(menu.lostFrames, 0);
   // replay not measured (drop-meter): never content
   assert.deepEqual(attributeSecond(second(0, { produced: 30, shown: 30, presents: 60, occupancy: { cpu: 0.2, gpu: 0.2, replay: null } }), { cadence: 60 }).parts, { "game:unknown": 30 });
-  // a thread without margin (0.7 to 0.85), or a small shortfall: marginal
-  assert.deepEqual(attributeSecond(second(0, { produced: 30, shown: 30, presents: 60, occupancy: { cpu: 0.75, gpu: 0.2, replay: 0.1 } }), { cadence: 60 }).parts, { "game:marginal": 30 });
+  // a thread without margin (0.7 to 0.85): marginal, undecided, not lost;
+  // a small shortfall with quiet threads: game:marginal
+  assert.deepEqual(attributeSecond(second(0, { produced: 30, shown: 30, presents: 60, occupancy: { cpu: 0.75, gpu: 0.2, replay: 0.1 } }), { cadence: 60 }).parts, { marginal: 30 });
   assert.deepEqual(attributeSecond(second(0, { produced: 58, shown: 58, presents: 60, occupancy: quiet }), { cadence: 60 }).parts, { "game:marginal": 2 });
 });
 
@@ -271,7 +272,9 @@ test("fitPeriod: 600 timestamps with 2 ms of jitter, the error stays at the regr
 });
 
 test("fitPeriod: a few per cent slow never bends the VI period; a locked screen with such a slowdown shows no beat", () => {
-  for (const [speed, from, to] of [[0.96, 40000, 45000], [0.97, 40000, 50000]]) for (const jitter of [0.7, 0.9]) {
+  // 3-4 % for seconds, and slowdowns too small for the local slope (0.1-0.2 %
+  // for 12-20 s): the per-block rates cut them out
+  for (const [speed, from, to] of [[0.96, 40000, 45000], [0.97, 40000, 50000], [0.999, 40000, 52000], [0.998, 40000, 60000]]) for (const jitter of [0.7, 0.9]) {
     const { vi } = timeline({ hz: 59.94, viHz: 59.94, seconds: 120, jitter, slow: [from, to], slowSpeed: speed, seed: 5 });
     const f = fitPeriod(vi.map((v) => v.t), { wholeSkips: false });
     assert.ok(Math.abs(1000 / f.periodMs - 59.94) < 0.005, `${speed} σ${jitter}: ${1000 / f.periodMs}`);
@@ -292,7 +295,7 @@ test("the refresh: one rate or none (60 → 120, 120 → 60, 60 → 72 give null
     return out;
   };
   assert.ok(Math.abs(measuredRefreshHz(ticks(() => 60, 60000, 0.2, 0.1)) - 60) < 0.001);
-  for (const [name, hz] of [["60 → 120", (t) => (t < 40000 ? 60 : 120)], ["120 → 60", (t) => (t < 40000 ? 120 : 60)], ["60 → 72", (t) => (t < 50000 ? 60 : 72)], ["60 → 120 at half", (t) => (t < 30000 ? 60 : 120)]]) {
+  for (const [name, hz] of [["60 → 120", (t) => (t < 40000 ? 60 : 120)], ["120 → 60", (t) => (t < 40000 ? 120 : 60)], ["60 → 72", (t) => (t < 50000 ? 60 : 72)], ["60 → 120 at half", (t) => (t < 30000 ? 60 : 120)], ["60 → 59.94 at half", (t) => (t < 30000 ? 60 : 59.94)]]) {
     assert.equal(measuredRefreshHz(ticks(hz)), null, name);
   }
 });
@@ -308,6 +311,26 @@ test("fitPeriod: a rate less precise than 5 mHz is no rate; at 3 ms of jitter a 
     const f = fitPeriod(run(600, 3));
     if (f) assert.ok(f.seHz <= 0.005 && Math.abs(1000 / f.periodMs - 59.94) < 4 * f.seHz, `${1000 / f.periodMs} ± ${f.seHz}`);
   }
+});
+
+test("a thread between the content margin and saturation: marginal, not lost; a cadence over the VI rate is capped", () => {
+  // 12 new frames a second, all shown, at full speed, cpu 0.717
+  const d = attributeSecond(second(0, { produced: 12, shown: 12, presents: 60, occupancy: { cpu: 0.717, gpu: 0.3, replay: 0.2 } }), { cadence: 60 });
+  assert.deepEqual(d.parts, { marginal: 48 });
+  assert.equal(d.lostFrames, 0);
+  const table = attributionTable([d], []);
+  assert.equal(table[0].marginalFrames, 48);
+  assert.deepEqual(table[0].ranked, []);
+  // quiet threads, produced near the cadence: still game:marginal, lost
+  assert.deepEqual(attributeSecond(second(0, { produced: 58, shown: 58, presents: 60 }), { cadence: 60 }).parts, { "game:marginal": 2 });
+  // a cadence of 120 on a 60 VI/s second: expected 60, not 120
+  const ws = second(0, { produced: 60, shown: 60, presents: 60, cadence: 120 }).map((w) => ({ ...w, vis: 6 }));
+  assert.equal(attributeSecond(ws, {}).expected, 60);
+  // a slow core keeps its cadence: 48 VIs at 80 % speed are 60 nominal
+  const slow = second(0, { speed: 80, produced: 48, shown: 48, presents: 48, cadence: 60 }).map((w) => ({ ...w, vis: 4.8 }));
+  assert.equal(attributeSecond(slow, {}).expected, 60);
+  // parcours rows carry viRate
+  assert.equal(parcoursWindowsForAttribution([{ t: 1, cadence: 120, speed: 100, producedFps: 60, newFps: 60, presents: 60, viRate: 60 }])[0].vis, 60);
 });
 
 test("a negative cause counter never gives a negative part", () => {
