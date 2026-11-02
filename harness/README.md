@@ -668,6 +668,114 @@ sleeps in the throttle is not understated), `msPerSecond`, `mailsPerSecond`,
 `meanMailUs` and `mailMaxMs`, medians of the good runs. Calm machine first,
 then the perf lock, as race-perf.
 
+## CPU thread time per second (dip windows)
+
+`harness/probes/cpu-window.mjs` splits the emulated CPU thread's host time,
+second by second, into the parts the core counts, and says which part grows
+in the seconds that dip (speed under 100 %, or the CPU thread saturated).
+Headless, one tree (`--candidate <dir>` serves another exported tree), one
+run, under the perf lock (calm machine first; a loaded or unplugged machine
+gives the lock back while it waits; the watchdog counts only the measure,
+with the lock held, and releases the lock when it fires):
+
+```
+node harness/probes/cpu-window.mjs --iso ../roms/<disc>.iso --port 8092 \
+  --state ../measures/harness/race-after.sav [--hold KeyX] \
+  [--warmup 25] [--secs 30] [--step 1] [--vi 1200-1500] \
+  [--dip-speed 99] [--dip-busy 0.95] [--region-sample 64] [--mem-warm 5] \
+  [--untimed-secs 5] [--config product | wgpu | --query "..."] [--out dir]
+```
+
+The query defaults to the product's (drop-meter's `PRODUCT_QUERY`, what
+Salon runs: `aot=1&aotcompiler=1&jitoffthread=1`, so regions run);
+`--config wgpu` (the race-perf preset) has no `aot=1` and no region ever
+runs there. The header prints the query, the regions installed and their
+mean coverage of guest cycles, and a WARNING when the query has no `aot=1`,
+no region was installed, or they cover under 1 % of the cycles.
+
+After `--warmup`, it turns on (one reset each) the region JIT stats
+(`validationReadJitRegionStats`, `sampleEvery` = `--region-sample`), the
+memory access stats (`validationReadMemAccessStats`; its first reset clears
+the JIT cache, hence `--mem-warm` s before the first read: the blocks
+recompile, the installed regions stay and are only checked again before
+their next run, 0075 `ClearOffThreadAndRegionState`), AX HLE
+(`validationReadAxHleStats`) and the headroom counters
+(`validationReadHeadroomStats`). The region stats run `--untimed-secs`
+untimed first (`sampleEvery` 0, the window that prices the timing, below),
+then timed; the probe reads all four and the core ticks every `--step` s,
+never resetting again. Each row is the difference of two
+consecutive reads (`lib/cpu-window.mjs` `cpuWindowBreakdown`), with the VI
+outputs since the load drained from the timeline in that step (`vi.from` to
+`vi.to`, the index race-perf's `hitchList` gives). For a dip another probe
+located, pass its VI range as `--vi FROM-TO`: only the rows overlapping it
+are kept, classified and contrasted. A range no row covers, past the last
+VI the run reached (a longer `--secs`), or before its first, FAILS the probe
+(exit 1, the reason printed, `viError`) rather than reporting "no dip row";
+rows without a VI range are left out and counted (`rowsDroppedNoVi`).
+`summary.json` holds `rows` (and `allRows` with `--vi`), `dips`, `contrast`
+and the decoded `snapshots` (to recompute any window). `--dip-busy` is a
+share of host time, 0 to 1.
+
+Each row: `hostMs` (the CPU thread's own window, headroom `windowUs`;
+`hostSource: node` when the headroom counters are missing or reset),
+`guestSeconds`, `speedPct`, `cpuBusyShare` (host minus throttle sleep minus
+FlushGpu wait, as `src/occupancy-stats.js`), and `ms` / `shares` (of host
+time) / `perGuestSecond` per part:
+
+| part | what it is |
+|---|---|
+| `regions` | inside region calls |
+| `blocksDispatch` (table `b+d`) | the rest of the slice loop: JIT'd blocks and the cached-interpreter callbacks between them, with everything they call (MMIO, memory slow paths, the gather pipe, AX HLE, the block compiles after a lookup miss), the block lookups and the loop itself |
+| `interpreter` | null: the core does not separate it (interpreted instructions are in `blocksDispatch`) |
+| `idle` | `CoreTiming::Idle`, less the FlushGpu wait it contains |
+| `installs` | region module installs (slice boundaries and throttle-sleep windows) |
+| `other` | busy time left: `CoreTiming::Advance` and its events (VI, SI, DSP and audio events), the throttle's bookkeeping, slice set-up, edge noise; clamped at 0 (`overAttributedMs` keeps a negative rest) |
+| `sleep` | throttle sleep |
+| `flushGpuWait` | waiting for the GPU thread in FlushGpu (SyncOnSkipIdle on only) |
+| `axHle` | AX command lists in the DSP mailbox write: **nested** in `blocksDispatch` or `regions`, never added |
+
+The parts but `axHle` add up to `hostMs`; the table's `over ms` column
+shows `overAttributedMs` (parts past the busy time, `other` clamped at 0),
+also counted in the verdict line.
+
+Blocks and dispatch are ONE part. The core's split of the two (kept per
+row in `split`, `reliable: false`, information only) is biased: per block
+call, patch 0075 adds `max(call - its region time - its lookup time - its
+Idle time, 0)` to blocks, the lookup time being 0 on the calls whose lookups
+are not timed and N times one lookup on the sampled one, and dispatch is
+the slice's residual. So the unsampled lookups stay in blocks, and on a
+sampled call N lookups usually exceed the call: the clamp moves the block's
+own time to dispatch. Their sum is exact; `contrast` and `grew` use it. Also per row: `regionCoverage`
+(region cycles over all cycles, and outside idle skip), and `mem`: memory
+slow paths per 1000 guest instructions (`slowPerKiloInstr`, counted blocks
+plus the regions' estimate), `slowShare` of accesses and `slowByKind`
+(counts only: their time is inside `blocksDispatch`/`regions`). A struct the core
+lacks, or a counter that went back (a reset), gives null fields with the
+reason in `why`, never zeros.
+
+`contrast` compares the dip rows with the normal ones in host ms per guest
+second (a dip has no throttle sleep, so every part's share of host time
+grows; per guest second only what costs more for the same emulated time
+does); `grew` lists the parts that did, largest first.
+
+Sampling: with `sampleEvery` > 0 the core times every region call, every
+block call and every Idle; only the block lookups are timed 1 in N, and the
+core multiplies them by N itself. The struct's times are totals and are not
+rescaled; `--region-sample 0` gives counters only (every time null). Two
+clock reads per block call slow the CPU thread: the speed under the profiler
+is lower than without it, so compare rows of the same run, never this speed
+with race-perf's. The header's `timing cost` prices it on the same run:
+busy CPU-thread ms per guest second in the timed rows over the untimed
+window just before (`timingCost` in `summary.json`, with both speeds); the
+scene moves between the two windows, so it is an estimate. With regions on,
+fewer block calls are timed and the cost falls. The console says it in so
+many words: "absolute numbers inflated x<cost> by the per-call timing,
+compare within a run only". The headroom window moves at each Throttle and the region
+times at each slice: about 1-2 % of a 1 s row is edge noise, in `other`.
+Not separated by any counter: the gather pipe and FIFO writes, MMIO and the
+memory slow paths' time (all in `blocksDispatch`/`regions`), and CoreTiming events
+(in `other`).
+
 ## Profiling the generated wasm (regions)
 
 Where the CPU thread's cycles go inside the generated code
