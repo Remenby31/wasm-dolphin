@@ -440,7 +440,7 @@ test("spark-run --probe parcours: --film required and pushed, never --state; set
   const run = readFileSync(new URL("../harness/remote/spark-run.mjs", import.meta.url), "utf8");
   assert.match(run, /for \(const f of \["--iso", "--state", "--film", "--steps", "--steps-during", "--out"/, "--film after -- refused");
   assert.match(run, /\.\.\.\(film \? \["--film", abs\(film\)\] : \[\]\)/);
-  assert.match(run, /umask 077; cat > \$\{sh\(`\$\{dest\}\.tmp`\)\}; mv \$\{sh\(`\$\{dest\}\.tmp`\)\} \$\{sh\(dest\)\}[^\n]*\n[^\n]*film pushed as roms/, "the film is pushed private and quoted");
+  assert.match(run, /umask 077; cat > \$\{sh\(`\$\{dest\}\.tmp`\)\}; mv \$\{sh\(`\$\{dest\}\.tmp`\)\} \$\{sh\(dest\)\}[^\n]*\n[^\n]*\$\{kind\} pushed as roms/, "the film is pushed private and quoted");
   assert.match(run, /const name = `\$\{safeName\(path\.basename\(file, "\.json"\)\)\}-/, "a safe name for a local film file");
   const probe = readFileSync(new URL("../harness/probes/parcours.mjs", import.meta.url), "utf8");
   assert.match(probe, /"lock-wait": \{ type: "string"/, "the probe takes the bench's --lock-wait");
