@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-import { aotAssemblerRequested, createAotAssemblerClient, installAotAssemblerWorker } from "../src/aot-assembler-worker.js";
+import { aotAssemblerDefault, aotAssemblerRequested, createAotAssemblerClient, installAotAssemblerWorker } from "../src/aot-assembler-worker.js";
 import { assembleRegion, paddedSleb, paddedUleb } from "../src/aot-region-module.js";
 import { AotOptimizer, fakeCache, fakeTranslator } from "../src/aot-optimizer.js";
 import { imageFromDol } from "../src/aot-image.js";
@@ -82,13 +82,14 @@ test("aot assembler: the bytes assembled in the worker are the ones assembled in
   assert.deepEqual([...b], [...a]);
   assert.equal(made, 1, "one worker for every request");
   await assert.rejects(client.assemble([]), /no fragments/);
-  assert.equal(aotAssemblerRequested(""), true);
+  assert.equal(aotAssemblerRequested(""), null, "absent: the worker's default");
   assert.equal(aotAssemblerRequested("?aotasm=0"), false);
+  assert.equal(aotAssemblerRequested("?aotasm=1"), true);
 });
 
 test("aot assembler: the discio worker hands first-launch assembly to it unless ?aotasm=0, the optimizer awaits it", () => {
   const worker = readFileSync(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
-  assert.match(worker, /aotAssemblerEnabled && typeof Worker === "function"\s*\? \(await import\("\.\/aot-assembler-worker\.js"\)\)\.createAotAssemblerClient\(\{ options: assembleOptions,/);
+  assert.match(worker, /aotAssemblerClient = assemblerModule && \(aotAssemblerRequestedFlag \?\? assemblerModule\.aotAssemblerDefault\(wasmEngineName\)\)/);
   assert.match(worker, /tuning: \{ assemble: \(fragments\) => aotAssemblerClient\.assemble\(fragments\) \}/);
   const optimizer = readFileSync(new URL("../src/aot-optimizer.js", import.meta.url), "utf8");
   assert.match(optimizer, /bytes = await this\.assemble\(fragments\);/);
@@ -199,4 +200,32 @@ test("aot first launch: dispose() terminates the assembler", () => {
   assert.match(orchestrator, /dispose\(\) \{\n\s+disposed = true;\n\s+this\.cancel\(\);\n\s+try \{ disposeAssembler\?\.\(\); \}/);
   const worker = readFileSync(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
   assert.match(worker, /disposeAssembler: \(\) => aotAssemblerClient\.terminate\(\)/);
+});
+
+test("aot assembler: off by default under JavaScriptCore (until an iPhone measures it), on elsewhere; the query forces it", () => {
+  assert.equal(aotAssemblerDefault("jsc"), false);
+  assert.equal(aotAssemblerDefault("v8"), true);
+  assert.equal(aotAssemblerDefault("spidermonkey"), true);
+  const { WASM_ENGINES } = { WASM_ENGINES: readFileSync(new URL("../src/wasm-engine.js", import.meta.url), "utf8") };
+  assert.match(WASM_ENGINES, /"jsc"/, "the engine's own name for JavaScriptCore");
+  const worker = readFileSync(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
+  assert.match(worker, /aotAssemblerRequestedFlag = typeof aotAssembler === "boolean" \? aotAssembler : null;/);
+  const adapter = readFileSync(new URL("../src/upstream-worker-adapter.js", import.meta.url), "utf8");
+  assert.match(adapter, /this\.aotAssembler = typeof aotAssembler === "boolean" \? aotAssembler : null;/);
+});
+
+test("aot assembler: terminate() on a dispose is no failure: nothing reported", async () => {
+  const reported = [];
+  const client = createAotAssemblerClient({ options: OPTIONS, createWorker: () => fakeWorker(), onHelperFailure: (w) => reported.push(w) });
+  await client.assemble(program());
+  client.terminate();
+  assert.deepEqual(reported, []);
+  const failing = createAotAssemblerClient({ options: OPTIONS, createWorker: () => { throw new Error("refused"); }, onHelperFailure: (w) => reported.push(w) });
+  await failing.assemble(program());
+  assert.equal(reported.length, 1, "a real failure still reports");
+});
+
+test("package.json postcheck checks the assembler worker's syntax", () => {
+  const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  assert.match(pkg.scripts.postcheck, /node --check src\/aot-assembler-worker\.js/);
 });

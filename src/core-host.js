@@ -209,7 +209,8 @@ export class EmulatorHost {
     this.regionCap = regionCap !== null && /^\d+$/.test(regionCap) ? Number(regionCap) : null;
     // With aot=1, regions tail-call the next region (patch 0102); ?regionchain=0 turns it off.
     this.regionChain = new URLSearchParams(window.location.search).get("regionchain") !== "0";
-    // First-launch regions assembled off the discio worker (aot-assembler-worker.js); ?aotasm=0: in place.
+    // First-launch regions assembled off the discio worker (aot-assembler-worker.js);
+    // ?aotasm=0 / =1 forces it, absent: the worker's default by engine (null).
     this.aotAssembler = aotAssemblerRequested(window.location.search);
     // Where relaxed_madd is fused the JIT's FMA uses it (patch 0129); ?fusedmadd=0
     // keeps the exact plain-f64 path (A/B on one core).

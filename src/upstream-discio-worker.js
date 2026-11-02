@@ -2884,7 +2884,7 @@ async function loadCore({
   wasmEngine: requestedWasmEngine = null,
   regionCap = null,
   regionChain = true,
-  aotAssembler = true,
+  aotAssembler = null,
   fusedMadd = true,
   reportedCoreSelection = null,
   wgpuReplayDiagnostics = false,
@@ -3336,7 +3336,7 @@ async function loadCore({
   aotProfileSampleMs = Number.isInteger(aotSampleMs) && aotSampleMs >= 0 ? aotSampleMs : AOT_PROFILE_SAMPLE_MS;
   wasmEngineName = resolveWasmEngineName(requestedWasmEngine);
   aotRegionCapRequested = Number.isInteger(regionCap) && regionCap >= 0 ? regionCap : null;
-  aotAssemblerEnabled = aotAssembler !== false;
+  aotAssemblerRequestedFlag = typeof aotAssembler === "boolean" ? aotAssembler : null;
   dolphinJitBootLoadComplete = false;
   dolphinJitBootLoadedEntries = 0;
   coreBuildFingerprint = String(buildFingerprint ?? "");
@@ -8721,8 +8721,9 @@ export async function prepareAotFirstLaunch(file, {
   // 0189 (on by default): the entry -> fragment section only in its mode
   // (bit 16 of the codegen mask, so its modules have their own keys).
   const assembleOptions = core?.assemble && { ...core.assemble, fragmentEntries: ((keyParts?.codegenMask ?? 0) & (1 << 16)) !== 0 };
-  const aotAssemblerClient = translator && assembleOptions && aotAssemblerEnabled && typeof Worker === "function"
-    ? (await import("./aot-assembler-worker.js")).createAotAssemblerClient({ options: assembleOptions,
+  const assemblerModule = translator && assembleOptions && typeof Worker === "function" ? await import("./aot-assembler-worker.js") : null;
+  const aotAssemblerClient = assemblerModule && (aotAssemblerRequestedFlag ?? assemblerModule.aotAssemblerDefault(wasmEngineName))
+    ? assemblerModule.createAotAssemblerClient({ options: assembleOptions,
       onHelperFailure: (why) => postStatus(`aot: assembler worker failed (${why}); regions assembled on this worker`) })
     : null;
   const flow = createAotFirstLaunch({
@@ -8991,8 +8992,9 @@ export function setAotCoreBootedForTest(on) {
 }
 // ?regioncap=N|0 (core-host): the region function cap forced, else null (by engine).
 let aotRegionCapRequested = null;
-// ?aotasm=0 (core-host): first-launch regions assembled on this worker.
-let aotAssemblerEnabled = true;
+// ?aotasm=0|1 (core-host), null when absent: the default by engine
+// (aotAssemblerDefault: off under JSC until measured on an iPhone).
+let aotAssemblerRequestedFlag = null;
 export function regionFunctionCap(jscCap) {
   return aotRegionCapRequested ?? (wasmEngineName === "jsc" ? jscCap : 0);
 }
