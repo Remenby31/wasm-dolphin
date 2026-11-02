@@ -41,7 +41,7 @@ test("the host checks the adapter before the core loads, falls back to software 
   assert.match(host, /await this\.fallBackWithoutWgpuAdapter\(\);\n\s+const mounted = await this\.adapter\.mountGame\(file\);/);
   assert.match(host, /this\.applyVideoBackend\("Software Renderer"\);\n\s+this\.videoFallback = \{ from: "WebGPU-Real", to: "Software Renderer", reason: problem \};/);
   // the detached presenter cannot switch: an explicit error, never a silent wait
-  assert.match(host, /if \(this\.usesDetachedWgpu\) \{\n\s+throw new Error\(`video=wgpu needs a usable WebGPU adapter/);
+  assert.match(host, /if \(this\.usesDetachedWgpu\) \{\n\s+const message = `video=wgpu needs a usable WebGPU adapter \(\$\{problem\}\); the detached presenter cannot fall back`;\n\s+console\.error\(`\[wgpu\] \$\{message\}`\);\n\s+throw new Error\(message\);/);
   // the reason reaches the frame info
   assert.match(host, /videoFallback: this\.videoFallback \?\? null,/);
 });

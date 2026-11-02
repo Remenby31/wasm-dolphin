@@ -7,12 +7,17 @@
 //   --expect-presenter 2d      the software renderer with presenter=webgpu
 //                              without a usable GPU (fallback adapter and
 //                              software WebGL refused) shows the 2D canvas
-//   --expect-boot-error RE     video=wgpu without a usable adapter fails
-//                              before the core starts, with a message
-//                              matching RE (worker console)
+//   --expect-video-fallback R  video=wgpu without a usable adapter boots the
+//                              software renderer instead (core-host
+//                              videoFallback), for reason R (e.g.
+//                              fallback-adapter: SwiftShader)
+//   --expect-boot-error RE     a boot that must fail before the core starts,
+//                              with a message matching RE (page or worker
+//                              console): video=wgpu with the detached
+//                              presenter (wgpudetached=1) and no usable adapter
 //
 //   node harness/probes/presenter-check.mjs --iso disc.iso --port N --query "..."
-//     (--expect-presenter webgpu|webgl|2d | --expect-boot-error RE) [--out file.json]
+//     (--expect-presenter webgpu|webgl|2d | --expect-video-fallback R | --expect-boot-error RE) [--out file.json]
 import { mkdtempSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -23,11 +28,12 @@ import { bootIso, ensureServer, launchChrome, workerRequest } from "../lib/brows
 const { values } = parseArgs({
   options: {
     iso: { type: "string" }, port: { type: "string", default: process.env.HARNESS_PORT }, query: { type: "string" },
-    "expect-presenter": { type: "string" }, "expect-boot-error": { type: "string" }, out: { type: "string" },
+    "expect-presenter": { type: "string" }, "expect-boot-error": { type: "string" }, "expect-video-fallback": { type: "string" },
+    out: { type: "string" },
   },
 });
-if (!values.iso || !values.port || !values.query || !(values["expect-presenter"] || values["expect-boot-error"])) {
-  throw new Error("usage: presenter-check.mjs --iso disc.iso --port N --query Q (--expect-presenter P | --expect-boot-error RE)");
+if (!values.iso || !values.port || !values.query || !(values["expect-presenter"] || values["expect-boot-error"] || values["expect-video-fallback"])) {
+  throw new Error("usage: presenter-check.mjs --iso disc.iso --port N --query Q (--expect-presenter P | --expect-video-fallback R | --expect-boot-error RE)");
 }
 
 const server = await ensureServer({ port: values.port });
@@ -46,6 +52,8 @@ try {
     const d = await workerRequest(page, "rendererDiagnostics", {}, 10000);
     r.presenter = d?.activePresenterBackend ?? null;
     r.adapter = d?.adapter ? { vendor: d.adapter.vendor, architecture: d.adapter.architecture } : null;
+    r.videoBackend = await page.evaluate(() => window.__host?.videoBackend ?? null).catch(() => null);
+    r.videoFallback = await page.evaluate(() => window.__host?.videoFallback ?? null).catch(() => null);
   } catch (e) {
     r.bootError = String(e?.message || e).split("\n")[0];
   }
@@ -58,6 +66,8 @@ if (values.out) writeFileSync(values.out, JSON.stringify(r, null, 1));
 let ok;
 if (values["expect-presenter"]) {
   ok = r.booted && r.presenter === values["expect-presenter"];
+} else if (values["expect-video-fallback"]) {
+  ok = r.booted && r.videoBackend === "Software Renderer" && r.videoFallback?.reason === values["expect-video-fallback"];
 } else {
   const re = new RegExp(values["expect-boot-error"]);
   ok = !r.booted && consoleLines.some((t) => re.test(t));

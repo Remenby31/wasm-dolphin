@@ -797,7 +797,9 @@ export class EmulatorHost {
     });
     if (!problem) return null;
     if (this.usesDetachedWgpu) {
-      throw new Error(`video=wgpu needs a usable WebGPU adapter (${problem}); the detached presenter cannot fall back`);
+      const message = `video=wgpu needs a usable WebGPU adapter (${problem}); the detached presenter cannot fall back`;
+      console.error(`[wgpu] ${message}`);
+      throw new Error(message);
     }
     this.applyVideoBackend("Software Renderer");
     this.videoFallback = { from: "WebGPU-Real", to: "Software Renderer", reason: problem };
