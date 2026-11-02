@@ -300,8 +300,12 @@ export async function acquirePerfLock({
     // on 2026-11-02, until the next contender swept it).
     const dropTicket = () => dequeue(dir, ticket);
     const onQueuedSignal = (sig) => { dropTicket(); process.exit({ SIGINT: 130, SIGTERM: 143, SIGHUP: 129 }[sig] ?? 1); };
+    // Whatever handleSignals: a caller that handles signals itself (lock-run)
+    // installs its handlers once the lock is held, and runs nothing yet while
+    // queued; without these a SIGTERM there would kill it by default, the
+    // exit handler unrun (a reused pid's ticket then blocks everyone).
     process.once("exit", dropTicket);
-    if (handleSignals) for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) process.once(sig, onQueuedSignal);
+    for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) process.once(sig, onQueuedSignal);
     let held;
     try {
       held = await contend({ dir, name, waitSec, pollSec, orphanSec, log, sleep, end, ticket, onBattery, handleSignals });

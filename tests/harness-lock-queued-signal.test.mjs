@@ -58,3 +58,22 @@ test("a plain exit while queued takes the ticket too", async (t) => {
   assert.equal(code, 3);
   assert.deepEqual(tickets(dir), []);
 });
+
+test("lock-run (handleSignals: false) queued: SIGTERM takes the ticket too, nothing launched", async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "harness-queued-signal-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const dir = path.join(root, ".perf-lock");
+  const marker = path.join(root, "launched");
+  const lockRun = new URL("../harness/lib/lock-run.mjs", import.meta.url).href;
+  const child = await queuedChild(t, dir, `
+    const { runLocked } = await import(${JSON.stringify(lockRun)});
+    await runLocked({ name: "lock-run queued", cmd: "touch", args: [${JSON.stringify(marker)}], lock: { dir: ${JSON.stringify(dir)}, waitSec: 60, pollSec: 1 }, log: (m) => process.stdout.write(m + "\\n") });
+    process.exit(0);`);
+  assert.equal(tickets(dir).length, 1, "queued with a ticket");
+  const exited = new Promise((r) => child.once("exit", (code) => r(code)));
+  child.kill("SIGTERM");
+  assert.equal(await exited, 143);
+  assert.deepEqual(tickets(dir), [], "no ticket left");
+  const { existsSync } = await import("node:fs");
+  assert.equal(existsSync(marker), false, "the command never ran");
+});
