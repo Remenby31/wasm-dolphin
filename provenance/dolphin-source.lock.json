@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "72e82efb8bbf55454dcc7660a5deed622892a759ef17c2195b4bde6dd982e16f",
+  "patchSeriesSha256": "e1902fed9538854541883f9cf52fa8c877b428e695354f4e3c5e2ec2b0dd5a40",
   "patches": [
     {
       "order": 1,
@@ -1165,6 +1165,14 @@
     },
     {
       "order": 143,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0211-stale-xfb-shows-last-picture.patch",
+      "size": 12180,
+      "sha256": "e6da99f35d4a0123731d799ed6ee32958610478a73ac0dccb38c5a20a67ebe85"
+    },
+    {
+      "order": 144,
       "cwd": "Externals/SFML/SFML",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0001-sfml-emscripten-config.patch",
@@ -1172,7 +1180,7 @@
       "sha256": "f82197a21fe982ad83f6ee7bbf5a03839b1cebd4d64da3eab11263842bf61d89"
     },
     {
-      "order": 144,
+      "order": 145,
       "cwd": "Externals/xxhash/xxHash",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0002-xxhash-wasm-simd-scalar.patch",

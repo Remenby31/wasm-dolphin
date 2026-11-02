@@ -1,0 +1,271 @@
+diff --git a/Source/Core/VideoCommon/Fifo.cpp b/Source/Core/VideoCommon/Fifo.cpp
+index 5418917..d73ffe0 100644
+--- a/Source/Core/VideoCommon/Fifo.cpp
++++ b/Source/Core/VideoCommon/Fifo.cpp
+@@ -249,6 +249,18 @@ void FifoManager::EmulatorState(bool running)
+     m_gpu_mainloop.AllowSleep();
+ }
+ 
++u64 FifoManager::GpuCatchUpTarget() const
++{
++  auto& fifo = m_system.GetCommandProcessor().GetFifo();
++  // The consumed count first, then the distance: a chunk the GPU thread
++  // consumes between the two reads lowers the distance only, so the target
++  // can come out one chunk low (a hold missed), never one high (a hold of a
++  // swap whose copy already ran).
++  const u64 consumed = m_gpu_chunks_consumed.load(std::memory_order_acquire);
++  const u32 pending = fifo.CPReadWriteDistance.load(std::memory_order_seq_cst);
++  return consumed + (pending + GPFifo::GATHER_PIPE_SIZE - 1) / GPFifo::GATHER_PIPE_SIZE;
++}
++
+ void FifoManager::SyncGPU(SyncGPUReason reason, bool may_move_read_ptr)
+ {
+   if (m_use_deterministic_gpu_thread)
+@@ -548,6 +560,8 @@ void FifoManager::RunGpuLoop()
+             fifo.CPReadPointer.store(readPtr, std::memory_order_relaxed);
+             const u32 previous_distance = fifo.CPReadWriteDistance.fetch_sub(
+                 GPFifo::GATHER_PIPE_SIZE, std::memory_order_seq_cst);
++            // Patch 0211: one more chunk consumed (after the decode above).
++            m_gpu_chunks_consumed.fetch_add(1, std::memory_order_release);
+ #ifdef __EMSCRIPTEN__
+             if (previous_distance < GPFifo::GATHER_PIPE_SIZE)
+               DolphinWeb::RasterProfile::RecordFifoDistanceUnderflow();
+diff --git a/Source/Core/VideoCommon/Fifo.h b/Source/Core/VideoCommon/Fifo.h
+index 9d69055..cdee507 100644
+--- a/Source/Core/VideoCommon/Fifo.h
++++ b/Source/Core/VideoCommon/Fifo.h
+@@ -80,6 +80,11 @@ public:
+   const SavestatePauseStats& GetSavestatePauseStats() const { return m_savestate_pause_stats; }
+   void UpdateWantDeterminism(bool want);
+   bool UseDeterministicGPUThread() const { return m_use_deterministic_gpu_thread; }
++  // Patch 0211 (dual core, non-deterministic GPU thread): FIFO chunks the GPU
++  // thread consumed so far, and the count it reaches once it has consumed
++  // everything written up to now (read on the CPU thread at a VI).
++  u64 GpuChunksConsumed() const { return m_gpu_chunks_consumed.load(std::memory_order_acquire); }
++  u64 GpuCatchUpTarget() const;
+   bool UseSyncGPU() const { return m_config_sync_gpu; }
+ 
+   // In deterministic GPU thread mode this waits for the GPU to be done with pending work.
+@@ -134,6 +139,7 @@ private:
+   // This could be in SConfig, but it depends on multiple settings
+   // and can change at runtime.
+   bool m_use_deterministic_gpu_thread = false;
++  std::atomic<u64> m_gpu_chunks_consumed{0};
+ 
+   CoreTiming::EventType* m_event_sync_gpu = nullptr;
+ 
+diff --git a/Source/Core/VideoCommon/Present.cpp b/Source/Core/VideoCommon/Present.cpp
+index 0c58fad..3795ab3 100644
+--- a/Source/Core/VideoCommon/Present.cpp
++++ b/Source/Core/VideoCommon/Present.cpp
+@@ -3,12 +3,20 @@
+ 
+ #include "VideoCommon/Present.h"
+ 
++#include <algorithm>
++
+ #ifdef __EMSCRIPTEN__
+ #include <atomic>
+ namespace DolphinWeb
+ {
+ extern std::atomic<bool> g_dup_xfb_rearms_throttle;  // CoreTiming.cpp, patch 0150
+ extern std::atomic<bool> g_present_on_arrival;       // CoreTiming.cpp, patch 0153
++// Patch 0211: swaps that held the last picture instead of an XFB whose copy
++// had not been replayed yet (dual core, a late GPU thread).
++std::atomic<u32> g_stale_xfb_held{0};
++// Of those, holds that showed a picture from before the last state load: 0
++// unless the record of shown entries outlived a load.
++std::atomic<u32> g_stale_xfb_held_preload{0};
+ }
+ #endif
+ 
+@@ -29,6 +37,7 @@ extern std::atomic<bool> g_present_on_arrival;       // CoreTiming.cpp, patch 01
+ 
+ #include "Present.h"
+ #include "VideoCommon/AbstractGfx.h"
++#include "VideoCommon/Fifo.h"
+ #include "VideoCommon/FrameDumper.h"
+ #include "VideoCommon/FramebufferManager.h"
+ #include "VideoCommon/OnScreenUI.h"
+@@ -156,7 +165,20 @@ bool Presenter::Initialize()
+   return true;
+ }
+ 
+-bool Presenter::FetchXFB(u32 xfb_addr, u32 fb_width, u32 fb_stride, u32 fb_height, u64 ticks)
++// Patch 0211: at most this many holds in a row; a game that shows one of its
++// finished buffers again without a new copy is then shown as it asks.
++constexpr u32 MAX_STALE_HOLDS_IN_A_ROW = 4;
++
++void Presenter::ForgetShownXfbs()
++{
++  m_shown_xfb_ids.fill(0);
++  m_shown_xfb_next = 0;
++  m_last_shown_entry.reset();
++  m_stale_holds_in_a_row = 0;
++}
++
++bool Presenter::FetchXFB(u32 xfb_addr, u32 fb_width, u32 fb_stride, u32 fb_height, u64 ticks,
++                         bool may_hold)
+ {
+   ReleaseXFBContentLock();
+   u64 old_xfb_id = m_last_xfb_id;
+@@ -172,7 +194,48 @@ bool Presenter::FetchXFB(u32 xfb_addr, u32 fb_width, u32 fb_stride, u32 fb_heigh
+   {
+     m_xfb_entry =
+         g_texture_cache->GetXFBTexture(xfb_addr, fb_width, fb_height, fb_stride, &m_xfb_rect);
+-    m_last_xfb_id = m_xfb_entry->id;
++    const u64 id = m_xfb_entry->id;
++    // Patch 0211. In dual core the swap is an AsyncRequests event the GPU
++    // thread pulls between FIFO chunks: a late GPU thread can run it before
++    // the EFB-to-XFB copy the game made for this frame. The cache then gives
++    // the entry this address had before, the picture from two frames back,
++    // and the scene jumps back for one frame. Held, the last picture is shown
++    // again (a duplicate, as when the game repeats a frame), only when all of
++    // these hold: the GPU thread has not yet replayed the FIFO written before
++    // this VI (may_hold), the entry is older than the last one shown and was
++    // shown already, and fewer than MAX_STALE_HOLDS_IN_A_ROW holds came just
++    // before.
++    const bool shown_before =
++        id != 0 &&
++        std::find(m_shown_xfb_ids.begin(), m_shown_xfb_ids.end(), id) != m_shown_xfb_ids.end();
++    const bool stale = may_hold && m_last_shown_entry && id < old_xfb_id &&
++                       old_xfb_id != std::numeric_limits<u64>::max() && shown_before &&
++                       m_stale_holds_in_a_row < MAX_STALE_HOLDS_IN_A_ROW;
++    if (stale)
++    {
++      m_xfb_entry = m_last_shown_entry;
++      m_xfb_rect = m_last_shown_rect;
++      m_last_xfb_id = old_xfb_id;
++      ++m_stale_holds_in_a_row;
++#ifdef __EMSCRIPTEN__
++      DolphinWeb::g_stale_xfb_held.fetch_add(1, std::memory_order_relaxed);
++      if (m_last_shown_generation != m_load_generation)
++        DolphinWeb::g_stale_xfb_held_preload.fetch_add(1, std::memory_order_relaxed);
++#endif
++    }
++    else
++    {
++      m_stale_holds_in_a_row = 0;
++      if (id != old_xfb_id)
++      {
++        m_shown_xfb_ids[m_shown_xfb_next] = id;
++        m_shown_xfb_next = (m_shown_xfb_next + 1) % m_shown_xfb_ids.size();
++      }
++      m_last_xfb_id = id;
++      m_last_shown_entry = m_xfb_entry;
++      m_last_shown_rect = m_xfb_rect;
++      m_last_shown_generation = m_load_generation;
++    }
+ 
+     m_xfb_entry->AcquireContentLock();
+   }
+@@ -186,9 +249,14 @@ bool Presenter::FetchXFB(u32 xfb_addr, u32 fb_width, u32 fb_stride, u32 fb_heigh
+ }
+ 
+ void Presenter::ViSwap(u32 xfb_addr, u32 fb_width, u32 fb_stride, u32 fb_height, u64 ticks,
+-                       TimePoint presentation_time)
++                       TimePoint presentation_time, u64 fifo_target)
+ {
+-  bool is_duplicate = FetchXFB(xfb_addr, fb_width, fb_stride, fb_height, ticks);
++  // Patch 0211: the GPU thread still behind what the game wrote before this
++  // VI (dual core): the swap may come before the copy of its frame.
++  const bool may_hold =
++      fifo_target != 0 &&
++      Core::System::GetInstance().GetFifo().GpuChunksConsumed() < fifo_target;
++  bool is_duplicate = FetchXFB(xfb_addr, fb_width, fb_stride, fb_height, ticks, may_hold);
+ 
+   PresentInfo present_info{
+       .present_count = m_present_count++,
+@@ -1063,6 +1131,16 @@ void Presenter::DoState(PointerWrap& p)
+   p.Do(m_last_xfb_stride);
+   p.Do(m_last_xfb_height);
+ 
++  // Patch 0211: a load restores the texture cache's entry ids, so the ids
++  // remembered from before it name other pictures: forget them, and the
++  // last XFB, before the re-display below.
++  if (p.IsReadMode())
++  {
++    ++m_load_generation;
++    ForgetShownXfbs();
++    m_last_xfb_id = std::numeric_limits<u64>::max();
++  }
++
+   // If we're loading and there is a last XFB, re-display it.
+   if (p.IsReadMode() && m_last_xfb_stride != 0)
+   {
+diff --git a/Source/Core/VideoCommon/Present.h b/Source/Core/VideoCommon/Present.h
+index 7e5ce65..01664b5 100644
+--- a/Source/Core/VideoCommon/Present.h
++++ b/Source/Core/VideoCommon/Present.h
+@@ -35,8 +35,11 @@ public:
+   Presenter();
+   virtual ~Presenter();
+ 
++  // fifo_target (patch 0211, dual core): the GPU FIFO chunks the GPU thread
++  // must have consumed to have replayed everything the game wrote before
++  // this VI (FifoManager::GpuCatchUpTarget); 0 when unknown.
+   void ViSwap(u32 xfb_addr, u32 fb_width, u32 fb_stride, u32 fb_height, u64 ticks,
+-              TimePoint presentation_time);
++              TimePoint presentation_time, u64 fifo_target = 0);
+   void ImmediateSwap(u32 xfb_addr, u32 fb_width, u32 fb_stride, u32 fb_height);
+ 
+   void SetNextSwapEstimatedTime(u64 ticks, TimePoint host_time);
+@@ -103,7 +106,10 @@ public:
+ private:
+   // Fetches the XFB texture from the texture cache.
+   // Returns true the contents have changed since last time
+-  bool FetchXFB(u32 xfb_addr, u32 fb_width, u32 fb_stride, u32 fb_height, u64 ticks);
++  // may_hold (patch 0211): a VI swap whose GPU thread is still behind the
++  // FIFO written before it; never an immediate swap.
++  bool FetchXFB(u32 xfb_addr, u32 fb_width, u32 fb_stride, u32 fb_height, u64 ticks,
++                bool may_hold = false);
+ 
+   void ProcessFrameDumping(u64 ticks) const;
+ 
+@@ -148,6 +154,18 @@ private:
+ 
+   // Tracking of XFB textures so we don't render duplicate frames.
+   u64 m_last_xfb_id = std::numeric_limits<u64>::max();
++  // Patch 0211: the XFB entries shown before the last one, the last one shown
++  // (entry and rectangle) and the holds in a row. Forgotten on a state load.
++  std::array<u64, 4> m_shown_xfb_ids{};
++  size_t m_shown_xfb_next = 0;
++  RcTcacheEntry m_last_shown_entry;
++  MathUtil::Rectangle<int> m_last_shown_rect{};
++  u32 m_stale_holds_in_a_row = 0;
++  // State loads seen, and the one the last shown entry belongs to: a hold
++  // never shows a picture from before a load (counted if it ever did).
++  u32 m_load_generation = 0;
++  u32 m_last_shown_generation = 0;
++  void ForgetShownXfbs();
+ 
+   // These will be set on the first call to SetSuggestedWindowSize.
+   int m_last_window_request_width = 0;
+diff --git a/Source/Core/VideoCommon/VideoBackendBase.cpp b/Source/Core/VideoCommon/VideoBackendBase.cpp
+index 668d36a..4d93578 100644
+--- a/Source/Core/VideoCommon/VideoBackendBase.cpp
++++ b/Source/Core/VideoCommon/VideoBackendBase.cpp
+@@ -157,6 +157,13 @@ void VideoBackendBase::Video_OutputXFB(u32 xfb_addr, u32 fb_width, u32 fb_stride
+ #endif
+ 
+     const TimePoint presentation_time = core_timing.GetTargetHostTime(ticks);
++    // Patch 0211: in dual core (GPU thread not deterministic), where the GPU
++    // thread must be in the FIFO once it has replayed this frame's copy.
++    auto& fifo_manager = system.GetFifo();
++    const u64 fifo_target =
++        system.IsDualCoreMode() && !fifo_manager.UseDeterministicGPUThread() ?
++            fifo_manager.GpuCatchUpTarget() :
++            0;
+ #ifdef __EMSCRIPTEN__
+     // Read on this (CPU) thread, after publish_xfb_to_web counted the output:
+     // in dual core the video thread presents later, when the counters have
+@@ -171,7 +178,8 @@ void VideoBackendBase::Video_OutputXFB(u32 xfb_addr, u32 fb_width, u32 fb_stride
+       if (harness_tag)
+         DolphinWeb_WebGpuTagViOutput(vi_since_boot, vi_since_load, ticks, load_generation);
+ #endif
+-      g_presenter->ViSwap(xfb_addr, fb_width, fb_stride, fb_height, ticks, presentation_time);
++      g_presenter->ViSwap(xfb_addr, fb_width, fb_stride, fb_height, ticks, presentation_time,
++                          fifo_target);
+     });
+   }
+ #ifdef __EMSCRIPTEN__
