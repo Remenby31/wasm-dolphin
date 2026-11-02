@@ -11,7 +11,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import { CPU_THREAD_DIAG_BYTES, consistentCpuThreadDiagRead, cpuThreadDiagDelta, decodeCpuThreadDiag, DEFERRED_FIELDS, deferredRunsDelta, FIELDS, PARTS } from "../harness/lib/cpu-thread-diag.mjs";
-import { classifyDips, contrast, cpuWindowBreakdown, formatTable, NESTED, OTHER_PARTS } from "../harness/lib/cpu-window.mjs";
+import { classifyDips, contrast, cpuWindowBreakdown, formatTable, NESTED, OTHER_PARTS, phaseCheck, screenOf } from "../harness/lib/cpu-window.mjs";
 import { cpuThreadLine } from "../harness/probes/cpu-window.mjs";
 
 const read = (rel) => readFileSync(new URL(rel, import.meta.url), "utf8");
@@ -196,7 +196,7 @@ test("probe contract: the diag turned on with the others (also before the load),
   assert.equal(src.match(/enabled = await enableStats\(page\)/g).length, 2);
   const snapFn = src.slice(src.indexOf("export async function snapshot"), src.indexOf("// Every counter on and reset"));
   assert.match(snapFn, /"validationReadCpuThreadDiag", \{ reset: -1 \}\), decodeCpuThreadDiag, consistentCpuThreadDiagRead/);
-  assert.match(snapFn, /return \{ t: [^}]*diag, progress \}/);
+  assert.match(snapFn, /return \{ t: [^}]*diag, progress, screen \}/);
   assert.match(src, /log\(cpuThreadLine\(c, run\.rows\)\)/);
 });
 
@@ -331,4 +331,39 @@ test("0213 contract: in the locked series after 0211, the core ABI lists the wor
   assert.ok(at > paths.indexOf("patches/dolphin-wasm/snapshot/0211-stale-xfb-shows-last-picture.patch"));
   const abi = read("../provenance/dolphin-core-abi-v1.json");
   assert.ok(abi.includes('"validationReadCpuThreadDiag"'), "the ABI manifest lists validationReadCpuThreadDiag (npm run update:core-abi)");
+});
+
+test("phaseCheck: COMPLETE with the compile wave then game rows; INCOMPLETE without either, or without the v2 diag", () => {
+  const dr = (blocks) => ({ throttle: { blocks: 0 }, offThread: { blocks } });
+  // 0.25 s rows: 10 s of menu (40 draws/frame), a 1 s wave of 4 x 60 blocks, then game (400 draws/frame)
+  const rows = [];
+  for (let i = 1; i <= 80; i += 1) {
+    const game = i > 44;
+    rows.push({ i, atS: i * 0.25, cpuThread: { deferredRuns: dr(i > 40 && i <= 44 ? 60 : 2) }, screen: { dtS: 0.25, draws: (game ? 400 : 40) * 15, frames: 15, newFps: 60 } });
+  }
+  const ok = phaseCheck(rows);
+  assert.equal(ok.verdict, "COMPLETE");
+  assert.equal(ok.wave.blocks, 240);
+  assert.equal(ok.wave.fromS, 10);
+  assert.ok(ok.gameSecAfterWave >= 8.5, String(ok.gameSecAfterWave));
+  // the route stopped in the menu: the wave never came
+  const menu = rows.map((r) => ({ ...r, cpuThread: { deferredRuns: dr(2) }, screen: { ...r.screen, draws: 40 * 15 } }));
+  assert.equal(phaseCheck(menu).verdict, "INCOMPLETE");
+  assert.match(phaseCheck(menu).why[0], /no compile wave/);
+  // the wave, but the game never showed (a load that never ended)
+  const stuck = rows.map((r) => ({ ...r, screen: { ...r.screen, draws: 40 * 15 } }));
+  assert.match(phaseCheck(stuck).why.join(), /no game phase after the wave: 0 s/);
+  // a v1 core: no counts, never COMPLETE
+  assert.match(phaseCheck(rows.map((r) => ({ ...r, cpuThread: null }))).why[0], /0213 v2 core needed/);
+  // screenOf: draws per produced frame between two snapshots
+  assert.deepEqual(screenOf({ t: 0, screen: { draws: 100 } }, { t: 500, screen: { draws: 3100, producedFps: 60, newFps: 58 } }), { dtS: 0.5, draws: 3000, frames: 30, newFps: 58 });
+  assert.equal(screenOf({ t: 0, screen: null }, { t: 500, screen: { draws: 1 } }), null);
+});
+
+test("probe contract: --steps-during runs alongside the rows and its phase check reaches the summary", () => {
+  const src = read("../harness/probes/cpu-window.mjs");
+  assert.match(src, /const duringRun = o\.during \? runSteps\(page, o\.during\)/);
+  assert.match(src, /if \(duringDone\?\.unfinished\) throw new Error/);
+  assert.match(src, /stepsDuring: values\["steps-during"\] \? \{ file: path\.basename\(values\["steps-during"\]\), doneAtS: run\.stepsDuringDoneS, \.\.\.phaseCheck\(run\.rows\) \} : null,/);
+  assert.match(src, /screen: screenOf\(snaps\.at\(-1\), snap\)/);
 });

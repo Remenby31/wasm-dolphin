@@ -84,6 +84,7 @@
 import { cpuThreadDiagDelta } from "./cpu-thread-diag.mjs";
 import { KINDS } from "./mem-access-stats.mjs";
 import { round } from "./stats.mjs";
+import { GAME_DRAWS_PER_FRAME, MIN_NEW_FPS } from "./parcours.mjs";
 
 // The parts of hostMs, in table order; they add up to hostMs.
 export const PARTS = ["regions", "blocksDispatch", "interpreter", "idle", "installs", "other", "sleep", "flushGpuWait"];
@@ -499,4 +500,57 @@ export function inflationNote(cost) {
   return cost?.ratio != null
     ? `absolute numbers inflated x${cost.ratio} by the per-call timing, compare within a run only`
     : `absolute numbers inflated by the per-call timing (cost unknown: ${cost?.why ?? "no estimate"}), compare within a run only`;
+}
+
+// The screen between two snapshots (their `screen`: the replay's draws since
+// boot, the frame rates): draws per produced frame, as parcours reads them;
+// null fields when a side lacks them (no wgpu replay, no frame info yet).
+export function screenOf(a, b) {
+  const sa = a?.screen, sb = b?.screen;
+  const dt = (b?.t - a?.t) / 1000;
+  if (!sa || !sb || !(dt > 0)) return null;
+  const draws = sa.draws != null && sb.draws != null && sb.draws >= sa.draws ? sb.draws - sa.draws : null;
+  const frames = sb.producedFps != null ? sb.producedFps * dt : null;
+  return { dtS: round(dt, 3), draws, frames: frames == null ? null : round(frames, 2), newFps: sb.newFps };
+}
+
+// Deferred blocks written in a row (0213 v2), or null without the diag.
+const deferredBlocksOf = (r) => {
+  const d = r.cpuThread?.deferredRuns;
+  return d ? d.throttle.blocks + d.offThread.blocks : null;
+};
+
+// Whether a run with --steps-during reached what it was played for: the
+// compile wave (the most deferred blocks written within 1 s, at least
+// minWaveBlocks), then the game phase after it for at least minGameSec
+// (seconds whose pooled draws per frame reach GAME_DRAWS_PER_FRAME with
+// newFps at least MIN_NEW_FPS, parcours' signals). verdict COMPLETE or
+// INCOMPLETE with why; an INCOMPLETE run is left out of any comparison.
+export function phaseCheck(rows, { minWaveBlocks = 100, minGameSec = 3, gameDrawsPerFrame = GAME_DRAWS_PER_FRAME, minNewFps = MIN_NEW_FPS } = {}) {
+  const why = [];
+  let wave = null;
+  for (let i = 0; i < rows.length; i += 1) {
+    let blocks = 0, known = true;
+    for (let j = i; j < rows.length && rows[j].atS - rows[i].atS < 1 - 1e-9; j += 1) {
+      const b = deferredBlocksOf(rows[j]);
+      if (b == null) { known = false; break; }
+      blocks += b;
+    }
+    if (known && (wave == null || blocks > wave.blocks)) wave = { fromS: round(rows[i].atS - (rows[i].screen?.dtS ?? 0), 2), blocks };
+  }
+  if (wave == null) why.push("no deferred-block counts (0213 v2 core needed)");
+  else if (wave.blocks < minWaveBlocks) why.push(`no compile wave: at most ${wave.blocks} deferred blocks in 1 s (< ${minWaveBlocks})`);
+  // game seconds after the wave's start: each row judged on the 1 s of rows ending with it
+  let gameSec = 0;
+  const after = wave ? rows.filter((r) => r.atS > wave.fromS) : [];
+  for (let i = 0; i < after.length; i += 1) {
+    const win = after.slice(0, i + 1).filter((r) => after[i].atS - r.atS < 1 - 1e-9);
+    const draws = win.reduce((n, r) => (r.screen?.draws == null || n == null ? null : n + r.screen.draws), 0);
+    const frames = win.reduce((n, r) => (r.screen?.frames == null || n == null ? null : n + r.screen.frames), 0);
+    const newFps = after[i].screen?.newFps;
+    if (draws != null && frames > 0 && draws / frames >= gameDrawsPerFrame && newFps >= minNewFps) gameSec += after[i].screen.dtS;
+  }
+  gameSec = round(gameSec, 2);
+  if (wave && gameSec < minGameSec) why.push(`no game phase after the wave: ${gameSec} s of game rows (< ${minGameSec})`);
+  return { verdict: why.length ? "INCOMPLETE" : "COMPLETE", why, wave, gameSecAfterWave: gameSec, thresholds: { minWaveBlocks, minGameSec, gameDrawsPerFrame, minNewFps } };
 }

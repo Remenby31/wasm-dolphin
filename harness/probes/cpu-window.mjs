@@ -59,7 +59,7 @@ import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 
 import { ensureServer, loadHarnessState, readCoreProgress, readTimeline, REPO_ROOT, workerRequest } from "../lib/browser.mjs";
-import { classifyDips, contrast, cpuWindowBreakdown, formatTable, inflationNote, parseViRange, regionWarning, rowsInViRange, SPLIT_NOTE, timingCost, viRangeOf } from "../lib/cpu-window.mjs";
+import { classifyDips, contrast, cpuWindowBreakdown, formatTable, inflationNote, parseViRange, phaseCheck, regionWarning, rowsInViRange, screenOf, SPLIT_NOTE, timingCost, viRangeOf } from "../lib/cpu-window.mjs";
 import { calmLock, defaultMaxLoad, loadGaveUp } from "../lib/env.mjs";
 import { consistentAxRead, decodeAxStats } from "../lib/ax-hle-stats.mjs";
 import { consistentCpuThreadDiagRead, decodeCpuThreadDiag } from "../lib/cpu-thread-diag.mjs";
@@ -98,7 +98,15 @@ export async function snapshot(page) {
   const diag = decoded(await req("validationReadCpuThreadDiag", { reset: -1 }), decodeCpuThreadDiag, consistentCpuThreadDiagRead);
   const p = await readCoreProgress(page).catch(() => null);
   const progress = p && !p.error ? { coreTicks: Number(p.coreTicks), coreTicksPerSecond: Number(p.coreTicksPerSecond), frame: p.frame ?? null } : { error: p?.error ?? "no core progress" };
-  return { t: (t0 + performance.now()) / 2, headroom, region, ax, mem, diag, progress };
+  // the screen's signals, as parcours reads them (the replay's draws since
+  // boot, the frame rates): what phase a row is in (lib/cpu-window.mjs phaseCheck)
+  const screen = await page.evaluate(() => {
+    const f = window.__lastFrameInfo || {};
+    const n = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+    const d = /wgx:d(\d+)/.exec(String(f.ppcWasmHelperStats || ""));
+    return { draws: d ? Number(d[1]) : null, producedFps: n(f.newFramesProducedPerSec), newFps: n(f.newFramesPerSec) };
+  }).catch(() => null);
+  return { t: (t0 + performance.now()) / 2, headroom, region, ax, mem, diag, progress, screen };
 }
 
 // Every counter on and reset (n >= 0), once: what each reset answered. The
@@ -225,7 +233,7 @@ async function measure(o, server) {
       const chunk = await readTimeline(page).catch((e) => ({ error: String(e?.message || e) }));
       const timeline = mergeTimeline([chunk]);
       loads.push(os.loadavg()[0]);
-      const row = { i, atS: round((snap.t - snaps[0].t) / 1000, 2), vi: viRangeOf(timeline.vi), viLost: timeline.lost.vi || 0, ...cpuWindowBreakdown(snaps.at(-1), snap) };
+      const row = { i, atS: round((snap.t - snaps[0].t) / 1000, 2), vi: viRangeOf(timeline.vi), viLost: timeline.lost.vi || 0, screen: screenOf(snaps.at(-1), snap), ...cpuWindowBreakdown(snaps.at(-1), snap) };
       snaps.push(snap);
       rows.push(row);
       if (session.watch.fatal().length) throw new Error(`page fatal: ${JSON.stringify(session.watch.fatal()).slice(0, 300)}`);
@@ -332,7 +340,10 @@ async function main() {
         ? "counters reset before the state load: no second JIT cache clear after it; the load's own clear (0171) and its recompiles are measured"
         : "counters reset after the warmup: the memory stats' first reset clears the JIT cache (block recompiles after it are an artefact of the probe)",
       rowsStartAfterLoadSec: run.rowsStartAfterLoadSec,
-      stepsDuring: values["steps-during"] ? { file: path.basename(values["steps-during"]), doneAtS: run.stepsDuringDoneS } : null,
+      // a transition played with --steps-during: COMPLETE only when the
+      // rows show the compile wave, then the game phase after it; an
+      // INCOMPLETE run (the route lost its way) is left out, as in parcours
+      stepsDuring: values["steps-during"] ? { file: path.basename(values["steps-during"]), doneAtS: run.stepsDuringDoneS, ...phaseCheck(run.rows) } : null,
       vi: o.vi, dipSpeed: o.dipSpeed, dipBusy: o.dipBusy, loadGate: gate, load1: run.load1, overloaded: run.overloaded, fatal: run.fatal,
       enabled: run.enabled, regionsInstalled, meanRegionCoverage: meanCoverage, regionWarning: warning,
       untimedSecs: o.untimedSecs, untimed: run.untimed, timingCost: cost,
