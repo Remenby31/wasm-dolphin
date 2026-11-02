@@ -538,8 +538,22 @@ export function phaseCheck(rows, { minWaveBlocks = 100, minGameSec = 3, gameDraw
     }
     if (known && (wave == null || blocks > wave.blocks)) wave = { fromS: round(rows[i].atS - (rows[i].screen?.dtS ?? 0), 2), blocks };
   }
-  if (wave == null) why.push("no deferred-block counts (0213 v2 core needed)");
-  else if (wave.blocks < minWaveBlocks) why.push(`no compile wave: at most ${wave.blocks} deferred blocks in 1 s (< ${minWaveBlocks})`);
+  // Without the 0213 counts (a core without the diag), the transition is
+  // read from the screen alone: at least 2 s of non-game rows, then the game.
+  const gameRow = (r, i, list) => {
+    const win = list.slice(0, i + 1).filter((x) => list[i].atS - x.atS < 1 - 1e-9);
+    const draws = win.reduce((n, x) => (x.screen?.draws == null || n == null ? null : n + x.screen.draws), 0);
+    const frames = win.reduce((n, x) => (x.screen?.frames == null || n == null ? null : n + x.screen.frames), 0);
+    return draws != null && frames > 0 && draws / frames >= gameDrawsPerFrame && r.screen?.newFps >= minNewFps;
+  };
+  const firstGame = rows.findIndex((r, i) => gameRow(r, i, rows));
+  const gameFromS = firstGame >= 0 ? round(rows[firstGame].atS - (rows[firstGame].screen?.dtS ?? 0), 2) : null;
+  let waveSignal = "deferred-blocks";
+  if (wave == null) {
+    waveSignal = "menu-to-game";
+    if (gameFromS == null || gameFromS < 2) why.push(gameFromS == null ? "no game rows" : `game from ${gameFromS} s: no menu phase before it`);
+    else wave = { fromS: round(gameFromS - 1, 2), blocks: null };
+  } else if (wave.blocks < minWaveBlocks) why.push(`no compile wave: at most ${wave.blocks} deferred blocks in 1 s (< ${minWaveBlocks})`);
   // game seconds after the wave's start: each row judged on the 1 s of rows ending with it
   let gameSec = 0;
   const after = wave ? rows.filter((r) => r.atS > wave.fromS) : [];
@@ -552,5 +566,5 @@ export function phaseCheck(rows, { minWaveBlocks = 100, minGameSec = 3, gameDraw
   }
   gameSec = round(gameSec, 2);
   if (wave && gameSec < minGameSec) why.push(`no game phase after the wave: ${gameSec} s of game rows (< ${minGameSec})`);
-  return { verdict: why.length ? "INCOMPLETE" : "COMPLETE", why, wave, gameSecAfterWave: gameSec, thresholds: { minWaveBlocks, minGameSec, gameDrawsPerFrame, minNewFps } };
+  return { verdict: why.length ? "INCOMPLETE" : "COMPLETE", why, wave, waveSignal, gameFromS, gameSecAfterWave: gameSec, thresholds: { minWaveBlocks, minGameSec, gameDrawsPerFrame, minNewFps } };
 }

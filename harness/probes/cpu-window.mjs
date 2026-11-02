@@ -188,9 +188,18 @@ async function measure(o, server) {
   const routes = o.state ? { [STATE_ROUTE]: o.state } : {};
   // the display from the environment (HARNESS_DISPLAY): headless by default,
   // the bench's screen under spark-run --headed (video=wgpu needs it there)
-  const session = await openSession({ base: server.base, server, query: o.query, iso: o.iso, routes });
+  // --display: the worker's rAF records what each BeginFrame shows (as
+  // drop-meter and parcours --display); --sampler-ms: the drop sampler
+  // (validationDropSampler, with patch 0167's per-compile timer) runs as in
+  // parcours and drop-meter, drained at every row. Both to price what those
+  // probes add to the run they measure.
+  const session = await openSession({ base: server.base, server, query: o.query, iso: o.iso, routes, harness: o.display ? { displayed: true } : {} });
   const { page } = session;
   try {
+    if (o.samplerMs) {
+      const started = await workerRequest(page, "validationDropSampler", { action: "start", everyMs: o.samplerMs }, 5000).catch((e) => ({ error: String(e?.message || e) }));
+      if (started?.error) throw new Error(`--sampler-ms: ${started.error}`);
+    }
     // --counters-before-load: every counter reset (and so the JIT cache the
     // memory stats' first reset clears) BEFORE the state load. The state
     // load empties the JIT cache itself (patch 0171), as in production; what
@@ -244,6 +253,7 @@ async function measure(o, server) {
       if (wait > 0) await new Promise((r) => setTimeout(r, wait));
       const snap = await snapshot(page, { light: o.light });
       const chunk = await readTimeline(page).catch((e) => ({ error: String(e?.message || e) }));
+      if (o.samplerMs) await workerRequest(page, "validationDropSampler", { action: "drain" }, 10000).catch(() => null);
       const timeline = mergeTimeline([chunk]);
       loads.push(os.loadavg()[0]);
       const row = { i, atS: round((snap.t - snaps[0].t) / 1000, 2), vi: viRangeOf(timeline.vi), viLost: timeline.lost.vi || 0, screen: screenOf(snaps.at(-1), snap), ...cpuWindowBreakdown(snaps.at(-1), snap) };
@@ -276,7 +286,7 @@ async function main() {
       port: { type: "string", default: process.env.HARNESS_PORT }, out: { type: "string" },
       // set by spark-run for every probe: one tree, one window here
       runs: { type: "string" }, baseline: { type: "string" }, "baseline-query": { type: "string" },
-      "counters-before-load": { type: "boolean", default: false }, light: { type: "boolean", default: false }
+      "counters-before-load": { type: "boolean", default: false }, light: { type: "boolean", default: false }, display: { type: "boolean", default: false }, "sampler-ms": { type: "string" }
     },
     allowPositionals: false
   });
@@ -300,7 +310,7 @@ async function main() {
     iso, state, steps, during, root,
     query: `${values.query ?? (values.config === "product" ? PRODUCT_QUERY : PRESETS[values.config] ?? values.config)}&metrics=1`,
     warmup: num(values, "warmup", { min: 0 }), secs: num(values, "secs", { min: 1 }), step: num(values, "step", { min: 0.25 }),
-    hold: values.hold || null, vi: parseViRange(values.vi), countersBeforeLoad: Boolean(values["counters-before-load"]), light: Boolean(values.light),
+    hold: values.hold || null, vi: parseViRange(values.vi), countersBeforeLoad: Boolean(values["counters-before-load"]), light: Boolean(values.light), display: Boolean(values.display), samplerMs: values["sampler-ms"] ? num(values, "sampler-ms", { min: 10, int: true }) : null,
     dipSpeed: num(values, "dip-speed", { min: 0 }), dipBusy: num(values, "dip-busy", { min: 0 }),
     regionSample: num(values, "region-sample", { min: 0, int: true }), memWarm: num(values, "mem-warm", { min: 0 }), untimedSecs: num(values, "untimed-secs", { min: 0 }),
     maxLoad: values["max-load"] ? num(values, "max-load", { min: 0.1 }) : defaultMaxLoad(),
@@ -350,7 +360,7 @@ async function main() {
       // (0171), so post-load block recompiles are real, not an artefact
       countersBeforeLoad: o.countersBeforeLoad,
       // --light: the product's counters only (no region, memory or AX stats)
-      light: o.light,
+      light: o.light, displayTrace: o.display, samplerMs: o.samplerMs,
       countersNote: o.countersBeforeLoad
         ? "counters reset before the state load: no second JIT cache clear after it; the load's own clear (0171) and its recompiles are measured"
         : "counters reset after the warmup: the memory stats' first reset clears the JIT cache (block recompiles after it are an artefact of the probe)",

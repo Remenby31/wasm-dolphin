@@ -244,7 +244,7 @@ test("probe contract: the three stats and headroom turned on with the worker mes
   // the display comes from the environment (HARNESS_DISPLAY): headless by
   // default, the bench screen under spark-run --headed (video=wgpu)
   assert.doesNotMatch(src, /display: "headless"/);
-  assert.match(src, /openSession\(\{ base: server\.base, server, query: o\.query, iso: o\.iso, routes \}\)/);
+  assert.match(src, /openSession\(\{ base: server\.base, server, query: o\.query, iso: o\.iso, routes, harness: o\.display \? \{ displayed: true \} : \{\} \}\)/);
   // --counters-before-load: the reset (which clears the JIT cache) before the state load
   const before = src.indexOf("if (o.countersBeforeLoad) {"), load = src.indexOf("await loadHarnessState(page, session.url)");
   assert.ok(before > 0 && load > before, "counters reset before the load");

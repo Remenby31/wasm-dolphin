@@ -365,8 +365,13 @@ test("phaseCheck: COMPLETE with the compile wave then game rows; INCOMPLETE with
   // the wave, but the game never showed (a load that never ended)
   const stuck = rows.map((r) => ({ ...r, screen: { ...r.screen, draws: 40 * 15 } }));
   assert.match(phaseCheck(stuck).why.join(), /no game phase after the wave: 0 s/);
-  // a v1 core: no counts, never COMPLETE
-  assert.match(phaseCheck(rows.map((r) => ({ ...r, cpuThread: null }))).why[0], /0213 v2 core needed/);
+  // a core without the diag: the transition from the screen alone (menu, then game)
+  const noDiag = phaseCheck(rows.map((r) => ({ ...r, cpuThread: null })));
+  assert.equal(noDiag.verdict, "COMPLETE");
+  assert.equal(noDiag.waveSignal, "menu-to-game");
+  assert.equal(noDiag.gameFromS, 11.25); // the pooled second reaches 200 draws a frame with the second game row
+  assert.equal(noDiag.wave.fromS, 10.25);
+  assert.match(phaseCheck(menu.map((r) => ({ ...r, cpuThread: null }))).why[0], /no game rows/);
   // screenOf: draws per produced frame between two snapshots
   assert.deepEqual(screenOf({ t: 0, screen: { draws: 100 } }, { t: 500, screen: { draws: 3100, producedFps: 60, newFps: 58 } }), { dtS: 0.5, draws: 3000, frames: 30, newFps: 58 });
   assert.equal(screenOf({ t: 0, screen: null }, { t: 500, screen: { draws: 1 } }), null);
@@ -378,4 +383,8 @@ test("probe contract: --steps-during runs alongside the rows and its phase check
   assert.match(src, /if \(duringDone\?\.unfinished\) throw new Error/);
   assert.match(src, /stepsDuring: values\["steps-during"\] \? \{ file: path\.basename\(values\["steps-during"\]\), doneAtS: run\.stepsDuringDoneS, \.\.\.phaseCheck\(run\.rows\) \} : null,/);
   assert.match(src, /screen: screenOf\(snaps\.at\(-1\), snap\)/);
+  // --sampler-ms: the drop sampler started as drop-meter starts it, drained every row; --display: the harness's displayed trace
+  assert.match(src, /workerRequest\(page, "validationDropSampler", \{ action: "start", everyMs: o\.samplerMs \}, 5000\)/);
+  assert.match(src, /if \(o\.samplerMs\) await workerRequest\(page, "validationDropSampler", \{ action: "drain" \}, 10000\)/);
+  assert.match(src, /light: o\.light, displayTrace: o\.display, samplerMs: o\.samplerMs,/);
 });
