@@ -16,6 +16,9 @@
 //     [--shots [--shot-every N]] [--max-load L] [--load-wait 300] [--lock-wait 14400 | --no-lock] [--out dir]
 //   node harness/probes/parcours.mjs --iso disc.iso --port N --record steps.json --film-out film.json [--auto '{"bias":0}'] [--shots [--shot-every N]]
 //   node harness/probes/parcours.mjs --analyze <out dir> [--noise <A/A>/summary.json]
+//   --browser safari: the real Safari of this Mac instead of headless Chrome
+//   (lib/safari-page.mjs: off screen, the disc by HTTP ranges on 127.0.0.1,
+//   the screen unlocked); a Safari run's noise is a Safari A/A
 //
 // A run boots the disc on a new, empty Chrome profile and plays the film
 // (lib/pad-film.mjs, pad-film-worker.js): pad states written into the core's
@@ -62,6 +65,7 @@ import { chromeInfo, isLocalOnly, probeOutDir } from "../lib/probe-out.mjs";
 import { decodePng } from "../lib/png.mjs";
 import { savePng } from "../lib/session.mjs";
 import { startEdgeFollower, stopEdgeFollower } from "../lib/edge-follower.mjs";
+import { bootRemoteDisc, launchSafariPage, startDiscServer } from "../lib/safari-page.mjs";
 import { median, round } from "../lib/stats.mjs";
 import { machineSnapshot, powerDrained, powerSnapshot } from "../lib/system.mjs";
 import { PRODUCT_QUERY } from "./drop-meter.mjs";
@@ -148,13 +152,14 @@ export function viTimesOf(tl) {
 // decaying average over the last seconds, not an instantaneous reading.
 // Async: never on the sampling loop's path.
 export const OTHER_CPU_EVERY_SEC = 5;
-export function otherCpuOf(psOutput, { profileDir, selfPid = process.pid, now = Date.now() } = {}) {
+export function otherCpuOf(psOutput, { profileDir, ownPids = [], selfPid = process.pid, now = Date.now() } = {}) {
   const procs = [];
   for (const line of psOutput.split("\n")) {
     const m = /^\s*(\d+)\s+(\d+)\s+([\d.]+)\s+(.*)$/.exec(line);
     if (m) procs.push({ pid: Number(m[1]), ppid: Number(m[2]), pct: Number(m[3]), command: m[4] });
   }
-  const roots = procs.filter((p) => p.pid === selfPid || (profileDir && p.command.includes(profileDir))).map((p) => p.pid);
+  // --browser safari: the session's Safari and its WebKit helpers (ownPids)
+  const roots = procs.filter((p) => p.pid === selfPid || ownPids.includes(p.pid) || (profileDir && p.command.includes(profileDir))).map((p) => p.pid);
   const ours = new Set([...roots, ...descendantsOf(procs.map((p) => [p.pid, p.ppid]), roots)]);
   let total = 0;
   const top = [];
@@ -165,8 +170,8 @@ export function otherCpuOf(psOutput, { profileDir, selfPid = process.pid, now = 
   }
   return [now, Math.round(total), top.sort((a, b) => b[1] - a[1]).slice(0, 3)];
 }
-function otherCpu(profileDir) {
-  return new Promise((resolve) => execFile("ps", ["-A", "-o", "pid=,ppid=,pcpu=,command="], { maxBuffer: 32 << 20, timeout: 5000 }, (error, out) => resolve(error ? null : otherCpuOf(out, { profileDir }))));
+function otherCpu(profileDir, ownPids = []) {
+  return new Promise((resolve) => execFile("ps", ["-A", "-o", "pid=,ppid=,pcpu=,command="], { maxBuffer: 32 << 20, timeout: 5000 }, (error, out) => resolve(error ? null : otherCpuOf(out, { profileDir, ownPids }))));
 }
 
 // The drop sampler's last row of a drain, as named counters (null: no row).
@@ -194,18 +199,23 @@ async function playRun(o, server, { side, run, outDir }) {
   const raw = { side, run, samples: [], reached: [], marks: [], stuckAt: [], loads: [], markers: o.film ? filmMarkers(o.film) : [] };
   const profileDir = mkdtempSync(path.join(os.tmpdir(), "gc-harness-parcours-"));
   const releaseProfile = claim(profileDir, REPO_ROOT, "chrome-profile");
-  const context = await launchChrome({ profileDir });
+  // --browser safari: the real Safari of this Mac (lib/safari-page.mjs), the
+  // disc by HTTP ranges; else headless Chrome on a new profile.
+  const safari = o.browser === "safari" ? await launchSafariPage({ port: o.safari.driverPort, log: o.log }) : null;
+  const context = safari ? null : await launchChrome({ profileDir });
   const shotDir = o.shots ? path.join(outDir, `shots-${side}-${run}`) : null;
   const shot = async (page, name) => { if (shotDir) savePng(await screenFrame(page).catch(() => null) ?? { width: 1, height: 1, data: new Uint8Array(4) }, path.join(shotDir, `${name}.png`)); };
   try {
-    await context.assertInvisible("after launch");
-    const page = context.pages()[0] ?? (await context.newPage());
+    if (!safari) await context.assertInvisible("after launch");
+    const page = safari ? safari.page : context.pages()[0] ?? (await context.newPage());
     raw.power = powerSnapshot();
     raw.launchT = Date.now();
-    await bootIso(page, { url: `${server.base}?${o.query}`, iso: o.iso, timeoutMs: 120000 });
+    if (safari) await bootRemoteDisc(page, { url: `${server.base}?${o.query}`, descriptor: o.safari.descriptor, timeoutMs: 120000 });
+    else await bootIso(page, { url: `${server.base}?${o.query}`, iso: o.iso, timeoutMs: 120000 });
     raw.bootMs = Date.now() - raw.launchT;
-    await context.assertInvisible("after boot");
-    raw.browser = await page.evaluate(() => navigator.userAgent.match(/(?:Headless)?Chrome\/[\d.]+/)?.[0] ?? navigator.userAgent).catch(() => null);
+    if (safari) await safari.assertInvisible("after boot");
+    else await context.assertInvisible("after boot");
+    raw.browser = await page.evaluate(() => navigator.userAgent.match(/(?:Headless)?Chrome\/[\d.]+/)?.[0] ?? (/Version\/([\d.]+).*Safari/.exec(navigator.userAgent) ? `Safari/${/Version\/([\d.]+)/.exec(navigator.userAgent)[1]}` : navigator.userAgent)).catch(() => null);
     const progress = await workerRequest(page, "validationReadCoreProgress", {}, 5000);
     raw.tps = progress?.coreTicksPerSecond ?? null;
     // the 0113 headroom counters (XFB copies) on, as drop-meter turns them on
@@ -246,7 +256,7 @@ async function playRun(o, server, { side, run, outDir }) {
       raw.loads.push([Date.now(), os.loadavg()[0]]);
       // the other processes' CPU every OTHER_CPU_EVERY_SEC, off the loop
       // (an async ps): how loaded the machine was, by what is not this run
-      if (sec % OTHER_CPU_EVERY_SEC === 0) otherCpu(profileDir).then((x) => { if (x) (raw.otherCpu ??= []).push(x); });
+      if (sec % OTHER_CPU_EVERY_SEC === 0) otherCpu(profileDir, safari?.ownPids() ?? []).then((x) => { if (x) (raw.otherCpu ??= []).push(x); });
       rows = deriveSeconds(raw.samples, { tps: raw.tps });
       const phase = phaseNow();
       const sec = Math.round((Date.now() - t0) / 1000);
@@ -303,7 +313,8 @@ async function playRun(o, server, { side, run, outDir }) {
   } catch (error) {
     return { ...raw, error: String(error?.message || error).slice(0, 400) };
   } finally {
-    await context.close().catch(() => {});
+    if (safari) await safari.close().catch(() => {});
+    else await context.close().catch(() => {});
     releaseProfile();
     rmSync(profileDir, { recursive: true, force: true });
   }
@@ -424,7 +435,8 @@ async function main() {
       config: { type: "string", default: "product" }, query: { type: "string" }, "marker-timeout": { type: "string", default: "120" }, "max-sec": { type: "string", default: "1200" },
       edge: { type: "string" }, "sampler-rows": { type: "boolean", default: false }, shots: { type: "boolean", default: false }, "shot-every": { type: "string", default: "0" }, auto: { type: "string" }, verbose: { type: "boolean", default: false }, analyze: { type: "string" },
       "max-load": { type: "string" }, "load-wait": { type: "string", default: "300" }, "lock-wait": { type: "string", default: "14400" }, "no-lock": { type: "boolean", default: false },
-      port: { type: "string", default: process.env.HARNESS_PORT }, out: { type: "string" }
+      port: { type: "string", default: process.env.HARNESS_PORT }, out: { type: "string" },
+      browser: { type: "string", default: "chrome" }
     }
   });
   const log = (m) => console.log(`[parcours] ${m}`);
@@ -453,8 +465,12 @@ async function main() {
     edge: values.edge ? JSON.parse(values.edge) : null,
     // --sampler-rows: every drop sampler row (100 ms, all its counters) kept in
     // the raw record, for an attribution of the causes (lib/drops.mjs rowsOf)
-    samplerRows: values["sampler-rows"]
+    samplerRows: values["sampler-rows"],
+    // --browser safari (macOS): safaridriver on --port + 1, the disc on --port + 2
+    browser: values.browser
   };
+  if (!["chrome", "safari"].includes(o.browser)) throw new Error("--browser chrome|safari");
+  if (o.browser === "safari" && process.platform !== "darwin") throw new Error("--browser safari runs on macOS only");
   const filmBytes = values.film ? readFileSync(values.film) : null;
   const filmId = filmBytes ? `${path.basename(values.film)}#${createHash("sha256").update(filmBytes).digest("hex").slice(0, 12)}` : null;
   const machine = machineSnapshot();
@@ -478,6 +494,11 @@ async function main() {
   };
   const analyses = [];
   let gaveUp = null;
+  // only the harness page's origin may read the disc (server.mjs serves it
+  // on 127.0.0.1:--port)
+  const disc = o.browser === "safari" ? await startDiscServer(iso, { port: o.port + 2, origin: `http://127.0.0.1:${o.port}` }) : null;
+  if (disc) o.safari = { descriptor: disc.descriptor, driverPort: o.port + 1 };
+  meta.browserKind = o.browser;
   try {
     for (let run = 1; run <= o.runs && !gaveUp; run += 1) {
       for (const name of sideOrder(run).filter((n) => sides[n])) {
@@ -510,6 +531,7 @@ async function main() {
     }
   } finally {
     lock.release();
+    disc?.close();
     for (const s of Object.values(sides)) if (s.temp) rmSync(s.root, { recursive: true, force: true });
   }
   const summary = writeSummary(outDir, { ...meta, gaveUp }, analyses, noise);
