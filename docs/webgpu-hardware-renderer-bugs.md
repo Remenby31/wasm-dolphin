@@ -463,10 +463,10 @@ without it is suspect.
 ### Root cause of the black world (2026-09-06): the ClearRect depth went through the viewport
 
 Found by reading the EFB depth buffer INSIDE the frame rather than at present
-time (`DIAG_DEPTH_TRACE` in `src/upstream-discio-worker.js`: it ends the EFB
-pass after chosen draws and before each depth-clearing ClearRect, copies the
-depth and colour attachments in the same encoder, and re-opens the pass with
-load ops and the game's state restored).
+time (a depth-trace diagnostic of the replay worker, since removed: it ended
+the EFB pass after chosen draws and before each depth-clearing ClearRect,
+copied the depth and colour attachments in the same encoder, and re-opened the
+pass with load ops and the game's state restored; see git history before #408).
 
 The clear triangle is a draw, so its depth is subject to the viewport depth
 range like any other fragment: `window z = minDepth + z * (maxDepth - minDepth)`.
