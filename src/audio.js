@@ -62,6 +62,9 @@ export class AudioController {
     // ring's excess over its target played up to 0.5 % faster, and the
     // mixer's queue pulled before it overflows, instead of mixer skips
     this.workletRateControl = params.get("audiorate") === "1";
+    // ?audioratemax=N (ppm, 1000-10000): the rate control's bound, 5000 by default
+    const rateMax = Number.parseInt(params.get("audioratemax") || "", 10);
+    this.workletRateMaxPpm = Number.isInteger(rateMax) && rateMax >= 1000 && rateMax <= 10000 ? rateMax : 5000;
     this.chunkFrames = 1024;
     const pumpParam = Number.parseInt(params.get("audiopump") || "", 10);
     this.pumpIntervalMs =
@@ -132,7 +135,7 @@ export class AudioController {
     if (!muted) {
       await this.ensureContext();
       if (this.activeTransport === "worklet") {
-        await this.transportBridge?.({ enabled: true, muted: false, sab: this.workletRing.sab, targetFrames: this.workletTargetFrames(), rateControl: this.workletRateControl });
+        await this.transportBridge?.({ enabled: true, muted: false, sab: this.workletRing.sab, targetFrames: this.workletTargetFrames(), rateControl: this.workletRateControl, rateMaxPpm: this.workletRateMaxPpm });
         if (!this.workletWatchdog) this.startWorkletWatchdog();
       } else {
         this.startPump();
@@ -142,7 +145,7 @@ export class AudioController {
       this.stopPump();
       this.stopWorkletWatchdog();
       if (this.activeTransport === "worklet") {
-        await this.transportBridge?.({ enabled: true, muted: true, sab: this.workletRing.sab, targetFrames: this.workletTargetFrames(), rateControl: this.workletRateControl });
+        await this.transportBridge?.({ enabled: true, muted: true, sab: this.workletRing.sab, targetFrames: this.workletTargetFrames(), rateControl: this.workletRateControl, rateMaxPpm: this.workletRateMaxPpm });
       }
     }
     this.update();
@@ -257,6 +260,7 @@ export class AudioController {
         sab: this.workletRing.sab,
         targetFrames: this.workletTargetFrames(),
         rateControl: this.workletRateControl,
+        rateMaxPpm: this.workletRateMaxPpm,
       });
       const activated = typeof activation === "object" ? activation?.active : activation;
       if (!activated) {

@@ -2868,6 +2868,7 @@ async function handleMessage(type, payload) {
         // set (0: the core's default, 80 ms)
         rateControl: Boolean(payload.rateControl),
         mixerCapMs: configuredAudioBufferMs > 0 ? configuredAudioBufferMs : 80,
+        rateMaxPpm: Number(payload.rateMaxPpm) || undefined,
       });
       if (result.active) api?.setAudioMuted?.(payload.muted ? 1 : 0);
       return result;

@@ -1,6 +1,7 @@
 import {
   AUDIO_PCM_HEADER,
   AUDIO_PCM_MAX_RATE_PPM,
+  AUDIO_PCM_RATE_CEILING_PPM,
   AUDIO_PCM_SAMPLE_RATE,
   AUDIO_PCM_STATE_MUTED,
   AUDIO_PCM_STATE_PREFILL,
@@ -65,7 +66,7 @@ export class AudioPcmProducer {
   // targetFrames: the ring's fill the producer keeps (the AudioWorklet
   // path's latency, before the mixer's own queue); 120 ms by default, the
   // page passes ?audiolead. Playback starts at half of it (at most 50 ms).
-  install(sab, { muted = true, targetFrames = AUDIO_PCM_TARGET_FRAMES, rateControl = false, mixerCapMs = 80 } = {}) {
+  install(sab, { muted = true, targetFrames = AUDIO_PCM_TARGET_FRAMES, rateControl = false, mixerCapMs = 80, rateMaxPpm = AUDIO_PCM_MAX_RATE_PPM } = {}) {
     this.requestedTransport = "worklet";
     try {
       const ring = validateAudioPcmRing(openAudioPcmRing(sab));
@@ -85,6 +86,7 @@ export class AudioPcmProducer {
       this.underrunsSeen = 0;
       this.rateControl = Boolean(rateControl);
       this.mixerCapMs = Math.max(16, Number(mixerCapMs) || 80);
+      this.rateMaxPpm = Math.max(0, Math.min(AUDIO_PCM_RATE_CEILING_PPM, Math.round(Number(rateMaxPpm) || AUDIO_PCM_MAX_RATE_PPM)));
       this.ratePpm = 0;
       this.excessMs = null;
       Atomics.store(ring.header, AUDIO_PCM_HEADER.RATE_PPM, 0);
@@ -231,7 +233,7 @@ export class AudioPcmProducer {
     const rawMs = (audioPcmAvailableFrames(ring.header) - (this.targetFrames ?? AUDIO_PCM_TARGET_FRAMES)) / 48 + mixerMs - this.mixerCapMs / 2;
     this.excessMs = this.excessMs == null ? rawMs : this.excessMs + RATE_SMOOTHING * (rawMs - this.excessMs);
     const excessMs = this.excessMs;
-    const goal = excessMs > RATE_DEAD_BAND_MS ? Math.min(AUDIO_PCM_MAX_RATE_PPM, Math.round((excessMs - RATE_DEAD_BAND_MS) * RATE_PPM_PER_MS)) : 0;
+    const goal = excessMs > RATE_DEAD_BAND_MS ? Math.min(this.rateMaxPpm ?? AUDIO_PCM_MAX_RATE_PPM, Math.round((excessMs - RATE_DEAD_BAND_MS) * RATE_PPM_PER_MS)) : 0;
     const next = this.ratePpm + Math.max(-RATE_SLEW_PPM, Math.min(RATE_SLEW_PPM, goal - this.ratePpm));
     this.ratePpm = next;
     Atomics.store(ring.header, AUDIO_PCM_HEADER.RATE_PPM, next | 0);
@@ -310,6 +312,7 @@ export class AudioPcmProducer {
       floorFrames: this.floorFrames ?? null,
       rateControl: Boolean(this.rateControl),
       ratePpm: this.ratePpm ?? 0,
+      rateMaxPpm: this.rateMaxPpm ?? null,
       workletRing: this.ring ? snapshotAudioPcmRing(this.ring) : null,
     };
   }

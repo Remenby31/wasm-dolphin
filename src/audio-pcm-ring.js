@@ -39,8 +39,10 @@ export const AUDIO_PCM_HEADER = Object.freeze({
   RESAMPLE_EXTRA_FRAMES: 20,
 });
 
-// The consumer's rate control is bounded to +0.5 % (+8.6 cents).
+// The consumer's rate control is bounded to +0.5 % (+8.6 cents) by default;
+// ?audioratemax lets the producer ask up to the ceiling, +1 % (+17 cents).
 export const AUDIO_PCM_MAX_RATE_PPM = 5000;
+export const AUDIO_PCM_RATE_CEILING_PPM = 10000;
 
 const HEADER_WORDS = AUDIO_PCM_HEADER_BYTES / Int32Array.BYTES_PER_ELEMENT;
 
@@ -161,7 +163,7 @@ export function consumeAudioPcm(
   const capacity = Atomics.load(header, AUDIO_PCM_HEADER.CAPACITY_FRAMES) >>> 0;
   const read = Atomics.load(header, AUDIO_PCM_HEADER.READ_INDEX) >>> 0;
   const available = Math.min(capacity, audioPcmAvailableFrames(header));
-  const ratePpm = Math.max(0, Math.min(AUDIO_PCM_MAX_RATE_PPM, Atomics.load(header, AUDIO_PCM_HEADER.RATE_PPM) | 0));
+  const ratePpm = Math.max(0, Math.min(AUDIO_PCM_RATE_CEILING_PPM, Atomics.load(header, AUDIO_PCM_HEADER.RATE_PPM) | 0));
   // rate control: 1 + ppm frames read per frame played, linear between two;
   // the position's fraction carries over in result.frac and is dropped (at
   // most half a frame) once the rate is back to 0

@@ -4,6 +4,7 @@ import {
   AUDIO_PCM_HEADER,
   AUDIO_PCM_STATE_PREFILL,
   AUDIO_PCM_STATE_RUNNING,
+  audioPcmAvailableFrames,
   createAudioPcmRing,
   consumeAudioPcm,
   mixerQueueMicroseconds,
@@ -263,10 +264,10 @@ test("consumer: at 0 ppm the plain copy; at +5000 ppm 0.5 % more input per outpu
   consumeAudioPcm(ring, L, R, 10, res);
   assert.equal(res.frac, 0);
   assert.equal(L[0] * 32768, 2005);
-  // a rate over the bound is held at it
+  // a rate over the ceiling (+1 %) is held at it
   Atomics.store(ring.header, AUDIO_PCM_HEADER.RATE_PPM, 99999);
   consumeAudioPcm(ring, L, R, 1000, res);
-  assert.equal(res.consumedFrames, 1005);
+  assert.equal(res.consumedFrames, 1010);
 });
 
 test("producer rate: proportional to the latency's excess (ring and mixer) over the target, smoothed, a dead band, bounded, slewed", () => {
@@ -327,7 +328,7 @@ test("producer surplus: the mixer's queue pulled to half its size into the ring 
 // a pull from an empty queue loops (an underrun fill). The core produces at
 // `speed` of real time; the worklet consumes 128 frames every 2.67 ms; the
 // producer ticks every 10 ms.
-function simulate({ rateControl, speedAt, seconds = 30, capMs = 40 }) {
+function simulate({ rateControl, speedAt, seconds = 30, capMs = 40, rateMaxPpm, trackOverMs = 100 }) {
   const ring = createAudioPcmRing();
   const heapU8 = new Uint8Array(65536);
   let queueMs = 20, skips = 0, fills = 0;
@@ -348,10 +349,10 @@ function simulate({ rateControl, speedAt, seconds = 30, capMs = 40 }) {
     },
   };
   const producer = new AudioPcmProducer({ api: () => core, setTimer: () => 1, clearTimer() {} });
-  producer.install(ring.sab, { muted: false, targetFrames: 1920, rateControl, mixerCapMs: capMs });
+  producer.install(ring.sab, { muted: false, targetFrames: 1920, rateControl, mixerCapMs: capMs, rateMaxPpm });
   const L = new Float32Array(128), R = new Float32Array(128), res = {};
   consumeAudioPcm(ring, L, R, 128, res); // ack the epoch
-  let now = 0, nextTick = 0, nextQuantum = 0;
+  let now = 0, nextTick = 0, nextQuantum = 0, overMs = 0;
   const realNow = performance.now;
   try {
     while (now < seconds * 1000) {
@@ -359,11 +360,12 @@ function simulate({ rateControl, speedAt, seconds = 30, capMs = 40 }) {
       queueMs += speedAt(now) * dt;
       if (now >= nextQuantum) { consumeAudioPcm(ring, L, R, 128, res); nextQuantum += 128 / 48; }
       if (now >= nextTick) { performance.now = () => now; producer.timerTick(); nextTick += 10; }
+      if (audioPcmAvailableFrames(ring.header) / 48 + queueMs > trackOverMs) overMs += dt;
       now += dt;
     }
   } finally { performance.now = realNow; }
   const snap = snapshotAudioPcmRing(ring);
-  return { skips, fills, underruns: snap.underrunEvents, fillMs: snap.fillFrames / 48, targetMs: producer.targetFrames / 48, resampledMs: snap.resampledFrames / 48, surplusMs: snap.producerSurplusFrames / 48 };
+  return { skips, fills, overMs, underruns: snap.underrunEvents, fillMs: snap.fillFrames / 48, targetMs: producer.targetFrames / 48, resampledMs: snap.resampledFrames / 48, surplusMs: snap.producerSurplusFrames / 48 };
 }
 
 test("model of the load: a 3 s slow core then a catch-up, and the ring's descent: rate control removes the mixer skips", () => {
@@ -388,8 +390,31 @@ test("plumbing: ?audiorate reaches the producer with the boot's AudioBufferSize"
   const [audio, adapter, worker] = await Promise.all([read("../src/audio.js"), read("../src/upstream-worker-adapter.js"), read("../src/upstream-discio-worker.js")]);
   assert.match(audio, /this\.workletRateControl = params\.get\("audiorate"\) === "1";/);
   assert.equal(audio.match(/rateControl: this\.workletRateControl/g).length, 3);
-  assert.match(adapter, /async configureAudioWorklet\(\{ enabled, muted, sab, targetFrames, rateControl = false \}\)/);
+  assert.equal(audio.match(/rateMaxPpm: this\.workletRateMaxPpm/g).length, 3);
+  assert.match(adapter, /rateMaxPpm: Number\(rateMaxPpm\) \|\| 5000,/);
+  assert.match(worker, /rateMaxPpm: Number\(payload\.rateMaxPpm\) \|\| undefined,/);
+  assert.match(adapter, /async configureAudioWorklet\(\{ enabled, muted, sab, targetFrames, rateControl = false, rateMaxPpm = 5000 \}\)/);
   assert.match(adapter, /rateControl: Boolean\(rateControl\),/);
   assert.match(worker, /rateControl: Boolean\(payload\.rateControl\),\n\s+mixerCapMs: configuredAudioBufferMs > 0 \? configuredAudioBufferMs : 80,/);
   assert.match(worker, /configuredAudioBufferMs = api\.setAudioBufferMs && Number\(audioBufferMs\) > 0 \? Number\(audioBufferMs\) : 0;/);
+});
+
+test("rate bound: 0.5 % by default, up to the 1 % ceiling when asked, never above", () => {
+  const ring = createAudioPcmRing();
+  const mk = (opts) => { const f = fixture(); f.producer.install(ring.sab, { muted: false, rateControl: true, mixerCapMs: 40, ...opts }); return f.producer; };
+  const fill = () => { Atomics.store(ring.header, AUDIO_PCM_HEADER.READ_INDEX, 0); Atomics.store(ring.header, AUDIO_PCM_HEADER.WRITE_INDEX, 8000); };
+  for (const [opts, bound] of [[{}, 5000], [{ rateMaxPpm: 10000 }, 10000], [{ rateMaxPpm: 50000 }, 10000]]) {
+    const p = mk(opts);
+    p.targetFrames = 1920;
+    fill();
+    for (let i = 0; i < 400; i += 1) p.rate();
+    assert.equal(p.ratePpm, bound, JSON.stringify(opts));
+  }
+});
+
+test("model: the 1 % bound brings the latency back about twice as fast", () => {
+  const speedAt = (t) => (t < 3000 ? 0.75 : t < 4000 ? 1.14 : 1);
+  const b = simulate({ rateControl: true, speedAt, seconds: 30, trackOverMs: 100 });
+  const c = simulate({ rateControl: true, speedAt, seconds: 30, trackOverMs: 100, rateMaxPpm: 10000 });
+  assert.ok(c.overMs < b.overMs * 0.7, JSON.stringify({ b, c }));
 });
