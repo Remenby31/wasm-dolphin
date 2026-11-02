@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "be65216cf693159e31e159ca1ab83d641738389b6a073b8191cb42d10df31557",
+  "patchSeriesSha256": "9e5047e51e4645cd24d9a66fca6927dbf0af7f3128fd4d03886b2da6988ef3f6",
   "patches": [
     {
       "order": 1,
@@ -1189,6 +1189,14 @@
     },
     {
       "order": 146,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0215-region-stats-publish-rate.patch",
+      "size": 1953,
+      "sha256": "8b329ac06adde9a100cee912f98fa217eb56a15580d246037c708bb7c3cd1568"
+    },
+    {
+      "order": 147,
       "cwd": "Externals/SFML/SFML",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0001-sfml-emscripten-config.patch",
@@ -1196,7 +1204,7 @@
       "sha256": "f82197a21fe982ad83f6ee7bbf5a03839b1cebd4d64da3eab11263842bf61d89"
     },
     {
-      "order": 147,
+      "order": 148,
       "cwd": "Externals/xxhash/xxHash",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0002-xxhash-wasm-simd-scalar.patch",
