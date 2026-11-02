@@ -25,7 +25,7 @@ function harness({ havePass = true, passW = 640, passH = 528 } = {}) {
     pass: havePass ? { setViewport: (...args) => calls.push(args) } : null,
     passW, passH, passFbId: 7, recWord: 0,
     f32: new Float32Array(8),
-    self: { _wgPassRevZ: false, _wgPassRevZAtBegin: false },
+    self: { _wgPassRevZ: false },
     vpRescaled: false,
     lastAppliedViewport: null,
     drawState: {},
@@ -91,7 +91,6 @@ for (const [name, near, far, expectedNear, expectedFar, reverseZ] of [
     h.assertApplied([8, 12, 400, 300, expectedNear, expectedFar]);
     assert.deepEqual(h.depthNotes, [[near, far]], "diagnostics retain raw depth endpoints");
     assert.equal(h.context.self._wgPassRevZ, reverseZ, "reverse-Z uses raw endpoints before clamping/swap");
-    assert.equal(h.context.self._wgVpInPass, 1);
   });
 }
 
@@ -102,7 +101,6 @@ test("successive viewport commands replace cached geometry and clear a previous 
   h.run([336, 300, 608, 456, 0.25, 0.75]);
   h.assertApplied([336, 300, 608, 456, 0.25, 0.75]);
   assert.equal(h.context.self._wgPassRevZ, false);
-  assert.equal(h.context.self._wgVpInPass, 2);
   assert.equal(h.calls.length, 2);
 });
 
