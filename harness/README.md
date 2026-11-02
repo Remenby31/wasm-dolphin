@@ -813,6 +813,17 @@ to hundreds of levels apart:
 | 16 levels | 0.001 % (~11 px at IR 2) | an isolated pixel past the rounding passes |
 | 64 levels | none | a wrong texel or a moved block is far above it |
 
+The shares are of the frame's pixels, so what they let through grows with
+the internal resolution: at IR 2 (1216x896, 1.09 M pixels) a 33x33 patch
+16 levels off, or 10 pixels 64 levels off, passes; at native (608x448,
+0.27 M) neither does. Compare at the same IR on both sides (a size that
+differs fails), and read a pass at a high IR with that in mind. Every
+reference visit must have its frame and the same hash (a visit without one
+fails, it is never left out), and an integrity counter or an A-B-A under
+`--flicker` fails the run as in `--exact`. The frames come from
+`harness/probes/safari-capture.mjs` (a fresh Safari per run, the state
+loaded, `run<k>.vi<VI>.png`).
+
 `--webkit-tolerance "over=0.1%,big=0.001%,max=64"` changes them; raising one
 to make a failing scene pass defeats the gate: look at the kept pictures
 (`out/webkit-<VI>-reference.png`, `-run<k>.png`, `-run<k>-diff-x8.png`)

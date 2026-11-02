@@ -88,7 +88,7 @@ import { ensureServer, loadHarnessState, captureAtVi, workerRequest } from "../l
 import { integrityBrief, integrityOf, readIntegrity, treeHasIntegrity } from "../lib/integrity.mjs";
 import { openSession, savePng } from "../lib/session.mjs";
 import { distinctRuns, findFlicker, flickerFatal, parseFlickerFrom, tripleStrip } from "../lib/flicker.mjs";
-import { diffFrame, exactVerdict, oracleQueryError, parseWebkitTolerance, referenceQuery, referenceSwitchesOn, tolerantFrameVerdict } from "../lib/glitch-oracle.mjs";
+import { diffFrame, exactVerdict, oracleQueryError, parseWebkitTolerance, webkitReferenceRow, referenceQuery, referenceSwitchesOn, tolerantFrameVerdict } from "../lib/glitch-oracle.mjs";
 import { decodePng } from "../lib/png.mjs";
 import { setPad } from "../lib/gamepad-mock.mjs";
 import { acquirePerfLock } from "../lib/perf-lock.mjs";
@@ -371,12 +371,13 @@ if (webkitRuns.length) {
   const failures = [];
   summary.webkit = { tolerance: webkitTolerance, rows: [] };
   for (const vi of VIS.map(String)) {
-    const reference = [...new Set(hashed.filter((v) => v.hashes[vi]).map((v) => v.hashes[vi]))];
-    if (reference.length !== 1) {
-      failures.push(reference.length ? `VI ${vi}: the reference itself differs between visits (not deterministic)` : `VI ${vi}: no reference frame`);
+    // every reference visit played, each with its frame, all one hash
+    const row = webkitReferenceRow(hashed, vi, perSide);
+    if (row.failure) {
+      failures.push(row.failure);
       continue;
     }
-    const ref = frameOf(visits.find((v) => v.frames[vi]?.sha256 === reference[0]).frames[vi]);
+    const ref = frameOf(visits.find((v) => v.frames[vi]?.sha256 === row.reference).frames[vi]);
     for (const [k, t] of webkitRuns.entries()) {
       const file = t.replaceAll("{vi}", vi);
       const frame = decodePng(readFileSync(file));
@@ -394,7 +395,8 @@ if (webkitRuns.length) {
   const errors = visits.filter((v) => v.error);
   failures.push(...errors.map((v) => `visit ${v.n}: ${v.error}`));
   summary.webkit.failures = failures;
-  summary.webkit.pass = failures.length === 0 && !summary.integrity.length;
+  // an integrity counter that moved, or an A-B-A under --flicker, fails too
+  summary.webkit.pass = failures.length === 0 && !summary.integrity.length && !flickerFails;
   writeFileSync(path.join(o.out, "summary.json"), JSON.stringify(summary, null, 1) + "\n");
   log(summary.webkit.pass ? "WEBKIT: every WebKit frame within the tolerance of the reference" : `WEBKIT FAILED: ${failures.join("; ")}`);
   process.exit(summary.webkit.pass ? 0 : 1);

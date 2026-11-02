@@ -119,3 +119,19 @@ test("WebKit tolerance: a block moved by 8 px or a wrong texture fails", async (
   assert.match(v.failure, /more than 16 levels apart/);
   assert.match(tolerantFrameVerdict(ref, { width: 608, height: 448, data: new Uint8Array(608 * 448 * 4) }).failure, /internal resolution/);
 });
+
+test("--webkit-frames reference: one visit of 4 without its capture fails, never left out", async () => {
+  const { webkitReferenceRow } = await import("../harness/lib/glitch-oracle.mjs");
+  const visit = (h) => ({ side: "base", hashes: { 240: h } });
+  assert.deepEqual(webkitReferenceRow([visit("a"), visit("a"), visit("a"), visit("a")], "240", 4), { vi: "240", reference: "a", failure: null });
+  assert.match(webkitReferenceRow([visit("a"), visit(null), visit("a"), visit("a")], "240", 4).failure, /1 reference visit\(s\) of 4 without a frame/);
+  assert.match(webkitReferenceRow([visit("a"), visit(null), visit(null), visit(null)], "240", 4).failure, /3 reference visit\(s\) of 4 without a frame/, "one survivor is not 'deterministic'");
+  assert.match(webkitReferenceRow([visit("a"), visit("b"), visit("a"), visit("a")], "240", 4).failure, /not deterministic/);
+  assert.match(webkitReferenceRow([visit("a"), visit("a")], "240", 4).failure, /2 reference visit\(s\) of 4/, "a visit that never ran");
+});
+
+test("replay-gates --webkit-frames: the reference row checks every visit, and a flicker fails the pass", async () => {
+  const src = await read("../harness/probes/replay-gates.mjs");
+  assert.match(src, /const row = webkitReferenceRow\(hashed, vi, perSide\)/);
+  assert.match(src, /summary\.webkit\.pass = failures\.length === 0 && !summary\.integrity\.length && !flickerFails/);
+});

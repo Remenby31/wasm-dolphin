@@ -97,6 +97,19 @@ export function diffFrame(a, b) {
   return { width, height, data, pixels };
 }
 
+// --webkit-frames: the reference visits at one VI ({ hashes: { vi: sha256 } },
+// every visit the run played): every one of them must have its frame (a
+// visit without one is never left out in silence) and all the same hash.
+export function webkitReferenceRow(visits, vi, expected) {
+  const hashes = visits.map((v) => v.hashes?.[vi] ?? null);
+  const missing = hashes.filter((h) => !h).length;
+  const distinct = [...new Set(hashes.filter(Boolean))];
+  if (visits.length < expected) return { vi, reference: null, failure: `VI ${vi}: ${visits.length} reference visit(s) of ${expected}` };
+  if (missing) return { vi, reference: null, failure: `VI ${vi}: ${missing} reference visit(s) of ${visits.length} without a frame` };
+  if (distinct.length !== 1) return { vi, reference: null, failure: `VI ${vi}: the reference itself differs between visits (not deterministic)` };
+  return { vi, reference: distinct[0], failure: null };
+}
+
 // The tolerant comparison, for WebKit only (never the default oracle: Chrome
 // against Chrome stays 0 pixel apart). Safari has no dual-source blending:
 // its fallback blends edges with a bounded rounding error, a few levels on a
