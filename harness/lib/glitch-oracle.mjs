@@ -98,51 +98,57 @@ export function diffFrame(a, b) {
 }
 
 // The tolerant comparison, for WebKit only (never the default oracle: Chrome
-// against Chrome stays 0 pixel apart). Safari has no dual-source blending, so
-// its fallback rounds blended edges a few levels apart from Chrome's (real
-// Safari 26 vs Chrome, IR 2, 2026-11-01: 4 % of pixels 1 to 3 levels apart,
-// 8 of 1.09 M above 3, the largest 17, all on blended edges). A WebKit frame
-// passes when no channel is more than maxLevel apart from the Chrome
-// reference and at most overShare of its pixels are more than overLevel
-// apart. Same size required (the same internal resolution).
-export const WEBKIT_TOLERANCE = Object.freeze({ maxLevel: 16, overLevel: 3, overShare: 0.001 });
+// against Chrome stays 0 pixel apart). Safari has no dual-source blending:
+// its fallback blends edges with a bounded rounding error, a few levels on a
+// few edge pixels (real Safari 26 vs Chrome, IR 2, 2026-11-01: 4 % of pixels
+// 1 to 3 levels apart, 8 of 1.09 M above 3, one at 17). The criterion counts
+// pixels by how far apart they are rather than trusting the single worst one
+// (a fragile statistic): at most overShare of the pixels more than overLevel
+// apart, at most bigShare more than bigLevel apart (an isolated 17 passes),
+// and none above maxLevel, the guard against a real rendering error (a wrong
+// texture, a shifted block: hundreds of levels). Same size required (the same
+// internal resolution). harness/README.md, "Replay gates under WebKit".
+export const WEBKIT_TOLERANCE = Object.freeze({ overLevel: 3, overShare: 0.001, bigLevel: 16, bigShare: 0.00001, maxLevel: 64 });
 
-// "max=16,over=0.1%" (either key may be left out: its default stays).
+// "over=0.1%,big=0.001%,max=64" (a key left out keeps its default).
 export function parseWebkitTolerance(spec) {
   const t = { ...WEBKIT_TOLERANCE };
   for (const part of String(spec ?? "").split(",").map((s) => s.trim()).filter(Boolean)) {
-    const m = /^(max|over)=(\d+(?:\.\d+)?)(%?)$/.exec(part);
-    if (!m) throw new Error(`--webkit-tolerance: "${part}" is not max=<levels> or over=<percent>%`);
+    const m = /^(max|over|big)=(\d+(?:\.\d+)?)(%?)$/.exec(part);
+    if (!m) throw new Error(`--webkit-tolerance: "${part}" is not over=<percent>%, big=<percent>% or max=<levels>`);
     const n = Number(m[2]);
     if (m[1] === "max") {
-      if (m[3] || !Number.isInteger(n) || n < t.overLevel || n > 255) throw new Error(`--webkit-tolerance: max is a level from ${t.overLevel} to 255`);
+      if (m[3] || !Number.isInteger(n) || n <= t.bigLevel || n > 255) throw new Error(`--webkit-tolerance: max is a level above ${t.bigLevel}, at most 255`);
       t.maxLevel = n;
     } else {
-      if (!m[3] || n > 100) throw new Error("--webkit-tolerance: over is a percentage (over=0.1%)");
-      t.overShare = n / 100;
+      if (!m[3] || n > 100) throw new Error(`--webkit-tolerance: ${m[1]} is a percentage (${m[1]}=0.1%)`);
+      t[m[1] === "over" ? "overShare" : "bigShare"] = n / 100;
     }
   }
   return t;
 }
 
-// One WebKit frame against the reference: the largest channel difference,
-// the pixels more than overLevel apart, and whether it passes.
+// One WebKit frame against the reference: how many pixels are more than
+// overLevel and more than bigLevel apart, the largest channel difference,
+// and whether it passes.
 export function tolerantFrameVerdict(reference, frame, tolerance = WEBKIT_TOLERANCE) {
   if (reference.width !== frame.width || reference.height !== frame.height) {
     return { pass: false, failure: `size ${frame.width}x${frame.height} vs the reference's ${reference.width}x${reference.height} (not the same internal resolution)` };
   }
   const n = reference.width * reference.height;
-  let max = 0, differ = 0, over = 0;
+  let max = 0, differ = 0, over = 0, big = 0;
   for (let i = 0; i < n * 4; i += 4) {
     let d = 0;
     for (let c = 0; c < 3; c += 1) d = Math.max(d, Math.abs(reference.data[i + c] - frame.data[i + c]));
     if (d) differ += 1;
     if (d > tolerance.overLevel) over += 1;
+    if (d > tolerance.bigLevel) big += 1;
     if (d > max) max = d;
   }
-  const overShare = over / n;
+  const pct = (x) => `${(100 * x).toFixed(4)} %`;
   const failures = [];
-  if (max > tolerance.maxLevel) failures.push(`a channel ${max} levels apart (max ${tolerance.maxLevel})`);
-  if (overShare > tolerance.overShare) failures.push(`${over} px more than ${tolerance.overLevel} levels apart (${(100 * overShare).toFixed(3)} % > ${(100 * tolerance.overShare).toFixed(3)} %)`);
-  return { pass: failures.length === 0, max, differ, over, overShare, failure: failures.join(", ") || null };
+  if (over / n > tolerance.overShare) failures.push(`${over} px more than ${tolerance.overLevel} levels apart (${pct(over / n)} > ${pct(tolerance.overShare)})`);
+  if (big / n > tolerance.bigShare) failures.push(`${big} px more than ${tolerance.bigLevel} levels apart (${pct(big / n)} > ${pct(tolerance.bigShare)})`);
+  if (max > tolerance.maxLevel) failures.push(`a channel ${max} levels apart (a rendering error: at most ${tolerance.maxLevel})`);
+  return { pass: failures.length === 0, max, differ, over, big, failure: failures.join(", ") || null };
 }

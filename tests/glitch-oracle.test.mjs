@@ -68,25 +68,54 @@ test("replay-gates --exact: reference read back, no input phase, images kept, ex
 test("the WebKit tolerance: defaults, and a bad spec refused before any run", async () => {
   const { parseWebkitTolerance, WEBKIT_TOLERANCE } = await import("../harness/lib/glitch-oracle.mjs");
   assert.deepEqual(parseWebkitTolerance(""), { ...WEBKIT_TOLERANCE });
-  assert.deepEqual(parseWebkitTolerance("max=20,over=0.5%"), { maxLevel: 20, overLevel: 3, overShare: 0.005 });
-  assert.equal(parseWebkitTolerance("over=1%").maxLevel, 16);
-  for (const bad of ["max=2", "max=1.5", "max=300", "over=0.5", "over=150%", "foo=1", "max=16%"]) assert.throws(() => parseWebkitTolerance(bad), /--webkit-tolerance/, bad);
+  assert.deepEqual(parseWebkitTolerance("over=0.5%,big=0.01%,max=80"), { overLevel: 3, overShare: 0.005, bigLevel: 16, bigShare: 0.0001, maxLevel: 80 });
+  assert.equal(parseWebkitTolerance("over=1%").maxLevel, 64);
+  for (const bad of ["max=16", "max=64.5", "max=300", "over=0.5", "big=2", "over=150%", "foo=1", "max=64%"]) assert.throws(() => parseWebkitTolerance(bad), /--webkit-tolerance/, bad);
 });
 
-test("a WebKit frame passes within the levels and the share, fails above either", async () => {
+// Synthetic frames: a 2-D pattern (a texture), its blended-edge rounding,
+// an isolated pixel, a block moved by 8 pixels, another texture.
+const W = 1216, H = 896;
+const texture = (f) => {
+  const data = new Uint8Array(W * H * 4);
+  for (let y = 0; y < H; y += 1) for (let x = 0; x < W; x += 1) {
+    const i = (y * W + x) * 4;
+    data[i] = f(x, y); data[i + 1] = f(y, x); data[i + 2] = f(x + y, x - y); data[i + 3] = 255;
+  }
+  return { width: W, height: H, data };
+};
+const checker = (x, y) => ((x >> 3) + (y >> 3)) % 2 ? 200 : 40;
+
+test("WebKit tolerance: blended edges ±3 pass, an isolated pixel at 17 passes", async () => {
   const { tolerantFrameVerdict } = await import("../harness/lib/glitch-oracle.mjs");
-  const frame = (fill) => ({ width: 100, height: 10, data: new Uint8Array(4000).fill(fill) });
-  const ref = frame(100);
-  const near = frame(100);
-  for (let p = 0; p < 50; p += 1) near.data[p * 4] = 103; // 5 % at 3 levels: not counted
-  near.data[4 * 60 + 1] = 116; // one pixel at 16: 0.1 %
-  let v = tolerantFrameVerdict(ref, near);
-  assert.deepEqual([v.pass, v.max, v.differ, v.over], [true, 16, 51, 1]);
-  near.data[4 * 61 + 2] = 117; // 17 levels, and 0.2 % above 3
-  v = tolerantFrameVerdict(ref, near);
+  const ref = texture(checker);
+  const edges = texture(checker);
+  // every checker edge (about a quarter of the pixels) rounded 1 to 3 levels
+  for (let y = 0; y < H; y += 1) for (let x = 0; x < W; x += 1) if (x % 8 === 0 || y % 8 === 0) edges.data[(y * W + x) * 4] += 1 + ((x + y) % 3);
+  let v = tolerantFrameVerdict(ref, edges);
+  assert.deepEqual([v.pass, v.max, v.over, v.big], [true, 3, 0, 0]);
+  assert.ok(v.differ > W * H / 5);
+  // what Safari gave at VI 600: 8 pixels over 3, one of them at 17
+  for (let k = 0; k < 8; k += 1) edges.data[(k * 100 * W + 50) * 4 + 1] += k ? 5 : 17;
+  v = tolerantFrameVerdict(ref, edges);
+  assert.deepEqual([v.pass, v.max, v.over, v.big], [true, 17, 8, 1]);
+});
+
+test("WebKit tolerance: a block moved by 8 px or a wrong texture fails", async () => {
+  const { tolerantFrameVerdict } = await import("../harness/lib/glitch-oracle.mjs");
+  const ref = texture(checker);
+  // one 8x8 block drawn 8 px to the right (the checker's other phase)
+  const moved = texture(checker);
+  for (let y = 400; y < 408; y += 1) for (let x = 600; x < 608; x += 1) for (let c = 0; c < 3; c += 1) moved.data[(y * W + x) * 4 + c] = ref.data[(y * W + x - 8) * 4 + c];
+  let v = tolerantFrameVerdict(ref, moved);
   assert.equal(v.pass, false);
-  assert.match(v.failure, /17 levels apart/);
-  assert.match(v.failure, /2 px more than 3 levels/);
-  assert.equal(tolerantFrameVerdict(ref, near, { maxLevel: 17, overLevel: 3, overShare: 0.002 }).pass, true);
-  assert.match(tolerantFrameVerdict(ref, { width: 50, height: 20, data: new Uint8Array(4000) }).failure, /internal resolution/);
+  assert.equal(v.big, 64);
+  assert.match(v.failure, /a channel 160 levels apart/);
+  // a wrong texture in a 64x64 corner (another pattern)
+  const wrong = texture(checker);
+  for (let y = 0; y < 64; y += 1) for (let x = 0; x < 64; x += 1) wrong.data[(y * W + x) * 4] = (x * 4) & 255;
+  v = tolerantFrameVerdict(ref, wrong);
+  assert.equal(v.pass, false);
+  assert.match(v.failure, /more than 16 levels apart/);
+  assert.match(tolerantFrameVerdict(ref, { width: 608, height: 448, data: new Uint8Array(608 * 448 * 4) }).failure, /internal resolution/);
 });

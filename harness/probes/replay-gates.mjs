@@ -67,12 +67,13 @@
 // query (measure-safari --capture-vi), as PNG paths with {vi} in place of
 // the VI; several runs comma-separated. Only the reference visits run here
 // (Chrome); the reference must still agree with itself bit for bit, then
-// each WebKit frame is compared with tolerance (lib/glitch-oracle.mjs
-// tolerantFrameVerdict): no channel more than 16 levels from the reference,
-// at most 0.1 % of pixels more than 3 levels (--webkit-tolerance
-// "max=16,over=0.1%"). Safari's blending without dual-source rounds blended
-// edges a few levels apart: an exact comparison would always fail, the
-// tolerant one still catches a wrong picture. A frame that fails keeps the
+// each WebKit frame is compared by counts (lib/glitch-oracle.mjs
+// tolerantFrameVerdict): at most 0.1 % of pixels more than 3 levels from the
+// reference, at most 0.001 % more than 16, none more than 64
+// (--webkit-tolerance "over=0.1%,big=0.001%,max=64"). Safari's blending
+// without dual-source rounds blended edges a few levels apart: an exact
+// comparison would always fail, the counts still catch a wrong picture
+// (harness/README.md, "Replay gates under WebKit"). A frame that fails keeps the
 // reference, the frame and their difference (x8) as out/webkit-<VI>-*.png.
 // visits.json keeps each captured frame's sha256 (hashes), so the frames of
 // two trees can be compared exactly from two runs.
@@ -381,7 +382,7 @@ if (webkitRuns.length) {
       const frame = decodePng(readFileSync(file));
       const v = tolerantFrameVerdict(ref, frame, webkitTolerance);
       summary.webkit.rows.push({ vi: Number(vi), run: k, file, ...v });
-      log(`webkit VI ${vi} run ${k}: ${v.pass ? "within" : "OUTSIDE"} the tolerance (max ${v.max ?? "-"}, ${v.differ ?? "-"} px apart, ${v.over ?? "-"} over ${webkitTolerance.overLevel})${v.failure ? `: ${v.failure}` : ""}`);
+      log(`webkit VI ${vi} run ${k}: ${v.pass ? "within" : "OUTSIDE"} the tolerance (${v.differ ?? "-"} px apart, ${v.over ?? "-"} over ${webkitTolerance.overLevel}, ${v.big ?? "-"} over ${webkitTolerance.bigLevel}, max ${v.max ?? "-"})${v.failure ? `: ${v.failure}` : ""}`);
       if (v.pass) continue;
       failures.push(`VI ${vi} run ${k}: ${v.failure}`);
       if (v.max === undefined) continue;
