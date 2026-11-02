@@ -145,7 +145,7 @@ export class UpstreamWorkerAdapter {
     aotCompiler = true,
     aotFirstLaunch = false,
     regionChain = true,
-    aotAssembler = true,
+    aotAssembler = null,
     fusedMadd = true,
     aotSampleMs = undefined,
     wasmEngine = undefined,
@@ -291,7 +291,7 @@ export class UpstreamWorkerAdapter {
     this.aotCompiler = aotCompiler !== false;
     this.aotFirstLaunch = aotFirstLaunch === true;
     this.regionChain = regionChain !== false;
-    this.aotAssembler = aotAssembler !== false;
+    this.aotAssembler = typeof aotAssembler === "boolean" ? aotAssembler : null; // null: the worker's default
     this.fusedMadd = fusedMadd !== false;
     // The page's ?aotsample= and wasm engine (src/wasm-engine.js): the worker
     // cannot read the page's URL, so they reach it only in this message.

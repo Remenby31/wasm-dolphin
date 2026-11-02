@@ -14,8 +14,17 @@ import { assembleRegion } from "./aot-region-module.js";
 
 export const AOT_ASSEMBLER_WORKER_NAME = "salon-aot-assembler";
 
+// ?aotasm=1 / ?aotasm=0 forces it on or off; absent: null, the worker's
+// default (on, but off under JavaScriptCore until an iPhone measures the extra
+// worker's memory: aotAssemblerDefault).
 export function aotAssemblerRequested(search = "") {
-  return new URLSearchParams(search).get("aotasm") !== "0";
+  const v = new URLSearchParams(search).get("aotasm");
+  return v === "1" ? true : v === "0" ? false : null;
+}
+// The default by engine (src/wasm-engine.js names): off under JSC.
+// TODO: iPhone measurement needed before enabling under JSC.
+export function aotAssemblerDefault(engine) {
+  return engine !== "jsc";
 }
 
 // The client: assemble(fragments) -> Promise<Uint8Array>.
@@ -49,7 +58,8 @@ export function createAotAssemblerClient({
       p.reject(error); // the module's own error, judged as before
     }
   };
-  const fail = (reason) => {
+  // `quiet`: an end asked for (terminate), not a failure: nothing reported.
+  const fail = (reason, { quiet = false } = {}) => {
     if (failed) return;
     failed = String(reason?.message || reason || "aot assembler failed");
     try { worker?.terminate(); } catch { /* already gone */ }
@@ -57,6 +67,7 @@ export function createAotAssemblerClient({
     const waiting = [...pending.values()];
     pending.clear();
     for (const p of waiting) { clearTimeout(p.timer); inPlace(p); }
+    if (quiet) return;
     try { onHelperFailure(failed); } catch { /* a listener never matters */ }
   };
   const ensure = () => {
@@ -99,7 +110,7 @@ export function createAotAssemblerClient({
     // The flow's end (another disc, a stop): the worker goes; requests still
     // in flight are assembled in place.
     terminate() {
-      fail(new Error("aot assembler terminated"));
+      fail(new Error("aot assembler terminated"), { quiet: true });
     }
   };
 }
