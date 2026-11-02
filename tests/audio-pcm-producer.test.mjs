@@ -308,19 +308,30 @@ test("producer rate: proportional to the latency's excess (ring and mixer) over 
   assert.equal(g.producer.rateControl, false);
 });
 
-test("producer surplus: the mixer's queue pulled to half its size into the ring before it overflows, counted", () => {
+test("producer mixer bounds: never more than the queue holds while the ring has slack; the queue pulled back down once high", () => {
   const ring = createAudioPcmRing();
   const f = fixture();
-  let queued = 35;
+  let queued = 20;
   f.core.audioQueuedMs = () => queued;
   f.producer.install(ring.sab, { muted: false, rateControl: true, mixerCapMs: 40 });
+  // ring at 60 ms: at most the queue less a granule (16 ms), at least down to 8 ms (12 ms)
+  assert.deepEqual(f.producer.mixerBounds(f.core, 60 * 48), { maxFrames: 16 * 48, minFrames: 12 * 48 });
+  // ring nearly empty: the mixer may loop (no cap)
+  assert.equal(f.producer.mixerBounds(f.core, 10 * 48).maxFrames, Infinity);
+  // low queue: nothing forced
+  queued = 10;
+  assert.equal(f.producer.mixerBounds(f.core, 60 * 48).minFrames, 0);
+  // a pull at the ring's target takes the forced part, counted as surplus
+  queued = 30;
   consumeAudioPcm(ring, new Float32Array(1), new Float32Array(1));
-  f.producer.targetFrames = 0; // the ring at its target: only the surplus is pulled
-  assert.equal(f.producer.surplusFrames(f.core), (35 - 20) * 48);
+  Atomics.store(ring.header, AUDIO_PCM_HEADER.WRITE_INDEX, 60 * 48);
+  f.producer.targetFrames = 60 * 48;
   f.producer.refill(1);
-  assert.equal(snapshotAudioPcmRing(ring).producerSurplusFrames, 15 * 48);
-  queued = 29; // under cap − 10 ms: nothing
-  assert.equal(f.producer.surplusFrames(f.core), 0);
+  assert.equal(snapshotAudioPcmRing(ring).producerSurplusFrames, 22 * 48);
+  // off, or a core without 0186: no bounds
+  const g = fixture();
+  g.producer.install(createAudioPcmRing().sab, { muted: false });
+  assert.equal(g.producer.mixerBounds(g.core, 0), null);
 });
 
 // A model of the mixer (Mixer::MixerFifo): a queue of input in ms, capped at
@@ -328,7 +339,7 @@ test("producer surplus: the mixer's queue pulled to half its size into the ring 
 // a pull from an empty queue loops (an underrun fill). The core produces at
 // `speed` of real time; the worklet consumes 128 frames every 2.67 ms; the
 // producer ticks every 10 ms.
-function simulate({ rateControl, speedAt, seconds = 30, capMs = 40, rateMaxPpm, trackOverMs = 100 }) {
+function simulate({ rateControl, speedAt, seconds = 30, capMs = 40, rateMaxPpm, trackOverMs = 100, lateTicks = false }) {
   const ring = createAudioPcmRing();
   const heapU8 = new Uint8Array(65536);
   let queueMs = 20, skips = 0, fills = 0;
@@ -352,14 +363,15 @@ function simulate({ rateControl, speedAt, seconds = 30, capMs = 40, rateMaxPpm, 
   producer.install(ring.sab, { muted: false, targetFrames: 1920, rateControl, mixerCapMs: capMs, rateMaxPpm });
   const L = new Float32Array(128), R = new Float32Array(128), res = {};
   consumeAudioPcm(ring, L, R, 128, res); // ack the epoch
-  let now = 0, nextTick = 0, nextQuantum = 0, overMs = 0;
+  let now = 0, nextTick = 0, nextQuantum = 0, overMs = 0, ticks = 0;
   const realNow = performance.now;
   try {
     while (now < seconds * 1000) {
       const dt = 0.5;
       queueMs += speedAt(now) * dt;
       if (now >= nextQuantum) { consumeAudioPcm(ring, L, R, 128, res); nextQuantum += 128 / 48; }
-      if (now >= nextTick) { performance.now = () => now; producer.timerTick(); nextTick += 10; }
+      // lateTicks: a busy worker, every third tick 25 ms late in the first 25 s
+      if (now >= nextTick) { performance.now = () => now; producer.timerTick(); ticks += 1; nextTick += lateTicks && now < 25000 && ticks % 3 === 0 ? 25 : 10; }
       if (audioPcmAvailableFrames(ring.header) / 48 + queueMs > trackOverMs) overMs += dt;
       now += dt;
     }
@@ -374,14 +386,18 @@ test("model of the load: a 3 s slow core then a catch-up, and the ring's descent
   const on = simulate({ rateControl: true, speedAt });
   // off: the mixer skips during the catch-up and the 120 -> 40 ms descent
   assert.ok(off.skips >= 10, JSON.stringify(off));
-  // on: the catch-up goes into the ring (the rest skips only once the ring is
-  // full, 170 ms), the excess is played up to 0.5 % faster
+  // on: the catch-up goes into the ring, the excess is played up to 0.5 %
+  // faster, the mixer is never over-pulled while the ring has slack
   assert.ok(on.skips <= off.skips / 2, JSON.stringify({ on, off }));
+  assert.ok(on.fills <= off.fills, JSON.stringify({ on, off }));
   assert.ok(on.resampledMs > 0 && on.surplusMs > 0, JSON.stringify(on));
   // and the latency comes down to the floor within the 30 s
   assert.ok(on.fillMs < on.targetMs + 10 && on.targetMs <= 41, JSON.stringify(on));
-  // the slow core's fills are the same: the game made less sound than played
-  assert.ok(Math.abs(on.fills - off.fills) <= Math.max(3, off.fills * 0.5), JSON.stringify({ on, off }));
+  // a busy worker (late ticks): what the first real run showed, skips with
+  // fills off; on, the mixer kept low absorbs a 25 ms tick
+  const offLate = simulate({ rateControl: false, speedAt, lateTicks: true });
+  const onLate = simulate({ rateControl: true, speedAt, lateTicks: true });
+  assert.ok(onLate.skips <= Math.max(1, offLate.skips / 4) && onLate.fills <= offLate.fills, JSON.stringify({ onLate, offLate }));
 });
 
 test("plumbing: ?audiorate reaches the producer with the boot's AudioBufferSize", async () => {

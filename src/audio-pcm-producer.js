@@ -25,14 +25,24 @@ export const ADAPT_DESCENT = 0.005;
 // ppm a ms over the dead band, so 5 ms more is the bound), under a 4 ms dead
 // band, moving at most 100 ppm a 10 ms tick (no step). The latency is the
 // ring's fill AND the mixer's queue (smoothed over ~200 ms), against the
-// ring's target plus half the mixer's size: the mixer's queue is pulled down
-// to that half into the ring whenever it comes within 10 ms of overflowing,
-// which moves latency between the two without changing it.
+// ring's target plus MIXER_LOW_MS.
+// The mixer's queue is kept low, the latency held in the ring: a late tick
+// (the worker busy, 20-30 ms after a load) let a half-full mixer pass
+// AudioBufferSize (an overflow skip), and a pull bigger than the queue made
+// it loop (an underrun fill). So once over MIXER_HIGH_MS it is pulled down to
+// MIXER_LOW_MS into the ring, whatever the target, and a pull never takes
+// more than the queue holds (less one granule) while the ring has at least
+// RING_LOW_MS: below that, the mixer's own gap fill is kept (a loop rather
+// than silence while the core is slow).
 export const RATE_PPM_PER_MS = 1000;
 export const RATE_DEAD_BAND_MS = 4;
 export const RATE_SMOOTHING = 0.05;
+export const MIXER_HIGH_MS = 12;
+export const MIXER_LOW_MS = 8;
+export const MIXER_GRANULE_MS = 4;
+export const RING_LOW_MS = 20;
 export const RATE_SLEW_PPM = 100;
-export const SURPLUS_MARGIN_MS = 10;
+
 
 function atomicMax(header, index, value) {
   let before = Atomics.load(header, index);
@@ -229,8 +239,8 @@ export class AudioPcmProducer {
     const ring = this.ring;
     if (!ring) return;
     const queuedMs = this.api()?.audioQueuedMs?.();
-    const mixerMs = Number.isFinite(queuedMs) && queuedMs >= 0 ? queuedMs : this.mixerCapMs / 2;
-    const rawMs = (audioPcmAvailableFrames(ring.header) - (this.targetFrames ?? AUDIO_PCM_TARGET_FRAMES)) / 48 + mixerMs - this.mixerCapMs / 2;
+    const mixerMs = Number.isFinite(queuedMs) && queuedMs >= 0 ? queuedMs : MIXER_LOW_MS;
+    const rawMs = (audioPcmAvailableFrames(ring.header) - (this.targetFrames ?? AUDIO_PCM_TARGET_FRAMES)) / 48 + mixerMs - MIXER_LOW_MS;
     this.excessMs = this.excessMs == null ? rawMs : this.excessMs + RATE_SMOOTHING * (rawMs - this.excessMs);
     const excessMs = this.excessMs;
     const goal = excessMs > RATE_DEAD_BAND_MS ? Math.min(this.rateMaxPpm ?? AUDIO_PCM_MAX_RATE_PPM, Math.round((excessMs - RATE_DEAD_BAND_MS) * RATE_PPM_PER_MS)) : 0;
@@ -239,13 +249,18 @@ export class AudioPcmProducer {
     Atomics.store(ring.header, AUDIO_PCM_HEADER.RATE_PPM, next | 0);
   }
 
-  // rate control: frames to pull from the mixer beyond the ring's target, so
-  // its queue never reaches AudioBufferSize (an overflow skips half of it)
-  surplusFrames(core) {
-    if (!this.rateControl) return 0;
+  // rate control: how much a pull may take and must take from the mixer.
+  // null without rate control or without the mixer's queue (0186).
+  mixerBounds(core, fill) {
+    if (!this.rateControl) return null;
     const queuedMs = core.audioQueuedMs?.();
-    if (!(Number.isFinite(queuedMs) && queuedMs > this.mixerCapMs - SURPLUS_MARGIN_MS)) return 0;
-    return Math.max(0, Math.round((queuedMs - this.mixerCapMs / 2) * 48));
+    if (!(Number.isFinite(queuedMs) && queuedMs >= 0)) return null;
+    return {
+      // never more than the queue holds while the ring has slack
+      maxFrames: fill >= RING_LOW_MS * 48 ? Math.max(0, Math.floor((queuedMs - MIXER_GRANULE_MS) * 48)) : Infinity,
+      // back down to MIXER_LOW_MS once over MIXER_HIGH_MS
+      minFrames: queuedMs > MIXER_HIGH_MS ? Math.round((queuedMs - MIXER_LOW_MS) * 48) : 0,
+    };
   }
 
   refill(maxMixes = 2) {
@@ -264,8 +279,8 @@ export class AudioPcmProducer {
       const fill = audioPcmAvailableFrames(ring.header);
       const free = audioPcmFreeFrames(ring.header);
       const target = Math.round(this.targetFrames ?? AUDIO_PCM_TARGET_FRAMES);
-      const surplus = this.surplusFrames(core);
-      const want = Math.max(target - fill, surplus);
+      const bounds = this.mixerBounds(core, fill);
+      const want = Math.min(Math.max(target - fill, bounds?.minFrames ?? 0), bounds?.maxFrames ?? Infinity);
       if (want <= 0 || free <= 0) break;
       const maxFrames = Math.max(1, core.audioBufferFrames?.() || 4096);
       const requested = Math.min(maxFrames, want, free);
