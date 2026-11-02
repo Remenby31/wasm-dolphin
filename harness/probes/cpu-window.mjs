@@ -26,7 +26,10 @@
 // (validationReadHeadroomStats), and the region JIT stats
 // (validationReadJitRegionStats) first untimed (sampleEvery 0) for
 // --untimed-secs, the window that prices the timing (timingCost), then with
-// sampleEvery --region-sample: every region call, block call and Idle
+// sampleEvery --region-sample (since 0215 the core publishes the region
+// stats' tops and gauges at most every 250 ms: the times and cycles the rows
+// use are current; before it, the publication every 64 slices cost the CPU
+// thread up to 19 % over a minute, lib/jit-region-stats.mjs): every region call, block call and Idle
 // timed, block lookups 1 in N, scaled by the core.
 // Then a snapshot of the four structs and the core ticks every --step s for
 // --secs s (reads only, never a reset), and the VIs drained from the

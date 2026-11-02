@@ -79,7 +79,9 @@
 //   --region-sample N, after the speed window (never during it: the counters
 //   and their timers cost time), a separate stats window of --region-secs
 //   resets them (host time sampled on 1 call in N, 0 = counters only) and
-//   reads them. summary.json carries the pooled shares of the cold stats
+//   reads them. Since 0215 the tops and gauges in them (topMiss, the miss
+//   table, regionsQueued, entriesMapped...) can be up to 250 ms old; the
+//   times and cycles are current (lib/jit-region-stats.mjs). summary.json carries the pooled shares of the cold stats
 //   windows as p4 (candidate) and baselineP4; a core without the export
 //   gives p4: null with the reason (p4Why), never a failure. A core with the
 //   256-byte struct also gives the idle-skipped cycles, taken out of

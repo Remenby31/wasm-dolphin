@@ -1,0 +1,40 @@
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -10552,6 +10552,18 @@ void ServiceRegionInstalls(std::optional<std::chrono::steady_clock::time_point>
+ std::atomic<int> s_region_stats_request{-1};
+ std::atomic<u32> s_regions_queued{0};
+ u32 s_publish_counter = 0;
++// Patch 0215: PublishRegionStats copies and sorts the miss map (it grows
++// with every PC run outside the regions) and the transition counts. Every
++// 64 slices (~580 times a second in a race) it took the CPU thread from 6 %
++// to 19 % of its host time over a minute and was most of the "other" the
++// harness measured. Now at most once per REGION_STATS_PUBLISH_MS of host
++// time (the clock read every 64 slices), and at once when a request is
++// applied. The time and cycle fields are written as they happen: only the
++// tops (miss PCs, transitions) and the gauges PublishRegionStats sets
++// (install_fallbacks, regions_queued, entries_mapped, regions_enabled) can
++// be up to that old.
++constexpr auto REGION_STATS_PUBLISH_MS = std::chrono::milliseconds(250);
++std::chrono::steady_clock::time_point s_region_stats_published_at{};
+ 
+ void PublishRegionStats()
+ {
+@@ -10607,10 +10619,16 @@ void ApplyRegionStatsRequest()
+     s_clock_pair_ms = request > 0 ? MeasureClockPairMs() : 0;
+     s_region_stats_on = true;
+     PublishRegionStats();
++    s_region_stats_published_at = std::chrono::steady_clock::now();
+   }
+   else if (s_region_stats_on && (++s_publish_counter & 63) == 0)
+   {
+-    PublishRegionStats();
++    const auto now = std::chrono::steady_clock::now();
++    if (now - s_region_stats_published_at >= REGION_STATS_PUBLISH_MS)
++    {
++      s_region_stats_published_at = now;
++      PublishRegionStats();
++    }
+   }
+ }
+ 
