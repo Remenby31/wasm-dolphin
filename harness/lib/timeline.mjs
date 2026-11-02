@@ -37,10 +37,12 @@ export function mergeTimeline(chunks) {
       out.swapsLost += c.swaps.lost ?? 0;
     } else if (c.swapsWhy) out.swapsWhy = c.swapsWhy;
     if (c.pipeline) {
-      out.pipeline ??= { tags: [], queued: [], ticks: [] };
+      out.pipeline ??= { tags: [], queued: [], ticks: [], drains: [] };
       c.pipeline.tags.vi.forEach((vi, i) => out.pipeline.tags.push({ vi, t: c.pipeline.tags.t[i] }));
       c.pipeline.queued.vi.forEach((vi, i) => out.pipeline.queued.push({ vi, t: c.pipeline.queued.t[i] }));
       c.pipeline.ticks.t.forEach((t, i) => out.pipeline.ticks.push({ t, cb: c.pipeline.ticks.cb[i], vi: c.pipeline.ticks.vi[i] }));
+      // drains: a log from before them has none
+      c.pipeline.drains?.t.forEach((t, i) => out.pipeline.drains.push({ t, wake: c.pipeline.drains.wake[i], setAt: c.pipeline.drains.setAt[i] }));
       out.pipelineLost += c.pipeline.lost ?? 0;
     }
   }

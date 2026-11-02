@@ -1,6 +1,6 @@
 import { asDiscBlob } from "./remote-disc.js";
 import { readSwapRing, readViRing } from "./harness-vi-ring.js";
-import { createPipelineLog } from "./harness-pipeline-log.js";
+import { createPipelineLog, PIPELINE_WAKE } from "./harness-pipeline-log.js";
 import { startPcSampler } from "./harness-pc-sampler.js";
 import { createDropSampler, histogramSum } from "./harness-drop-sampler.js";
 import {
@@ -745,8 +745,13 @@ let harnessDisplayStop = null;
 // VI output's way to the screen, the worker's side (src/harness-pipeline-log.js)
 // and the core's swap ring (patch 0214), for harness/lib/no-present.mjs.
 let harnessPipeline = false;
-const harnessPipelineLog = createPipelineLog();
+// made at the first { pipeline: true }: nothing allocated otherwise
+let harnessPipelineLog = null;
 let harnessSwapRead = null;
+// Pipeline diag: how the replay pump's next run was woken and when it was
+// scheduled or parked (harness clock), written only with harnessPipeline.
+let harnessPumpWake = PIPELINE_WAKE.timer0;
+let harnessPumpSetAt = null;
 let harnessPresentRead = 0;
 const presentationIntervalHistogram = new Uint32Array(
   PRESENTATION_HISTOGRAM_BUCKETS_MS.length + 1
@@ -2419,6 +2424,8 @@ async function handleMessage(type, payload) {
         harnessDisplayStop = startDisplayLoop(harnessDisplay, { active: () => harnessEnabled });
       }
       if (payload.pipeline) {
+        // room for ~2 s of drains, tags, presents and ticks between two reads
+        harnessPipelineLog ??= createPipelineLog({ capacity: 131072 });
         harnessPipeline = true;
         moduleInstance?._DolphinWeb_HarnessSwapsEnable?.(1);
       }
@@ -6042,6 +6049,7 @@ function runPresentationLoopOnce() {
       // ring over (handleWebGpuCmdRing) and only matters for
       // ?video=wgpu. Cheap when empty (one atomic load).
       if (!(wgpuReplayBudgetMs > 0 && wgpuReplayYieldPending)) {
+        if (harnessPipeline) harnessPipelineLog.replayStart(PIPELINE_WAKE.presentation, harnessNow(), null);
         drainWebGpuCmdRing("presentation");
       } else {
         webGpuCausalStats.replayBudgetPresentationRedrainSuppressedCount += 1;
@@ -10456,6 +10464,7 @@ function startWgpuReplayPump() {
       );
     }
     wgpuReplayYieldPending = false;
+    if (harnessPipeline) harnessPipelineLog.replayStart(harnessPumpWake, harnessNow(), harnessPumpSetAt);
     const write = Atomics.load(webGpuCmdRing.headerI32, 0) >>> 0;
     const read = currentWgpuReadIndex(webGpuCmdRing);
     if (write !== read) {
@@ -10492,6 +10501,7 @@ function parkWgpuReplayPump(pump, observedWrite) {
   if (wgpuReplayParker.parked) {
     wgpuReplayPumpTimer = "parked";
     wgpuReplayPumpDueAt = 0;
+    if (harnessPipeline) { harnessPumpWake = PIPELINE_WAKE.parker; harnessPumpSetAt = harnessNow(); }
   }
   return true;
 }
@@ -10502,6 +10512,7 @@ function scheduleWgpuReplayPump(callback, delayMs) {
   wgpuReplayPumpScheduledAt = trackWakeDelay ? performance.now() : 0;
   wgpuReplayPumpDueAt = trackWakeDelay ? wgpuReplayPumpScheduledAt + delay : 0;
   webGpuCausalStats.replayPumpScheduleCount += 1;
+  if (harnessPipeline) { harnessPumpWake = delay === 0 ? PIPELINE_WAKE.timer0 : PIPELINE_WAKE.timerIdle; harnessPumpSetAt = harnessNow(); }
   if (delay === 0) webGpuCausalStats.replayPumpBacklogScheduleCount += 1;
   else webGpuCausalStats.replayPumpIdleScheduleCount += 1;
   wgpuReplayPumpTimer = setTimeout(callback, delay);

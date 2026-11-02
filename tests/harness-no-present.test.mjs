@@ -215,7 +215,7 @@ test("pipeline log: tags, queued presents and ticks drained in order; an overwri
   log.tag(7, 100);
   log.queued(7, 101.5);
   log.tick(116.7, 117.2, 7);
-  assert.deepEqual(log.drain(), { tags: { vi: [7], t: [100] }, queued: { vi: [7], t: [101.5] }, ticks: { t: [116.7], cb: [117.2], vi: [7] }, lost: 0 });
+  assert.deepEqual(log.drain(), { tags: { vi: [7], t: [100] }, queued: { vi: [7], t: [101.5] }, ticks: { t: [116.7], cb: [117.2], vi: [7] }, drains: { t: [], wake: [], setAt: [] }, lost: 0 });
   assert.deepEqual(log.drain().lost, 0);
   for (let i = 0; i < 6; i += 1) log.tick(200 + i, 201 + i, null);
   const r = log.drain();
@@ -235,7 +235,7 @@ test("mergeTimeline: swaps and the pipeline log, null when not recorded", () => 
   const on = mergeTimeline([{ ...base, swaps: { vi: [3], t: [9], behind: [null], fifoBytes: [null], fresh: [true], held: [false], lost: 1 }, swapsWhy: null, pipeline: log.drain() }]);
   assert.deepEqual(on.swaps, [{ vi: 3, t: 9, behind: null, fifoBytes: null, fresh: true, held: false }]);
   assert.equal(on.swapsLost, 1);
-  assert.deepEqual(on.pipeline, { tags: [{ vi: 3, t: 10 }], queued: [{ vi: 3, t: 11 }], ticks: [{ t: 16.7, cb: 17, vi: 3 }] });
+  assert.deepEqual(on.pipeline, { tags: [{ vi: 3, t: 10 }], queued: [{ vi: 3, t: 11 }], ticks: [{ t: 16.7, cb: 17, vi: 3 }], drains: [] });
   assert.equal(on.complete, false, "a lost swap entry makes the timeline incomplete");
   assert.equal(off.complete, true, "an older timeline without the diag stays complete");
 });
