@@ -2402,6 +2402,13 @@ async function handleMessage(type, payload) {
         ...(aotTestHeapShiftBytes ? { heapShift: coreBoot.attempted ? "too-late" : "before-boot" } : {}) };
     case "validationReadTimeline":
       return readHarnessTimeline();
+    case "validationReadAudioQueue":
+      // patch 0212: the mixer queue's overflow skips (an audible jump) and
+      // underrun fills since boot, and the throttle trim applied (ppm)
+      return api?.audioQueueEvents
+        ? { overflowSkips: api.audioQueueEvents(0), underrunFills: api.audioQueueEvents(1),
+            trimPpm: typeof moduleInstance?._DolphinWeb_ThrottleRatePpm === "function" ? moduleInstance._DolphinWeb_ThrottleRatePpm() : null }
+        : { unavailable: "core without patch 0212" };
     case "validationFlickerWatch":
       return harnessFlickerRequest(payload);
     case "validationUniqueFrames":
@@ -4107,6 +4114,12 @@ function bindApi(module) {
     setThrottleRatePpm:
       typeof module._DolphinWeb_SetThrottleRatePpm === "function"
         ? (ppm) => module._DolphinWeb_SetThrottleRatePpm(Math.round(Number(ppm)) | 0)
+        : null,
+    // patch 0212: the mixer's queue events since boot (0 overflow skips, 1
+    // underrun fills); null on a core without them
+    audioQueueEvents:
+      typeof module._DolphinWeb_AudioQueueEvents === "function"
+        ? (which) => module._DolphinWeb_AudioQueueEvents(which | 0) >>> 0
         : null,
     setAudioBufferMs:
       typeof module._DolphinWeb_SetAudioBufferMs === "function"

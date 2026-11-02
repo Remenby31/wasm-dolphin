@@ -25,7 +25,7 @@
 // the rAF frame times and the frames' arrivals and applies its speed.
 
 export const MAX_PPM = 2000;
-export const SLEW_PPM_PER_SEC = 400;
+export const SLEW_PPM_PER_SEC = 1000;
 export const TARGET_PHASE = 0.5;
 // PI on the phase error (in refreshes): the phase moves by ppm x 1e-6 x the
 // frames a second; gains for a ~20 s loop, damped (zeta ~0.8). The integral
@@ -34,9 +34,14 @@ export const PHASE_GAIN_PPM = 8000;
 export const PHASE_INTEGRAL_PPM_PER_SEC = 1500;
 // the drift must be within reach of the bound: 59.94 on 60 Hz is 1001 ppm; a
 // game 1 % behind (a core that cannot keep up) is no lock
-export const RATIO_TOLERANCE = 0.0015;
-// once locked, kept up to twice that (the ratio's estimate wobbles: no flapping)
-export const RATIO_KEEP = 0.003;
+// (a 60.05 Hz panel needs 1835 ppm): taken up to 1900 ppm, leaving the P
+// term some room under the bound; kept up to the bound itself (the ratio's
+// estimate wobbles: no flapping), dropped past it (the phase would slide)
+export const RATIO_TOLERANCE = 0.0019;
+// Once locked, the frames' period measured over a window at a moving speed
+// wobbles (+/-700 ppm): the lock is kept on the PI's own drift instead, and
+// dropped when it stays at the bound OUT_OF_REACH_MS (the phase would slide).
+export const OUT_OF_REACH_MS = 5000;
 // the refresh: a least-squares line through the last REFRESH_TICKS rAF frame
 // times, each numbered by the refreshes since the first (a missed vsync counts
 // as whole periods): 0.0007 Hz over 7,200 ticks, where a filtered mean of the
@@ -49,6 +54,10 @@ const MIN_REFRESH_TICKS = 120;
 export const REFRESH_INLIERS = 0.8;
 export const REFRESH_BAND = 0.3;
 export const REFRESH_JITTER = 0.1;
+// a gap more than this far from a whole number of refreshes, or more than
+// MAX_MISSED of them, splits the regression
+const AMBIGUOUS_GAP = 0.3;
+const MAX_MISSED = 8;
 const MIN_REFRESH_MS = 1000 / 165;
 const MAX_REFRESH_MS = 1000 / 45;
 // the frames: their arrivals over the last ARRIVAL_WINDOW_MS; regular when
@@ -74,17 +83,31 @@ export function stableRefresh(times) {
   const m = median(gaps);
   if (!(m > 0)) return { refreshMs: null, why: "rAF irregular" };
   if (gaps.filter((g) => Math.abs(g - m) <= m * REFRESH_BAND).length < gaps.length * REFRESH_INLIERS) return { refreshMs: null, why: "rAF irregular" };
-  const ks = [0];
-  for (const g of gaps) ks.push(ks[ks.length - 1] + Math.max(1, Math.round(g / m)));
-  const n = times.length, mk = ks.reduce((a, b) => a + b, 0) / n, mt = times.reduce((a, b) => a + b, 0) / n;
-  let skt = 0, skk = 0;
-  for (let i = 0; i < n; i++) {
-    skt += (ks[i] - mk) * (times[i] - mt);
-    skk += (ks[i] - mk) ** 2;
+  // segments of refresh-numbered ticks; a gap that is no clear number of
+  // refreshes (a tick miscounted, a stall) starts a new segment instead of
+  // shifting every later number: one bad interval is left out, not the window
+  const segs = [[{ k: 0, t: times[0] }]];
+  for (let i = 0; i < gaps.length; i++) {
+    const r = gaps[i] / m;
+    const seg = segs[segs.length - 1];
+    if (Math.abs(r - Math.round(r)) > AMBIGUOUS_GAP || Math.round(r) > MAX_MISSED) segs.push([{ k: 0, t: times[i + 1] }]);
+    else seg.push({ k: seg[seg.length - 1].k + Math.max(1, Math.round(r)), t: times[i + 1] });
   }
+  // pooled least squares: one slope, each segment its own intercept
+  let skt = 0, skk = 0, n = 0;
+  const means = segs.map((sg) => {
+    const mk = sg.reduce((a, p) => a + p.k, 0) / sg.length, mt = sg.reduce((a, p) => a + p.t, 0) / sg.length;
+    for (const p of sg) {
+      skt += (p.k - mk) * (p.t - mt);
+      skk += (p.k - mk) ** 2;
+    }
+    n += sg.length;
+    return { mk, mt };
+  });
+  if (!(skk > 0) || n < MIN_REFRESH_TICKS) return { refreshMs: null, why: "few rAF" };
   const R = skt / skk;
   let sr = 0;
-  for (let i = 0; i < n; i++) sr += (times[i] - (mt + R * (ks[i] - mk))) ** 2;
+  segs.forEach((sg, j) => { for (const p of sg) sr += (p.t - (means[j].mt + R * (p.k - means[j].mk))) ** 2; });
   if (Math.sqrt(sr / n) > R * REFRESH_JITTER) return { refreshMs: null, why: "rAF jitter" };
   if (R < MIN_REFRESH_MS || R > MAX_REFRESH_MS) return { refreshMs: null, why: "rAF rate out of range" };
   return { refreshMs: R, why: null };
@@ -94,11 +117,16 @@ export function createViPhaseLock({ maxPpm = MAX_PPM, slewPpmPerSec = SLEW_PPM_P
   const times = [];
   let lastFrameTime = null;
   let lastTickAt = null;
+  // the presenter takes its frame when the rAF callback runs, a little after
+  // the BeginFrame's frameTime: the phase is measured against that cut, the
+  // offset smoothed (its jitter would move the phase)
+  let cutOffset = null;
   // the arrivals of the window, and the speed factor each came at
   const arrivals = [];
   let ppm = 0;
   let integral = 0;
   let lastUpdate = null;
+  let saturatedSince = null;
   const stats = { on: false, ppm: 0, locks: 0, lost: 0, why: "starting", driftPpm: null, refreshMs: null, frameMs: null, ratio: null, phase: null };
 
   function tick(frameTime, now = frameTime) {
@@ -108,6 +136,8 @@ export function createViPhaseLock({ maxPpm = MAX_PPM, slewPpmPerSec = SLEW_PPM_P
     }
     lastFrameTime = frameTime;
     lastTickAt = now;
+    const off = Math.max(0, now - frameTime);
+    cutOffset = cutOffset === null ? off : cutOffset + (off - cutOffset) * 0.05;
   }
 
   function arrival(at) {
@@ -136,11 +166,11 @@ export function createViPhaseLock({ maxPpm = MAX_PPM, slewPpmPerSec = SLEW_PPM_P
     const frameMs = (sxy / sxx) * speed;
     const ratio = frameMs / refreshMs;
     const m = Math.round(ratio);
-    if (m < 1 || m > 2 || Math.abs(ratio - m) > m * (stats.on ? RATIO_KEEP : RATIO_TOLERANCE)) return { why: "no integer ratio", refreshMs, frameMs, ratio };
+    if (m < 1 || m > 2 || (!stats.on && Math.abs(ratio - m) > m * RATIO_TOLERANCE)) return { why: "no integer ratio", refreshMs, frameMs, ratio };
     // the arrivals' phase in the refresh (circular mean, last second)
     let sx = 0, sy = 0;
     for (const t of a.filter((t) => t >= now - 1000)) {
-      const ph = (((t - lastFrameTime) / refreshMs) % 1 + 1) % 1;
+      const ph = (((t - lastFrameTime - cutOffset) / refreshMs) % 1 + 1) % 1;
       sx += Math.cos(2 * Math.PI * ph);
       sy += Math.sin(2 * Math.PI * ph);
     }
@@ -157,6 +187,11 @@ export function createViPhaseLock({ maxPpm = MAX_PPM, slewPpmPerSec = SLEW_PPM_P
     lastUpdate = now;
     const speed = 1 + ppm / 1e6;
     const s = assess(now, speed);
+    // locked, the drift at the bound for OUT_OF_REACH_MS: out of reach
+    if (s.why === null && stats.on && Math.abs(integral) >= maxPpm - 1) {
+      saturatedSince ??= now;
+      if (now - saturatedSince >= OUT_OF_REACH_MS) s.why = "drift out of reach";
+    } else saturatedSince = null;
     let want = 0;
     if (s.why === null) {
       // late in the refresh (phase above the target): a little faster
@@ -169,10 +204,16 @@ export function createViPhaseLock({ maxPpm = MAX_PPM, slewPpmPerSec = SLEW_PPM_P
         integral = Math.max(-maxPpm, Math.min(maxPpm, (s.frameMs / (s.m * s.refreshMs) - 1) * 1e6));
       }
       stats.on = true;
+      // P limited to what the slew can follow from the current output, and
+      // the integral frozen while the clamp or the slew holds the output
+      // back (it wound up at the acquisition: an overshoot to 0.8, a
+      // crossing when the lock was taken at 0.85 or more)
+      const step = slewPpmPerSec * dt;
       const p = PHASE_GAIN_PPM * err;
-      // anti-windup: the integral moves only while the output is not clamped
       const next = integral + PHASE_INTEGRAL_PPM_PER_SEC * err * dt;
-      if (Math.abs(next + p) <= maxPpm) integral = next;
+      const raw = next + p;
+      const limited = Math.abs(raw) > maxPpm || Math.abs(raw - ppm) > step;
+      if (!limited) integral = next;
       want = Math.max(-maxPpm, Math.min(maxPpm, integral + p));
     } else {
       if (stats.on) stats.lost += 1;

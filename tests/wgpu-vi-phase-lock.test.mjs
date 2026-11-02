@@ -12,16 +12,22 @@ const NTSC_VI_MS = 1000 / 59.94;
 // asks (or 1 without it), each arrival moved by jitter(n) ms, through the
 // presenter's real queue. Returns the frames shown/dropped/repeated after the
 // first `settleSec`, and the lock.
-function play({ hz = 60, viMs = NTSC_VI_MS, fields = 1, seconds = 120, settleSec = 20, jitter = (n) => ((n * 7919) % 5) - 2, tickJitter = () => 0, lock = true }) {
+function play({ hz = 60, viMs = NTSC_VI_MS, fields = 1, seconds = 120, settleSec = 20, jitter = (n) => ((n * 7919) % 5) - 2, tickJitter = () => 0, lock = true, arrivalOffsetMs = 3, cbLateMs = 0, stall = null }) {
   const R = 1000 / hz;
   const q = createVsyncQueue({ queueSize: 2, createTexture: () => ({}) });
   const vi = lock ? createViPhaseLock() : null;
   let factor = 1;
-  let nextArrival = 3, n = 0, tick = 0, lastUpdate = 0;
+  let nextArrival = arrivalOffsetMs, n = 0, tick = 0, lastUpdate = 0;
+  // the lock's phase after it was first taken, and the frames dropped or
+  // repeated from then on (a crossing of the cut shows as both)
+  const phases = [];
+  let lockedAt = null, droppedAtLock = null, repeatsLocked = 0;
   let shown = 0, repeats = 0, counted = false, droppedAtSettle = 0;
   const end = seconds * 1000;
   for (let k = 0; k * R < end; k++) {
     const t = 0.37 * R + k * R + tickJitter(k);
+    // a stall (hidden tab, a long task): no BeginFrame, the frames queue
+    const stalled = stall && t >= stall[0] && t < stall[1];
     // the arrivals before this BeginFrame
     while (nextArrival + jitter(n) <= t) {
       const at = nextArrival + jitter(n);
@@ -31,13 +37,27 @@ function play({ hz = 60, viMs = NTSC_VI_MS, fields = 1, seconds = 120, settleSec
       n++;
       nextArrival += (fields * viMs) / factor;
     }
+    if (stalled) {
+      if (vi && t - lastUpdate >= 500) {
+        lastUpdate = t;
+        factor = vi.update(t).factor;
+      }
+      continue;
+    }
     tick++;
-    vi?.tick(t);
+    // the BeginFrame's frameTime is cbLateMs before the callback runs (the cut, t)
+    vi?.tick(t - cbLateMs, t);
     if (vi && t - lastUpdate >= 500) {
       lastUpdate = t;
       factor = vi.update(t).factor;
+      if (vi.stats.on && lockedAt === null) lockedAt = t;
+      // drops counted from 5 s after the lock: the acquisition from a phase
+      // already in the jitter band next to the cut cannot avoid a few
+      if (lockedAt !== null && droppedAtLock === null && t >= lockedAt + 5000) droppedAtLock = q.stats.dropped;
+      if (lockedAt !== null && vi.stats.phase !== null) phases.push(vi.stats.phase);
     }
     const f = q.takeForDisplay(tick, null);
+    if (!f && droppedAtLock !== null && !(stall && t < stall[1] + 5000)) repeatsLocked++;
     const measuring = t >= settleSec * 1000;
     if (measuring && !counted) {
       counted = true;
@@ -48,7 +68,7 @@ function play({ hz = 60, viMs = NTSC_VI_MS, fields = 1, seconds = 120, settleSec
       if (measuring) shown++;
     } else if (measuring) repeats++;
   }
-  return { shown, repeats, dropped: q.stats.dropped - droppedAtSettle, factor, stats: vi?.stats };
+  return { shown, repeats, dropped: q.stats.dropped - droppedAtSettle, factor, stats: vi?.stats, phases, lockedAt, droppedLocked: droppedAtLock === null ? null : q.stats.dropped - droppedAtLock, repeatsLocked };
 }
 
 test("NTSC on 60 Hz with a jittered arrival: free-running it drops and repeats at every crossing; locked, neither", () => {
@@ -126,7 +146,7 @@ test("bounded and smooth: never past MAX_PPM, at most SLEW a second; out of reac
   assert.ok(near.vi.stats.on, JSON.stringify(near.vi.stats));
   assert.equal(near.vi.stats.locks, 1, "no flapping");
   assert.ok(near.maxPpm <= MAX_PPM + 0.5, `max ${near.maxPpm} ppm`);
-  assert.ok(near.maxStep <= 400 * 0.55, `step ${near.maxStep} ppm per update`);
+  assert.ok(near.maxStep <= 1000 * 0.55, `step ${near.maxStep} ppm per update`);
   // a game 1 % behind: no lock, the base speed
   const slow = run(NTSC_VI_MS * 1.01);
   assert.equal(slow.vi.stats.on, false);
@@ -137,4 +157,46 @@ test("bounded and smooth: never past MAX_PPM, at most SLEW a second; out of reac
   assert.equal(near.vi.stats.why, "no rAF");
   assert.equal(r.factor, 1);
   assert.equal(near.vi.stats.lost, 1);
+});
+
+// the phase never wraps through the cut (0 / 1) once locked
+const noCrossing = (phases) => phases.every((p, i) => i === 0 || Math.abs(p - phases[i - 1]) < 0.5) && Math.min(...phases.map((p) => Math.min(p, 1 - p))) > 0.04;
+
+test("acquisition from a phase near the cut on either side (0.13, 0.9): settles to the middle without crossing it", () => {
+  // the first arrival placed so the lock is taken (~2 s in, the drift +0.06 cycle/s) near 0.13 and near 0.9
+  for (const [offset, near] of [[0.37 * (1000 / 60) + 0.01 * (1000 / 60), 0.13], [0.37 * (1000 / 60) + 0.78 * (1000 / 60), 0.9]]) {
+    const r = play({ arrivalOffsetMs: offset, jitter: (n) => (((n * 7919) % 7) - 3) * 0.6 });
+    assert.ok(r.lockedAt !== null, `${near}: locked`);
+    assert.ok(Math.abs(r.phases[0] - near) < 0.12, `${near}: taken at ${r.phases[0]}`);
+    assert.ok(noCrossing(r.phases), `${near}: no crossing ${r.phases.slice(0, 40).join(" ")}`);
+    assert.equal(r.droppedLocked, 0, `${near}: no catch-up drop once settled`);
+    assert.ok(Math.abs(r.phases.at(-1) - 0.5) < 0.08, `${near}: settled at ${r.phases.at(-1)}`);
+  }
+});
+
+test("a 1 s stall (hidden tab, long task): unlocked at once, locked again after, without crossing", () => {
+  const r = play({ stall: [40_000, 41_000], seconds: 90 });
+  assert.equal(r.stats.lost, 1);
+  assert.equal(r.stats.locks, 2);
+  assert.ok(r.stats.on);
+  assert.ok(noCrossing(r.phases), r.phases.join(" "));
+  assert.ok(Math.abs(r.phases.at(-1) - 0.5) < 0.08);
+});
+
+test("the phase is taken against the cut (the callback's run), not frameTime: a callback 6 ms late still locks mid-refresh", () => {
+  const r = play({ cbLateMs: 6, jitter: (n) => (((n * 7919) % 7) - 3) * 0.6 });
+  assert.ok(r.stats.on);
+  assert.equal(r.droppedLocked, 0);
+  assert.ok(r.repeatsLocked <= 1, `repeats ${r.repeatsLocked}`);
+});
+
+test("a 60.05 Hz panel (1835 ppm) locks; one miscounted tick does not cost the lock", () => {
+  const a = play({ hz: 60.05 });
+  assert.ok(a.stats.on, JSON.stringify(a.stats));
+  assert.equal(a.stats.locks, 1);
+  assert.equal(a.droppedLocked, 0);
+  // one BeginFrame half a refresh late at 30 s (a miscounted tick mid-window)
+  const b = play({ tickJitter: (k) => (k === 1800 ? 0.5 * (1000 / 60) : 0) });
+  assert.equal(b.stats.lost, 0, JSON.stringify(b.stats));
+  assert.equal(b.stats.locks, 1);
 });

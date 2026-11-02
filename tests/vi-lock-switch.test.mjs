@@ -48,17 +48,25 @@ test("vilock: host, worker and patch 0212 (a trim of the throttle's wall rate on
   assert.match(worker, /module\._DolphinWeb_SetThrottleRatePpm\(Math\.round\(Number\(ppm\)\) \| 0\)/);
   assert.match(worker, /if \(r\.changed\) api\.setThrottleRatePpm\(wgpuViLock\.stats\.ppm\);/);
   assert.doesNotMatch(worker, /setEmulationSpeed\?\.\(r\.factor\)/, "never the pre-boot speed setter");
-  // the patch: one file, the throttle; bounded, relaxed, applied in Throttle through UpdateSpeedLimit
-  assert.deepEqual([...patch.matchAll(/^\+\+\+ b\/(.+)$/gm)].map((m) => m[1]), ["Source/Core/Core/CoreTiming.cpp"]);
-  assert.match(patch, /\+constexpr int THROTTLE_RATE_MAX_PPM = 2000;/);
+  // the patch: the throttle, its header, and the mixer that follows the trim
+  assert.deepEqual([...patch.matchAll(/^\+\+\+ b\/(.+)$/gm)].map((m) => m[1]).sort(),
+    ["Source/Core/AudioCommon/Mixer.cpp", "Source/Core/Core/CoreTiming.cpp", "Source/Core/Core/WasmThrottleRate.h"]);
+  assert.match(patch, /\+constexpr int MAX_PPM = 2000;/);
   assert.match(patch, /\+  return ppm == 0 \? 1\.0 : 1\.0 \+ static_cast<double>\(ppm\) \* 1e-6;/);
-  assert.match(patch, /std::clamp\(ppm, -DolphinWeb::THROTTLE_RATE_MAX_PPM, DolphinWeb::THROTTLE_RATE_MAX_PPM\)/);
-  assert.match(patch, /\+\/\/ each Throttle, nothing published with it: relaxed is enough\./);
+  assert.match(patch, /\+inline std::atomic<int> g_requested_ppm\{0\};\n\+inline std::atomic<int> g_applied_ppm\{0\};/);
+  assert.match(patch, /TR::g_requested_ppm\.store\(std::clamp\(ppm, -TR::MAX_PPM, TR::MAX_PPM\), std::memory_order_relaxed\);/);
+  assert.match(patch, /\+\/\/ them: relaxed is enough\. At 0 ppm the factor is exactly 1\.0\./);
   assert.doesNotMatch(patch, /memory_order_(acquire|release|seq_cst)/);
   assert.match(patch, /\+    UpdateSpeedLimit\(target_cycle, m_emulation_speed\);/);
-  assert.match(patch, /new_speed \* DolphinWeb::ThrottleRateFactor\(rate_ppm\)\);/);
-  // the speed and the config are not touched: only the throttle's clock per second
-  // (code lines: the comment names them)
+  assert.match(patch, /new_speed \*\n\+                  DolphinWeb::ThrottleRate::Factor\(rate_ppm\)\);/);
+  // the mixer resamples at the trim the CPU thread applied (no drift of the queue), after the speed
+  assert.match(patch, /\+  in_sample_rate \*= DolphinWeb::ThrottleRate::Factor\(\n\+      DolphinWeb::ThrottleRate::g_applied_ppm\.load\(std::memory_order_relaxed\)\);/);
+  // the queue's overflow skips and underrun fills, counted and exported
+  assert.match(patch, /\+    DolphinWeb::ThrottleRate::g_audio_overflow_skips\.fetch_add\(1, std::memory_order_relaxed\);/);
+  assert.match(patch, /\+      DolphinWeb::ThrottleRate::g_audio_underrun_fills\.fetch_add\(1, std::memory_order_relaxed\);/);
+  assert.match(patch, /\+extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_AudioQueueEvents\(int which\)/);
+  assert.match(worker, /case "validationReadAudioQueue":/);
+  // the speed and the config are not touched (code lines: the comments name them)
   assert.doesNotMatch(patch, /^\+(?!\s*\/\/).*(Config::SetCurrent|Config::SetBase|MAIN_EMULATION_SPEED)/m);
   assert.doesNotMatch(patch, /^\+(?!\s*\/\/).*m_emulation_speed\s*=/m);
   // at 0 ppm the factor is exactly 1 (the same double arithmetic as the patch)

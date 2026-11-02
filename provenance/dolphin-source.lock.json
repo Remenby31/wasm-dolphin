@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "32b34727cb9993b1c74635c89bac337af1a90421c3a0bf8dd94f464701b39fbf",
+  "patchSeriesSha256": "d085784bb4175e4450022d3f1de3a5438c5865ed67e9659d5ec1907162b5b200",
   "patches": [
     {
       "order": 1,
@@ -1176,8 +1176,8 @@
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0212-throttle-rate-trim.patch",
-      "size": 3473,
-      "sha256": "082100801175e712859fb10f26f809dfc839fd8afdac7e1c9f1810cfb4cefd9d"
+      "size": 7241,
+      "sha256": "4c3164af717de35fb16a925866f00f83d277e4e4387fedd275f4361ae4929341"
     },
     {
       "order": 145,
