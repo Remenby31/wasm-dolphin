@@ -62,6 +62,19 @@
 // so a scene's own
 // blinking stretch can be left out at the call. A new scene or window needs
 // a clean cpu=single run first.
+// --webkit-frames T (with --exact; WebKit only, never the default): the
+// frames a real Safari captured at the same VIs, internal resolution and
+// query (measure-safari --capture-vi), as PNG paths with {vi} in place of
+// the VI; several runs comma-separated. Only the reference visits run here
+// (Chrome); the reference must still agree with itself bit for bit, then
+// each WebKit frame is compared by counts (lib/glitch-oracle.mjs
+// tolerantFrameVerdict): at most 0.1 % of pixels more than 3 levels from the
+// reference, at most 0.001 % more than 16, none more than 64
+// (--webkit-tolerance "over=0.1%,big=0.001%,max=64"). Safari's blending
+// without dual-source rounds blended edges a few levels apart: an exact
+// comparison would always fail, the counts still catch a wrong picture
+// (harness/README.md, "Replay gates under WebKit"). A frame that fails keeps the
+// reference, the frame and their difference (x8) as out/webkit-<VI>-*.png.
 // visits.json keeps each captured frame's sha256 (hashes), so the frames of
 // two trees can be compared exactly from two runs.
 // Exit 1 when a visit failed, a side has no picture or no input reading, or
@@ -75,7 +88,8 @@ import { ensureServer, loadHarnessState, captureAtVi, workerRequest } from "../l
 import { integrityBrief, integrityOf, readIntegrity, treeHasIntegrity } from "../lib/integrity.mjs";
 import { openSession, savePng } from "../lib/session.mjs";
 import { distinctRuns, findFlicker, flickerFatal, parseFlickerFrom, tripleStrip } from "../lib/flicker.mjs";
-import { diffFrame, exactVerdict, oracleQueryError, referenceQuery, referenceSwitchesOn } from "../lib/glitch-oracle.mjs";
+import { diffFrame, exactVerdict, oracleQueryError, parseWebkitTolerance, webkitReferenceRow, referenceQuery, referenceSwitchesOn, tolerantFrameVerdict } from "../lib/glitch-oracle.mjs";
+import { decodePng } from "../lib/png.mjs";
 import { setPad } from "../lib/gamepad-mock.mjs";
 import { acquirePerfLock } from "../lib/perf-lock.mjs";
 
@@ -85,7 +99,7 @@ const { values: o } = parseArgs({ options: {
   candidate: { type: "string" }, "lock-wait": { type: "string", default: "14400" },
   "slot-reload": { type: "boolean", default: false }, "slot-saves": { type: "string", default: "0" },
   "bad-state-load": { type: "boolean", default: false }, quickload: { type: "boolean", default: false },
-  exact: { type: "boolean", default: false }, flicker: { type: "string", default: "0" }, "flicker-from": { type: "string" }
+  exact: { type: "boolean", default: false }, "webkit-frames": { type: "string" }, "webkit-tolerance": { type: "string" }, flicker: { type: "string", default: "0" }, "flicker-from": { type: "string" }
 }, strict: true });
 // checked before the lock and the browser: a bad value never runs
 const flickerFrom = parseFlickerFrom(o["flicker-from"], o.flicker);
@@ -95,6 +109,16 @@ if (o.exact) {
   const why = oracleQueryError(o.query);
   if (why) throw new Error(why);
 }
+// --webkit-frames: every file and the tolerance checked before the lock
+const webkitTolerance = o["webkit-frames"] || o["webkit-tolerance"] ? parseWebkitTolerance(o["webkit-tolerance"]) : null;
+const webkitRuns = (o["webkit-frames"] ?? "").split(",").map((t) => t.trim()).filter(Boolean);
+if (webkitTolerance && !o.exact) throw new Error("--webkit-frames and --webkit-tolerance go with --exact");
+if (o["webkit-tolerance"] && !webkitRuns.length) throw new Error("--webkit-tolerance needs --webkit-frames");
+if (webkitRuns.length && o.extra) throw new Error("--webkit-frames runs the reference only: no --extra");
+for (const t of webkitRuns) {
+  if (!t.includes("{vi}")) throw new Error(`--webkit-frames ${t}: no {vi} in the path`);
+  for (const vi of o.vi.split(",")) if (!existsSync(t.replaceAll("{vi}", vi))) throw new Error(`--webkit-frames: ${t.replaceAll("{vi}", vi)} is missing`);
+}
 if (existsSync(o.out)) throw new Error(`${o.out} exists`);
 const root = path.resolve(o.candidate ?? path.join(import.meta.dirname, "..", ".."));
 const perSide = Math.max(2, Number(o.runs) + (Number(o.runs) % 2));
@@ -103,7 +127,9 @@ const integrityExpected = treeHasIntegrity(root);
 const VIS = o.vi.split(",").map(Number).filter((n) => n > 0);
 const log = (m) => console.log(`[gates] ${m}`);
 const order = [];
-for (let b = 0; b < perSide / 2; b += 1) order.push(...(b % 2 ? ["candidate", "base", "base", "candidate"] : ["base", "candidate", "candidate", "base"]).slice(0, 4));
+// --webkit-frames: the reference only (its visits checked against each other)
+if (webkitRuns.length) order.push(...Array(perSide).fill("base"));
+else for (let b = 0; b < perSide / 2; b += 1) order.push(...(b % 2 ? ["candidate", "base", "base", "candidate"] : ["base", "candidate", "candidate", "base"]).slice(0, 4));
 const release = await acquirePerfLock({ name: `replay-gates ${o.extra}`, waitSec: Number(o["lock-wait"]), log });
 const watchdog = setTimeout(() => { console.error("watchdog: 60 min under the lock"); release(); process.exit(2); }, 60 * 60 * 1000);
 const server = await ensureServer({ port: Number(o.port), root });
@@ -338,6 +364,43 @@ writeFileSync(path.join(o.out, "summary.json"), JSON.stringify(summary, null, 1)
 writeFileSync(path.join(o.out, "visits.json"), JSON.stringify(visits.map(({ frames, ...v }) => ({ ...v,
   hashes: Object.fromEntries(Object.entries(frames).map(([vi, f]) => [vi, f.sha256 ?? null])) })), null, 1) + "\n");
 // --exact: the oracle's verdict, and the pictures of every difference
+// --webkit-frames: the reference must agree with itself, then each WebKit
+// frame within the tolerance
+if (webkitRuns.length) {
+  const hashed = visits.map((v) => ({ side: v.side, hashes: Object.fromEntries(Object.entries(v.frames).map(([vi, f]) => [vi, f.sha256 ?? null])) }));
+  const failures = [];
+  summary.webkit = { tolerance: webkitTolerance, rows: [] };
+  for (const vi of VIS.map(String)) {
+    // every reference visit played, each with its frame, all one hash
+    const row = webkitReferenceRow(hashed, vi, perSide);
+    if (row.failure) {
+      failures.push(row.failure);
+      continue;
+    }
+    const ref = frameOf(visits.find((v) => v.frames[vi]?.sha256 === row.reference).frames[vi]);
+    for (const [k, t] of webkitRuns.entries()) {
+      const file = t.replaceAll("{vi}", vi);
+      const frame = decodePng(readFileSync(file));
+      const v = tolerantFrameVerdict(ref, frame, webkitTolerance);
+      summary.webkit.rows.push({ vi: Number(vi), run: k, file, ...v });
+      log(`webkit VI ${vi} run ${k}: ${v.pass ? "within" : "OUTSIDE"} the tolerance (${v.differ ?? "-"} px apart, ${v.over ?? "-"} over ${webkitTolerance.overLevel}, ${v.big ?? "-"} over ${webkitTolerance.bigLevel}, max ${v.max ?? "-"})${v.failure ? `: ${v.failure}` : ""}`);
+      if (v.pass) continue;
+      failures.push(`VI ${vi} run ${k}: ${v.failure}`);
+      if (v.max === undefined) continue;
+      savePng(ref, path.join(o.out, `webkit-${vi}-reference.png`));
+      savePng(frame, path.join(o.out, `webkit-${vi}-run${k}.png`));
+      savePng(diffFrame(ref, frame), path.join(o.out, `webkit-${vi}-run${k}-diff-x8.png`));
+    }
+  }
+  const errors = visits.filter((v) => v.error);
+  failures.push(...errors.map((v) => `visit ${v.n}: ${v.error}`));
+  summary.webkit.failures = failures;
+  // an integrity counter that moved, or an A-B-A under --flicker, fails too
+  summary.webkit.pass = failures.length === 0 && !summary.integrity.length && !flickerFails;
+  writeFileSync(path.join(o.out, "summary.json"), JSON.stringify(summary, null, 1) + "\n");
+  log(summary.webkit.pass ? "WEBKIT: every WebKit frame within the tolerance of the reference" : `WEBKIT FAILED: ${failures.join("; ")}`);
+  process.exit(summary.webkit.pass ? 0 : 1);
+}
 if (o.exact) {
   const hashed = visits.map((v) => ({ side: v.side, hashes: Object.fromEntries(Object.entries(v.frames).map(([vi, f]) => [vi, f.sha256 ?? null])) }));
   const verdict = exactVerdict(hashed, VIS.map(String));

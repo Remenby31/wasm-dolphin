@@ -64,3 +64,74 @@ test("replay-gates --exact: reference read back, no input phase, images kept, ex
   assert.match(config, /geometryCacheMode: wgpuGeometryCacheMode,/);
   assert.match(config, /bindGroupCacheEnabled: Boolean\(webGpuObjects\.bindGroupCache\),/);
 });
+
+test("the WebKit tolerance: defaults, and a bad spec refused before any run", async () => {
+  const { parseWebkitTolerance, WEBKIT_TOLERANCE } = await import("../harness/lib/glitch-oracle.mjs");
+  assert.deepEqual(parseWebkitTolerance(""), { ...WEBKIT_TOLERANCE });
+  assert.deepEqual(parseWebkitTolerance("over=0.5%,big=0.01%,max=80"), { overLevel: 3, overShare: 0.005, bigLevel: 16, bigShare: 0.0001, maxLevel: 80 });
+  assert.equal(parseWebkitTolerance("over=1%").maxLevel, 64);
+  for (const bad of ["max=16", "max=64.5", "max=300", "over=0.5", "big=2", "over=150%", "foo=1", "max=64%"]) assert.throws(() => parseWebkitTolerance(bad), /--webkit-tolerance/, bad);
+});
+
+// Synthetic frames: a 2-D pattern (a texture), its blended-edge rounding,
+// an isolated pixel, a block moved by 8 pixels, another texture.
+const W = 1216, H = 896;
+const texture = (f) => {
+  const data = new Uint8Array(W * H * 4);
+  for (let y = 0; y < H; y += 1) for (let x = 0; x < W; x += 1) {
+    const i = (y * W + x) * 4;
+    data[i] = f(x, y); data[i + 1] = f(y, x); data[i + 2] = f(x + y, x - y); data[i + 3] = 255;
+  }
+  return { width: W, height: H, data };
+};
+const checker = (x, y) => ((x >> 3) + (y >> 3)) % 2 ? 200 : 40;
+
+test("WebKit tolerance: blended edges ±3 pass, an isolated pixel at 17 passes", async () => {
+  const { tolerantFrameVerdict } = await import("../harness/lib/glitch-oracle.mjs");
+  const ref = texture(checker);
+  const edges = texture(checker);
+  // every checker edge (about a quarter of the pixels) rounded 1 to 3 levels
+  for (let y = 0; y < H; y += 1) for (let x = 0; x < W; x += 1) if (x % 8 === 0 || y % 8 === 0) edges.data[(y * W + x) * 4] += 1 + ((x + y) % 3);
+  let v = tolerantFrameVerdict(ref, edges);
+  assert.deepEqual([v.pass, v.max, v.over, v.big], [true, 3, 0, 0]);
+  assert.ok(v.differ > W * H / 5);
+  // what Safari gave at VI 600: 8 pixels over 3, one of them at 17
+  for (let k = 0; k < 8; k += 1) edges.data[(k * 100 * W + 50) * 4 + 1] += k ? 5 : 17;
+  v = tolerantFrameVerdict(ref, edges);
+  assert.deepEqual([v.pass, v.max, v.over, v.big], [true, 17, 8, 1]);
+});
+
+test("WebKit tolerance: a block moved by 8 px or a wrong texture fails", async () => {
+  const { tolerantFrameVerdict } = await import("../harness/lib/glitch-oracle.mjs");
+  const ref = texture(checker);
+  // one 8x8 block drawn 8 px to the right (the checker's other phase)
+  const moved = texture(checker);
+  for (let y = 400; y < 408; y += 1) for (let x = 600; x < 608; x += 1) for (let c = 0; c < 3; c += 1) moved.data[(y * W + x) * 4 + c] = ref.data[(y * W + x - 8) * 4 + c];
+  let v = tolerantFrameVerdict(ref, moved);
+  assert.equal(v.pass, false);
+  assert.equal(v.big, 64);
+  assert.match(v.failure, /a channel 160 levels apart/);
+  // a wrong texture in a 64x64 corner (another pattern)
+  const wrong = texture(checker);
+  for (let y = 0; y < 64; y += 1) for (let x = 0; x < 64; x += 1) wrong.data[(y * W + x) * 4] = (x * 4) & 255;
+  v = tolerantFrameVerdict(ref, wrong);
+  assert.equal(v.pass, false);
+  assert.match(v.failure, /more than 16 levels apart/);
+  assert.match(tolerantFrameVerdict(ref, { width: 608, height: 448, data: new Uint8Array(608 * 448 * 4) }).failure, /internal resolution/);
+});
+
+test("--webkit-frames reference: one visit of 4 without its capture fails, never left out", async () => {
+  const { webkitReferenceRow } = await import("../harness/lib/glitch-oracle.mjs");
+  const visit = (h) => ({ side: "base", hashes: { 240: h } });
+  assert.deepEqual(webkitReferenceRow([visit("a"), visit("a"), visit("a"), visit("a")], "240", 4), { vi: "240", reference: "a", failure: null });
+  assert.match(webkitReferenceRow([visit("a"), visit(null), visit("a"), visit("a")], "240", 4).failure, /1 reference visit\(s\) of 4 without a frame/);
+  assert.match(webkitReferenceRow([visit("a"), visit(null), visit(null), visit(null)], "240", 4).failure, /3 reference visit\(s\) of 4 without a frame/, "one survivor is not 'deterministic'");
+  assert.match(webkitReferenceRow([visit("a"), visit("b"), visit("a"), visit("a")], "240", 4).failure, /not deterministic/);
+  assert.match(webkitReferenceRow([visit("a"), visit("a")], "240", 4).failure, /2 reference visit\(s\) of 4/, "a visit that never ran");
+});
+
+test("replay-gates --webkit-frames: the reference row checks every visit, and a flicker fails the pass", async () => {
+  const src = await read("../harness/probes/replay-gates.mjs");
+  assert.match(src, /const row = webkitReferenceRow\(hashed, vi, perSide\)/);
+  assert.match(src, /summary\.webkit\.pass = failures\.length === 0 && !summary\.integrity\.length && !flickerFails/);
+});
