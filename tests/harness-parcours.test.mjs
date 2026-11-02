@@ -551,3 +551,43 @@ test("one definition of content: parcours' contentSecond is lib/drops.mjs conten
   const src = readFileSync(new URL("../harness/lib/parcours.mjs", import.meta.url), "utf8");
   assert.doesNotMatch(src, /CONTENT_MIN_SPEED/, "no second set of thresholds");
 });
+
+// Review of #410: an unknown value never passes as content (null >= 0 is
+// true in JS), a second with nothing made is no content reference (0/0).
+test("content: an unknown production, speed or cadence is no content; none made is no reference; the smoothness stays judged", async () => {
+  const { contentRule } = await import("../harness/lib/drops.mjs");
+  const calm = { cpu: 0.2, gpu: 0.2, replay: 0.2 };
+  assert.equal(contentRule({ speed: 100, produced: null, expected: 60, occupancy: calm }), false);
+  assert.equal(contentRule({ speed: 100, produced: NaN, expected: 60, occupancy: calm }), false);
+  assert.equal(contentRule({ speed: null, produced: 30, expected: 60, occupancy: calm }), false);
+  assert.equal(contentRule({ speed: 100, produced: 30, expected: null, occupancy: calm }), false);
+  assert.equal(contentRule({ speed: 100, produced: 30, expected: NaN, occupancy: calm }), false);
+  assert.equal(contentRule({ speed: 100, produced: 30, expected: 60, occupancy: { ...calm, cpu: null } }), false);
+  assert.equal(contentRule({ speed: 100, produced: 0, expected: 60, occupancy: calm }), true, "the attribution: a still screen is content");
+  assert.equal(contentSecond({ producedFps: null, speed: 100, cadence: 60, cpuBusy: 0.2, gpuBusy: 0.2, replayBusy: 0.2 }), false);
+  assert.equal(contentSecond({ producedFps: 0, speed: 100, cadence: 60, cpuBusy: 0.2, gpuBusy: 0.2, replayBusy: 0.2 }), false, "0/0: no reference");
+  // producedFps missing: judged against the cadence, never 100 % by an Infinity
+  const s = samplesOf([["menu", 2]]);
+  for (const x of s.slice(1)) { x.info.newShown = (x.info.newShown / 60) * 40; x.info.producedFps = null; }
+  assert.deepEqual(deriveSeconds(s, { tps: TPS }).map((r) => [r.content, r.smoothness]), [[false, 66.7], [false, 66.7]]);
+  const z = samplesOf([["menu", 2]]);
+  for (const x of z.slice(1)) { x.info.newShown = 0; x.info.producedFps = 0; }
+  assert.deepEqual(deriveSeconds(z, { tps: TPS }).map((r) => r.smoothness), [0, 0]);
+});
+
+test("readNoise refuses an A/A analysed under another analysis version (its noise is of another metric)", async () => {
+  const { mkdtempSync, writeFileSync } = await import("node:fs");
+  const os = await import("node:os");
+  const { readNoise } = await import("../harness/probes/parcours.mjs");
+  const { ANALYSIS_VERSION } = await import("../harness/lib/parcours.mjs");
+  const dir = mkdtempSync(`${os.tmpdir()}/parcours-noise-`);
+  const base = { probe: "parcours", probeVersion: 2, film: "f#1", query: "q", noise: { "kind:menu": {} } };
+  const expect = { probeVersion: 2, film: "f#1", query: "q" };
+  writeFileSync(`${dir}/old.json`, JSON.stringify(base));
+  assert.throws(() => readNoise(`${dir}/old.json`, expect), /analysed with analysis version 1, this probe judges with \d+: re-analyse it/);
+  writeFileSync(`${dir}/new.json`, JSON.stringify({ ...base, analysisVersion: ANALYSIS_VERSION }));
+  assert.deepEqual(readNoise(`${dir}/new.json`, expect), base.noise);
+  const probe = readFileSync(new URL("../harness/probes/parcours.mjs", import.meta.url), "utf8");
+  assert.match(probe, /analysisVersion: ANALYSIS_VERSION, reanalyzedAt/, "--analyze writes the current version");
+  assert.match(probe, /probeVersion: PROBE_VERSION, analysisVersion: ANALYSIS_VERSION, at:/);
+});

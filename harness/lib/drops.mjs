@@ -843,6 +843,9 @@ export function standardViHz(windows) {
 // it) at full speed, with every thread measured and under contentBusy (the
 // site's margin). Its missing frames are the scene's own, not lost.
 export function contentRule({ speed, produced, expected, occupancy = {} }, { fullSpeed = ATTRIBUTION_FULL_SPEED, contentBusy = ATTRIBUTION_CONTENT_BUSY, contentShare = ATTRIBUTION_CONTENT_SHARE } = {}) {
+  // every input measured: null >= 0 is true in JS, and an unknown value
+  // must never pass as content (nor its frames as not lost)
+  if (!Number.isFinite(speed) || !Number.isFinite(produced) || !Number.isFinite(expected)) return false;
   if (!(speed >= fullSpeed) || !(produced >= 0) || !(expected > 0)) return false;
   return OCCUPANCY_THREADS.every((k) => Number.isFinite(occupancy[k]) && occupancy[k] < contentBusy) && produced < contentShare * expected;
 }

@@ -30,6 +30,12 @@ import { integrityOf } from "./integrity.mjs";
 import { contentRule, noiseOf, verdictOf } from "./drops.mjs";
 import { median, percentile, round } from "./stats.mjs";
 
+// How the seconds are judged (not what the page runs: the probe's
+// PROBE_VERSION). An A/A's noise holds only for the same analysis: readNoise
+// refuses another. 2: content seconds judged against what was made
+// (contentRule), the menus' smoothness p5 several points higher than in 1.
+export const ANALYSIS_VERSION = 2;
+
 export const PHASES = Object.freeze(["boot", "loading", "cinematic", "menu", "game"]);
 // A phase lasts at least this long: a shorter run of seconds goes to the
 // phase before it (hysteresis), so one odd second never makes a phase.
@@ -106,7 +112,11 @@ const num = (v) => (typeof v === "number" && Number.isFinite(v) ? v : null);
 // the scene's cadence). Then smoothness is shown / produced. On the first
 // disc measured, 31 % of the menus' deficit was this (a save screen, the
 // hand-over to a race: 45-50 frames made a second).
+// The smoothness reference of a content second is what was made: none made
+// (0, a still screen) leaves no reference, so it is no content second here
+// (0/0 would be NaN).
 export function contentSecond({ producedFps, speed, cadence, cpuBusy, gpuBusy, replayBusy }) {
+  if (!(Number.isFinite(producedFps) && producedFps > 0)) return false;
   return contentRule({ speed, produced: producedFps, expected: cadence, occupancy: { cpu: cpuBusy, gpu: gpuBusy, replay: replayBusy } });
 }
 const delta = (a, b) => (num(a) == null || num(b) == null || b < a ? null : b - a);
@@ -171,7 +181,7 @@ export function deriveSeconds(samples, { tps = null } = {}) {
     rows.push({
       i: rows.length, t: round((b.t - t0) / 1000, 2), at: b.t, booted,
       speed: round(speed, 1), newFps: round(newFps, 1), producedFps: round(producedFps, 1),
-      cadence: ref, sceneCadence, content, smoothness: newFps == null ? null : round(Math.max(0, Math.min(100, (newFps / ref) * 100)), 1),
+      cadence: ref, sceneCadence, content, smoothness: newFps == null || !(Number.isFinite(ref) && ref > 0) ? null : round(Math.max(0, Math.min(100, (newFps / ref) * 100)), 1),
       viRate: round(viRate, 1), presents: (b.presents ?? []).length, hitches50, hitches100, maxGapMs: round(maxGapMs, 1),
       // the presenting worker's longest stall in the second (sampler rows)
       workerLagMs: Array.isArray(b.samplerTicks) && b.samplerTicks.length ? Math.max(...b.samplerTicks.map((x) => x[1])) : null,
