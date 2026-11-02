@@ -205,6 +205,7 @@ export function windowsOf({ vi, presents = [], rows = [], page = [], markers = [
       vis: (nVi * 1000) / stepMs,
       presents: nPresents, maxPresentGap: maxGap,
       xfb: d.xfbCopies ?? null, discBytes: d.discBytes ?? null, sleptMs: d.cpuSleepUs == null ? null : d.cpuSleepUs / 1000,
+      gpuWorkMs: d.gpuWorkUs == null ? null : d.gpuWorkUs / 1000,
       behindMs: d.behindUs == null ? null : d.behindUs / 1000,
       // guest cycles (region counters on, else 0): in regions, in all, idle-skipped
       cycles: { region: d.regionCycles ?? null, total: d.totalCycles ?? null, idle: d.idleCycles ?? null },
@@ -757,4 +758,244 @@ export function trendTable(lines) {
   const out = [`| ${head.join(" | ")} |`, `|${head.map(() => "---").join("|")}|`];
   for (const l of lines) for (const v of l.visits) out.push(`| ${l.at.slice(0, 16)} | ${String(l.commit).slice(0, 8)} | ${v.visit === 1 ? "cold" : "warm"} | ${v.runs} | ${Object.keys(GUARDED).map((k) => v[k] ?? "–").join(" | ")} | ${v.top.join(", ")} |`);
   return out.join("\n") + "\n";
+}
+
+// ---- Dip attribution (one tool for drop-meter and parcours) --------------
+// Where a run's smoothness went, frame by frame. Input: a sequence of
+// windows in host time, from any probe (an adapter per probe):
+//   { t, ms, phase?, speed?, produced?, shown?, presents?,
+//     gaps?: [{ ms, vis, workerLagMs? }]  (presentation gaps ending in it),
+//     occupancy?: { cpu, gpu, replay }   (0..1),
+//     causes?: { <cause>: host ms }      (counter differences, CAUSES),
+//     mainLagMs?, workerLagMs? }
+// produced: new game frames (XFB copies or new frame tags), shown: new
+// frames put on screen, presents: presentations (new or repeated).
+// Per second of the run (ATTRIBUTION_SECOND_MS), the deficit is
+// cadence − shown frames, split so that the parts add up to it:
+//   production gap = cadence − produced:
+//     emulation    the guest ran under ATTRIBUTION_FULL_SPEED %; split by
+//                  the counted causes (their ms over the time lost), the rest
+//                  unexplained
+//     game         at full speed with something saturated (occupancy ≥
+//                  ATTRIBUTION_BUSY): the game itself produced less
+//     content      at full speed, nothing saturated: the scene's own cadence
+//                  (a 30 fps menu, a still picture); 0 frames lost
+//   presentation gap = produced − shown:
+//     presenter-blocked  frames of gaps during which the core produced VIs
+//                        while the worker that presents lagged
+//     no-present         cadence − presents (no presentation at all)
+//     old-frame          the rest (presented, but an older picture)
+//     beat               no-present at full speed with nothing saturated, in
+//                        dips that come back every 1 / |refresh − VI rate|
+//                        (opts.refreshHz, opts.viHz: a 59.94 Hz core on a
+//                        60 Hz screen drifts across the vsync every ~16.7 s)
+// Markers per second, not parts: main-stall (the page's sampler late) and
+// gc-probable (the worker late with no counted work).
+// Seconds under `fluidity` % (shown / cadence) are the dips; the table ranks
+// parts by frames over the dips, per phase when windows carry one.
+// Thresholds are the caller's: nothing here knows a game or a scene.
+export const ATTRIBUTION_SECOND_MS = 1000;
+export const ATTRIBUTION_FULL_SPEED = 99;
+export const ATTRIBUTION_BUSY = 0.85;
+export const ATTRIBUTION_FLUIDITY = 95;
+export const ATTRIBUTION_HITCH_MS = 25;
+export const ATTRIBUTION_EMULATION_CAUSES = ["jit", "regions", "disc", "slot", "efb", "gpuWait", "pipelines", "lateWake", "uncountedBusy"];
+
+const sumOf = (xs, f) => xs.reduce((a, x) => a + (Number.isFinite(f(x)) ? f(x) : 0), 0);
+const allKnown = (xs, f) => xs.length > 0 && xs.every((x) => Number.isFinite(f(x)));
+
+// One second's split (frames). null when it lacks produced or shown.
+export function attributeSecond(ws, { cadence, fullSpeed = ATTRIBUTION_FULL_SPEED, busy = ATTRIBUTION_BUSY, stallMs = STALL_MIN_MS } = {}) {
+  if (!allKnown(ws, (w) => w.produced) || !allKnown(ws, (w) => w.shown)) return null;
+  const hostMs = sumOf(ws, (w) => w.ms);
+  const expected = (cadence * hostMs) / 1000;
+  const produced = sumOf(ws, (w) => w.produced), shown = sumOf(ws, (w) => w.shown);
+  const presents = allKnown(ws, (w) => w.presents) ? sumOf(ws, (w) => w.presents) : null;
+  const speeds = ws.filter((w) => Number.isFinite(w.speed));
+  const speed = speeds.length ? sumOf(speeds, (w) => w.speed * w.ms) / sumOf(speeds, (w) => w.ms) : null;
+  const occ = {};
+  for (const k of ["cpu", "gpu", "replay"]) {
+    const v = ws.map((w) => w.occupancy?.[k]).filter(Number.isFinite);
+    occ[k] = v.length ? Math.max(...v) : null;
+  }
+  const saturated = Object.entries(occ).filter(([, v]) => v != null && v >= busy).map(([k]) => k);
+  const parts = {};
+  const add = (k, f) => { if (f > 0) parts[k] = (parts[k] ?? 0) + f; };
+  // the production gap
+  const productionGap = Math.max(0, expected - produced);
+  if (productionGap > 0) {
+    if (speed != null && speed < fullSpeed) {
+      const lostMs = Math.max(1, hostMs - (speed * hostMs) / 100);
+      let left = productionGap;
+      for (const c of ATTRIBUTION_EMULATION_CAUSES) {
+        const ms = sumOf(ws, (w) => w.causes?.[c]);
+        const f = Math.min(left, (productionGap * ms) / lostMs);
+        add(`emulation:${c}`, f);
+        left -= f;
+      }
+      add("emulation:unexplained", left);
+    } else if (saturated.length) add(`game:${saturated.join("+")}`, productionGap);
+    // content only when the occupancy says nothing saturated: unknown, it is
+    // the game's own loss (never hidden as content)
+    else if (Object.values(occ).some((v) => v != null)) add("content", productionGap);
+    else add("game:unknown", productionGap);
+  }
+  // the presentation gap
+  let presentationGap = Math.max(0, Math.min(produced, expected) - shown);
+  if (presentationGap > 0) {
+    const frameMs = 1000 / cadence;
+    let blocked = 0;
+    for (const w of ws) for (const g of w.gaps ?? []) {
+      if (g.ms > frameMs * 1.5 && g.vis > 0 && (g.workerLagMs ?? w.workerLagMs ?? 0) >= g.ms / 2) blocked += Math.max(0, Math.round(g.ms / frameMs) - 1);
+    }
+    blocked = Math.min(blocked, presentationGap);
+    add("presenter-blocked", blocked);
+    presentationGap -= blocked;
+    const noPresent = presents == null ? 0 : Math.min(presentationGap, Math.max(0, expected - presents));
+    add("no-present", noPresent);
+    add("old-frame", presentationGap - noPresent);
+  }
+  const counted = sumOf(ws, (w) => sumOf(ATTRIBUTION_EMULATION_CAUSES, (c) => w.causes?.[c]));
+  const markers = [];
+  if (sumOf(ws, (w) => w.mainLagMs) >= stallMs) markers.push("main-stall");
+  if (sumOf(ws, (w) => w.workerLagMs) >= stallMs && counted < stallMs) markers.push("gc-probable");
+  const lost = Object.entries(parts).filter(([k]) => k !== "content").reduce((a, [, f]) => a + f, 0);
+  return {
+    t: ws[0].t, phase: ws[0].phase ?? null, hostMs, expected: round(expected, 1), produced, shown, presents,
+    speed: speed == null ? null : round(speed, 1), occupancy: occ,
+    fluidity: expected > 0 ? round((100 * shown) / expected, 1) : null,
+    lostFrames: round(lost, 2), parts: Object.fromEntries(Object.entries(parts).map(([k, f]) => [k, round(f, 2)])), markers
+  };
+}
+
+// The run's seconds, its dips (under `fluidity`), its hitches (presentation
+// gaps over `hitchMs`, each with the part of its second that dominates) and
+// the table: per phase, each part's frames over the dips, ranked.
+export function attributeDips(windows, { cadence, fluidity = ATTRIBUTION_FLUIDITY, hitchMs = ATTRIBUTION_HITCH_MS, secondMs = ATTRIBUTION_SECOND_MS, refreshHz = null, viHz = null, beatToleranceMs = 2000, ...opts } = {}) {
+  if (!(cadence > 0)) throw new Error("attributeDips: the scene's cadence (frames per second) is the caller's");
+  const ws = [...windows].filter((w) => Number.isFinite(w.t) && w.ms > 0).sort((a, b) => a.t - b.t);
+  const seconds = [];
+  let group = [];
+  for (const w of ws) {
+    if (group.length && (w.t - group[0].t >= secondMs || (w.phase ?? null) !== (group[0].phase ?? null))) {
+      seconds.push(group);
+      group = [];
+    }
+    group.push(w);
+  }
+  if (group.length) seconds.push(group);
+  const attributed = seconds.filter((g) => sumOf(g, (w) => w.ms) >= secondMs / 2).map((g) => attributeSecond(g, { cadence, ...opts })).filter(Boolean);
+  const dips = attributed.filter((s) => s.fluidity != null && s.fluidity < fluidity);
+  markBeat(dips, { refreshHz, viHz, toleranceMs: beatToleranceMs, fullSpeed: opts.fullSpeed ?? ATTRIBUTION_FULL_SPEED, busy: opts.busy ?? ATTRIBUTION_BUSY });
+  const frameMs = 1000 / cadence;
+  const hitches = [];
+  for (const w of ws) for (const g of w.gaps ?? []) {
+    if (!(g.ms > hitchMs)) continue;
+    hitches.push({ t: w.t, phase: w.phase ?? null, ms: round(g.ms, 1), frames: Math.max(1, Math.round(g.ms / frameMs) - 1), cause: hitchCause(g, w, { frameMs, fullSpeed: opts.fullSpeed ?? ATTRIBUTION_FULL_SPEED }) });
+  }
+  return { cadence, seconds: attributed.length, dips, hitches, table: attributionTable(dips, hitches) };
+}
+
+// A presentation gap's cause, from the gap itself: the core kept producing
+// VIs through it (within 1.5 frames) — the presentation side
+// (presenter-blocked when the presenting worker lagged half the gap, else
+// no-present); else the guest fell behind — its window's largest counted
+// cause (emulation:<cause>, else emulation:unexplained).
+export function hitchCause(gap, window, { frameMs, fullSpeed = ATTRIBUTION_FULL_SPEED } = {}) {
+  const expectedVis = gap.ms / frameMs;
+  if (gap.vis == null || gap.vis >= expectedVis - 1.5) {
+    return gap.vis > 0 && (gap.workerLagMs ?? window.workerLagMs ?? 0) >= gap.ms / 2 ? "presenter-blocked" : "no-present";
+  }
+  const top = ATTRIBUTION_EMULATION_CAUSES.map((c) => [c, window.causes?.[c] ?? 0]).sort((a, b) => b[1] - a[1])[0];
+  return top && top[1] > 0 ? `emulation:${top[0]}` : "emulation:unexplained";
+}
+
+// The beat: no-present dips at full speed with nothing saturated, recurring
+// about a multiple (1 to 3) of 1 / |refresh − VI rate| apart, have their
+// no-present frames moved to "beat".
+export function markBeat(dips, { refreshHz, viHz, toleranceMs = 2000, fullSpeed = ATTRIBUTION_FULL_SPEED, busy = ATTRIBUTION_BUSY } = {}) {
+  if (!(refreshHz > 0) || !(viHz > 0) || refreshHz === viHz) return dips;
+  const period = 1000 / Math.abs(refreshHz - viHz);
+  const quiet = (d) => (d.speed ?? 0) >= fullSpeed && Object.values(d.occupancy ?? {}).every((v) => v == null || v < busy) &&
+    (d.parts["no-present"] ?? 0) > 0 && Object.entries(d.parts).filter(([k]) => k !== "content").sort((a, b) => b[1] - a[1])[0]?.[0] === "no-present";
+  const candidates = dips.filter(quiet);
+  for (const d of candidates) {
+    const recurs = candidates.some((o) => o !== d && [1, 2, 3].some((k) => Math.abs(Math.abs(o.t - d.t) - k * period) <= toleranceMs));
+    if (!recurs) continue;
+    d.parts.beat = round((d.parts.beat ?? 0) + d.parts["no-present"], 2);
+    delete d.parts["no-present"];
+  }
+  return dips;
+}
+
+// Per phase (or "all"): each part's frames over the dips, ranked, and the
+// hitches by cause.
+export function attributionTable(dips, hitches = []) {
+  const byPhase = new Map();
+  const row = (phase) => {
+    if (!byPhase.has(phase)) byPhase.set(phase, { phase, dips: 0, lostFrames: 0, parts: {}, markers: {}, hitches: 0, hitchFrames: 0, hitchCauses: {} });
+    return byPhase.get(phase);
+  };
+  for (const d of dips) {
+    const r = row(d.phase ?? "all");
+    r.dips += 1;
+    r.lostFrames += d.lostFrames;
+    for (const [k, f] of Object.entries(d.parts)) r.parts[k] = (r.parts[k] ?? 0) + f;
+    for (const m of d.markers) r.markers[m] = (r.markers[m] ?? 0) + 1;
+  }
+  for (const h of hitches) {
+    const r = row(h.phase ?? "all");
+    r.hitches += 1;
+    r.hitchFrames += h.frames;
+    r.hitchCauses[h.cause] = (r.hitchCauses[h.cause] ?? 0) + h.frames;
+  }
+  return [...byPhase.values()].map((r) => ({
+    ...r, lostFrames: round(r.lostFrames, 1),
+    ranked: Object.entries(r.parts).filter(([k]) => k !== "content").sort((a, b) => b[1] - a[1])
+      .map(([cause, frames]) => ({ cause, frames: round(frames, 1), share: r.lostFrames > 0 ? round(frames / r.lostFrames, 3) : null })),
+    contentFrames: round(r.parts.content ?? 0, 1)
+  }));
+}
+
+// drop-meter's windows (windowsOf) and its timeline as attribution windows:
+// produced = XFB copies, shown = distinct new pictures displayed (--display),
+// presents and the presentation gaps (with the VIs produced during each),
+// causes from the counters, the samplers' lateness.
+export function dropWindowsForAttribution(windows, { presents = [], vi = [], displayed = null, rows = [], page = [] } = {}) {
+  const distinct = [];
+  if (displayed) for (const f of displayed) if (f.submits > 0 && (distinct.length === 0 || f.vi !== distinct.at(-1).vi)) distinct.push(f);
+  const countIn = (points, t0, t1) => points.reduce((a, p) => a + (p.t >= t0 && p.t < t1 ? 1 : 0), 0);
+  const gapsIn = (t0, t1) => {
+    const out = [];
+    for (let i = 1; i < presents.length; i += 1) {
+      const a = presents[i - 1].t, b = presents[i].t;
+      if (b < t0 || b >= t1) continue;
+      out.push({ ms: b - a, vis: countIn(vi, a, b), workerLagMs: stallOverlap(rows, a, b, 0) });
+    }
+    return out;
+  };
+  return windows.map((w) => {
+    const t1 = w.t0 + STEP_MS;
+    return {
+      t: w.t0, ms: STEP_MS, phase: w.label ?? null, speed: w.speed,
+      produced: w.xfb, shown: displayed ? countIn(distinct, w.t0, t1) : null, presents: w.presents,
+      gaps: gapsIn(w.t0, t1),
+      // the CPU thread's share awake (not in its throttle sleep), the GPU
+      // thread's share working; the replay's is not sampled here
+      occupancy: { cpu: w.sleptMs == null ? null : round(Math.max(0, 1 - w.sleptMs / STEP_MS), 3), gpu: w.gpuWorkMs == null ? null : Math.min(1, w.gpuWorkMs / STEP_MS), replay: null },
+      causes: { ...w.causes, slot: w.causes.slot ?? null },
+      mainLagMs: w.causes.mainPause ?? null, workerLagMs: w.causes.workerPause ?? null
+    };
+  });
+}
+
+// The table as text lines.
+export function attributionLines(result) {
+  const lines = [];
+  for (const r of result.table) {
+    lines.push(`${r.phase}: ${r.dips} dip second(s), ${r.lostFrames} frames lost${r.contentFrames ? ` (+${r.contentFrames} content, not lost)` : ""}${Object.keys(r.markers).length ? `, markers ${JSON.stringify(r.markers)}` : ""}`);
+    for (const x of r.ranked) lines.push(`  ${x.cause.padEnd(28)} ${String(x.frames).padStart(7)} frames  ${x.share == null ? "" : `${(100 * x.share).toFixed(1)} %`}`);
+    if (r.hitches) lines.push(`  hitches > ${ATTRIBUTION_HITCH_MS} ms: ${r.hitches} (${r.hitchFrames} frames): ${Object.entries(r.hitchCauses).sort((a, b) => b[1] - a[1]).map(([c, f]) => `${c} ${f}`).join(", ")}`);
+  }
+  return lines;
 }
