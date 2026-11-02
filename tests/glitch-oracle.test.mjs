@@ -64,3 +64,29 @@ test("replay-gates --exact: reference read back, no input phase, images kept, ex
   assert.match(config, /geometryCacheMode: wgpuGeometryCacheMode,/);
   assert.match(config, /bindGroupCacheEnabled: Boolean\(webGpuObjects\.bindGroupCache\),/);
 });
+
+test("the WebKit tolerance: defaults, and a bad spec refused before any run", async () => {
+  const { parseWebkitTolerance, WEBKIT_TOLERANCE } = await import("../harness/lib/glitch-oracle.mjs");
+  assert.deepEqual(parseWebkitTolerance(""), { ...WEBKIT_TOLERANCE });
+  assert.deepEqual(parseWebkitTolerance("max=20,over=0.5%"), { maxLevel: 20, overLevel: 3, overShare: 0.005 });
+  assert.equal(parseWebkitTolerance("over=1%").maxLevel, 16);
+  for (const bad of ["max=2", "max=1.5", "max=300", "over=0.5", "over=150%", "foo=1", "max=16%"]) assert.throws(() => parseWebkitTolerance(bad), /--webkit-tolerance/, bad);
+});
+
+test("a WebKit frame passes within the levels and the share, fails above either", async () => {
+  const { tolerantFrameVerdict } = await import("../harness/lib/glitch-oracle.mjs");
+  const frame = (fill) => ({ width: 100, height: 10, data: new Uint8Array(4000).fill(fill) });
+  const ref = frame(100);
+  const near = frame(100);
+  for (let p = 0; p < 50; p += 1) near.data[p * 4] = 103; // 5 % at 3 levels: not counted
+  near.data[4 * 60 + 1] = 116; // one pixel at 16: 0.1 %
+  let v = tolerantFrameVerdict(ref, near);
+  assert.deepEqual([v.pass, v.max, v.differ, v.over], [true, 16, 51, 1]);
+  near.data[4 * 61 + 2] = 117; // 17 levels, and 0.2 % above 3
+  v = tolerantFrameVerdict(ref, near);
+  assert.equal(v.pass, false);
+  assert.match(v.failure, /17 levels apart/);
+  assert.match(v.failure, /2 px more than 3 levels/);
+  assert.equal(tolerantFrameVerdict(ref, near, { maxLevel: 17, overLevel: 3, overShare: 0.002 }).pass, true);
+  assert.match(tolerantFrameVerdict(ref, { width: 50, height: 20, data: new Uint8Array(4000) }).failure, /internal resolution/);
+});

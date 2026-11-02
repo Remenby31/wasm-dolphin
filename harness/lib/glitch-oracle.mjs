@@ -96,3 +96,53 @@ export function diffFrame(a, b) {
   }
   return { width, height, data, pixels };
 }
+
+// The tolerant comparison, for WebKit only (never the default oracle: Chrome
+// against Chrome stays 0 pixel apart). Safari has no dual-source blending, so
+// its fallback rounds blended edges a few levels apart from Chrome's (real
+// Safari 26 vs Chrome, IR 2, 2026-11-01: 4 % of pixels 1 to 3 levels apart,
+// 8 of 1.09 M above 3, the largest 17, all on blended edges). A WebKit frame
+// passes when no channel is more than maxLevel apart from the Chrome
+// reference and at most overShare of its pixels are more than overLevel
+// apart. Same size required (the same internal resolution).
+export const WEBKIT_TOLERANCE = Object.freeze({ maxLevel: 16, overLevel: 3, overShare: 0.001 });
+
+// "max=16,over=0.1%" (either key may be left out: its default stays).
+export function parseWebkitTolerance(spec) {
+  const t = { ...WEBKIT_TOLERANCE };
+  for (const part of String(spec ?? "").split(",").map((s) => s.trim()).filter(Boolean)) {
+    const m = /^(max|over)=(\d+(?:\.\d+)?)(%?)$/.exec(part);
+    if (!m) throw new Error(`--webkit-tolerance: "${part}" is not max=<levels> or over=<percent>%`);
+    const n = Number(m[2]);
+    if (m[1] === "max") {
+      if (m[3] || !Number.isInteger(n) || n < t.overLevel || n > 255) throw new Error(`--webkit-tolerance: max is a level from ${t.overLevel} to 255`);
+      t.maxLevel = n;
+    } else {
+      if (!m[3] || n > 100) throw new Error("--webkit-tolerance: over is a percentage (over=0.1%)");
+      t.overShare = n / 100;
+    }
+  }
+  return t;
+}
+
+// One WebKit frame against the reference: the largest channel difference,
+// the pixels more than overLevel apart, and whether it passes.
+export function tolerantFrameVerdict(reference, frame, tolerance = WEBKIT_TOLERANCE) {
+  if (reference.width !== frame.width || reference.height !== frame.height) {
+    return { pass: false, failure: `size ${frame.width}x${frame.height} vs the reference's ${reference.width}x${reference.height} (not the same internal resolution)` };
+  }
+  const n = reference.width * reference.height;
+  let max = 0, differ = 0, over = 0;
+  for (let i = 0; i < n * 4; i += 4) {
+    let d = 0;
+    for (let c = 0; c < 3; c += 1) d = Math.max(d, Math.abs(reference.data[i + c] - frame.data[i + c]));
+    if (d) differ += 1;
+    if (d > tolerance.overLevel) over += 1;
+    if (d > max) max = d;
+  }
+  const overShare = over / n;
+  const failures = [];
+  if (max > tolerance.maxLevel) failures.push(`a channel ${max} levels apart (max ${tolerance.maxLevel})`);
+  if (overShare > tolerance.overShare) failures.push(`${over} px more than ${tolerance.overLevel} levels apart (${(100 * overShare).toFixed(3)} % > ${(100 * tolerance.overShare).toFixed(3)} %)`);
+  return { pass: failures.length === 0, max, differ, over, overShare, failure: failures.join(", ") || null };
+}
