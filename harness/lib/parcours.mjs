@@ -20,7 +20,8 @@
 //   vi        VI outputs of that second (timeline); viT their host times
 //             (the frames' phase against the presents: ?vilock, patch 0212)
 //   audioQ    the mixer queue's overflow skips and underrun fills since boot,
-//             the throttle trim (patch 0212; null on a core without it)
+//             the throttle trim and the phase lock's counters (patch 0212,
+//             ?vilock=1; null on a core without it)
 //   integrity validationReadIntegrity, for the deltas per phase (optional)
 //   film      the pad film's position { pos, hold } (optional)
 // Derived per second: speed (guest / host time from the core ticks), new

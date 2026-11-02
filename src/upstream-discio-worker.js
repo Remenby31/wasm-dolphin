@@ -2406,9 +2406,11 @@ async function handleMessage(type, payload) {
     case "validationReadAudioQueue":
       // patch 0212: the mixer queue's overflow skips (an audible jump) and
       // underrun fills since boot, and the throttle trim applied (ppm)
+      // (and the phase lock's counters, null without ?vilock=1)
       return api?.audioQueueEvents
         ? { overflowSkips: api.audioQueueEvents(0), underrunFills: api.audioQueueEvents(1),
-            trimPpm: typeof moduleInstance?._DolphinWeb_ThrottleRatePpm === "function" ? moduleInstance._DolphinWeb_ThrottleRatePpm() : null }
+            trimPpm: typeof moduleInstance?._DolphinWeb_ThrottleRatePpm === "function" ? moduleInstance._DolphinWeb_ThrottleRatePpm() : null,
+            phaseLock: wgpuViLock ? { ...wgpuViLock.stats } : null }
         : { unavailable: "core without patch 0212" };
     case "validationFlickerWatch":
       return harnessFlickerRequest(payload);
