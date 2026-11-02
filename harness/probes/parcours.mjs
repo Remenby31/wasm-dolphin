@@ -152,13 +152,14 @@ export function viTimesOf(tl) {
 // decaying average over the last seconds, not an instantaneous reading.
 // Async: never on the sampling loop's path.
 export const OTHER_CPU_EVERY_SEC = 5;
-export function otherCpuOf(psOutput, { profileDir, selfPid = process.pid, now = Date.now() } = {}) {
+export function otherCpuOf(psOutput, { profileDir, ownPids = [], selfPid = process.pid, now = Date.now() } = {}) {
   const procs = [];
   for (const line of psOutput.split("\n")) {
     const m = /^\s*(\d+)\s+(\d+)\s+([\d.]+)\s+(.*)$/.exec(line);
     if (m) procs.push({ pid: Number(m[1]), ppid: Number(m[2]), pct: Number(m[3]), command: m[4] });
   }
-  const roots = procs.filter((p) => p.pid === selfPid || (profileDir && p.command.includes(profileDir))).map((p) => p.pid);
+  // --browser safari: the session's Safari and its WebKit helpers (ownPids)
+  const roots = procs.filter((p) => p.pid === selfPid || ownPids.includes(p.pid) || (profileDir && p.command.includes(profileDir))).map((p) => p.pid);
   const ours = new Set([...roots, ...descendantsOf(procs.map((p) => [p.pid, p.ppid]), roots)]);
   let total = 0;
   const top = [];
@@ -169,8 +170,8 @@ export function otherCpuOf(psOutput, { profileDir, selfPid = process.pid, now = 
   }
   return [now, Math.round(total), top.sort((a, b) => b[1] - a[1]).slice(0, 3)];
 }
-function otherCpu(profileDir) {
-  return new Promise((resolve) => execFile("ps", ["-A", "-o", "pid=,ppid=,pcpu=,command="], { maxBuffer: 32 << 20, timeout: 5000 }, (error, out) => resolve(error ? null : otherCpuOf(out, { profileDir }))));
+function otherCpu(profileDir, ownPids = []) {
+  return new Promise((resolve) => execFile("ps", ["-A", "-o", "pid=,ppid=,pcpu=,command="], { maxBuffer: 32 << 20, timeout: 5000 }, (error, out) => resolve(error ? null : otherCpuOf(out, { profileDir, ownPids }))));
 }
 
 // The drop sampler's last row of a drain, as named counters (null: no row).
@@ -212,7 +213,8 @@ async function playRun(o, server, { side, run, outDir }) {
     if (safari) await bootRemoteDisc(page, { url: `${server.base}?${o.query}`, descriptor: o.safari.descriptor, timeoutMs: 120000 });
     else await bootIso(page, { url: `${server.base}?${o.query}`, iso: o.iso, timeoutMs: 120000 });
     raw.bootMs = Date.now() - raw.launchT;
-    if (!safari) await context.assertInvisible("after boot");
+    if (safari) await safari.assertInvisible("after boot");
+    else await context.assertInvisible("after boot");
     raw.browser = await page.evaluate(() => navigator.userAgent.match(/(?:Headless)?Chrome\/[\d.]+/)?.[0] ?? (/Version\/([\d.]+).*Safari/.exec(navigator.userAgent) ? `Safari/${/Version\/([\d.]+)/.exec(navigator.userAgent)[1]}` : navigator.userAgent)).catch(() => null);
     const progress = await workerRequest(page, "validationReadCoreProgress", {}, 5000);
     raw.tps = progress?.coreTicksPerSecond ?? null;
@@ -254,7 +256,7 @@ async function playRun(o, server, { side, run, outDir }) {
       raw.loads.push([Date.now(), os.loadavg()[0]]);
       // the other processes' CPU every OTHER_CPU_EVERY_SEC, off the loop
       // (an async ps): how loaded the machine was, by what is not this run
-      if (sec % OTHER_CPU_EVERY_SEC === 0) otherCpu(profileDir).then((x) => { if (x) (raw.otherCpu ??= []).push(x); });
+      if (sec % OTHER_CPU_EVERY_SEC === 0) otherCpu(profileDir, safari?.ownPids() ?? []).then((x) => { if (x) (raw.otherCpu ??= []).push(x); });
       rows = deriveSeconds(raw.samples, { tps: raw.tps });
       const phase = phaseNow();
       const sec = Math.round((Date.now() - t0) / 1000);
@@ -492,7 +494,9 @@ async function main() {
   };
   const analyses = [];
   let gaveUp = null;
-  const disc = o.browser === "safari" ? startDiscServer(iso, { port: o.port + 2 }) : null;
+  // only the harness page's origin may read the disc (server.mjs serves it
+  // on 127.0.0.1:--port)
+  const disc = o.browser === "safari" ? await startDiscServer(iso, { port: o.port + 2, origin: `http://127.0.0.1:${o.port}` }) : null;
   if (disc) o.safari = { descriptor: disc.descriptor, driverPort: o.port + 1 };
   meta.browserKind = o.browser;
   try {
