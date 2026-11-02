@@ -57,7 +57,7 @@ with `scaleResolutionDownBy` there.
   and depth), and a game with many render-to-texture copies holds several
   hundred MB more than at 1x. Savestates hold the EFB too, so they grow
   with N² inside the 1.5 GiB heap.
-- **Ceiling per adapter.** `internalResolutionCeiling(adapter, { deviceMemory })`
+- **Ceiling per adapter.** `internalResolutionCeiling(adapter, { deviceMemory, maxTouchPoints })`
   (`src/wgpu-enhancements.js`) gives the highest scale a machine is trusted
   with, by adapter class since WebGPU says nothing about GPU memory: 1 for
   no adapter or a CPU one; 2 for `navigator.deviceMemory` ≤ 4 GB (1 at
@@ -66,7 +66,17 @@ with `scaleResolutionDownBy` there.
   integrated Intel GPU (Dawn's `gen-*` but `gen-12hp`, or any `lp`:
   `gen-12lp`, `xe-lpg`, `xe-2lpg`, `xe-3lpg`…; Arc `gen-12hp`/`xe-2hpg` or
   unnamed keeps 4) or an Apple GPU without `deviceMemory` (Safari and
-  Firefox, a Mac included: an iPhone or iPad cannot be told from it there);
+  Firefox) on a touch device (`navigator.maxTouchPoints` > 0: an iPhone, an
+  iPad, its desktop mode with a Mac's user agent included; reason
+  `apple-touch`) or where the touch points are unknown (reason
+  `apple-without-memory`); a user agent naming an iPhone, iPad or iPod is a
+  touch device whatever `maxTouchPoints` says (WebKit fixes it at build
+  time, 0 on macOS and 5 on iOS; its only iOS paths to 0, a per-domain quirk
+  list and a private background text-extraction flag, do not apply to a
+  normal tab here); with `maxTouchPoints` 0, a Mac, an Apple GPU
+  without `deviceMemory` goes by the other rules (as Chrome on a Mac). The
+  page passes its `maxTouchPoints` to the worker (`pageMaxTouchPoints`: a
+  worker has none);
   the texture limit / 640; else 4
   (M4 Pro in Chrome: 4). The worker holds the boot scale and every
   `setEnhancements` to its adapter's ceiling, answers the scale in effect

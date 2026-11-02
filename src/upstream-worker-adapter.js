@@ -162,6 +162,7 @@ export class UpstreamWorkerAdapter {
     wgpuReplayPump = false,
     wgpuReplayBudgetMs = 0,
     wgpuPowerPreference = "high-performance",
+    pageMaxTouchPoints = null,
     wgpuAtomicPassReplay = true,
     wgpuDiagnosticQuiet = false,
     wgpuProducerProfile = false,
@@ -317,6 +318,7 @@ export class UpstreamWorkerAdapter {
     this.wgpuPowerPreference = wgpuPowerPreference === "low-power"
       ? "low-power"
       : "high-performance";
+    this.pageMaxTouchPoints = Number.isInteger(pageMaxTouchPoints) && pageMaxTouchPoints >= 0 ? pageMaxTouchPoints : null;
     this.wgpuAtomicPassReplay = Boolean(wgpuAtomicPassReplay);
     this.wgpuDiagnosticQuiet = Boolean(wgpuDiagnosticQuiet);
     this.wgpuProducerProfile = this.collectMetrics && Boolean(wgpuProducerProfile);
@@ -582,6 +584,7 @@ export class UpstreamWorkerAdapter {
       wgpuReplayPump: this.wgpuReplayPump,
       wgpuReplayBudgetMs: this.wgpuReplayBudgetMs,
       wgpuPowerPreference: this.wgpuPowerPreference,
+      pageMaxTouchPoints: this.pageMaxTouchPoints,
       wgpuAtomicPassReplay: this.wgpuAtomicPassReplay,
       wgpuDiagnosticQuiet: this.wgpuDiagnosticQuiet,
       wgpuProducerProfile: this.wgpuProducerProfile,

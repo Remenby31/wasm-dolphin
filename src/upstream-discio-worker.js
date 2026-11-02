@@ -921,6 +921,9 @@ let wgpuReplayPumpEnabled = false;
 let wgpuReplayPumpTimer = null;
 let wgpuReplayBudgetMs = 0;
 let wgpuPowerPreference = "high-performance";
+// the page's navigator.maxTouchPoints (null: not passed), for the adapter
+// ceiling (a worker has no maxTouchPoints of its own)
+let pageMaxTouchPoints = null;
 let wgpuReplayFatal = null;
 // Patch 0168 follow-ups: the highest internal resolution the adapter is
 // trusted with (internalResolutionCeiling, set when the presenter takes its
@@ -1367,6 +1370,9 @@ function wgpuRuntimeConfigPayload() {
     // The engine whose defaults applied (mapped staging, 4 slots and the bind
     // group cache under JavaScriptCore): what tools/perf-artifacts.mjs expects.
     wasmEngine: wasmEngineName,
+    // the page's touch points as the worker received them (the adapter
+    // ceiling's Mac-or-touch signal; null: not passed)
+    pageMaxTouchPoints,
     metricsEnabled: causalMetricsEnabled,
     uploadTransport: wgpuUploadTransport,
     stateCacheEnabled: wgpuStateCacheEnabled,
@@ -2174,6 +2180,7 @@ async function handleMessage(type, payload) {
         wgpuReplayPump: payload.wgpuReplayPump,
         wgpuReplayBudgetMs: payload.wgpuReplayBudgetMs,
         wgpuPowerPreference: payload.wgpuPowerPreference,
+        pageMaxTouchPoints: payload.pageMaxTouchPoints,
         wgpuAtomicPassReplay: payload.wgpuAtomicPassReplay,
         wgpuDiagnosticQuiet: payload.wgpuDiagnosticQuiet,
         wgpuProducerProfile: payload.wgpuProducerProfile,
@@ -2898,6 +2905,7 @@ async function loadCore({
   wgpuReplayPump: requestedWgpuReplayPump = false,
   wgpuReplayBudgetMs: requestedWgpuReplayBudgetMs = 0,
   wgpuPowerPreference: requestedWgpuPowerPreference = "high-performance",
+  pageMaxTouchPoints: requestedPageMaxTouchPoints = null,
   wgpuAtomicPassReplay: requestedWgpuAtomicPassReplay = true,
   wgpuDiagnosticQuiet: requestedWgpuDiagnosticQuiet = false,
   wgpuProducerProfile: requestedWgpuProducerProfile = false,
@@ -3142,6 +3150,7 @@ async function loadCore({
   wgpuPowerPreference = requestedWgpuPowerPreference === "low-power"
     ? "low-power"
     : "high-performance";
+  pageMaxTouchPoints = Number.isInteger(requestedPageMaxTouchPoints) && requestedPageMaxTouchPoints >= 0 ? requestedPageMaxTouchPoints : null;
   webGpuCausalStats.rendererWorkerProbe = {
     ...webGpuCausalStats.rendererWorkerProbe,
     requested: wgpuRendererWorkerProbe,
@@ -7152,7 +7161,7 @@ async function createWebGpuPresenter(canvas) {
   }
   const scaleCeiling = internalResolutionCeiling(
     { info: adapterInfo, limits: adapter.limits, isFallbackAdapter: adapter.isFallbackAdapter },
-    { deviceMemory: self.navigator?.deviceMemory });
+    { deviceMemory: self.navigator?.deviceMemory, maxTouchPoints: pageMaxTouchPoints, userAgent: self.navigator?.userAgent });
   wgpuScaleAdapterCeiling = scaleCeiling.ceiling;
   rendererDiagnostics.internalResolutionCeiling = { ...scaleCeiling, lost: wgpuScaleLostCeiling < 4 };
   // The page holds its scales to this adapter's ceiling (core-host), not to
