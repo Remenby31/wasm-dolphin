@@ -15,7 +15,7 @@ export const HITCH_MS = 1000 / 60 * 2; // more than 2 frames at 60 Hz
 // A chunk that could not be read makes the timeline incomplete: a missing
 // final read would otherwise hide a core that stopped at the end.
 export function mergeTimeline(chunks) {
-  const out = { presents: [], vi: [], lost: { presents: 0, vi: 0 }, viSupported: true, viWhy: null, failedReads: 0, complete: true, displayed: [], displayedLost: 0, displayedWhy: null };
+  const out = { presents: [], vi: [], lost: { presents: 0, vi: 0 }, viSupported: true, viWhy: null, failedReads: 0, complete: true, displayed: [], displayedLost: 0, displayedWhy: null, swaps: null, swapsLost: 0, swapsWhy: null, pipeline: null, pipelineLost: 0 };
   if (!chunks.length) out.complete = false;
   for (const c of chunks) {
     if (!c || c.error) { out.failedReads += 1; out.complete = false; continue; }
@@ -28,8 +28,26 @@ export function mergeTimeline(chunks) {
     if (c.displayed) c.displayed.t.forEach((t, i) => out.displayed.push({ t, submits: c.displayed.submits[i], vi: c.displayed.vi[i] }));
     else out.displayedWhy = c.displayedWhy ?? out.displayedWhy ?? "engine without the display counter";
     out.displayedLost += c.displayedLost ?? 0;
+    // The pipeline diag (validationEnableHarness { pipeline: true }): the
+    // core's swaps (patch 0214) and the worker's log (tags replayed, presents
+    // queued, presenter ticks); null when not recorded, swapsWhy says why.
+    if (c.swaps) {
+      out.swaps ??= [];
+      c.swaps.vi.forEach((vi, i) => out.swaps.push({ vi, t: c.swaps.t[i], behind: c.swaps.behind[i], fifoBytes: c.swaps.fifoBytes[i], fresh: c.swaps.fresh[i], held: c.swaps.held[i] }));
+      out.swapsLost += c.swaps.lost ?? 0;
+    } else if (c.swapsWhy) out.swapsWhy = c.swapsWhy;
+    if (c.pipeline) {
+      out.pipeline ??= { tags: [], queued: [], ticks: [] };
+      c.pipeline.tags.vi.forEach((vi, i) => out.pipeline.tags.push({ vi, t: c.pipeline.tags.t[i] }));
+      c.pipeline.queued.vi.forEach((vi, i) => out.pipeline.queued.push({ vi, t: c.pipeline.queued.t[i] }));
+      c.pipeline.ticks.t.forEach((t, i) => out.pipeline.ticks.push({ t, cb: c.pipeline.ticks.cb[i], vi: c.pipeline.ticks.vi[i] }));
+      out.pipelineLost += c.pipeline.lost ?? 0;
+    }
   }
   if (out.lost.presents || out.lost.vi) out.complete = false;
+  // a pipeline diag ring that overflowed: the no-present causes would miss
+  // stages, the run is not used either
+  if (out.swapsLost || out.pipelineLost) out.complete = false;
   // Both rings must be on one clock (timeOrigin + now). Presentations and VI
   // outputs of one run cannot be minutes apart; if they are, the timeline is
   // unusable rather than silently wrong.

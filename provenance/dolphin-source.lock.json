@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "ca19864f27392743ceb11530d683607949bbed5b78b8c45fa32a0fc459befdd7",
+  "patchSeriesSha256": "be65216cf693159e31e159ca1ab83d641738389b6a073b8191cb42d10df31557",
   "patches": [
     {
       "order": 1,
@@ -1181,6 +1181,14 @@
     },
     {
       "order": 145,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0214-harness-swap-ring.patch",
+      "size": 9596,
+      "sha256": "f4a121690d3d7765c8dbb118a045f22df2ed9c478401bc374623e66ab1833d23"
+    },
+    {
+      "order": 146,
       "cwd": "Externals/SFML/SFML",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0001-sfml-emscripten-config.patch",
@@ -1188,7 +1196,7 @@
       "sha256": "f82197a21fe982ad83f6ee7bbf5a03839b1cebd4d64da3eab11263842bf61d89"
     },
     {
-      "order": 146,
+      "order": 147,
       "cwd": "Externals/xxhash/xxHash",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0002-xxhash-wasm-simd-scalar.patch",

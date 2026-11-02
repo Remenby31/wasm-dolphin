@@ -1,5 +1,6 @@
 import { asDiscBlob } from "./remote-disc.js";
-import { readViRing } from "./harness-vi-ring.js";
+import { readSwapRing, readViRing } from "./harness-vi-ring.js";
+import { createPipelineLog } from "./harness-pipeline-log.js";
 import { startPcSampler } from "./harness-pc-sampler.js";
 import { createDropSampler, histogramSum } from "./harness-drop-sampler.js";
 import {
@@ -740,6 +741,12 @@ let harnessPresentHead = 0;
 // what each BeginFrame put on screen (src/wgpu-display-counter.js).
 const harnessDisplay = createDisplayCounter();
 let harnessDisplayStop = null;
+// Harness only, when it asks (validationEnableHarness { pipeline: true }): a
+// VI output's way to the screen, the worker's side (src/harness-pipeline-log.js)
+// and the core's swap ring (patch 0214), for harness/lib/no-present.mjs.
+let harnessPipeline = false;
+const harnessPipelineLog = createPipelineLog();
+let harnessSwapRead = null;
 let harnessPresentRead = 0;
 const presentationIntervalHistogram = new Uint32Array(
   PRESENTATION_HISTOGRAM_BUCKETS_MS.length + 1
@@ -1572,8 +1579,28 @@ function readHarnessTimeline() {
   }
   // displayed: null when not asked for, or when this worker has no rAF.
   const display = harnessDisplayStop ? harnessDisplay.drain() : { displayed: null, displayedLost: 0, dropped: null };
+  // The pipeline diag: null when not asked for, or (swaps) when the core has
+  // no swap ring; `swapsWhy` says which. The ring's address is read here, at
+  // every read, never kept: the core allocates it at the first enable (null
+  // before: no ring, never zeros) and never moves it.
+  const swapsWhy = !harnessPipeline ? "not requested (validationEnableHarness { pipeline: true })"
+    : !m?._DolphinWeb_HarnessSwapRing ? "core has no swap ring (patch 0214)"
+      : !m._DolphinWeb_HarnessSwapRing() ? "swap ring not allocated yet (the core not loaded)" : null;
+  let swaps = null;
+  if (!swapsWhy) {
+    const head = m._DolphinWeb_HarnessSwapRingHead() >>> 0;
+    swaps = readSwapRing({
+      buffer: m.HEAPU8.buffer,
+      ptr: m._DolphinWeb_HarnessSwapRing(),
+      capacity: m._DolphinWeb_HarnessSwapRingCapacity() >>> 0,
+      head,
+      read: harnessSwapRead
+    });
+    harnessSwapRead = head;
+  }
   return {
     presents: { ...presents, lost: presentsLost }, vi, now: harnessNow(),
+    swaps, swapsWhy, pipeline: harnessPipeline ? harnessPipelineLog.drain() : null,
     displayedEnabled: Boolean(harnessDisplayStop),
     displayedWhy: harnessDisplayStop ? null : typeof requestAnimationFrame !== "function" ? "no requestAnimationFrame in this worker" : "not requested (validationEnableHarness { displayed: true })",
     ...display
@@ -2390,6 +2417,10 @@ async function handleMessage(type, payload) {
       moduleInstance?._DolphinWeb_HarnessEnable?.(1);
       if (payload.displayed && !harnessDisplayStop) {
         harnessDisplayStop = startDisplayLoop(harnessDisplay, { active: () => harnessEnabled });
+      }
+      if (payload.pipeline) {
+        harnessPipeline = true;
+        moduleInstance?._DolphinWeb_HarnessSwapsEnable?.(1);
       }
       // The determinism trace (WasmDetTrace.h) must see the boot from its
       // first event: requested here, started when the core loads.
@@ -3501,6 +3532,7 @@ async function loadCore({
   }
   harnessVideoBackend = videoBackend;
   if (harnessEnabled) moduleInstance._DolphinWeb_HarnessEnable?.(1);
+  if (harnessPipeline) moduleInstance._DolphinWeb_HarnessSwapsEnable?.(1);
   if (detTraceRequested) moduleInstance._DolphinWeb_DetTraceEnable?.(1);
   if (gpuSyncDiagEnabled) moduleInstance._DolphinWeb_GpuSyncDiagEnable?.(1);
   // Patch 0129: the FMA emitter uses relaxed_madd only where it is fused,
@@ -13281,6 +13313,8 @@ function refreshHelperField() {
 // A frame went up since the presenter's last BeginFrame (shown at a
 // BeginFrame, by the late path or the fallback timer).
 let wgpuVsyncShownSinceTick = 0;
+// The VI output of the frame shown last (harness pipeline diag; -1: untagged).
+let wgpuVsyncShownVi = -1;
 // Pool and queue, one texture per frame (src/wgpu-vsync-queue.js).
 const wgpuVsync = createVsyncQueue({
   queueSize: 2,
@@ -13372,6 +13406,7 @@ function queueWgpuVsyncFrame(coreFrame, shownVi, stream, tag = 0, tagEpoch = 0) 
   if (!frame) return false;
   if (stream && streamCapture.active) streamWgpuVsyncFrame(frame.tex, coreFrame);
   wgpuNewFrames.queued(tag, tagEpoch);
+  if (harnessPipeline) harnessPipelineLog.queued(shownVi, performance.timeOrigin + at);
   if (wgpuVsyncTracking()) wgpuGamePacer.stamp(at);
   if (wgpuViLock) {
     wgpuViLock.arrival(at);
@@ -13405,6 +13440,7 @@ function queueWgpuVsyncFrame(coreFrame, shownVi, stream, tag = 0, tagEpoch = 0) 
       } finally {
         wgpuVsyncFrameTime = null;
       }
+      if (harnessPipeline) harnessPipelineLog.tick(performance.timeOrigin + frameTime, performance.timeOrigin + now, shown ? wgpuVsyncShownVi : -1);
       // The game frame now on screen and how many refreshes it covers. After
       // a gap (a hidden tab: the fallback timer put up a frame every 50 ms,
       // ~1,200 a minute), the frames shown meanwhile are not unseen ones.
@@ -13482,6 +13518,7 @@ function presentWgpuVsyncFrameOnce({ newest = false, hidden = false, t = null, r
   }
   if (pace) wgpuGamePacer.shown(f, t, refreshMs);
   wgpuVsyncShownSinceTick += 1;
+  wgpuVsyncShownVi = f.shownVi ?? -1;
   const dev = renderGpu.device;
   if (wgpuVsyncCanvasDevice !== dev) {
     wgpuVsyncCanvasDevice = dev;
@@ -16394,6 +16431,7 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
             wgpuNewFrames.queued(presentFrameTag, presentFrameTagEpoch);
             wgpuNewFrames.shown(presentFrameTag, presentFrameTagEpoch);
             recordPresentedFrame(api?.getFrame?.() ?? 0, wgpuExactCapture.currentBoot());
+            if (harnessPipeline) harnessPipelineLog.queued(wgpuExactCapture.currentBoot(), harnessNow());
           }
           wgpuStalePresent.present(wgpuLastBackbufferSourceTextureId, presentFrameTag, presentFrameTagEpoch);
           wgpuPresentedSource = {
@@ -16521,6 +16559,7 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
         }
         case WGPU_CMD_OP_VI_TAG:
           // Harness only: the VI output the next ViSwap shows.
+          if (harnessPipeline) harnessPipelineLog.tag(u32[recWord + 1], harnessNow());
           wgpuExactCapture.onViTag({
             boot: u32[recWord + 1], load: u32[recWord + 2],
             ticks: u32[recWord + 3] + u32[recWord + 4] * 4294967296,
