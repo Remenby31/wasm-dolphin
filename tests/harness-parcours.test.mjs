@@ -8,7 +8,7 @@ import vm from "node:vm";
 
 import { analyzeRun, classifySecond, gapDetail, completionOf, currentPhase, deriveSeconds, GAME_DRAWS_PER_FRAME, LOAD_DISC_BPS, markerIndexes, MIN_PHASE_SEC, parcoursVerdict, phaseLabels, phaseMetrics, phaseNoise, renderTimeline, sectionsOf, segmentsOf, summarizeSeconds, windowCadence } from "../harness/lib/parcours.mjs";
 import { filmMarkers, filmWithMarks, keyToPad, padStateOf, recordPorts, runRecordSteps, validateFilm, validateRecordSteps } from "../harness/lib/pad-film.mjs";
-import { analyzeRaw, countersOf, presentGaps, samplerTicksOf, viTimesOf, exitCodeOf, humanSummary, markerStep } from "../harness/probes/parcours.mjs";
+import { analyzeRaw, countersOf, otherCpuOf, presentGaps, samplerTicksOf, viTimesOf, exitCodeOf, humanSummary, markerStep } from "../harness/probes/parcours.mjs";
 import { decodePng, encodePng } from "../harness/lib/png.mjs";
 
 const TPS = 486e6;
@@ -482,4 +482,12 @@ test("per present, the gap before it (the adapter's gapVis, gapWorkerLagMs): unk
   const probe = readFileSync(new URL("../harness/probes/parcours.mjs", import.meta.url), "utf8");
   assert.ok(probe.indexOf("const tl = await readTimeline(page)") < probe.indexOf('"validationDropSampler", { action: "drain" }'), "the timeline read before the sampler is drained");
   assert.match(probe, /raw\.samplerMissing = /);
+});
+
+test("the other processes' CPU: every process but this run's Chrome and this node, summed, with the top three", () => {
+  const ps = ["  10  50.0 /usr/libexec/fseventsd", "  11 120.5 /Applications/Google Chrome.app/x --user-data-dir=/tmp/gc-harness-parcours-abc", "  12  30.0 node probe", "  13   2.0 /bin/zsh", "  14  12.0 /opt/other/cfd-solver"].join("\n");
+  const [t, pct, top] = otherCpuOf(ps, { profileDir: "/tmp/gc-harness-parcours-abc", selfPid: 12, now: 5 });
+  assert.equal(t, 5);
+  assert.equal(pct, 64);
+  assert.deepEqual(top, [["fseventsd", 50], ["cfd-solver", 12]]);
 });
