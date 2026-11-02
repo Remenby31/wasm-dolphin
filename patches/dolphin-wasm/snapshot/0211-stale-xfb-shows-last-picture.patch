@@ -1,23 +1,27 @@
 diff --git a/Source/Core/VideoCommon/Fifo.cpp b/Source/Core/VideoCommon/Fifo.cpp
-index 5418917..48ac4cf 100644
+index 5418917..d73ffe0 100644
 --- a/Source/Core/VideoCommon/Fifo.cpp
 +++ b/Source/Core/VideoCommon/Fifo.cpp
-@@ -249,6 +249,14 @@ void FifoManager::EmulatorState(bool running)
+@@ -249,6 +249,18 @@ void FifoManager::EmulatorState(bool running)
      m_gpu_mainloop.AllowSleep();
  }
  
 +u64 FifoManager::GpuCatchUpTarget() const
 +{
 +  auto& fifo = m_system.GetCommandProcessor().GetFifo();
++  // The consumed count first, then the distance: a chunk the GPU thread
++  // consumes between the two reads lowers the distance only, so the target
++  // can come out one chunk low (a hold missed), never one high (a hold of a
++  // swap whose copy already ran).
++  const u64 consumed = m_gpu_chunks_consumed.load(std::memory_order_acquire);
 +  const u32 pending = fifo.CPReadWriteDistance.load(std::memory_order_seq_cst);
-+  return m_gpu_chunks_consumed.load(std::memory_order_acquire) +
-+         (pending + GPFifo::GATHER_PIPE_SIZE - 1) / GPFifo::GATHER_PIPE_SIZE;
++  return consumed + (pending + GPFifo::GATHER_PIPE_SIZE - 1) / GPFifo::GATHER_PIPE_SIZE;
 +}
 +
  void FifoManager::SyncGPU(SyncGPUReason reason, bool may_move_read_ptr)
  {
    if (m_use_deterministic_gpu_thread)
-@@ -548,6 +556,8 @@ void FifoManager::RunGpuLoop()
+@@ -548,6 +560,8 @@ void FifoManager::RunGpuLoop()
              fifo.CPReadPointer.store(readPtr, std::memory_order_relaxed);
              const u32 previous_distance = fifo.CPReadWriteDistance.fetch_sub(
                  GPFifo::GATHER_PIPE_SIZE, std::memory_order_seq_cst);
