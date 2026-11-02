@@ -37,13 +37,18 @@ export const PHASE_INTEGRAL_PPM_PER_SEC = 1500;
 export const RATIO_TOLERANCE = 0.0015;
 // once locked, kept up to twice that (the ratio's estimate wobbles: no flapping)
 export const RATIO_KEEP = 0.003;
-// the refresh: the last REFRESH_GAPS rAF gaps; stable when at least
-// REFRESH_INLIERS of them sit within REFRESH_BAND of their median and the
-// inliers' spread is under REFRESH_JITTER of it, between 45 and 165 Hz
-export const REFRESH_GAPS = 120;
+// the refresh: a least-squares line through the last REFRESH_TICKS rAF frame
+// times, each numbered by the refreshes since the first (a missed vsync counts
+// as whole periods): 0.0007 Hz over 7,200 ticks, where a filtered mean of the
+// gaps was 0.07 Hz off with 2 ms of jitter (review of #411). Stable when at
+// least REFRESH_INLIERS of the gaps are single refreshes (within REFRESH_BAND, 30 %,
+// of the median) and the residuals' spread is under REFRESH_JITTER of the
+// period, between 45 and 165 Hz
+export const REFRESH_TICKS = 600;
+const MIN_REFRESH_TICKS = 120;
 export const REFRESH_INLIERS = 0.8;
-export const REFRESH_BAND = 0.05;
-export const REFRESH_JITTER = 0.02;
+export const REFRESH_BAND = 0.3;
+export const REFRESH_JITTER = 0.1;
 const MIN_REFRESH_MS = 1000 / 165;
 const MAX_REFRESH_MS = 1000 / 45;
 // the frames: their arrivals over the last ARRIVAL_WINDOW_MS; regular when
@@ -59,21 +64,34 @@ const median = (v) => {
   return s.length ? s[s.length >> 1] : null;
 };
 
-/** The screen's refresh period from rAF gaps, or why it cannot be trusted. */
-export function stableRefresh(gaps) {
-  if (gaps.length < REFRESH_GAPS / 2) return { refreshMs: null, why: "few rAF" };
+/**
+ * The screen's refresh period from rAF frame times (a least-squares line over
+ * their refresh numbers, missed vsyncs counted), or why it cannot be trusted.
+ */
+export function stableRefresh(times) {
+  if (times.length < MIN_REFRESH_TICKS) return { refreshMs: null, why: "few rAF" };
+  const gaps = times.slice(1).map((t, i) => t - times[i]);
   const m = median(gaps);
-  const inl = gaps.filter((g) => Math.abs(g - m) <= m * REFRESH_BAND);
-  if (inl.length < gaps.length * REFRESH_INLIERS) return { refreshMs: null, why: "rAF irregular" };
-  const mean = inl.reduce((a, b) => a + b, 0) / inl.length;
-  const sd = Math.sqrt(inl.reduce((a, b) => a + (b - mean) ** 2, 0) / inl.length);
-  if (sd > mean * REFRESH_JITTER) return { refreshMs: null, why: "rAF jitter" };
-  if (mean < MIN_REFRESH_MS || mean > MAX_REFRESH_MS) return { refreshMs: null, why: "rAF rate out of range" };
-  return { refreshMs: mean, why: null };
+  if (!(m > 0)) return { refreshMs: null, why: "rAF irregular" };
+  if (gaps.filter((g) => Math.abs(g - m) <= m * REFRESH_BAND).length < gaps.length * REFRESH_INLIERS) return { refreshMs: null, why: "rAF irregular" };
+  const ks = [0];
+  for (const g of gaps) ks.push(ks[ks.length - 1] + Math.max(1, Math.round(g / m)));
+  const n = times.length, mk = ks.reduce((a, b) => a + b, 0) / n, mt = times.reduce((a, b) => a + b, 0) / n;
+  let skt = 0, skk = 0;
+  for (let i = 0; i < n; i++) {
+    skt += (ks[i] - mk) * (times[i] - mt);
+    skk += (ks[i] - mk) ** 2;
+  }
+  const R = skt / skk;
+  let sr = 0;
+  for (let i = 0; i < n; i++) sr += (times[i] - (mt + R * (ks[i] - mk))) ** 2;
+  if (Math.sqrt(sr / n) > R * REFRESH_JITTER) return { refreshMs: null, why: "rAF jitter" };
+  if (R < MIN_REFRESH_MS || R > MAX_REFRESH_MS) return { refreshMs: null, why: "rAF rate out of range" };
+  return { refreshMs: R, why: null };
 }
 
 export function createViPhaseLock({ maxPpm = MAX_PPM, slewPpmPerSec = SLEW_PPM_PER_SEC, target = TARGET_PHASE } = {}) {
-  const gaps = [];
+  const times = [];
   let lastFrameTime = null;
   let lastTickAt = null;
   // the arrivals of the window, and the speed factor each came at
@@ -84,9 +102,9 @@ export function createViPhaseLock({ maxPpm = MAX_PPM, slewPpmPerSec = SLEW_PPM_P
   const stats = { on: false, ppm: 0, locks: 0, lost: 0, why: "starting", driftPpm: null, refreshMs: null, frameMs: null, ratio: null, phase: null };
 
   function tick(frameTime, now = frameTime) {
-    if (lastFrameTime !== null && frameTime > lastFrameTime) {
-      gaps.push(frameTime - lastFrameTime);
-      if (gaps.length > REFRESH_GAPS) gaps.shift();
+    if (lastFrameTime === null || frameTime > lastFrameTime) {
+      times.push(frameTime);
+      if (times.length > REFRESH_TICKS) times.shift();
     }
     lastFrameTime = frameTime;
     lastTickAt = now;
@@ -100,7 +118,7 @@ export function createViPhaseLock({ maxPpm = MAX_PPM, slewPpmPerSec = SLEW_PPM_P
   /** Why no lock now (null: lockable), with the measures it needs. */
   function assess(now, speed) {
     if (lastTickAt === null || now - lastTickAt > NO_TICK_MS) return { why: "no rAF" };
-    const { refreshMs, why } = stableRefresh(gaps);
+    const { refreshMs, why } = stableRefresh(times);
     if (!refreshMs) return { why };
     const a = arrivals.filter((t) => t >= now - ARRIVAL_WINDOW_MS);
     if (a.length < MIN_ARRIVALS) return { why: "few frames", refreshMs };

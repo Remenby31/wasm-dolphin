@@ -90,8 +90,15 @@ test("a VRR / jittery rAF is no stable refresh: no lock", () => {
   assert.equal(vrr.stats.on, false);
   assert.match(vrr.stats.why, /rAF/);
   assert.equal(vrr.factor, 1);
-  assert.equal(stableRefresh(Array.from({ length: 120 }, (_, i) => (i % 2 ? 8.3 : 16.7))).refreshMs, null);
-  assert.ok(Math.abs(stableRefresh(Array.from({ length: 120 }, () => 16.667)).refreshMs - 16.667) < 1e-9);
+  // alternating 8.3 / 16.7 ms gaps (a VRR screen): no refresh
+  let t = 0;
+  assert.equal(stableRefresh(Array.from({ length: 600 }, (_, i) => (t += i % 2 ? 8.3 : 16.7))).refreshMs, null);
+  // 60.000 Hz with 2 ms of jitter and 5 % missed vsyncs: the regression finds it within 0.01 Hz
+  const R = 1000 / 60;
+  const times = [];
+  for (let k = 0; times.length < 600; k++) if ((k * 7919) % 20 !== 0) times.push(k * R + (((k * 104729) % 41) / 10 - 2));
+  const est = stableRefresh(times);
+  assert.ok(Math.abs(1000 / est.refreshMs - 60) < 0.01, `${1000 / est.refreshMs} Hz`);
 });
 
 test("bounded and smooth: never past MAX_PPM, at most SLEW a second; out of reach is no lock; a hidden tab unlocks at once, counted", () => {
