@@ -982,6 +982,8 @@ let worstLoopMsLogged = 0;
 let stallCount = 0;
 let worstSignalWaitMs = 0;
 let signalStallCount = 0;
+// ?stalllog=1 (core-host, through the load payload): [signal-stall] logging.
+let stallLogEnabled = false;
 let presentationChannel = null;
 let frameSignalHeap = null;
 let frameSignalIndex = -1;
@@ -2171,6 +2173,7 @@ async function handleMessage(type, payload) {
         wgpuPowerPreference: payload.wgpuPowerPreference,
         wgpuAtomicPassReplay: payload.wgpuAtomicPassReplay,
         wgpuDiagnosticQuiet: payload.wgpuDiagnosticQuiet,
+        stallLog: payload.stallLog,
         wgpuProducerProfile: payload.wgpuProducerProfile,
         wgpuDrawProfile: payload.wgpuDrawProfile,
         wgpuTailGate: payload.wgpuTailGate,
@@ -2894,6 +2897,7 @@ async function loadCore({
   wgpuPowerPreference: requestedWgpuPowerPreference = "high-performance",
   wgpuAtomicPassReplay: requestedWgpuAtomicPassReplay = true,
   wgpuDiagnosticQuiet: requestedWgpuDiagnosticQuiet = false,
+  stallLog: requestedStallLog = false,
   wgpuProducerProfile: requestedWgpuProducerProfile = false,
   wgpuDrawProfile: requestedWgpuDrawProfile = false,
   wgpuTailGate: requestedWgpuTailGate = false,
@@ -2938,6 +2942,7 @@ async function loadCore({
   }
   rendererDiagnostics = createRendererDiagnostics();
   wgpuDiagnosticQuiet = Boolean(requestedWgpuDiagnosticQuiet);
+  stallLogEnabled = Boolean(requestedStallLog);
   wgpuDiagnosticLogFilter.restore();
   wgpuDiagnosticLogFilter = installWgpuDiagnosticLogFilter({
     enabled: wgpuDiagnosticQuiet,
@@ -5872,7 +5877,7 @@ function scheduleFrameSignalWait() {
       if (waitMs > 200) {
         signalStallCount += 1;
         const isNewWorst = waitMs > worstSignalWaitMs;
-        if (isNewWorst || signalStallCount % 5 === 0) {
+        if (stallLogEnabled && (isNewWorst || signalStallCount % 5 === 0)) {
           if (isNewWorst) worstSignalWaitMs = waitMs;
           // eslint-disable-next-line no-console
           console.log(
@@ -11560,19 +11565,6 @@ function replayCreateBindGroup(id, blobPtr, blobLen) {
       const t = webGpuObjects.textures.get(resId);
       if (!t) {
         noteMissingResource("texture", resId);
-        // §28 diag: which texture ids are missing (→ whole draw
-        // skipped → screen-specific black, e.g. difficulty-select
-        // background)? Rate-limited tally of the missing resId.
-        self._wgMiss = self._wgMiss || { n: 0, ids: {} };
-        self._wgMiss.n++;
-        self._wgMiss.ids[resId] = (self._wgMiss.ids[resId] || 0) + 1;
-        if ((self._wgMiss.n & 0x3FFF) === 0) {
-          const top = Object.entries(self._wgMiss.ids)
-            .sort((a, b) => b[1] - a[1]).slice(0, 8)
-            .map(([k, v]) => `tex#${k}:${v}`).join(" ");
-          console.log(`[s28-missbg] n=${self._wgMiss.n} b${binding} ` +
-            `top-missing=${top}`);
-        }
         // §28cx FORCE-VALID: do NOT drop the whole bind group when a texture
         // is missing — that permanently skips every draw using it (the
         // create record is one-shot), which is why characters & menus vanish
@@ -13811,99 +13803,7 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
   };
   let errScope = false;
   let mappedCapacityHold = false;
-  // One-shot present-path diagnostic: per-pass tally of pipeline/bind/
-  // draw activity for the backbuffer (fb=0) and XFB-format (fb=47)
-  // passes — tells us whether the present/XFB-copy draw actually runs.
   let passFbId = -1;
-  let pd = { pipeOk: 0, pipeMiss: 0, bgOk: 0, bgMiss: 0, draw: 0, drawIdx: 0 };
-  self._wgPassDiag = self._wgPassDiag || {};
-  const flushPassDiag = () => {
-    if (passFbId < 0) return;
-    const key = passFbId === 0 ? "fb0" : "fb" + passFbId;
-    const n = (self._wgPassDiag[key] = (self._wgPassDiag[key] || 0) + 1);
-    // [webgpu-DIAG-cpypass] EFB-copy target passes (the 640x480
-    // rgba8unorm depth-less RTs found opaque-black, §15a): does the
-    // copy draw actually run, and with a pipeline+bind group?
-    const isCopyTgt = self._wgCopyTargets &&
-      self._wgCopyTargets.has(passFbId);
-    // §28y: also fire on a wall-clock cadence (every 5 s, capped 30×)
-    // so the copy pass is observable DEEP in the A-only black-3D
-    // dwell (n≫6 there) — does the EFB→640×480 copy draw actually
-    // run, with what srcTex/pipe/bg, when the copies read all-white?
-    let _cpWcOk = false;
-    if (isCopyTgt) {
-      const _cn = Date.now();
-      self._wgCpPassT0 = self._wgCpPassT0 || _cn;
-      const _ct = Math.floor((_cn - self._wgCpPassT0) / 5000);
-      self._wgCpPassWc = (self._wgCpPassWc == null) ? -1 : self._wgCpPassWc;
-      if (_ct !== self._wgCpPassWc && _ct < 30) {
-        self._wgCpPassWc = _ct;
-        _cpWcOk = true;
-      }
-    }
-    if (isCopyTgt && (n <= 6 || _cpWcOk)) {
-      const _ct = webGpuObjects.pipeTpl.get(self._wgCurPipe);
-      console.log(`[webgpu-DIAG-cpypass] pass#${n} fb=${passFbId} ` +
-        `pipeOk=${pd.pipeOk} pipeMiss=${pd.pipeMiss} bgOk=${pd.bgOk} ` +
-        `bgMiss=${pd.bgMiss} draw=${pd.draw} drawIdx=${pd.drawIdx} ` +
-        `srcTex=${self._wgCpySrc != null ? "tex#" + self._wgCpySrc : "?"} ` +
-        `pipe=${self._wgCurPipe} ${_ct ? _ct.s28dbg : "?"} ` +
-        `${passColorFmt}/${passDepthFmt} ${passW}x${passH}`);
-      // §28z: one-shot dump the 640×480 EFB-copy's FS WGSL — the
-      // shader that outputs white instead of mirroring tex#14. Keyed
-      // off the copy pipeline (not the broken 4096 heuristic).
-      if (passW === 640 && passH === 480 && _ct && !self._wgCpFsDone &&
-          self._wgFsSrc && self._wgFsSrc[_ct.fsId] !== undefined) {
-        self._wgCpFsDone = true;
-        const w = self._wgFsSrc[_ct.fsId].replace(/\s+/g, " ");
-        console.log(`[s28z-cpfs] fb=${passFbId} pipe=${self._wgCurPipe} ` +
-          `fs#${_ct.fsId} vs#${_ct.vsId} len=${w.length} ` +
-          `nSample=${(w.match(/textureSample/g) || []).length}`);
-        for (let o = 0; o < w.length && o < 4200; o += 700)
-          console.log(`[s28z-cpfs ${o}] ${w.slice(o, o + 700)}`);
-      }
-    }
-    if ((passFbId === 0 || passFbId === 47) && n <= 3) {
-      console.log(`[webgpu-exec] pass#${n} fb=${passFbId} ` +
-        `pipeOk=${pd.pipeOk} pipeMiss=${pd.pipeMiss} bgOk=${pd.bgOk} ` +
-        `bgMiss=${pd.bgMiss} draw=${pd.draw} drawIdx=${pd.drawIdx} ` +
-        `${passColorFmt}/${passDepthFmt} ${passW}x${passH}`);
-    }
-    // [webgpu-DIAG-efbpass] The EFB colour pass (depth-attached
-    // tex#14) sampled across the run. Decides menu-black: real draws
-    // but black EFB ⇒ state/shader; ~0 draws ⇒ menu uses another path.
-    if (self._wgEfbColorId && passFbId === self._wgEfbColorId &&
-        (n % 240) === 1) {
-      console.log(`[webgpu-DIAG-efbpass] p=${webGpuExecStats.present} ` +
-        `n=${n} fb=${passFbId} pipeOk=${pd.pipeOk} pipeMiss=${pd.pipeMiss} ` +
-        `bgOk=${pd.bgOk} bgMiss=${pd.bgMiss} draw=${pd.draw} ` +
-        `drawIdx=${pd.drawIdx} ${passColorFmt}/${passDepthFmt} ` +
-        `${passW}x${passH}`);
-    }
-    // §28k: where do intro-cutscene / title / main-menu draws go?
-    // Those screens render BLACK with zero draws into tex#14 (the EFB
-    // pass). Tally per-fbId draw totals over the run and dump the full
-    // map periodically so we can see whether they target a different
-    // FB / copy target instead of the depth-attached EFB.
-    if (pd.draw + pd.drawIdx > 0) {
-      self._wgFbDraws = self._wgFbDraws || {};
-      const fk = passFbId === 0 ? "fb0" : "fb" + passFbId;
-      const e = self._wgFbDraws[fk] || { d: 0, passes: 0, efb: 0 };
-      e.d += pd.draw + pd.drawIdx; e.passes += 1;
-      if (passFbId === self._wgEfbColorId) e.efb = 1;
-      self._wgFbDraws[fk] = e;
-    }
-    self._wgFbDumpN = (self._wgFbDumpN || 0) + 1;
-    if ((self._wgFbDumpN % 600) === 0) {
-      const rows = Object.entries(self._wgFbDraws || {})
-        .map(([k, v]) => `${k}${v.efb ? "*EFB" : ""}=${v.d}/${v.passes}p`)
-        .join(" ");
-      console.log(`[s28k-fbdraws] p=${webGpuExecStats.present} ` +
-        `efbId=${self._wgEfbColorId} ${rows}`);
-    }
-    passFbId = -1;
-    pd = { pipeOk: 0, pipeMiss: 0, bgOk: 0, bgMiss: 0, draw: 0, drawIdx: 0 };
-  };
   const ensureEnc = () => {
     if (!enc) {
       dev.pushErrorScope("validation");
@@ -14110,7 +14010,7 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
       }
       pass = null;
       if (wgpuConsumerStateCacheEnabled) wgpuPassStateCache.reset(reason);
-      flushPassDiag();
+      passFbId = -1;
 
       // Present-time EFB sampling can be invalidated by a later clear.  When
       // the classifier is enabled, submit exactly one readback immediately
@@ -14339,11 +14239,6 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
                 );
               }
             }
-            // The utility UBO is the unique 4096-byte uniform buffer
-            // (kUtilUboSize). Track its id so we can dump what
-            // UploadUtilityUniforms actually writes (src_offset/size
-            // for the EFB-copy VS).
-            if (u32[recWord + 2] === 4096) self._wgUtilBuf = id;
             // §28-vtxdata: the main vertex buffer is the unique 16 MB
             // buffer (kVertexBufferSize). Track its id so we can read
             // the uploaded per-vertex texcoord bytes for the dark-menu
@@ -14406,19 +14301,6 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
             }
           }
             const bid = u32[recWord + 1];
-            self._wgUbN = (self._wgUbN || 0) + 1;
-            // First few + periodic so steady-state UBO uploads are
-            // visible (one-shot only caught the pre-SetConstants zero).
-            if (self._wgUbN <= 6 || (self._wgUbN % 4000) === 0) {
-              const ff = new Float32Array(uploadSource.buffer,
-                                          uploadSource.byteOffset,
-                                          Math.min(len, 160) >>> 2);
-              console.log(`[webgpu-DIAG-ub] id=${bid} dst=${u32[recWord+2]} ` +
-                `len=${len} f0=${ff[0]?.toFixed(3)},${ff[1]?.toFixed(3)} ` +
-                `pnm@32=${ff[8]?.toFixed(3)},${ff[9]?.toFixed(3)},${ff[10]?.toFixed(3)} ` +
-                `proj@128=${ff[32]?.toFixed(3)},${ff[33]?.toFixed(3)},` +
-                `${ff[34]?.toFixed(3)},${ff[35]?.toFixed(3)}`);
-            }
             // §28b: PixelShaderConstants has fogcolor (int4 @byte432),
             // fogi (int4 @448), fogf (float4 @464). The backdrop FS
             // lerps to fogcolor by a fogf-driven factor → if fogcolor
@@ -14482,40 +14364,6 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
                 self._wgVsSnap = new Uint8Array(len);
               self._wgVsSnap.set(uploadSource.subarray(0, len));
               self._wgVsSnapLen = len;
-            }
-            // [webgpu-DIAG-utilubo] EFB-copy VS reads src_offset(.xy)
-            // + src_size(.xy) from this UBO. If src_size≈0 every vertex
-            // gets the same uv ⇒ samples one EFB texel ⇒ uniform black.
-            // §28y: also wall-clock-sample (every 5 s, capped 24×) so
-            // the EFB-copy src_size is observable DEEP in the A-only
-            // black-3D dwell (src_size≈0 ⇒ degenerate UV ⇒ uniform
-            // white copy = the §28x root).
-            let _utWcOk = false;
-            if (bid === self._wgUtilBuf) {
-              const _un = Date.now();
-              self._wgUtUbT0 = self._wgUtUbT0 || _un;
-              const _ut = Math.floor((_un - self._wgUtUbT0) / 5000);
-              self._wgUtUbWc = (self._wgUtUbWc == null) ? -1 : self._wgUtUbWc;
-              if (_ut !== self._wgUtUbWc && _ut < 24) {
-                self._wgUtUbWc = _ut;
-                _utWcOk = true;
-              }
-            }
-            if (bid === self._wgUtilBuf &&
-                ((self._wgUtilUbN = (self._wgUtilUbN || 0) + 1) <= 8
-                 || _utWcOk)) {
-              const uf = new Float32Array(uploadSource.buffer,
-                                          uploadSource.byteOffset,
-                                          Math.min(len, 64) >>> 2);
-              const ui = new Uint32Array(uploadSource.buffer,
-                                         uploadSource.byteOffset,
-                                         Math.min(len, 64) >>> 2);
-              console.log(`[webgpu-DIAG-utilubo] id=${bid} len=${len} ` +
-                `src_offset=${uf[0]?.toFixed(4)},${uf[1]?.toFixed(4)} ` +
-                `src_size=${uf[2]?.toFixed(4)},${uf[3]?.toFixed(4)} ` +
-                `filt=${ui[4]},${ui[5]},${ui[6]} gamma_rcp=${uf[7]?.toFixed(3)} ` +
-                `clamp=${uf[8]?.toFixed(4)},${uf[9]?.toFixed(4)} ` +
-                `pxh=${uf[10]?.toFixed(5)}`);
             }
             // §28-vtxdata: snapshot the vertex batch bytes from the
             // HEAP before they go to the GPU (this is the only window
@@ -14826,21 +14674,6 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
             const uz = u32[recWord + 7];
             if (t && !t.format.startsWith("depth") && uz < t.layers) {
               const w = u32[recWord + 4];
-            // DIAG one-shot per tex id: confirm uploaded pixels aren't
-            // all-zero (→ black sampling). Dumps first 4 RGBA texels.
-            self._wgUtN = self._wgUtN || {};
-            const tid = u32[recWord + 1];
-            if (!self._wgUtN[tid] &&
-                (self._wgUtTot = (self._wgUtTot || 0) + 1) <= 14) {
-              self._wgUtN[tid] = true;
-              const px = uploadSource.subarray(0, Math.min(uploadBytes, 16));
-              let nz = 0;
-              const chk = uploadSource.subarray(0, Math.min(uploadBytes, 4096));
-              for (let q2 = 0; q2 < chk.length; q2++) if (chk[q2]) { nz++; }
-              console.log(`[webgpu-DIAG-ut] tex#${tid} ${w}x${h} bpr=${bpr} ` +
-                `mip=${u32[recWord+6]} px0=${px[0]},${px[1]},${px[2]},${px[3]} ` +
-                `px1=${px[4]},${px[5]},${px[6]},${px[7]} nz=${nz}/${chk.length}`);
-            }
               if (wgpuUploadTransport === "mapped") {
                 const stageStartedAt = causalMetricsEnabled
                   ? wgpuUploadAttribution.beginMappedStageTiming(
@@ -15068,20 +14901,6 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
           // REVZ_COMPARE_FLIP). dcv=1.0/unflipped was backwards = black;
           // §28as's dcv=0.0-but-unflipped was the half-right mismatch.
           const dcv = GX_NATIVE_DEPTH ? 1.0 : 0.0;
-          // §28aq DISCRIMINATING PROBE: record the revZ baked into
-          // this pass's depthClearValue; the SET_VIEWPORT handler
-          // logs when a later viewport in the SAME pass disagrees
-          // (⇒ the bake-time value was wrong = the flicker source).
-          self._wgPassRevZAtBegin = self._wgPassRevZ;
-          self._wgBpSeq = (self._wgBpSeq || 0) + 1;
-          self._wgVpInPass = 0;
-          if (depthId && (self._wgAqN = (self._wgAqN || 0) + 1) <= 60) {
-            console.log(`[s28aq-bp] bp#${self._wgBpSeq} fb=${fbId} ` +
-              `depth=${depthId} dcv=${dcv} revZ=${self._wgPassRevZ ? 1 : 0} ` +
-              `peeked=${(((read + 1) >>> 0) !== replayLimit &&
-                u32[(ring.slotsBase + ((read + 1) % ring.capacity) * 32) >>> 2]
-                  === WGPU_CMD_OP_SET_VIEWPORT) ? 1 : 0}`);
-          }
           let colorView;
           if (fbId === 0) {
             webGpuExecStats.beginFb0++;
@@ -15156,16 +14975,6 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
             passColorFmt = ct.format;
             if (frameCapActive()) frameCapPush(`BEGINPASS fb#${fbId} ${passW}x${passH} fmt=${ct.format}` +
               `${fbId === (self._wgEfbColorId || -1) ? " (EFB)" : ""}`);
-            // DIAG: which texture ids are ever render targets (+size).
-            // Cross-ref with tex#69 (640x480 green, sampled at b1
-            // everywhere): if 640x480 ids never appear here, they're
-            // pure XFB-from-RAM ⇒ EFB-copy-to-RAM (staging) is stubbed.
-            self._wgRT = self._wgRT || {};
-            if (!self._wgRT[fbId]) {
-              self._wgRT[fbId] = true;
-              console.log(`[webgpu-DIAG-rt] render-target tex#${fbId} ` +
-                `${ct.tex.width}x${ct.tex.height} ${ct.format} depth=${depthId}`);
-            }
             // [webgpu-DIAG-cpy] EFB-copy color targets: depth-less
             // rgba8unorm RTs that aren't the bgra8 XFB. These are the
             // textures textured draws later SAMPLE — if they are empty
@@ -15174,7 +14983,6 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
                 ct.tex.width <= 1024) {
               self._wgCopyTargets = self._wgCopyTargets || new Set();
               self._wgCopyTargets.add(fbId);
-              self._wgCpySrc = null;
             }
             // The XFB blit target: the large bgra8unorm depth-less RT.
             // If menu content lives HERE while the EFB is cleared, the
@@ -15249,7 +15057,7 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
           // executed this frame at that moment. The copy's source rect is
           // correct and the EFB is correct at present time, so if the copy
           // runs early in the frame it captures a half-drawn EFB.
-          if (fbId !== 0 && fbId !== (self._wgEfbColorId || -1)) {
+          if (DIAG_EFB_TO_CANVAS && fbId !== 0 && fbId !== (self._wgEfbColorId || -1)) {
             const _d = webGpuObjects.textures.get(fbId);
             if (_d && _d.tex && _d.tex.width === 608 && _d.tex.height === 456) {
               diagLastCopyDst = fbId;
@@ -15261,22 +15069,6 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
           // attachment (the fb=47 XFB has none) — track its id so the
           // DIAG path can blit it straight to the canvas.
           if (fbId !== 0 && depthId) self._wgEfbColorId = fbId;
-          if (fbId !== 0) {
-            self._wgEfbN = (self._wgEfbN || 0) + 1;
-            if (self._wgEfbN <= 6) {
-              const ct2 = webGpuObjects.textures.get(fbId);
-              console.log(`[webgpu-exec] EFB pass#${self._wgEfbN} fb=${fbId}` +
-                `(${ct2 ? ct2.format : "?"}) depth=${depthId}` +
-                `(${dt ? dt.format : "none"}) load=${loadOp} ` +
-                `clear=${f32[recWord + 2].toFixed(2)},${f32[recWord + 3].toFixed(2)},` +
-                `${f32[recWord + 4].toFixed(2)},${f32[recWord + 5].toFixed(2)}`);
-            }
-          } else if (!self._wgFb0Logged) {
-            self._wgFb0Logged = true;
-            console.log(`[webgpu-exec] first backbuffer pass load=${loadOp} ` +
-              `clear=${f32[recWord + 2].toFixed(2)},${f32[recWord + 3].toFixed(2)},` +
-              `${f32[recWord + 4].toFixed(2)}`);
-          }
           break;
         }
         case WGPU_CMD_OP_SET_PIPELINE: {
@@ -15307,16 +15099,14 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
                 webGpuObjects.pipeTpl.get(pid)?.desc?.vertex?.buffers?.length
               );
               webGpuExecStats.setPipe++;
-              pd.pipeOk++;
             } catch (error) {
               if (wgpuConsumerStateCacheEnabled) wgpuPassStateCache.recordPipelineApplyFailed();
               passHasPipe = false;
               recordRendererError("set-pipeline", error?.message || error);
               webGpuExecStats.missPipe++;
-              pd.pipeMiss++;
             }
           } else {
-            webGpuExecStats.missPipe++; pd.pipeMiss++;
+            webGpuExecStats.missPipe++;
             if (pass && !p) {
               noteMissingResource("pipeline", pid);
             }
@@ -15367,10 +15157,10 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
             drawState.dynamicOffsetCounts[bgSlot] = u32[recWord + 3];
           }
           if (u32[recWord + 1] === 1) self._wgCurBg1 = bgId;
-          if (bgSlot === 1 && self._wgBgTex) {
+          if (bgSlot === 1 && self._wgBgTex && frameCapActive()) {
             const _bt = self._wgBgTex[bgId];
             const _bo = _bt != null ? webGpuObjects.textures.get(_bt) : null;
-            if (frameCapActive()) frameCapPush(`  BINDTEX  fb#${passFbId} tex#${_bt != null ? _bt : "?"}` +
+            frameCapPush(`  BINDTEX  fb#${passFbId} tex#${_bt != null ? _bt : "?"}` +
               `${_bo && _bo.tex ? " " + _bo.tex.width + "x" + _bo.tex.height : ""}`);
           }
           if (passFbId === 0 && bgSlot === 1 && self._wgBgTex) {
@@ -15380,8 +15170,9 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
             // so the question is whether this is the EFB colour texture at all
             // and what size it is. Capped: first few, then occasional, so a
             // long run still shows the in-race state.
-            self._wgBbSrcN = (self._wgBbSrcN || 0) + 1;
-            if (self._wgBbSrcN <= 6 || (self._wgBbSrcN % 600) === 0) {
+            if (DIAG_EFB_TO_CANVAS &&
+                ((self._wgBbSrcN = (self._wgBbSrcN || 0) + 1) <= 6 ||
+                 (self._wgBbSrcN % 600) === 0)) {
               const _t = webGpuObjects.textures.get(currentBackbufferSourceTextureId);
               const _e = webGpuObjects.textures.get(self._wgEfbColorId || 0);
               const _dim = (o) => (o && o.tex) ? `${o.tex.width}x${o.tex.height}` : "?";
@@ -15390,11 +15181,6 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
                 ` | efb=tex#${self._wgEfbColorId || 0} ${_dim(_e)}` +
                 ` xfb=tex#${self._wgXfbId || 0}`);
             }
-          }
-          if (u32[recWord + 1] === 1 && self._wgBgTex &&
-              self._wgBgTex[bgId] != null &&
-              self._wgCopyTargets && self._wgCopyTargets.has(passFbId)) {
-            self._wgCpySrc = self._wgBgTex[bgId];
           }
           if (pass && bg) {
             // §16: arg.u[2]=nDynOff, u[3..6]=per-draw ring offsets
@@ -15429,7 +15215,6 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
                 }
               }
               webGpuExecStats.setBg++;
-              pd.bgOk++;
             } catch (error) {
               if (wgpuConsumerStateCacheEnabled) {
                 wgpuPassStateCache.recordBindGroupApplyFailed(bgSlot);
@@ -15437,10 +15222,9 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
               if (bgSlot < 3) bgValid[bgSlot] = false;
               recordRendererError("set-bind-group", error?.message || error);
               webGpuExecStats.missBg++;
-              pd.bgMiss++;
             }
           }
-          else { webGpuExecStats.missBg++; pd.bgMiss++; }
+          else { webGpuExecStats.missBg++; }
           break;
         }
         case WGPU_CMD_OP_SET_VERTEX_BUFFER: {
@@ -15510,7 +15294,7 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
           // the presented entry all verify correct, so the remaining suspect is
           // how this pass samples that entry. Record the raw requested viewport
           // for fb#0 against the pass size.
-          if (passFbId === 0) {
+          if (DIAG_EFB_TO_CANVAS && passFbId === 0) {
             self._wgLastVp = `${f32[recWord + 1].toFixed(0)},${f32[recWord + 2].toFixed(0)}` +
               `+${f32[recWord + 3].toFixed(0)}x${f32[recWord + 4].toFixed(0)}`;
           }
@@ -15540,40 +15324,6 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
             // clear (set self._wgPassRevZ BEFORE the Dawn-required
             // mn≤mx swap so the reversal signal isn't lost).
             self._wgPassRevZ = f32[recWord + 5] > f32[recWord + 6];
-            // §28aq: a SET_VIEWPORT inside an open pass whose revZ
-            // disagrees with what BEGIN_PASS baked into depthClearValue
-            // = the flicker mechanism (bake-time guess was wrong).
-            self._wgVpInPass = (self._wgVpInPass || 0) + 1;
-            if (pass && self._wgPassRevZ !== self._wgPassRevZAtBegin &&
-                (self._wgAqMisN = (self._wgAqMisN || 0) + 1) <= 60) {
-              console.log(`[s28aq-MISMATCH] bp#${self._wgBpSeq} ` +
-                `vpInPass=${self._wgVpInPass} bakedRevZ=` +
-                `${self._wgPassRevZAtBegin ? 1 : 0} nowRevZ=` +
-                `${self._wgPassRevZ ? 1 : 0} (dcv stuck at ` +
-                `${self._wgPassRevZAtBegin ? 0.0 : 1.0}, wrong for this draw)`);
-            }
-            // §28at DISCRIMINATING PROBE (JS-only, flag=true run):
-            // BPFunctions emits near_T=max_depth,far_T=min_depth at
-            // flag=true; at flag=false it emits (1-max_depth,
-            // 1-min_depth) = exactly (1-near_T,1-far_T) for this SAME
-            // draw. So we can compute the precise flag=false viewport
-            // here without a rebuild and test the tracer's "zero-width
-            // collapse" hypothesis vs "stays healthy [0,1]" (⇒ the real
-            // coupling-(2) is the dcv/compare pairing, not BPFunctions).
-            {
-              const nT = f32[recWord + 5], fT = f32[recWord + 6];
-              const nF = 1.0 - nT, fF = 1.0 - fT;
-              const span = Math.abs(nF - fF);
-              const cls = span < 1e-4 ? "ZEROWIDTH"
-                : (nF > fF ? "inverted(needswap)" : "normal[0,1]");
-              if ((self._wgAtN = (self._wgAtN || 0) + 1) <= 120) {
-                console.log(`[s28at-vp] bp#${self._wgBpSeq} ` +
-                  `vp#${self._wgVpInPass} revZ=${self._wgPassRevZ ? 1 : 0} ` +
-                  `T(near=${nT.toFixed(5)},far=${fT.toFixed(5)}) ` +
-                  `=> F(near=${nF.toFixed(5)},far=${fF.toFixed(5)}) ` +
-                  `span=${span.toFixed(5)} ${cls}`);
-              }
-            }
             vpRescaled = f32[recWord + 3] !== vw || f32[recWord + 4] !== vh;
             vpDiagNoteViewport(f32[recWord + 5], f32[recWord + 6]);
             vpDiagNoteRect(f32[recWord + 1], f32[recWord + 2],
@@ -15685,7 +15435,7 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
           break;
         }
         case WGPU_CMD_OP_SET_SCISSOR:
-          if (passFbId === 0) {
+          if (DIAG_EFB_TO_CANVAS && passFbId === 0) {
             self._wgLastSc = `${u32[recWord + 1]},${u32[recWord + 2]}` +
               `+${u32[recWord + 3]}x${u32[recWord + 4]}`;
           }
@@ -15727,10 +15477,10 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
               self._wgVpSkipN = (self._wgVpSkipN || 0) + 1;
               break;
             }
-            frameCapPush(`  DRAW     fb#${passFbId}`);
+            if (frameCapActive()) frameCapPush(`  DRAW     fb#${passFbId}`);
             if (!vpDiagDone) vpDiagVerts += u32[recWord + 1] * Math.max(1, u32[recWord + 2]);
             pass.draw(u32[recWord + 1], u32[recWord + 2], u32[recWord + 3], 0);
-            webGpuExecStats.draw++; pd.draw++;
+            webGpuExecStats.draw++;
             wgpuReplayClassifier?.recordRealDraw({
               framebufferId: passFbId,
               indexed: false,
@@ -15766,14 +15516,14 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
               self._wgVpSkipN = (self._wgVpSkipN || 0) + 1;
               break;
             }
-            frameCapPush(`  DRAW     fb#${passFbId}`);
+            if (frameCapActive()) frameCapPush(`  DRAW     fb#${passFbId}`);
             if (!vpDiagDone) {
               vpDiagIdx += u32[recWord + 1] * Math.max(1, u32[recWord + 2]);
               vpDiagNoteIndexedDraw(u32[recWord + 1], u32[recWord + 3], u32[recWord + 4]);
             }
             pass.drawIndexed(u32[recWord + 1], u32[recWord + 2],
                              u32[recWord + 3], u32[recWord + 4], 0);
-            webGpuExecStats.drawIdx++; pd.drawIdx++;
+            webGpuExecStats.drawIdx++;
             wgpuReplayClassifier?.recordRealDraw({
               framebufferId: passFbId,
               indexed: true,
@@ -15786,11 +15536,6 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
                 baseVertex: u32[recWord + 4]
               })
             });
-            if ((self._wgDi = (self._wgDi || 0) + 1) <= 5) {
-              console.log(`[webgpu-exec] DRAW_INDEXED#${self._wgDi} ` +
-                `idx=${u32[recWord + 1]} inst=${u32[recWord + 2]} ` +
-                `firstIdx=${u32[recWord + 3]} baseVtx=${u32[recWord + 4]}`);
-            }
             if (!wgpuDeepReplayDiagnostics) break;
             // §28-vtxdata: dark-menu probe — for the menu textured
             // pipeline (stride 20, TexCoord0 @location(8) float32x2

@@ -201,6 +201,54 @@ test("?wgpustagingslots=6 reaches the worker's load payload through the adapter"
   assert.equal(posted.payload.wgpuMappedStagingSlotCount, 6);
 });
 
+// The stall loggers are opt-in: ?stalllog=1 is read once by the host, which
+// gates [main-stall], and must reach the worker's load payload through the
+// adapter (which rebuilds that payload field by field) to gate [signal-stall].
+test("?stalllog=1 gates both stall loggers and flows through the worker load payload", async () => {
+  const [host, adapter, worker] = await Promise.all([
+    readSource("../src/core-host.js"),
+    readSource("../src/upstream-worker-adapter.js"),
+    readSource("../src/upstream-discio-worker.js"),
+  ]);
+  assert.match(host, /this\.stallLog = new URLSearchParams\(window\.location\.search\)\.get\("stalllog"\) === "1"/);
+  assert.match(host, /stallLog: this\.stallLog/);
+  assert.match(host, /if \(this\.stallLog && !this\._mainStallFirstLogged/);
+  assert.match(host, /if \(this\.stallLog && \(isNewWorst \|\| this\._mainStallCount % 5 === 0\)\)/);
+  // main-profiler reads the counters: they stay unconditional.
+  assert.match(host, /if \(loopMs > 20\) \{\s*this\._mainStallCount = /);
+  assert.match(adapter, /stallLog = false,/);
+  assert.match(adapter, /this\.stallLog = Boolean\(stallLog\)/);
+  assert.match(adapter, /stallLog: this\.stallLog/);
+  assert.match(worker, /stallLog: payload\.stallLog/);
+  assert.match(worker, /stallLog: requestedStallLog = false/);
+  assert.match(worker, /stallLogEnabled = Boolean\(requestedStallLog\)/);
+  assert.match(worker, /if \(stallLogEnabled && \(isNewWorst \|\| signalStallCount % 5 === 0\)\)/);
+});
+
+for (const [search, expected] of [["?stalllog=1", true], ["", false]]) {
+  test(`stallLog=${expected} reaches the worker's load payload through the adapter`, async (t) => {
+    const { UpstreamWorkerAdapter } = await import("../src/upstream-worker-adapter.js");
+    const adapter = new UpstreamWorkerAdapter(
+      new URLSearchParams(search).get("stalllog") === "1" ? { stallLog: true } : {}
+    );
+    let posted = null;
+    adapter.worker = {
+      postMessage(message) {
+        posted = message;
+        queueMicrotask(() => adapter.handleMessage({ id: message.id, ok: true }));
+      }
+    };
+    const originalWindow = globalThis.window;
+    globalThis.window = { location: { href: `http://127.0.0.1:8080/${search}`, search } };
+    t.after(() => {
+      if (originalWindow === undefined) delete globalThis.window;
+      else globalThis.window = originalWindow;
+    });
+    await adapter.load();
+    assert.equal(posted.payload.stallLog, expected);
+  });
+}
+
 test("mapped staging slot size flows from the page to the pool and the artifacts", async () => {
   const [host, adapter, worker, gate, harness] = await Promise.all([
     readSource("../src/core-host.js"),

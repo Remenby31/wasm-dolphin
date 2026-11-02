@@ -163,6 +163,7 @@ export class UpstreamWorkerAdapter {
     wgpuPowerPreference = "high-performance",
     wgpuAtomicPassReplay = true,
     wgpuDiagnosticQuiet = false,
+    stallLog = false,
     wgpuProducerProfile = false,
     wgpuDrawProfile = false,
     wgpuTailGate = false,
@@ -317,6 +318,7 @@ export class UpstreamWorkerAdapter {
       : "high-performance";
     this.wgpuAtomicPassReplay = Boolean(wgpuAtomicPassReplay);
     this.wgpuDiagnosticQuiet = Boolean(wgpuDiagnosticQuiet);
+    this.stallLog = Boolean(stallLog);
     this.wgpuProducerProfile = this.collectMetrics && Boolean(wgpuProducerProfile);
     this.wgpuDrawProfile = Boolean(wgpuDrawProfile);
     this.wgpuTailGate = Boolean(wgpuTailGate);
@@ -581,6 +583,7 @@ export class UpstreamWorkerAdapter {
       wgpuPowerPreference: this.wgpuPowerPreference,
       wgpuAtomicPassReplay: this.wgpuAtomicPassReplay,
       wgpuDiagnosticQuiet: this.wgpuDiagnosticQuiet,
+      stallLog: this.stallLog,
       wgpuProducerProfile: this.wgpuProducerProfile,
       wgpuDrawProfile: this.wgpuDrawProfile,
       wgpuTailGate: this.wgpuTailGate,

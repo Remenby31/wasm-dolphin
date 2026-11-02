@@ -232,6 +232,10 @@ export class EmulatorHost {
     this.wgpuPowerPreference = requestedWgpuPowerPreference(window.location.search);
     this.wgpuAtomicPassReplay = requestedWgpuAtomicPassReplay(window.location.search);
     this.wgpuDiagnosticQuiet = requestedWgpuDiagnosticQuiet(window.location.search);
+    // ?stalllog=1 turns on the [main-stall] (rAF loop, here) and [signal-stall]
+    // (worker frame-signal wait) console loggers. The stall counters main-profiler
+    // reads are kept either way; only the logging is opt-in.
+    this.stallLog = new URLSearchParams(window.location.search).get("stalllog") === "1";
     this.wgpuProducerProfile = this.collectMetrics &&
       requestedWgpuProducerProfile(window.location.search);
     this.wgpuDrawProfile = requestedWgpuDrawProfile(window.location.search);
@@ -588,6 +592,7 @@ export class EmulatorHost {
             wgpuPowerPreference: this.wgpuPowerPreference,
             wgpuAtomicPassReplay: this.wgpuAtomicPassReplay,
             wgpuDiagnosticQuiet: this.wgpuDiagnosticQuiet,
+            stallLog: this.stallLog,
             wgpuProducerProfile: this.wgpuProducerProfile,
             wgpuDrawProfile: this.wgpuDrawProfile,
             wgpuTailGate: this.wgpuTailGate,
@@ -1226,7 +1231,7 @@ export class EmulatorHost {
       this.hostCausalStats.renderLastMs = renderEndedAt - loopStartedAt;
       this.hostCausalStats.publishLastMs = loopEndedAt - renderEndedAt;
     }
-    if (!this._mainStallFirstLogged && loopMs > 0) {
+    if (this.stallLog && !this._mainStallFirstLogged && loopMs > 0) {
       this._mainStallFirstLogged = true;
       // eslint-disable-next-line no-console
       console.log(`[main-stall:first] loop=${loopMs.toFixed(2)}ms frame=${this.frame} mode=${this.mode}`);
@@ -1235,7 +1240,7 @@ export class EmulatorHost {
       this._mainStallCount = (this._mainStallCount || 0) + 1;
       const isNewWorst = loopMs > (this._mainStallWorstMs || 0);
       if (isNewWorst) this._mainStallWorstMs = loopMs;
-      if (isNewWorst || this._mainStallCount % 5 === 0) {
+      if (this.stallLog && (isNewWorst || this._mainStallCount % 5 === 0)) {
         // eslint-disable-next-line no-console
         console.log(
           `[main-stall#${this._mainStallCount}${isNewWorst ? "*" : ""}] ` +
