@@ -432,7 +432,26 @@ node harness/probes/drop-meter.mjs --iso ../roms/<disc>.iso --port 8113 --runs 3
 node harness/probes/drop-meter.mjs --false-positives <A/A dir>:candidate --noise <A/A dir>/summary.json
 # again from the raw data, e.g. against a native reference (game frames per guest second)
 node harness/probes/drop-meter.mjs --analyze <dir> --native <native-ref.json>
+# dip attribution (runs recorded with --display): each second under 95 % or
+# with a hitch over 25 ms split into causes that add up to its lost frames
+node harness/probes/drop-meter.mjs --analyze <dir> --attribute
 ```
+
+Attribution and the beat label (`harness/lib/drops.mjs`): the screen's
+refresh and the core's VI rate are both fitted by regression
+(`fitPeriod`). A stretch even a few per cent slow is cut out of the VI fit,
+and the refresh is null when the run holds two rates (60 → 72, 60 → 120)
+or when the fit is less precise than 5 mHz. A repeat is labelled `beat`
+only when the two rates drift, the repeat falls at the common phase
+boundary within 3 sigma of the VI timestamps' measured jitter (Mac:
+0.7-0.95 ms, so about 2.1-2.8 ms), it is a single tick, and its crossing
+holds no more repeats than the run's median crossing. **The label still
+over-counts.** On a drifting screen, an isolated random drop inside a
+crossing window cannot be told from the beat's own jitter repeats: about a
+fifth of such drops are labelled beat (synthetic 60 / 59.94 Hz at
+σ 0.7-0.9 ms: 17-21 %, 21-26 % without the per-crossing cap). Read `beat`
+as an upper bound. On a screen locked to the VI rate, nothing is labelled
+beat (slowdowns of 3-7 % included).
 
 ## Parcours (the whole play-through)
 

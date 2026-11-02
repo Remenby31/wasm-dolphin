@@ -940,56 +940,85 @@ export function hitchCause(gap, window, { frameMs } = {}) {
 }
 
 // A steady period from timestamps (ms): t regressed on the number of
-// periods elapsed, pooled over the steady stretches. An interval spans
-// k = round(Δt / median) periods (a missed vsync counts whole when
-// `wholeSkips`, else k > 1 breaks); it is steady when Δt is within
-// `tolerance` periods of k AND the local median interval (±`localSpan`, per
-// period) is within the local tolerance of the global one, so a slow stretch
-// (a VI at 80 % speed) breaks the fit and never bends the period. The local
-// tolerance is `localTolerance` or, when the timestamps jitter more, 4
-// standard errors of that local median (the intervals' spread by MAD), so
-// jitter alone does not cut the run into pieces. Then `trims` passes drop
-// the timestamps more than `trimSigmas` residual sigmas off the fit (the
-// edges of a slow stretch the local median let in; a dropped point leaves
-// its stretch whole) and fit again. Returns { periodMs, sigmaMs (the
-// residual jitter of one timestamp), n } or null with fewer than `min`
-// timestamps, or fewer than half of them kept in stretches of at least
-// `minStretch`.
-export function fitPeriod(times, { tolerance = 0.45, localTolerance = 0.05, localSpan = 15, wholeSkips = true, min = 600, minStretch = 30, trims = 3, trimSigmas = 4 } = {}) {
+// periods elapsed, pooled over the steady stretches.
+// 1. Counting: each timestamp's period number n comes from its stretch's
+//    smoothed intercept (the mean of t − n·median over its last `countSpan`
+//    points), so one jittered timestamp never shifts the count of the ones
+//    after it; a missed vsync counts whole when `wholeSkips`, else n must
+//    step by one; a lone timestamp off the count is skipped, two in a row
+//    end the stretch.
+// 2. Steadiness: the local period, by regression over ±`localSpan` points of
+//    its stretch (precise to ~0.05 % even at 3 ms of jitter), must lie within
+//    `slopeTolerance` of the median local period: a stretch a few per cent
+//    slow (a VI at 96 % speed) is cut out, never pooled.
+// 3. Fit, then `trims` passes drop points more than `trimSigmas` residual
+//    sigmas off (a dropped point leaves its stretch whole).
+// Returns { periodMs, sigmaMs (one timestamp's residual jitter), seHz (the
+// rate's standard error), n, kept (share of timestamps fitted), skips
+// (share of intervals spanning several periods) } or null with fewer than
+// `min` timestamps, fewer than half of them fitted, a rate less precise
+// than `maxSeHz`, or under `wholeShare` of the intervals spanning a whole
+// number of fitted periods (two rates mixed).
+export function fitPeriod(times, opts = {}) {
+  const { min = 600, wholeShare = 0.7 } = opts;
   if (!times || times.length < min) return null;
-  const d = times.slice(1).map((t, i) => t - times[i]);
-  const sortedD = d.filter((x) => x > 0).sort((x, y) => x - y);
-  const med = sortedD[sortedD.length >> 1];
+  const d = times.slice(1).map((t, i) => t - times[i]).filter((x) => x > 0);
+  const sorted = [...d].sort((x, y) => x - y);
+  const med = sorted[sorted.length >> 1];
   if (!(med > 0)) return null;
-  const k = d.map((x) => Math.round(x / med));
-  const per = d.map((x, i) => (k[i] >= 1 ? x / k[i] : null));
-  const dev = per.filter((v) => v != null).map((v) => Math.abs(v - med)).sort((x, y) => x - y);
-  const spread = 1.4826 * (dev[dev.length >> 1] ?? 0);
-  const localTol = Math.max(localTolerance, (4 * 1.25 * spread) / Math.sqrt(2 * localSpan + 1) / med);
-  const steady = d.map((x, i) => {
-    if (!(k[i] >= 1)) return true; // two timestamps in one period: the count below decides
-    const near = per.slice(Math.max(0, i - localSpan), i + localSpan + 1).filter((v) => v != null).sort((p, q) => p - q);
-    return Math.abs(near[near.length >> 1] / med - 1) <= localTol;
-  });
-  // the period number of each timestamp, from the stretch's smoothed
-  // intercept (the mean of t − n·median over its last `localSpan` points), so
-  // one jittered timestamp never shifts the count of the ones after it
-  // A lone timestamp off the count is skipped (one jittered outlier never
-  // splits a stretch); two in a row end it.
-  const stretches = [];
-  let cur = [{ t: times[0], n: 0 }], skipped = false;
-  for (let i = 0; i < d.length; i += 1) {
-    const t = times[i + 1];
-    const tail = cur.slice(-localSpan);
+  // counted first by the median interval, then again by the fitted period
+  // (slow stretches move the median a few per cent at high jitter)
+  const first = fitPeriodOnce(times, med, opts);
+  const out = first && (fitPeriodOnce(times, first.periodMs, opts) ?? first);
+  if (!out) return null;
+  // one rate: most intervals span a whole number of periods (two rates in
+  // equal parts, 60 + 120, fit a period between them that few do)
+  const whole = d.filter((x) => { const k = Math.round(x / out.periodMs); return k >= 1 && Math.abs(x / out.periodMs - k) <= 0.3; }).length / d.length;
+  return whole >= wholeShare ? out : null;
+}
+
+function fitPeriodOnce(times, med, { tolerance = 0.45, slopeTolerance = 0.005, localSpan = 30, countSpan = 15, wholeSkips = true, min = 600, minStretch = 30, trims = 3, trimSigmas = 4, maxSeHz = 0.005 } = {}) {
+  // 1. counting
+  const counted = [];
+  let cur = [{ t: times[0], n: 0 }], skipped = false, multi = 0, steps = 0;
+  const close = () => { if (cur.length >= minStretch) counted.push(cur); };
+  for (let i = 1; i < times.length; i += 1) {
+    const t = times[i];
+    const tail = cur.slice(-countSpan);
     const c = tail.reduce((a, p) => a + p.t - p.n * med, 0) / tail.length;
     const n = Math.round((t - c) / med);
     const last = cur.at(-1).n;
-    const ok = steady[i] && n > last && (wholeSkips || n === last + 1 + (skipped ? 1 : 0)) && Math.abs(t - c - n * med) <= tolerance * med;
-    if (ok) { cur.push({ t, n }); skipped = false; }
+    const ok = n > last && (wholeSkips || n === last + 1 + (skipped ? 1 : 0)) && Math.abs(t - c - n * med) <= tolerance * med;
+    if (ok) { steps += 1; if (n - last > 1 + (skipped ? 1 : 0)) multi += 1; cur.push({ t, n }); skipped = false; }
     else if (!skipped && cur.length > 1) skipped = true;
-    else { if (cur.length >= minStretch) stretches.push(cur); cur = [{ t, n: 0 }]; skipped = false; }
+    else { close(); cur = [{ t, n: 0 }]; skipped = false; }
   }
-  if (cur.length >= minStretch) stretches.push(cur);
+  close();
+  // 2. steadiness by the local period
+  const localSlope = (st, i) => {
+    const lo = Math.max(0, i - localSpan), hi = Math.min(st.length, i + localSpan + 1);
+    let mn = 0, mt = 0;
+    for (let j = lo; j < hi; j += 1) { mn += st[j].n; mt += st[j].t; }
+    mn /= hi - lo; mt /= hi - lo;
+    let sxy = 0, sxx = 0;
+    for (let j = lo; j < hi; j += 1) { sxy += (st[j].n - mn) * (st[j].t - mt); sxx += (st[j].n - mn) ** 2; }
+    return sxx > 0 ? sxy / sxx : null;
+  };
+  const slopes = counted.map((st) => st.map((_, i) => localSlope(st, i)));
+  const all = slopes.flat().filter((v) => v != null).sort((x, y) => x - y);
+  if (!all.length) return null;
+  const ref = all[all.length >> 1];
+  const stretches = [];
+  counted.forEach((st, si) => {
+    let piece = [];
+    st.forEach((p, i) => {
+      const sl = slopes[si][i];
+      if (sl != null && Math.abs(sl / ref - 1) <= slopeTolerance) piece.push(p);
+      else { if (piece.length >= minStretch) stretches.push(piece); piece = []; }
+    });
+    if (piece.length >= minStretch) stretches.push(piece);
+  });
+  // 3. fit and trims
   const fit = (parts) => {
     const centred = parts.map((st) => ({ st, mn: st.reduce((a, p) => a + p.n, 0) / st.length, mt: st.reduce((a, p) => a + p.t, 0) / st.length }));
     let sxy = 0, sxx = 0, count = 0;
@@ -1004,9 +1033,10 @@ export function fitPeriod(times, { tolerance = 0.45, localTolerance = 0.05, loca
       c.res = c.st.map((p) => p.t - c.mt - periodMs * (p.n - c.mn));
       for (const r of c.res) ss += r * r;
     }
-    return { periodMs, sigmaMs: Math.sqrt(ss / Math.max(1, count - parts.length - 1)), n: count, centred };
+    const sigmaMs = Math.sqrt(ss / Math.max(1, count - parts.length - 1));
+    return { periodMs, sigmaMs, seHz: (1000 / periodMs ** 2) * (sigmaMs / Math.sqrt(sxx)), n: count, centred };
   };
-  let parts = stretches, best = fit(parts);
+  let best = fit(stretches);
   for (let pass = 0; best && pass < trims; pass += 1) {
     const limit = trimSigmas * best.sigmaMs;
     const next = [];
@@ -1019,19 +1049,30 @@ export function fitPeriod(times, { tolerance = 0.45, localTolerance = 0.05, loca
     if (!cut) break;
     const refit = fit(next);
     if (!refit) break;
-    parts = next;
     best = refit;
   }
-  if (!best) return null;
-  return { periodMs: best.periodMs, sigmaMs: best.sigmaMs, n: best.n };
+  if (!best || !(best.seHz <= maxSeHz)) return null;
+  return { periodMs: best.periodMs, sigmaMs: best.sigmaMs, seHz: best.seHz, n: best.n, kept: best.n / times.length, skips: steps ? multi / steps : 0 };
 }
 
 // The screen's refresh, measured from the animation frames (not the
 // presentations, which follow the core's VI): their period by regression
-// over every tick, a missed vsync counted as whole periods.
-export function measuredRefreshHz(ticks, opts = {}) {
+// over every tick, a missed vsync counted as whole periods. One rate for the
+// whole run or none: null when under `minKept` of the ticks fit it (a rate
+// change, 60 → 72, leaves the other part out), when over `maxSkips` of the
+// intervals span several periods (120 → 60 would read as 120 with every
+// other vsync missed), or when consecutive blocks of `block` ticks, fitted
+// alone, differ by more than `blockTolerance` (60 → 72: five 60 Hz periods
+// are six 72 Hz ones, so the 60 Hz part also reads as 72 Hz with a vsync in
+// six missed; 120 → 60 likewise as 120 with every other vsync missed).
+export function measuredRefreshHz(ticks, { minKept = 0.9, maxSkips = 0.25, block = 600, blockTolerance = 0.01, ...opts } = {}) {
   const fit = fitPeriod(ticks, { wholeSkips: true, ...opts });
-  return fit ? 1000 / fit.periodMs : null;
+  if (!fit || fit.kept < minKept || fit.skips > maxSkips) return null;
+  for (let i = 0; i + block <= ticks.length; i += block) {
+    const part = fitPeriod(ticks.slice(i, ticks.length - i < 2 * block ? ticks.length : i + block), { wholeSkips: true, ...opts, min: block });
+    if (part && Math.abs(part.periodMs / fit.periodMs - 1) > blockTolerance) return null;
+  }
+  return 1000 / fit.periodMs;
 }
 
 // The beat, proven frame by frame. vi: the core's VI outputs { t, index };
@@ -1049,10 +1090,13 @@ export function measuredRefreshHz(ticks, opts = {}) {
 // repeat is a single tick (the beat loses one frame at a time; a stall holds
 // several). Both rates come from regressions (fitPeriod: the refresh over
 // every tick, the VI over its full-speed stretches); `deltaMs` defaults to
-// `jitterSigmas` times the VI timestamps' residual jitter. Returns
+// `jitterSigmas` times the VI timestamps' residual jitter; a crossing keeps
+// at most the run's median count of repeats. An upper bound still: a random
+// drop inside a crossing window reads as beat (~1 in 5 on a drifting
+// screen; see harness/README.md). Returns
 // { refreshHz, viHz, viJitterMs, deltaMs, boundaryMs, share, proven: [tick t] }
 // or a reason.
-export function beatEvidence({ vi, ticks }, { deltaMs = null, jitterSigmas = 3, minShare = 0.5, minDriftHz = 0.005, smooth = 30, minRepeats = 6 } = {}) {
+export function beatEvidence({ vi, ticks }, { deltaMs = null, jitterSigmas = 3, minShare = 0.5, minDriftHz = 0.005, smooth = 30, minRepeats = 6, minCrossings = 3, capCrossings = true } = {}) {
   const refreshHz = measuredRefreshHz(ticks?.map((k) => k.t));
   if (!refreshHz) return { proven: [], reason: "refresh not measured (too few animation frames)" };
   // the core's VI period by regression over its full-speed stretches (a
@@ -1102,7 +1146,23 @@ export function beatEvidence({ vi, ticks }, { deltaMs = null, jitterSigmas = 3, 
     const xs = phases.slice(Math.max(0, k - smooth), k + smooth + 1).filter((p) => p != null).map((p) => dist(p, boundary)).sort((a, b) => a - b);
     return xs.length ? xs[xs.length >> 1] : null;
   };
-  const proven = repeats.filter((r) => r.single && dist(r.phase, boundary) <= deltaMs && (smoothedAt(r.k) ?? Infinity) <= deltaMs).map((r) => r.t);
+  let atBoundary = repeats.filter((r) => r.single && dist(r.phase, boundary) <= deltaMs && (smoothedAt(r.k) ?? Infinity) <= deltaMs);
+  // Per crossing (repeats closer than half a beat period), at most the median
+  // count over the run's crossings: the beat repeats alike at each crossing,
+  // a random drop that falls in one adds to it alone (kept: the repeats
+  // nearest the boundary). Needs `minCrossings` crossings to know the median.
+  const beatMs = 1000 / Math.abs(refreshHz - viHz);
+  const crossings = [];
+  for (const r of atBoundary) {
+    if (crossings.length && r.t - crossings.at(-1).at(-1).t < beatMs / 2) crossings.at(-1).push(r);
+    else crossings.push([r]);
+  }
+  if (capCrossings && crossings.length >= minCrossings) {
+    const counts = crossings.map((c) => c.length).sort((a, b) => a - b);
+    const cap = counts[counts.length >> 1];
+    atBoundary = crossings.flatMap((c) => [...c].sort((a, b) => dist(a.phase, boundary) - dist(b.phase, boundary)).slice(0, cap)).sort((a, b) => a.t - b.t);
+  }
+  const proven = atBoundary.map((r) => r.t);
   return { refreshHz, viHz, viJitterMs: round(viFit.sigmaMs, 3), deltaMs: round(deltaMs, 3), boundaryMs: round(boundary, 3), share: round(share, 3), repeats: repeats.length, proven };
 }
 

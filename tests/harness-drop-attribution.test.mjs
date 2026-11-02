@@ -270,6 +270,46 @@ test("fitPeriod: 600 timestamps with 2 ms of jitter, the error stays at the regr
   assert.ok(sd < 1.5 * theory, `sd ${sd} vs ${theory}`);
 });
 
+test("fitPeriod: a few per cent slow never bends the VI period; a locked screen with such a slowdown shows no beat", () => {
+  for (const [speed, from, to] of [[0.96, 40000, 45000], [0.97, 40000, 50000]]) for (const jitter of [0.7, 0.9]) {
+    const { vi } = timeline({ hz: 59.94, viHz: 59.94, seconds: 120, jitter, slow: [from, to], slowSpeed: speed, seed: 5 });
+    const f = fitPeriod(vi.map((v) => v.t), { wholeSkips: false });
+    assert.ok(Math.abs(1000 / f.periodMs - 59.94) < 0.005, `${speed} σ${jitter}: ${1000 / f.periodMs}`);
+    let x = 23;
+    const rnd = () => ((x = (x * 1103515245 + 12345) % 2 ** 31) / 2 ** 31);
+    const stalls = Array.from({ length: 10 }, () => 2000 + rnd() * 116000);
+    const ev = beatEvidence(timeline({ hz: 59.94, viHz: 59.94, seconds: 120, jitter, slow: [from, to], slowSpeed: speed, stalls, seed: 5 }));
+    assert.equal(ev.proven.length, 0, `${speed} σ${jitter}: ${ev.reason ?? ev.proven.length}`);
+  }
+});
+
+test("the refresh: one rate or none (60 → 120, 120 → 60, 60 → 72 give null), a missed vsync is not a rate", () => {
+  const ticks = (hzAt, ms = 60000, sigma = 0.2, missed = 0) => {
+    let x = 9;
+    const rnd = () => ((x = (x * 1103515245 + 12345) % 2 ** 31) / 2 ** 31);
+    const out = [];
+    for (let at = 0; at < ms; at += 1000 / hzAt(at)) if (rnd() >= missed) out.push(at + (rnd() - 0.5) * 2 * sigma);
+    return out;
+  };
+  assert.ok(Math.abs(measuredRefreshHz(ticks(() => 60, 60000, 0.2, 0.1)) - 60) < 0.001);
+  for (const [name, hz] of [["60 → 120", (t) => (t < 40000 ? 60 : 120)], ["120 → 60", (t) => (t < 40000 ? 120 : 60)], ["60 → 72", (t) => (t < 50000 ? 60 : 72)], ["60 → 120 at half", (t) => (t < 30000 ? 60 : 120)]]) {
+    assert.equal(measuredRefreshHz(ticks(hz)), null, name);
+  }
+});
+
+test("fitPeriod: a rate less precise than 5 mHz is no rate; at 3 ms of jitter a rate given is right", () => {
+  let x = 41;
+  const rnd = () => ((x = (x * 1103515245 + 12345) % 2 ** 31) / 2 ** 31);
+  const gauss = () => Math.sqrt(-2 * Math.log(rnd() + 1e-12)) * Math.cos(2 * Math.PI * rnd());
+  const run = (n, sigma) => Array.from({ length: n }, (_, j) => (j * 1000) / 59.94 + sigma * gauss());
+  // 300 points at 3 ms: the slope's standard error is ~7 mHz
+  assert.equal(fitPeriod(run(300, 3), { min: 300 }), null);
+  for (let i = 0; i < 40; i += 1) {
+    const f = fitPeriod(run(600, 3));
+    if (f) assert.ok(f.seHz <= 0.005 && Math.abs(1000 / f.periodMs - 59.94) < 4 * f.seHz, `${1000 / f.periodMs} ± ${f.seHz}`);
+  }
+});
+
 test("a negative cause counter never gives a negative part", () => {
   const d = attributeSecond(second(0, { speed: 80, produced: 48, shown: 48, presents: 48, causes: { jit: 300, disc: -200 } }), { cadence: 60 });
   assert.ok(Object.values(d.parts).every((f) => f > 0), JSON.stringify(d.parts));
