@@ -148,8 +148,18 @@ test("the internal resolution ceiling goes by adapter class and limits", async (
     [gpu("apple", "metal-3", {}, { isFallbackAdapter: true }), {}, 1, "cpu-adapter"],
     [{ info: { vendor: "x", isFallbackAdapter: true } }, {}, 1, "cpu-adapter"],
     [gpu("apple", "metal-3"), { deviceMemory: 32 }, 4, "adapter"],
-    // Safari has no deviceMemory: an iPhone or an iPad reads as a Mac.
+    // Safari has no deviceMemory, and an iPad's desktop mode reads as a Mac:
+    // maxTouchPoints tells them apart (0 on a Mac, 5 on an iPhone or iPad).
     [gpu("apple", "metal-3"), {}, 2, "apple-without-memory"],
+    [gpu("apple", "metal-3"), { maxTouchPoints: 0 }, 4, "adapter"],
+    [gpu("apple", "apple", { maxBufferSize: 2147483644 }), { maxTouchPoints: 0 }, 4, "adapter"],
+    [gpu("apple", "metal-3"), { maxTouchPoints: 5 }, 2, "apple-touch"],
+    [gpu("apple", "metal-3"), { maxTouchPoints: 1 }, 2, "apple-touch"],
+    ...[null, undefined, -1, 0.5, "0", NaN].map((t) => [gpu("apple", "metal-3"), { maxTouchPoints: t }, 2, "apple-without-memory"]),
+    // deviceMemory known (Chrome): the touch points change nothing
+    [gpu("apple", "metal-3"), { deviceMemory: 8, maxTouchPoints: 5 }, 4, "adapter"],
+    // a Mac's other limits still apply
+    [gpu("apple", "metal-3", { maxTextureDimension2D: 2048 }), { maxTouchPoints: 0 }, 3, "texture-limit"],
     [gpu("nvidia", "ampere"), {}, 4, "adapter"],
     // Dawn's exact Intel names (gpu_info.json): Arc Alchemist "gen-12hp",
     // Battlemage "xe-2hpg"; integrated gen-*, *lp*.
@@ -305,4 +315,35 @@ test("on the hardware path a CPU frame after the backbuffer was sized never shri
   assert.match(worker, /const drawn = markerApplied \? drawFrameBytesToWebGpu\(width, height, displayFrameView\) : drawFrameToWebGpu\(width, height, pointer, length\);\n    markerOutputIssued = markerApplied && drawn;/, "presentFrame");
   assert.match(worker, /markerOutputIssued = drawFrameBytesToWebGpu\(width, height, displayBytes\) && markerApplied;/, "presentFrameBytes");
   assert.doesNotMatch(worker, /drawFrameBytesToWebGpu\([^)]*\);\n\s*markerOutputIssued = markerApplied;/, "no marker counted after a draw that may be dropped");
+});
+
+// The page's maxTouchPoints reaches the worker's ceiling (a worker has none):
+// core-host -> the adapter's load payload -> the worker's init -> the rule.
+test("pageMaxTouchPoints goes from the page to the worker's adapter ceiling", async (t) => {
+  const { UpstreamWorkerAdapter } = await import("../src/upstream-worker-adapter.js");
+  const posted = [];
+  const load = async (options) => {
+    const adapter = new UpstreamWorkerAdapter(options);
+    adapter.worker = { postMessage(message) { posted.push(message); queueMicrotask(() => adapter.handleMessage({ id: message.id, ok: true })); } };
+    await adapter.load();
+    return posted.at(-1).payload.pageMaxTouchPoints;
+  };
+  const originalWindow = globalThis.window;
+  globalThis.window = { location: { href: "http://127.0.0.1:8080/", search: "" } };
+  t.after(() => {
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+  });
+  assert.equal(await load({ pageMaxTouchPoints: 0 }), 0);
+  assert.equal(await load({ pageMaxTouchPoints: 5 }), 5);
+  assert.equal(await load({}), null, "not passed: unknown, never 0");
+  assert.equal(await load({ pageMaxTouchPoints: "0" }), null);
+  const host = await read("../src/core-host.js");
+  assert.match(host, /pageMaxTouchPoints: globalThis\.navigator\?\.maxTouchPoints,/);
+  assert.match(host, /\{ deviceMemory: globalThis\.navigator\?\.deviceMemory, maxTouchPoints: globalThis\.navigator\?\.maxTouchPoints \}/);
+  const worker = await read("../src/upstream-discio-worker.js");
+  assert.match(worker, /pageMaxTouchPoints: payload\.pageMaxTouchPoints,/);
+  assert.match(worker, /pageMaxTouchPoints: requestedPageMaxTouchPoints = null,/);
+  assert.match(worker, /pageMaxTouchPoints = Number\.isInteger\(requestedPageMaxTouchPoints\) && requestedPageMaxTouchPoints >= 0 \? requestedPageMaxTouchPoints : null;/);
+  assert.match(worker, /\{ deviceMemory: self\.navigator\?\.deviceMemory, maxTouchPoints: pageMaxTouchPoints \}/);
 });

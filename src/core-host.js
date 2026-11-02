@@ -591,6 +591,9 @@ export class EmulatorHost {
             wgpuReplayPump: this.wgpuReplayPump,
             wgpuReplayBudgetMs: this.wgpuReplayBudgetMs,
             wgpuPowerPreference: this.wgpuPowerPreference,
+            // the page's touch points: the worker's adapter ceiling tells a
+            // Mac from an iPhone or iPad with it (a worker has no maxTouchPoints)
+            pageMaxTouchPoints: globalThis.navigator?.maxTouchPoints,
             wgpuAtomicPassReplay: this.wgpuAtomicPassReplay,
             wgpuDiagnosticQuiet: this.wgpuDiagnosticQuiet,
             wgpuProducerProfile: this.wgpuProducerProfile,
@@ -1131,7 +1134,7 @@ export class EmulatorHost {
         info = await adapter.requestAdapterInfo().catch(() => null);
       }
       return internalResolutionCeiling(adapter ? { info, limits: adapter.limits, isFallbackAdapter: adapter.isFallbackAdapter } : null,
-        { deviceMemory: globalThis.navigator?.deviceMemory });
+        { deviceMemory: globalThis.navigator?.deviceMemory, maxTouchPoints: globalThis.navigator?.maxTouchPoints });
     })();
     const adapter = this.workerScaleCeiling ?? await this.scaleCeilingPromise;
     return this.scaleLostCeiling < adapter.ceiling
