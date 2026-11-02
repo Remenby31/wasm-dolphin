@@ -483,7 +483,9 @@ every 100 ms, drained once a second; PROBE_VERSION 2). `lib/parcours.mjs` (pure)
 the speed (guest/host time from the core ticks), new frames per second,
 smoothness (new frames against the game's cadence, learnt as the site
 learns it: VI/n snapped, below the VI rate only with occupancy margin, else
-the VI rate), present hitches over 50 and 100 ms, and summarises each phase
+the VI rate; in a content second, where the game itself made fewer frames
+at full speed with margin on every thread, against what it made), present
+hitches over 50 and 100 ms, and summarises each phase
 and each film section: min, p5 and median of speed, new frames and
 smoothness, the 3 worst seconds, hitches, integrity, occupancy, seconds.
 

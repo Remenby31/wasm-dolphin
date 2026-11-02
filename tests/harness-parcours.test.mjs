@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 
-import { analyzeRun, classifySecond, gapDetail, completionOf, currentPhase, deriveSeconds, GAME_DRAWS_PER_FRAME, LOAD_DISC_BPS, markerIndexes, MIN_PHASE_SEC, parcoursVerdict, phaseLabels, phaseMetrics, phaseNoise, renderTimeline, sectionsOf, segmentsOf, summarizeSeconds, windowCadence } from "../harness/lib/parcours.mjs";
+import { analyzeRun, classifySecond, contentSecond, gapDetail, completionOf, currentPhase, deriveSeconds, GAME_DRAWS_PER_FRAME, LOAD_DISC_BPS, markerIndexes, MIN_PHASE_SEC, parcoursVerdict, phaseLabels, phaseMetrics, phaseNoise, renderTimeline, sectionsOf, segmentsOf, summarizeSeconds, windowCadence } from "../harness/lib/parcours.mjs";
 import { filmMarkers, filmWithMarks, keyToPad, padStateOf, recordPorts, runRecordSteps, validateFilm, validateRecordSteps } from "../harness/lib/pad-film.mjs";
 import { analyzeRaw, countersOf, otherCpuOf, presentGaps, samplerTicksOf, viTimesOf, exitCodeOf, humanSummary, markerStep } from "../harness/probes/parcours.mjs";
 import { decodePng, encodePng } from "../harness/lib/png.mjs";
@@ -513,4 +513,41 @@ test("probe: the sampling loop declares each name before its first use", () => {
     const use = new RegExp(`(?<![\\w.])${name}(?![\\w:])`).exec(loop.slice(0, decl.index));
     assert.equal(use, null, `${name} used before its declaration`);
   }
+});
+
+// Content, not a loss (parcours A/A of 2026-11-01: 31 % of the menus' deficit):
+// the game made fewer frames than the cadence at full speed with margin.
+test("smoothness: a content second (made that few at full speed, with margin) is judged against what was made", () => {
+  const s = samplesOf([["menu", 3]]);
+  for (const x of s.slice(1)) { x.info.newShown = (x.info.newShown / 60) * 45; x.info.producedFps = 45; }
+  const rows = deriveSeconds(s, { tps: TPS });
+  assert.deepEqual(rows.map((r) => r.smoothness), [100, 100, 100]);
+  assert.deepEqual(rows.map((r) => r.content), [true, true, true]);
+  assert.equal(rows[0].sceneCadence, 60);
+  // a frame made and not shown is still a loss
+  const lost = samplesOf([["menu", 2]]);
+  for (const x of lost.slice(1)) { x.info.newShown = (x.info.newShown / 60) * 40; x.info.producedFps = 45; }
+  assert.deepEqual(deriveSeconds(lost, { tps: TPS }).map((r) => r.smoothness), [88.9, 88.9]);
+  // no margin (a saturated thread can be why it made few) or slow: against the cadence
+  const busy = samplesOf([["menu", 2]], { busy: 0.9 });
+  for (const x of busy.slice(1)) { x.info.newShown = (x.info.newShown / 60) * 45; x.info.producedFps = 45; }
+  assert.deepEqual(deriveSeconds(busy, { tps: TPS }).map((r) => r.smoothness), [75, 75]);
+  assert.equal(contentSecond({ producedFps: 45, speed: 90, cadence: 60, cpuBusy: 0.2, gpuBusy: 0.2, replayBusy: 0.2 }), false);
+  assert.equal(contentSecond({ producedFps: 59, speed: 100, cadence: 60, cpuBusy: 0.2, gpuBusy: 0.2, replayBusy: 0.2 }), false, "within the shown share: no content second");
+  assert.equal(contentSecond({ producedFps: 45, speed: 100, cadence: 60, cpuBusy: 0.2, gpuBusy: null, replayBusy: 0.2 }), false, "unknown occupancy is no margin");
+  // a loading screen animating at 45 is still a loading when the disc reads
+  const load = deriveSeconds(samplesOf([["loading", 2]]), { tps: TPS });
+  assert.equal(classifySecond(load[0]), "loading");
+  const a = analyzeRun({ samples: s, tps: TPS });
+  assert.equal(a.phases.menu.contentSeconds, 3);
+});
+
+test("one definition of content: parcours' contentSecond is lib/drops.mjs contentRule", async () => {
+  const { contentRule } = await import("../harness/lib/drops.mjs");
+  for (const speed of [95, 98.9, 99, 100]) for (const producedFps of [30, 56, 58]) for (const busy of [0.5, 0.69, 0.7, 0.9, null]) {
+    const r = { producedFps, speed, cadence: 60, cpuBusy: busy, gpuBusy: 0.2, replayBusy: 0.2 };
+    assert.equal(contentSecond(r), contentRule({ speed, produced: producedFps, expected: 60, occupancy: { cpu: busy, gpu: 0.2, replay: 0.2 } }), JSON.stringify(r));
+  }
+  const src = readFileSync(new URL("../harness/lib/parcours.mjs", import.meta.url), "utf8");
+  assert.doesNotMatch(src, /CONTENT_MIN_SPEED/, "no second set of thresholds");
 });
