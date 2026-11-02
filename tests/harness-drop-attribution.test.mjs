@@ -345,6 +345,25 @@ test("a thread between the content margin and saturation: marginal, not lost; a 
   assert.equal(parcoursWindowsForAttribution([{ t: 1, cadence: 120, speed: 100, producedFps: 60, newFps: 60, presents: 60, viRate: 60 }])[0].vis, 60);
 });
 
+test("parcours rows spaced 0.99 s and 1.01 s: each its own second, its rates over its own duration", () => {
+  const row = (t) => ({ t, phase: "race", cadence: 60, speed: 100, producedFps: 60, newFps: 60, presents: 60, viRate: 60, cpuBusy: 0.3, gpuBusy: 0.2, replayBusy: 0.1 });
+  const rows = [row(140), row(140.99), row(142), row(142.99), row(144), row(145.01)];
+  const ws = parcoursWindowsForAttribution(rows);
+  assert.deepEqual(ws.map((w) => Math.round(w.ms)), [1000, 990, 1010, 990, 1010, 1010]);
+  assert.ok(Math.abs(ws[1].t - 140000) < 1e-6 && Math.abs(ws[1].produced - 59.4) < 1e-9);
+  const r = attributeDips(ws, {});
+  assert.equal(r.seconds, rows.length, "never two rows in one second");
+  assert.equal(r.dips.length, 0);
+  // a sampling hole (row 147 missing): no phantom second, no doubled cadence
+  const holed = parcoursWindowsForAttribution([row(146), row(148), row(149)]);
+  assert.deepEqual(holed.map((w) => [w.t, Math.round(w.ms), w.produced]), [[145000, 1000, 60], [147000, 1000, 60], [148000, 1000, 60]]);
+  const rh = attributeDips(holed, {});
+  assert.equal(rh.seconds, 3);
+  assert.equal(rh.dips.length, 0);
+  // 100 ms windows still make seconds of 10
+  assert.equal(attributeDips(second(0).concat(second(1000)), { cadence: 60 }).seconds, 2);
+});
+
 test("a negative cause counter never gives a negative part", () => {
   const d = attributeSecond(second(0, { speed: 80, produced: 48, shown: 48, presents: 48, causes: { jit: 300, disc: -200 } }), { cadence: 60 });
   assert.ok(Object.values(d.parts).every((f) => f > 0), JSON.stringify(d.parts));
