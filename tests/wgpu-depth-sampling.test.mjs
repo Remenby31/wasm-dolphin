@@ -47,12 +47,12 @@ function harness() {
     GPUTextureUsage: { TEXTURE_BINDING: 4, COPY_DST: 2 },
     moduleInstance: { HEAPU8: new Uint8Array(4096) },
     self: { _wgBg1N: 100 }, console: { log() {} },
-    wgpuReplayClassifier: null, noteMissingResource() {}, DIAG_DUMMY_TINT: false, DIAG_DEPTH_TRACE: false,
+    wgpuReplayClassifier: null, noteMissingResource() {},
     // main gates the viewport dump with vpDiagDone (true == finished/off),
     // where this work originally used a vpDiagEnabled flag.
     vpDiagDone: true,
-    vpDiagBgTexByBinding: new Map(), vpDiagFinalCmp: new Map(), vpDiagPipeFinalDs: new Map(),
-    REVZ_COMPARE_FLIP: false, REVZ_COMPARE_FLIP_ALL: false, DIAG_DEPTH_ALWAYS: false,
+    vpDiagBgTexByBinding: new Map(), vpDiagFinalCmp: new Map(),
+    REVZ_COMPARE_FLIP: false, REVZ_COMPARE_FLIP_ALL: false,
     webGpuPcfg: { ok: 0, fail: 0 }, dropSampler: null, recordRendererError: (...args) => errors.push(args),
     wgpuConsumerStateCacheEnabled: false, pipelinePrewarm: null,
     webGpuExecStats: { setPipe: 0, missPipe: 0, setBg: 0, missBg: 0 },
@@ -89,16 +89,16 @@ function harness() {
   function run(commands) {
     context.commands = commands.map((command) => new Uint32Array(command));
     return vm.runInContext(`(() => {
-      let passHasPipe = false, passNeedsVertexBuffer = false, dtLastPipe = null;
+      let passHasPipe = false, passNeedsVertexBuffer = false;
       let passSamplingKey = "0/0";
       const passColorFmt = "rgba8unorm", passDepthFmt = null, passFbId = 77;
-      const bgValid = [false, false, false], dtLastBg = [null, null, null];
+      const bgValid = [false, false, false];
       const drawState = null, pd = { pipeOk: 0, pipeMiss: 0, bgOk: 0, bgMiss: 0 };
       for (const u32 of commands) {
         const recWord = 0, read = 0;
         switch (u32[0]) { ${stateCases} }
       }
-      return { passHasPipe, passSamplingKey, dtLastPipe };
+      return { passHasPipe, passSamplingKey };
     })()`, context);
   }
   return { context, objects, device, errors, events, createdPipelines, texture, sampler, group, run };
@@ -195,7 +195,6 @@ test("pipeline-before-textures and repeated texture changes refresh matching pip
   assert.equal(applied[1].descriptor.layout, h.context.getFixedLayouts(1, 1).pipelineLayout);
   assert.equal(result.passSamplingKey, "1/1");
   assert.equal(result.passHasPipe, true);
-  assert.equal(result.dtLastPipe, applied[1]);
   assert.deepEqual(h.errors, []);
 });
 
