@@ -501,3 +501,16 @@ test("the other processes' CPU: this run's process tree left out (helpers withou
   assert.equal(pct, 50 + 70 + 12 + 2, "the run's node, browser, helpers and their children left out; another Chrome's GPU counted");
   assert.deepEqual(top, [["Google Chrome Helper (GPU)", 70], ["fseventsd", 50], ["cfd-solver", 12]]);
 });
+
+// #415 used `sec` above its declaration: every run failed with a TDZ
+// ReferenceError ("Cannot access 'sec' before initialization").
+test("probe: the sampling loop declares each name before its first use", () => {
+  const src = readFileSync(new URL("../harness/probes/parcours.mjs", import.meta.url), "utf8");
+  const loop = src.slice(src.indexOf("while (!ended) {"), src.indexOf("raw.ended = ended;"));
+  for (const name of ["sec", "phase", "status", "drained", "tl"]) {
+    const decl = new RegExp(`(?:const|let) (?:\\{[^}]*\\b)?${name}\\b`).exec(loop);
+    assert.ok(decl, `${name} declared in the loop`);
+    const use = new RegExp(`(?<![\\w.])${name}(?![\\w:])`).exec(loop.slice(0, decl.index));
+    assert.equal(use, null, `${name} used before its declaration`);
+  }
+});

@@ -254,12 +254,12 @@ async function playRun(o, server, { side, run, outDir }) {
       if (o.samplerRows && drained?.rows) (raw.samplerRows ??= []).push(drained);
       raw.samples.push({ t, info, counters: countersOf(drained), presents, vi: tl?.vi?.t?.length ?? null, viT, samplerTicks, gapVis: per.vis, gapWorkerLagMs: per.workerLagMs, integrity: integrity?.unread || integrity?.unavailable ? null : integrity, film: status ? { pos: status.pos, hold: status.hold, polls: status.polls } : null });
       raw.loads.push([Date.now(), os.loadavg()[0]]);
+      const sec = Math.round((Date.now() - t0) / 1000);
       // the other processes' CPU every OTHER_CPU_EVERY_SEC, off the loop
       // (an async ps): how loaded the machine was, by what is not this run
       if (sec % OTHER_CPU_EVERY_SEC === 0) otherCpu(profileDir, safari?.ownPids() ?? []).then((x) => { if (x) (raw.otherCpu ??= []).push(x); });
       rows = deriveSeconds(raw.samples, { tps: raw.tps });
       const phase = phaseNow();
-      const sec = Math.round((Date.now() - t0) / 1000);
       if (o.film) {
         const step = markerStep({ status, markers: raw.markers, phase, now: Date.now(), state: markerState, defaultTimeoutSec: o.markerTimeout });
         if (step.action === "release") {
