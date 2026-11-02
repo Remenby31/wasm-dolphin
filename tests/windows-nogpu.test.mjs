@@ -18,9 +18,12 @@ test("the Windows no-GPU workflow is manual, pinned, and checks the no-flag adap
   for (const uses of wf.match(/uses: \S+/g)) assert.match(uses, /@[0-9a-f]{40}$/, `${uses} is pinned by SHA`);
   // A player's Chrome (without the harness's unsafe flag) gets no adapter.
   assert.match(job, /webgpu-adapter\.mjs --port \d+ --no-unsafe-webgpu --expect none/);
-  // The effective presenter is asserted, and forced wgpu must fail.
+  // The effective presenter is asserted. Forced wgpu without a usable adapter
+  // (SwiftShader only) boots the software renderer and names the reason; with
+  // the detached presenter (its canvas already given away) it must fail.
   assert.match(job, /presenter-check\.mjs [^\n]*video=software&presenter=webgpu[^\n]*--expect-presenter 2d/);
-  assert.match(job, /presenter-check\.mjs [^\n]*video=wgpu[^\n]*--expect-boot-error "needs a usable WebGPU adapter"/);
+  assert.match(job, /presenter-check\.mjs [^\n]*video=wgpu&presenter=webgpu&cpu=single&speed=1&wasmjit=0" --expect-video-fallback fallback-adapter/);
+  assert.match(job, /presenter-check\.mjs [^\n]*video=wgpu[^\n]*wgpudetached=1" --expect-boot-error "needs a usable WebGPU adapter"/);
   // No step adds Chrome flags of its own.
   assert.doesNotMatch(wf, /HARNESS_CHROME_ARGS/);
 });

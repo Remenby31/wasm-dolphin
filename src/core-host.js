@@ -71,6 +71,7 @@ import { requestedWgpuVisualCadence } from "./wgpu-visual-cadence.js";
 import { requestedWgpuPipelinePrewarm } from "./wgpu-pipeline-prewarm.js";
 import { requestedWgpuSparseUbo } from "./wgpu-sparse-ubo-copy-forward.js";
 import { captureSessionAfterDeviceLoss, requestedWgpuSessionRecover } from "./wgpu-session-recovery.js";
+import { wgpuAdapterProblem } from "./wgpu-adapter-check.js";
 
 const DEMO_WIDTH = 320;
 const DEMO_HEIGHT = 240;
@@ -734,6 +735,7 @@ export class EmulatorHost {
 
     if (await this.adapterAvailable()) {
       try {
+        await this.fallBackWithoutWgpuAdapter();
         const mounted = await this.adapter.mountGame(file);
         this.mode = "dolphin";
         this.game.name = mounted.title || file.name;
@@ -779,6 +781,31 @@ export class EmulatorHost {
     }
 
     return this.game;
+  }
+
+  // video=wgpu with no usable WebGPU adapter (a blocklist, no GPU, a CPU
+  // adapter, no answer): boot the software renderer instead, and say why
+  // (videoFallback, in the frame info and the status line), rather than let
+  // the worker refuse the core and the page wait without a picture. The
+  // detached presenter has already given its canvas away: there, an explicit
+  // error. Once per host, before the core loads.
+  async fallBackWithoutWgpuAdapter() {
+    if (this.videoBackend !== "WebGPU-Real" || this.adapter?.loaded || this.videoFallback) return null;
+    const problem = await wgpuAdapterProblem({
+      powerPreference: this.wgpuPowerPreference ?? "high-performance",
+      acceptFallback: this.wgpuFallback
+    });
+    if (!problem) return null;
+    if (this.usesDetachedWgpu) {
+      const message = `video=wgpu needs a usable WebGPU adapter (${problem}); the detached presenter cannot fall back`;
+      console.error(`[wgpu] ${message}`);
+      throw new Error(message);
+    }
+    this.applyVideoBackend("Software Renderer");
+    this.videoFallback = { from: "WebGPU-Real", to: "Software Renderer", reason: problem };
+    console.warn(`[wgpu] no usable WebGPU adapter (${problem}): booting the software renderer`);
+    this.onStatus(`No usable WebGPU adapter (${problem}): software renderer`);
+    return this.videoFallback;
   }
 
   async adapterAvailable() {
@@ -1416,6 +1443,8 @@ export class EmulatorHost {
       // older pictures shown after newer ones (lifetime); null without tags.
       newFramesPerSec: this.mode === "dolphin" ? this.adapter.newFramesPerSec ?? null : null,
       newFramesProducedPerSec: this.mode === "dolphin" ? this.adapter.newFramesProducedPerSec ?? null : null,
+      // video=wgpu asked, no usable adapter: the renderer it fell back to, and why
+      videoFallback: this.videoFallback ?? null,
       newFramesShown: this.mode === "dolphin" ? this.adapter.newFramesShown ?? null : null,
       framesOutOfOrder: this.mode === "dolphin" ? this.adapter.framesOutOfOrder ?? null : null,
       // presents of a new frame showing a texture not rewritten since it was
