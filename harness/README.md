@@ -444,7 +444,9 @@ a second (nothing per frame) it reads `__lastFrameInfo` (speed, new frames
 shown and produced, occupancy of the CPU thread, GPU thread and replay
 worker, the replay's draws), the drop sampler at 1 s (core ticks, disc
 bytes, EFB→XFB copies), the timeline (every present and VI output) and the
-replay's integrity counters. `lib/parcours.mjs` (pure) derives per second
+replay's integrity counters, and every present gap past 25 ms with its VI
+outputs and the presenting worker's stall inside it (the drop sampler runs
+every 100 ms, drained once a second; PROBE_VERSION 2). `lib/parcours.mjs` (pure) derives per second
 the speed (guest/host time from the core ticks), new frames per second,
 smoothness (new frames against the game's cadence, learnt as the site
 learns it: VI/n snapped, below the VI rate only with occupancy margin, else

@@ -55,6 +55,27 @@ export const GAME_DRAWS_PER_FRAME = 200;
 // still picture, a pause), it keeps the phase before it.
 export const MIN_NEW_FPS = 5;
 export const HITCH_MS = [50, 100];
+// One present gap [a, b) (host ms): its length, the VI outputs inside it
+// (viT: their host times, null when the ring lost entries: unknown), and the
+// presenting worker's longest stall inside it from the drop sampler's ticks
+// (ticks: EVERY tick [t, lagMs] of the sampler, null when it was not read: a
+// tick that ran lagMs late means the worker could not run during
+// [t - lagMs, t]). An absent datum stays unknown, never 0 (lib/drops.mjs
+// attribution): no tick due in the gap nor stalled across it, or no ticks
+// read, gives null; an on-time tick inside it, 0. Pure.
+export function gapDetail(a, b, viT = null, ticks = null) {
+  const vis = Array.isArray(viT) ? viT.filter((v) => v >= a && v < b).length : null;
+  let workerLagMs = null;
+  if (Array.isArray(ticks)) {
+    for (const [t, l] of ticks) {
+      const due = t - l;
+      const over = Math.min(b, t) - Math.max(a, due);
+      if (!(due >= a && due < b) && !(over > 0)) continue;
+      workerLagMs = Math.max(workerLagMs ?? 0, Math.max(0, over));
+    }
+  }
+  return { at: a, ms: round(b - a, 1), vis, workerLagMs: workerLagMs == null ? null : round(workerLagMs, 1) };
+}
 
 // The site's smoothness (salon packages/core/src/smoothness.ts): a window
 // teaches the game's cadence (VI/1, /2, /3, within 10 %) only at full speed
@@ -136,6 +157,8 @@ export function deriveSeconds(samples, { tps = null } = {}) {
       speed: round(speed, 1), newFps: round(newFps, 1), producedFps: round(producedFps, 1),
       cadence: ref, smoothness: newFps == null ? null : round(Math.max(0, Math.min(100, (newFps / ref) * 100)), 1),
       viRate: round(viRate, 1), presents: (b.presents ?? []).length, hitches50, hitches100, maxGapMs: round(maxGapMs, 1),
+      // the presenting worker's longest stall in the second (sampler rows)
+      workerLagMs: Array.isArray(b.samplerTicks) && b.samplerTicks.length ? Math.max(...b.samplerTicks.map((x) => x[1])) : null,
       discBps: carried?.discBps == null ? null : Math.round(carried.discBps),
       xfbPerFrame: carried?.xfbPerSec != null && producedFps > 0 ? round(carried.xfbPerSec / producedFps, 2) : null,
       drawsPerFrame: draws != null && made ? round(draws / made, 1) : null,

@@ -6,9 +6,9 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 
-import { analyzeRun, classifySecond, completionOf, currentPhase, deriveSeconds, GAME_DRAWS_PER_FRAME, LOAD_DISC_BPS, markerIndexes, MIN_PHASE_SEC, parcoursVerdict, phaseLabels, phaseMetrics, phaseNoise, renderTimeline, sectionsOf, segmentsOf, summarizeSeconds, windowCadence } from "../harness/lib/parcours.mjs";
+import { analyzeRun, classifySecond, gapDetail, completionOf, currentPhase, deriveSeconds, GAME_DRAWS_PER_FRAME, LOAD_DISC_BPS, markerIndexes, MIN_PHASE_SEC, parcoursVerdict, phaseLabels, phaseMetrics, phaseNoise, renderTimeline, sectionsOf, segmentsOf, summarizeSeconds, windowCadence } from "../harness/lib/parcours.mjs";
 import { filmMarkers, filmWithMarks, keyToPad, padStateOf, recordPorts, runRecordSteps, validateFilm, validateRecordSteps } from "../harness/lib/pad-film.mjs";
-import { analyzeRaw, countersOf, exitCodeOf, humanSummary, markerStep } from "../harness/probes/parcours.mjs";
+import { analyzeRaw, countersOf, presentGaps, samplerTicksOf, viTimesOf, exitCodeOf, humanSummary, markerStep } from "../harness/probes/parcours.mjs";
 import { decodePng, encodePng } from "../harness/lib/png.mjs";
 
 const TPS = 486e6;
@@ -434,4 +434,52 @@ test("film player: the picture's steering replaces the sine under the autopilot,
   const out = p.onPoll(3, { released: 0, stuck: 1, steer: { 0: 60 } });
   assert.equal(out.writes[0][1].mask, 2, "B: backing off");
   assert.notEqual(p.onPoll(4, { released: 0, stuck: 1, steer: { 0: null } }).writes.length ? 1 : 0, 2);
+});
+
+// Review of #413 (#411's rule): an absent datum stays unknown, never 0.
+test("a present gap's VIs in [a, b) and the worker's stall: null when unknown, 0 only for an on-time tick inside it", () => {
+  // VIs in [a, b): the one at a counts, the one at b does not
+  assert.equal(gapDetail(1000, 1100, [1000, 1050, 1100], []).vis, 2);
+  // a 60 ms late tick ending inside: 60; a stall across the gap's end: its part inside
+  assert.equal(gapDetail(1000, 1100, [], [[1080, 60], [1300, 40]]).workerLagMs, 60);
+  assert.equal(gapDetail(1000, 1100, [], [[1150, 100]]).workerLagMs, 50);
+  // an on-time tick due inside: 0
+  assert.equal(gapDetail(1000, 1100, [], [[1050, 0]]).workerLagMs, 0);
+  // no tick due inside nor stalled across it (the 100 ms blind spot): unknown
+  assert.equal(gapDetail(1000, 1040, [], [[990, 0], [1090, 0]]).workerLagMs, null);
+  // the sampler not read, the ring lost entries: unknown
+  assert.equal(gapDetail(1000, 1100, null, null).workerLagMs, null);
+  assert.equal(gapDetail(1000, 1100, null, null).vis, null);
+});
+
+test("per present, the gap before it (the adapter's gapVis, gapWorkerLagMs): unknown when either second's data is", () => {
+  const prev = { presents: [900, 983], viT: [950], samplerTicks: [[960, 0]] };
+  const r = presentGaps(prev, { presents: [1000, 1100], viT: [990, 1016, 1050], samplerTicks: [[1060, 0], [1090, 50]] });
+  assert.deepEqual(r.vis, [1, 2]);
+  assert.deepEqual(r.workerLagMs, [null, 50], "983-1000: no tick due in it");
+  assert.deepEqual(presentGaps(undefined, { presents: [5, 21], viT: [10], samplerTicks: [[12, 0]] }), { vis: [null, 1], workerLagMs: [null, 0] });
+  // this second's ring lost entries, or its drain failed
+  assert.deepEqual(presentGaps(prev, { presents: [1000], viT: null, samplerTicks: [[990, 0]] }).vis, [null]);
+  assert.deepEqual(presentGaps(prev, { presents: [1000], viT: [990], samplerTicks: null }).workerLagMs, [null]);
+  // the previous second's data unknown: the gap spanning both is too
+  assert.deepEqual(presentGaps({ ...prev, viT: null }, { presents: [1000], viT: [990], samplerTicks: [[990, 0]] }).vis, [null]);
+  // the probe's readers
+  assert.deepEqual(samplerTicksOf({ columns: ["t", "lagMs", "ticks"], rows: [[1, 5, 0], [2, 30, 0]] }), [[1, 5], [2, 30]], "every tick, on time ones too");
+  assert.equal(samplerTicksOf({ error: "timeout" }), null);
+  assert.equal(samplerTicksOf(null), null);
+  assert.equal(viTimesOf({ presents: { t: [], lost: 0 }, vi: { t: [1, 2], lost: 0 } }).length, 2);
+  assert.equal(viTimesOf({ presents: { t: [], lost: 3 }, vi: { t: [1, 2], lost: 0 } }), null, "presents lost");
+  assert.equal(viTimesOf({ presents: { t: [] }, vi: { t: [1], lost: 1 } }), null, "VIs lost");
+  assert.equal(viTimesOf({ error: "x" }), null);
+  // the row's workerLagMs: unknown without ticks
+  const s = samplesOf([["menu", 2]]);
+  s[1].samplerTicks = [[1, 0], [2, 40]];
+  s[2].samplerTicks = null;
+  const rows = deriveSeconds(s, { tps: TPS });
+  assert.equal(rows[0].workerLagMs, 40);
+  assert.equal(rows[1].workerLagMs, null);
+  assert.equal("gaps" in rows[0], false, "no invented per-row gaps");
+  const probe = readFileSync(new URL("../harness/probes/parcours.mjs", import.meta.url), "utf8");
+  assert.ok(probe.indexOf("const tl = await readTimeline(page)") < probe.indexOf('"validationDropSampler", { action: "drain" }'), "the timeline read before the sampler is drained");
+  assert.match(probe, /raw\.samplerMissing = /);
 });

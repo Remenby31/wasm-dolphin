@@ -54,7 +54,7 @@ import { calmLock, defaultMaxLoad, loadGaveUp, loadLimit } from "../lib/env.mjs"
 import { readIntegrity, treeHasIntegrity } from "../lib/integrity.mjs";
 import { claim } from "../lib/ownership.mjs";
 import { filmMarkers, filmWithMarks, padFilmStatus, recordPorts, releaseMarker, runRecordSteps, signalStuck, startPadFilm, stopPadFilm, validateFilm, validateRecordSteps } from "../lib/pad-film.mjs";
-import { analyzeRun, currentPhase, deriveSeconds, frameDiff, markerIndexes, STILL_DIFF, phaseNoise, parcoursVerdict, renderTimeline, usable } from "../lib/parcours.mjs";
+import { analyzeRun, currentPhase, deriveSeconds, frameDiff, gapDetail, markerIndexes, STILL_DIFF, phaseNoise, parcoursVerdict, renderTimeline, usable } from "../lib/parcours.mjs";
 import { acquirePerfLock } from "../lib/perf-lock.mjs";
 import { chromeInfo, isLocalOnly, probeOutDir } from "../lib/probe-out.mjs";
 import { decodePng } from "../lib/png.mjs";
@@ -67,7 +67,11 @@ import { num, sideOrder } from "./race-perf.mjs";
 
 // What this probe runs in the page and the worker: an A/A's noise holds only
 // for the same version. Raised with each such change.
-export const PROBE_VERSION = 1;
+export const PROBE_VERSION = 2; // 2: the drop sampler every SAMPLER_MS (100 ms, was 1 s), its stalls and the VI times kept per second (present gap detail)
+
+// The drop sampler's period: its counters are drained once a second, its
+// rows' lateness says when the presenting worker was blocked.
+export const SAMPLER_MS = 100;
 
 // The autopilot's stuck signal: while the worker says a port is under the
 // autopilot, a picture of the screen every STILL_EVERY_SEC (an element
@@ -98,6 +102,40 @@ async function readInfo(page) {
       info: { speed: n(f.gameSpeed), newFps: n(f.newFramesPerSec), producedFps: n(f.newFramesProducedPerSec), newShown: n(f.newFramesShown), outOfOrder: n(f.framesOutOfOrder), cpuBusy: n(f.cpuThreadBusy), gpuBusy: n(f.gpuThreadBusy), replayBusy: n(f.replayBusy), draws: d ? Number(d[1]) : null }
     };
   });
+}
+
+// Per present of a second, the gap since the present before it (the last of
+// the previous second for the first): the VI outputs inside it and the
+// presenting worker's stall inside it (gapDetail); null for a first present
+// with none before it, and wherever either second's data is unknown (a ring
+// that lost entries: viT null; ticks not read: samplerTicks null). Pure.
+export function presentGaps(prev, { presents, viT, samplerTicks }) {
+  const vis = [], workerLagMs = [];
+  const known = (x, y) => (prev && x === null) || y === null ? null : [...(x ?? []), ...y];
+  const vAll = known(prev?.viT, viT), lAll = known(prev?.samplerTicks, samplerTicks);
+  let from = prev?.presents?.at(-1) ?? null;
+  for (const p of presents) {
+    if (from == null) { vis.push(null); workerLagMs.push(null); from = p; continue; }
+    const g = gapDetail(from, p, vAll, lAll);
+    vis.push(g.vis); workerLagMs.push(g.workerLagMs);
+    from = p;
+  }
+  return { vis, workerLagMs };
+}
+
+// Every tick of a drain, [t, lagMs] (an on-time one too: "no tick" and "on
+// time" differ); null when the drain failed or has no rows array (unknown).
+export function samplerTicksOf(drained) {
+  if (!drained || drained.error || !Array.isArray(drained.rows)) return null;
+  const it = drained.columns?.indexOf("t") ?? -1, il = drained.columns?.indexOf("lagMs") ?? -1;
+  if (it < 0 || il < 0) return null;
+  return drained.rows.map((r) => [Math.round(r[it] * 10) / 10, Math.round(r[il] * 10) / 10]);
+}
+// The timeline's VI times, null when the read failed or a ring lost entries
+// (the VIs inside a gap would be undercounted).
+export function viTimesOf(tl) {
+  if (!tl || tl.error || tl.presents?.lost || tl.vi?.lost || !Array.isArray(tl.vi?.t)) return null;
+  return tl.vi.t;
 }
 
 // The drop sampler's last row of a drain, as named counters (null: no row).
@@ -141,7 +179,9 @@ async function playRun(o, server, { side, run, outDir }) {
     raw.tps = progress?.coreTicksPerSecond ?? null;
     // the 0113 headroom counters (XFB copies) on, as drop-meter turns them on
     raw.headroom = (await workerRequest(page, "validationReadHeadroomStats", { reset: 0 }, 5000))?.error ?? "on";
-    raw.sampler = await workerRequest(page, "validationDropSampler", { action: "start", everyMs: 1000 }, 5000);
+    raw.sampler = await workerRequest(page, "validationDropSampler", { action: "start", everyMs: SAMPLER_MS }, 5000);
+    // no sampler (an older tree): its counters and the worker's stalls unknown
+    if (!raw.sampler?.started) raw.samplerMissing = raw.sampler?.error ?? "engine without validationDropSampler";
     raw.integrityStart = await readIntegrity(page, { expected: o.integrityExpected });
     raw.film = await startPadFilm(page, o.film ? { film: o.film } : { record: { ports: recordPorts(o.recordSteps), auto: o.auto } });
     if (raw.film?.error) throw new Error(`pad film: ${raw.film.error}`);
@@ -159,12 +199,19 @@ async function playRun(o, server, { side, run, outDir }) {
     while (!ended) {
       await page.waitForTimeout(1000 - ((Date.now() - t0) % 1000));
       const { t, info } = await readInfo(page);
-      const drained = await workerRequest(page, "validationDropSampler", { action: "drain" }, 5000);
+      // the timeline first, then the sampler: its ticks then cover every gap
+      // ending at the last present read
       const tl = await readTimeline(page).catch((e) => ({ error: String(e.message || e) }));
+      const drained = raw.samplerMissing ? null : await workerRequest(page, "validationDropSampler", { action: "drain" }, 5000);
       if (tl?.presents?.lost || tl?.vi?.lost) raw.timelineLost = (raw.timelineLost ?? 0) + (tl.presents?.lost ?? 0) + (tl.vi?.lost ?? 0);
       const integrity = await readIntegrity(page, { expected: o.integrityExpected });
       const status = await padFilmStatus(page);
-      raw.samples.push({ t, info, counters: countersOf(drained), presents: tl?.presents?.t ?? [], vi: tl?.vi?.t?.length ?? null, integrity: integrity?.unread || integrity?.unavailable ? null : integrity, film: status ? { pos: status.pos, hold: status.hold, polls: status.polls } : null });
+      const presents = tl?.presents?.t ?? [], viT = viTimesOf(tl), samplerTicks = samplerTicksOf(drained);
+      // per present, the gap before it: its VIs and the worker's stall
+      // (lib/drops.mjs parcoursWindowsForAttribution reads gapVis, gapWorkerLagMs)
+      const per = presentGaps(raw.samples.at(-1), { presents, viT, samplerTicks });
+      if (o.samplerRows && drained?.rows) (raw.samplerRows ??= []).push(drained);
+      raw.samples.push({ t, info, counters: countersOf(drained), presents, vi: tl?.vi?.t?.length ?? null, viT, samplerTicks, gapVis: per.vis, gapWorkerLagMs: per.workerLagMs, integrity: integrity?.unread || integrity?.unavailable ? null : integrity, film: status ? { pos: status.pos, hold: status.hold, polls: status.polls } : null });
       raw.loads.push([Date.now(), os.loadavg()[0]]);
       rows = deriveSeconds(raw.samples, { tps: raw.tps });
       const phase = phaseNow();
@@ -339,7 +386,7 @@ async function main() {
       iso: { type: "string" }, film: { type: "string" }, record: { type: "string" }, "film-out": { type: "string" },
       runs: { type: "string", default: "1" }, candidate: { type: "string" }, baseline: { type: "string" }, noise: { type: "string" },
       config: { type: "string", default: "product" }, query: { type: "string" }, "marker-timeout": { type: "string", default: "120" }, "max-sec": { type: "string", default: "1200" },
-      edge: { type: "string" }, shots: { type: "boolean", default: false }, "shot-every": { type: "string", default: "0" }, auto: { type: "string" }, verbose: { type: "boolean", default: false }, analyze: { type: "string" },
+      edge: { type: "string" }, "sampler-rows": { type: "boolean", default: false }, shots: { type: "boolean", default: false }, "shot-every": { type: "string", default: "0" }, auto: { type: "string" }, verbose: { type: "boolean", default: false }, analyze: { type: "string" },
       "max-load": { type: "string" }, "load-wait": { type: "string", default: "300" }, "lock-wait": { type: "string", default: "14400" }, "no-lock": { type: "boolean", default: false },
       port: { type: "string", default: process.env.HARNESS_PORT }, out: { type: "string" }
     }
@@ -367,7 +414,10 @@ async function main() {
     auto: values.auto ? JSON.parse(values.auto) : null,
     // --edge '{"0":[0,0,1,1]}': the autopilot steers from the picture, each
     // port in its view (lib/edge-follower.mjs); '{}' or absent: the sine
-    edge: values.edge ? JSON.parse(values.edge) : null
+    edge: values.edge ? JSON.parse(values.edge) : null,
+    // --sampler-rows: every drop sampler row (100 ms, all its counters) kept in
+    // the raw record, for an attribution of the causes (lib/drops.mjs rowsOf)
+    samplerRows: values["sampler-rows"]
   };
   const filmBytes = values.film ? readFileSync(values.film) : null;
   const filmId = filmBytes ? `${path.basename(values.film)}#${createHash("sha256").update(filmBytes).digest("hex").slice(0, 12)}` : null;
