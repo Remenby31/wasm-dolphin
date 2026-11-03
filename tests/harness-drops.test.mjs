@@ -780,5 +780,7 @@ test("render-starved in the summary: rendered per guest second and the GPU threa
   const wr = windowsOf({ vi, presents: presentsOf(vi), rows: reset, tps: TPS });
   assert.ok(wr.some((x) => x.xfb < 0));
   const sr = dropSummary({ windows: wr, presents: presentsOf(vi), vi, tps: TPS, rows: reset });
-  assert.ok(sr.renderedPerGuestSec > 55, String(sr.renderedPerGuestSec));
+  // left out, not counted 0: the rate of the measured windows
+  assert.ok(Math.abs(sr.renderedPerGuestSec - 60) < 1, String(sr.renderedPerGuestSec));
+  assert.ok(Math.abs(sr.gameFps - 60) < 1, String(sr.gameFps));
 });

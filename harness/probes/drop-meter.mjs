@@ -702,12 +702,12 @@ export function readNoise(file, expect = null) {
 // RENDER-STARVED: the GPU thread busy over the run (≥ the content margin,
 // ATTRIBUTION_CONTENT_BUSY: a run mean, lower than its seconds' peaks) and
 // the core rendering (XFB copies) under half the presents' rate per guest
-// second (the VI rate; 5 % margin so a 30 fps scene at 60 Hz, or 25 at 50 Hz,
-// is not flagged). Speed and pictures per VI cannot see it. A CPU-decoded
+// second (the VI rate; ATTRIBUTION_STARVED_SHARE, 0.475, so a 30 fps scene at
+// 60 Hz, or 25 at 50 Hz, is not flagged), as attributeSecond judges a second. Speed and pictures per VI cannot see it. A CPU-decoded
 // movie (few copies, quiet GPU thread) is not flagged.
 export function renderStarvedBrief(s) {
   const r = s?.renderedPerGuestSec, p = s?.presentsPerGuestSec, g = s?.gpuBusyShare;
-  return Number.isFinite(r) && p > 0 && g >= ATTRIBUTION_CONTENT_BUSY && r < ATTRIBUTION_STARVED_SHARE * 0.95 * p ? ` RENDER-STARVED (${r} rendered for ${p} presented per guest s, GPU thread ${Math.round(g * 100)} % busy)` : "";
+  return Number.isFinite(r) && p > 0 && g >= ATTRIBUTION_CONTENT_BUSY && r < ATTRIBUTION_STARVED_SHARE * p ? ` RENDER-STARVED (${r} rendered for ${p} presented per guest s, GPU thread ${Math.round(g * 100)} % busy)` : "";
 }
 const audioQueueBrief = (q) => (!q || q.unavailable ? "" : `, audio skips ${q.overflowSkips ?? "–"} fills ${q.underrunFills ?? "–"}${q.phaseLock ? `, vilock ${q.phaseLock.on ? "on" : "off"}${q.phaseLock.why ? ` (${q.phaseLock.why})` : ""} ppm ${q.phaseLock.ppm ?? "–"} locks ${q.phaseLock.locks ?? "–"} lost ${q.phaseLock.lost ?? "–"}` : ""}`);
 

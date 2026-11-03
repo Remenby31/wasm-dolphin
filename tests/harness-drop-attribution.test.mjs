@@ -59,6 +59,8 @@ test("render-starved: VI at 60, 7 frames rendered at full speed with the GPU thr
   assert.equal(movie.shownCounted, 30);
   // slow guest: the emulation causes, never render-starved
   assert.equal(attributeSecond(second(0, { speed: 80, produced: 7, shown: 54, presents: 60, occupancy: { cpu: 0.9, gpu: 0.9, replay: null }, causes: { jit: 100 } }), { cadence: 60 }).parts["render-starved"], undefined);
+  // a 30 fps scene at 59.94 VIs, a frame short or so: game:gpu, never flipping to render-starved (0.475)
+  for (const produced of [29, 30, 31]) assert.deepEqual(Object.keys(attributeSecond(second(0, { produced, shown: produced, presents: 60, occupancy: { cpu: 0.3, gpu: 0.95, replay: 0.3 } }), { cadence: 59.94 }).parts), ["game:gpu"], String(produced));
   // half or more rendered with the GPU saturated: game:gpu as before
   assert.deepEqual(attributeSecond(second(0, { produced: 45, shown: 45, presents: 60, occupancy: { cpu: 0.3, gpu: 0.95, replay: 0.3 } }), { cadence: 60 }).parts, { "game:gpu": 15 });
 });

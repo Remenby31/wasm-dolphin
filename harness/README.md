@@ -461,17 +461,18 @@ is labelled beat (slowdowns from 0.1 % to 7 % included).
 
 Render-starved (`render-starved`): the guest at full speed, the GPU thread
 saturated, and the core rendering (XFB copies) under half the scene's
-cadence. The VI and the presents keep their rate and the presenter shows
+cadence (0.475). The VI and the presents keep their rate and the presenter shows
 the old picture on every VI, so speed, `lostMs` and the pictures counted per
 VI see nothing. Measured on the software renderer (Firefox without WebGPU,
 2026-11-03): 7 copies a second at 100 % guest speed, "0 ms lost". In such a
 second "shown" is capped at produced + 2. The run line prints `rendered
-N/guest s` and RENDER-STARVED when the rendered rate is under half the
+N/guest s` and RENDER-STARVED when the rendered rate is under 0.475 of the
 presents' with the GPU thread ≥ 70 % busy over the run. A CPU-decoded movie
 (few copies, quiet GPU thread) is not starved. parcours, without the
 worker's produced counter (off WebGPU), takes the sampler's XFB copies a
 second instead (`producedFrom: "xfb"`). A negative counter difference (the
-counters reset at a state load) is unmeasured, never a loss.
+counters reset at a state load) is unmeasured, never a loss, and left out
+of `renderedPerGuestSec` and `gameFps`.
 
 No-present causes (`harness/lib/no-present.mjs`, `--attribute` writes
 `no-present.json`; record with `--pipeline` for the stages): every

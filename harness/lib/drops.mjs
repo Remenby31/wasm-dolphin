@@ -574,8 +574,14 @@ export function dropSummary({ windows, presents = [], vi = [], tps = null, rows 
   // afterwards, unlike lostMs): what a 50 ms stall on a load shows as.
   const dropLost = windows.reduce((a, w) => a + ((w.speed != null && w.speed < DROP_SPEED) || w.maxPresentGap > HITCH_MS[0] ? Math.max(0, w.lostMs ?? 0) : 0), 0);
   const host = windows.length * STEP_MS;
-  // a negative window (the counters reset) counts 0, never against the rest
-  const xfb = windows.reduce((a, w) => a + Math.max(0, w.xfb ?? 0), 0);
+  // a negative window (the counters reset at a state load) is unmeasured:
+  // left out of the copies and of the time they are divided by
+  const xfbOk = windows.filter((w) => !(w.xfb < 0));
+  const xfb = xfbOk.reduce((a, w) => a + (w.xfb ?? 0), 0);
+  const xfbHost = xfbOk.length * STEP_MS;
+  // guest seconds of the measured windows: the run's guest time less the
+  // left-out windows' (each its STEP_MS at its own speed)
+  const xfbGuestSec = guestSec == null ? null : guestSec - windows.filter((w) => w.xfb < 0).reduce((a, w) => a + (STEP_MS * (Number.isFinite(w.speed) ? w.speed : 100)) / 100 / 1000, 0);
   return {
     hostSec: round(host / 1000, 1),
     // net host ms not matched by guest time: a catch-up repays only a loss
@@ -600,10 +606,10 @@ export function dropSummary({ windows, presents = [], vi = [], tps = null, rows 
     hitches50: pg.filter((g) => g > HITCH_MS[0]).length, hitches100: pg.filter((g) => g > HITCH_MS[1]).length,
     viGaps50: vg.filter((g) => g > HITCH_MS[0]).length, viGaps100: vg.filter((g) => g > HITCH_MS[1]).length,
     presentP99: round(percentile(pg, 99), 1), presentMax: pg.length ? round(Math.max(...pg), 1) : null,
-    gameFps: host > 0 ? round((xfb * 1000) / host, 1) : null,
+    gameFps: xfbHost > 0 ? round((xfb * 1000) / xfbHost, 1) : null,
     // frames the core rendered (XFB copies) per guest second: what the
     // player can see at most, whatever the VI and present rates say
-    renderedPerGuestSec: guestSec > 0 && windows.some((w) => w.xfb != null) ? round(xfb / guestSec, 2) : null,
+    renderedPerGuestSec: xfbGuestSec > 0 && windows.some((w) => w.xfb != null) ? round(xfb / xfbGuestSec, 2) : null,
     // the GPU thread's working share over the run (0113 gpuWorkUs), null
     // when a window did not measure it
     gpuBusyShare: host > 0 && windows.length && windows.every((w) => Number.isFinite(w.gpuWorkMs)) ? round(windows.reduce((a, w) => a + Math.max(0, w.gpuWorkMs), 0) / host, 3) : null,
@@ -851,7 +857,9 @@ export const ATTRIBUTION_HITCH_MS = 25;
 // keeps its rate and the presenter shows the old picture on every VI (the
 // software renderer, 2026-11-03: 7 XFB copies a second against 60 VIs at
 // 100 % guest speed), so neither speed nor the pictures counted per VI see it.
-export const ATTRIBUTION_STARVED_SHARE = 0.5;
+// 0.475 (half less 5 %): a 30 fps scene at 59.94 VIs never flips between
+// game:gpu and render-starved on one frame; renderStarvedBrief uses it too.
+export const ATTRIBUTION_STARVED_SHARE = 0.475;
 // A second may show at most this many frames more than it produced (a frame
 // produced in the second before, the counters' edges); past it, "shown"
 // counts old pictures presented again (distinct VIs, the same image).
