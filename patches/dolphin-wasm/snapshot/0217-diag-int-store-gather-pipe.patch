@@ -1,0 +1,145 @@
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -1618,14 +1618,19 @@ extern "C" int DolphinWeb_CachedInterpreterFctiwz(int state_ptr, u32 inst_hex, u
+   return DolphinWeb_CachedInterpreterCheckProgramOrDsi(ppc_state, current_pc, downcount) ? 1 : 0;
+ }
+ 
+-extern "C" void DolphinWeb_CachedInterpreterFastCheckGatherPipe(int state_ptr, u32 unused_a,
++extern "C" void DolphinWeb_CachedInterpreterFastCheckGatherPipe(int state_ptr, u32 full_check,
+                                                                  u32 unused_b)
+ {
+   (void)state_ptr;
+-  (void)unused_a;
+   (void)unused_b;
+   ++s_wasm_gpfifo_fastcheck_count;
+-  Core::System::GetInstance().GetGPFifo().FastCheckGatherPipe();
++  // DIAG 0217 prototype: an integer store's inline gather pipe write asks for
++  // the check GPFifo::Write8/16/32 does after every write (CheckGatherPipe:
++  // the burst, then CompileExceptionCheck(FIFOWrite)), as the MMU path did.
++  if (full_check == 1)
++    Core::System::GetInstance().GetGPFifo().CheckGatherPipe();
++  else
++    Core::System::GetInstance().GetGPFifo().FastCheckGatherPipe();
+ }
+ 
+ u16 ReadRamU16BE(const u8* ram, u32 offset)
+@@ -4000,6 +4005,73 @@ void EmitReadS16MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout
+   EmitSignExtendI16(body);
+ }
+ 
++// DIAG 0217 prototype: the integer store's path out of RAM. A store to the
++// gather pipe page (MSR.DR on, the EA masked as the float path masks it,
++// within its 4 KiB page) is written inline as GPFifo::Write8/16/32 does
++// (FastWriteN: big-endian at gather_pipe_ptr, then the pointer advances; then
++// CheckGatherPipe when 32 bytes or more wait), every other store calls the
++// MMU helper as before. Not exact: the BAT is not looked at (sizing only).
++void EmitIntStoreOutOfRam(std::vector<u8>& body, const WasmStateLayout& layout, u32 size,
++                          u32 import_index)
++{
++  EmitStateLoadU32(body, layout.msr_offset);
++  EmitI32Const(body, 1u << 4);  // MSR.DR
++  body.push_back(0x71);
++  EmitI32Const(body, 0);
++  body.push_back(0x47);  // ne
++  EmitLocalGet(body, 1);
++  EmitI32Const(body, 0x0ffff000);
++  body.push_back(0x71);
++  EmitI32Const(body, GPFifo::GATHER_PIPE_PHYSICAL_ADDRESS);
++  body.push_back(0x46);  // eq
++  body.push_back(0x71);
++  EmitLocalGet(body, 1);
++  EmitI32Const(body, 0xfff);
++  body.push_back(0x71);
++  EmitI32Const(body, static_cast<s32>(0x1000 - size));
++  body.push_back(0x4d);  // le_u: no page crossing
++  body.push_back(0x71);
++  HintNextIf(body, true);
++  body.push_back(0x04);
++  body.push_back(0x40);
++  if (size == 4)
++    EmitBswap32FromLocal(body, 2);
++  else if (size == 2)
++    EmitBswap16FromLocal(body, 2);
++  else
++    EmitLocalGet(body, 2);
++  EmitLocalSet(body, 3);
++  EmitStateLoadU32(body, layout.gather_pipe_ptr_offset);
++  EmitLocalGet(body, 3);
++  body.push_back(size == 4 ? 0x36 : size == 2 ? 0x3b : 0x3a);
++  body.push_back(0x00);
++  EmitU32Leb(body, 0);
++  EmitStateStoreU32Prefix(body);
++  EmitStateLoadU32(body, layout.gather_pipe_ptr_offset);
++  EmitI32Const(body, static_cast<s32>(size));
++  body.push_back(0x6a);
++  EmitStateStoreU32Suffix(body, layout.gather_pipe_ptr_offset);
++  EmitStateLoadU32(body, layout.gather_pipe_ptr_offset);
++  EmitStateLoadU32(body, layout.gather_pipe_base_ptr_offset);
++  body.push_back(0x6b);
++  EmitI32Const(body, GPFifo::GATHER_PIPE_SIZE);
++  body.push_back(0x4f);  // ge_u
++  HintNextIf(body, false);
++  body.push_back(0x04);
++  body.push_back(0x40);
++  EmitLocalGet(body, 0);
++  EmitI32Const(body, 1);
++  EmitI32Const(body, 0);
++  EmitCallImport(body, WASM_IMPORT_FASTCHECK_GPFIFO_INDEX);
++  body.push_back(0x0b);
++  body.push_back(0x05);
++  EmitLocalGet(body, 0);
++  EmitLocalGet(body, 1);
++  EmitLocalGet(body, 2);
++  EmitCallImport(body, import_index);
++  body.push_back(0x0b);
++}
++
+ void EmitWriteU32MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout)
+ {
+   EmitLocalGet(body, 1);
+@@ -4021,10 +4093,7 @@ void EmitWriteU32MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layou
+   body.push_back(0x00);
+   EmitU32Leb(body, 0);
+   body.push_back(0x05);
+-  EmitLocalGet(body, 0);
+-  EmitLocalGet(body, 1);
+-  EmitLocalGet(body, 2);
+-  EmitCallImport(body, 1);
++  EmitIntStoreOutOfRam(body, layout, 4, 1);
+   body.push_back(0x0b);
+ }
+ 
+@@ -4047,10 +4116,7 @@ void EmitWriteU8MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout
+   body.push_back(0x00);
+   EmitU32Leb(body, 0);
+   body.push_back(0x05);
+-  EmitLocalGet(body, 0);
+-  EmitLocalGet(body, 1);
+-  EmitLocalGet(body, 2);
+-  EmitCallImport(body, 3);
++  EmitIntStoreOutOfRam(body, layout, 1, 3);
+   body.push_back(0x0b);
+ }
+ 
+@@ -4075,10 +4141,7 @@ void EmitWriteU16MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layou
+   body.push_back(0x00);
+   EmitU32Leb(body, 0);
+   body.push_back(0x05);
+-  EmitLocalGet(body, 0);
+-  EmitLocalGet(body, 1);
+-  EmitLocalGet(body, 2);
+-  EmitCallImport(body, 5);
++  EmitIntStoreOutOfRam(body, layout, 2, 5);
+   body.push_back(0x0b);
+ }
+ 
+@@ -16242,7 +16305,7 @@ namespace
+ // psq_st float pairs in v128. 36 (0157): regions run with MSR.FP clear,
+ // blocks with FPU ops checked at the head. 37 (0196): the four per-game
+ // call imports are gone (a bl to those addresses is an ordinary call).
+-constexpr u32 AOT_COMPILER_VERSION = 37;
++constexpr u32 AOT_COMPILER_VERSION = 38;
+ constexpr u32 AOT_MAX_FRAGMENT_BYTES = 1u << 20;
+ thread_local std::vector<u32> t_aot_out;
+ u8* s_aot_ram = nullptr;
