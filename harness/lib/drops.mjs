@@ -544,6 +544,16 @@ export function audioLatencyOf(page, windows) {
   return v.length ? { audioLatencyMs: v[v.length >> 1], audioLatencyP95Ms: v[Math.min(v.length - 1, Math.floor(v.length * 0.95))], audioMixerMs: m.length ? m[m.length >> 1] : null } : none;
 }
 
+// Net host ms not matched by guest time over consecutive windows: each
+// window's lostMs (negative while the core runs ahead, catching up) added to
+// a backlog that never goes below 0, so a catch-up repays only a loss counted
+// earlier in the span. A plain sum went negative when the span opened on the
+// catch-up of a stall before it: the first window after a state load ran at
+// 151 % repaying the load's own pause (lost -49 ms on a visit, 2026-11-03).
+export function netLostMs(windows) {
+  return windows.reduce((backlog, w) => Math.max(0, backlog + (w.lostMs ?? 0)), 0);
+}
+
 export function dropSummary({ windows, presents = [], vi = [], tps = null, rows = [], displayed = null, page = null }) {
   const guestSec = tps > 0 && vi.length > 1 ? (vi.at(-1).ticks - vi[0].ticks) / tps : null;
   // The worker alive over [t0, t1]: no sampler tick late by STALL_MIN_MS or
@@ -554,7 +564,7 @@ export function dropSummary({ windows, presents = [], vi = [], tps = null, rows 
   const sl = slidingSpeed(windows);
   const below = (x) => (sl.length ? round((100 * sl.filter((s) => s.speed < x).length) / sl.length, 2) : null);
   const pg = gapsOf(presents), vg = gapsOf(vi);
-  const lost = windows.reduce((a, w) => a + (w.lostMs ?? 0), 0);
+  const lost = netLostMs(windows);
   // Time lost inside drops only (never offset by the throttle catching up
   // afterwards, unlike lostMs): what a 50 ms stall on a load shows as.
   const dropLost = windows.reduce((a, w) => a + ((w.speed != null && w.speed < DROP_SPEED) || w.maxPresentGap > HITCH_MS[0] ? Math.max(0, w.lostMs ?? 0) : 0), 0);
@@ -562,7 +572,8 @@ export function dropSummary({ windows, presents = [], vi = [], tps = null, rows 
   const xfb = windows.reduce((a, w) => a + (w.xfb ?? 0), 0);
   return {
     hostSec: round(host / 1000, 1),
-    // net host ms not matched by guest time (catch-up counted)
+    // net host ms not matched by guest time: a catch-up repays only a loss
+    // counted earlier in the span (netLostMs), never below 0
     lostMs: round(lost, 0), dropLostMs: round(dropLost, 0),
     // the larger of the two readings: VI intervals, sampler rows
     stallMs: round(Math.max(stallMsOf(vi, tps) ?? 0, stallMsOfRows(rows, tps) ?? 0), 0),

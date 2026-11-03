@@ -443,3 +443,18 @@ test("drop-meter: regionsDoneBeforeLoad, the region count flat over the 5 s afte
   assert.equal(regionsDoneBeforeLoadOf({}, rows(143, 143)), null, "no state");
   assert.equal(regionsDoneBeforeLoadOf(load, []), null, "no region counts");
 });
+
+test("lostMs: a catch-up repays only a loss counted earlier in the span, never below 0 (the -49 ms visit)", async () => {
+  const { netLostMs } = await import("../harness/lib/drops.mjs");
+  // the visit's first window after a state load ran at 151.5 % (repaying the
+  // load's own pause, before the span), then small ups and downs: a plain sum
+  // gave -49 ms
+  const lost = [-51.5, 1, 1.5, -0.5, 0.5, -0.5, 0.5];
+  const windows = lost.map((lostMs) => ({ lostMs }));
+  assert.ok(Math.abs(lost.reduce((a, x) => a + x, 0) + 49) < 1e-9, "the plain sum of this visit");
+  assert.equal(netLostMs(windows), 2.5);
+  // a stall then its catch-up still nets to 0; a catch-up larger than the stall stops at 0
+  assert.equal(netLostMs([{ lostMs: 200 }, { lostMs: -150 }, { lostMs: -50 }]), 0);
+  assert.equal(netLostMs([{ lostMs: 30 }, { lostMs: -80 }, { lostMs: 10 }]), 10);
+  assert.equal(netLostMs([{ lostMs: null }, { lostMs: 5 }]), 5);
+});
