@@ -574,7 +574,14 @@ export function dropSummary({ windows, presents = [], vi = [], tps = null, rows 
   // afterwards, unlike lostMs): what a 50 ms stall on a load shows as.
   const dropLost = windows.reduce((a, w) => a + ((w.speed != null && w.speed < DROP_SPEED) || w.maxPresentGap > HITCH_MS[0] ? Math.max(0, w.lostMs ?? 0) : 0), 0);
   const host = windows.length * STEP_MS;
-  const xfb = windows.reduce((a, w) => a + (w.xfb ?? 0), 0);
+  // a negative window (the counters reset at a state load) is unmeasured:
+  // left out of the copies and of the time they are divided by
+  const xfbOk = windows.filter((w) => !(w.xfb < 0));
+  const xfb = xfbOk.reduce((a, w) => a + (w.xfb ?? 0), 0);
+  const xfbHost = xfbOk.length * STEP_MS;
+  // guest seconds of the measured windows: the run's guest time less the
+  // left-out windows' (each its STEP_MS at its own speed)
+  const xfbGuestSec = guestSec == null ? null : guestSec - windows.filter((w) => w.xfb < 0).reduce((a, w) => a + (STEP_MS * (Number.isFinite(w.speed) ? w.speed : 100)) / 100 / 1000, 0);
   return {
     hostSec: round(host / 1000, 1),
     // net host ms not matched by guest time: a catch-up repays only a loss
@@ -599,7 +606,13 @@ export function dropSummary({ windows, presents = [], vi = [], tps = null, rows 
     hitches50: pg.filter((g) => g > HITCH_MS[0]).length, hitches100: pg.filter((g) => g > HITCH_MS[1]).length,
     viGaps50: vg.filter((g) => g > HITCH_MS[0]).length, viGaps100: vg.filter((g) => g > HITCH_MS[1]).length,
     presentP99: round(percentile(pg, 99), 1), presentMax: pg.length ? round(Math.max(...pg), 1) : null,
-    gameFps: host > 0 ? round((xfb * 1000) / host, 1) : null,
+    gameFps: xfbHost > 0 ? round((xfb * 1000) / xfbHost, 1) : null,
+    // frames the core rendered (XFB copies) per guest second: what the
+    // player can see at most, whatever the VI and present rates say
+    renderedPerGuestSec: xfbGuestSec > 0 && windows.some((w) => w.xfb != null) ? round(xfb / xfbGuestSec, 2) : null,
+    // the GPU thread's working share over the run (0113 gpuWorkUs), null
+    // when a window did not measure it
+    gpuBusyShare: host > 0 && windows.length && windows.every((w) => Number.isFinite(w.gpuWorkMs)) ? round(windows.reduce((a, w) => a + Math.max(0, w.gpuWorkMs), 0) / host, 3) : null,
     underruns: windows.reduce((a, w) => a + (w.underruns ?? 0), 0),
     // audio queued after the mixer (page sampler; null before the audio runs)
     ...audioLatencyOf(page, windows)
@@ -791,12 +804,19 @@ export function trendTable(lines) {
 // cadence: the scene's frames per second (a 30 fps menu, a 60 fps race in
 // one run), else opts.cadence; a second never spans two cadences.
 // Per second (ATTRIBUTION_SECOND_MS) the deficit is cadence − shown, split
-// into parts that add up to it exactly:
+// into parts that add up to it exactly. In a render-starved second shown
+// counts at most produced + ATTRIBUTION_SHOWN_EDGE (more is an old picture
+// presented again); unknown, shown is taken as produced and only the
+// production gap is judged:
 //   production gap = min(cadence − produced, deficit):
 //     emulation:<cause>  the guest ran under ATTRIBUTION_FULL_SPEED %: shared
 //                        in proportion to the counted causes' ms over the
 //                        time lost (all of it when they cover it), the rest
 //                        emulation:unexplained
+//     render-starved     full speed, the GPU thread saturated and produced
+//                        under ATTRIBUTION_STARVED_SHARE of the cadence: the
+//                        core renders a fraction of the frames while the VI
+//                        keeps its rate (shown capped, see above)
 //     game:<thread>      full speed, a thread saturated (≥ ATTRIBUTION_BUSY)
 //     content            full speed, cpu, gpu and replay ALL known and under
 //                        ATTRIBUTION_CONTENT_BUSY (the margin the site needs
@@ -832,6 +852,18 @@ export const ATTRIBUTION_CONTENT_BUSY = 0.7;
 export const ATTRIBUTION_CONTENT_SHARE = 0.95;
 export const ATTRIBUTION_FLUIDITY = 95;
 export const ATTRIBUTION_HITCH_MS = 25;
+// Render-starved: at full speed, the core rendered (XFB copies) under this
+// share of the scene's cadence and the content rule does not hold. The VI
+// keeps its rate and the presenter shows the old picture on every VI (the
+// software renderer, 2026-11-03: 7 XFB copies a second against 60 VIs at
+// 100 % guest speed), so neither speed nor the pictures counted per VI see it.
+// 0.475 (half less 5 %): a 30 fps scene at 59.94 VIs never flips between
+// game:gpu and render-starved on one frame; renderStarvedBrief uses it too.
+export const ATTRIBUTION_STARVED_SHARE = 0.475;
+// A second may show at most this many frames more than it produced (a frame
+// produced in the second before, the counters' edges); past it, "shown"
+// counts old pictures presented again (distinct VIs, the same image).
+export const ATTRIBUTION_SHOWN_EDGE = 2;
 export const ATTRIBUTION_EMULATION_CAUSES = ["jit", "regions", "disc", "slot", "efb", "gpuWait", "pipelines", "lateWake", "uncountedBusy"];
 const OCCUPANCY_THREADS = ["cpu", "gpu", "replay"];
 
@@ -868,7 +900,8 @@ export function contentRule({ speed, produced, expected, occupancy = {} }, { ful
 
 // One second's split (frames). null when it lacks produced or shown.
 export function attributeSecond(ws, { cadence, viHz = null, fullSpeed = ATTRIBUTION_FULL_SPEED, busy = ATTRIBUTION_BUSY, contentBusy = ATTRIBUTION_CONTENT_BUSY, contentShare = ATTRIBUTION_CONTENT_SHARE, stallMs = STALL_MIN_MS } = {}) {
-  if (!allKnown(ws, (w) => w.produced) || !allKnown(ws, (w) => w.shown)) return null;
+  if (!allKnown(ws, (w) => w.produced)) return null;
+  const shownKnown = allKnown(ws, (w) => w.shown);
   const hostMs = sumOf(ws, (w) => w.ms);
   // a cadence never exceeds the run's standard VI rate (viHz: 50 or 59.94):
   // over it by more than 2 %, it is that rate. Never the second's own VI
@@ -876,13 +909,24 @@ export function attributeSecond(ws, { cadence, viHz = null, fullSpeed = ATTRIBUT
   // frames owed must not fall with it.
   const cadenceOf = (w) => { const c = w.cadence ?? cadence; return viHz > 0 && c > 1.02 * viHz ? viHz : c; };
   const expected = sumOf(ws, (w) => (cadenceOf(w) * w.ms) / 1000);
-  const produced = sumOf(ws, (w) => w.produced), shown = sumOf(ws, (w) => w.shown);
+  const produced = sumOf(ws, (w) => w.produced);
   const presents = allKnown(ws, (w) => w.presents) ? sumOf(ws, (w) => w.presents) : null;
   const speed = allKnown(ws, (w) => w.speed) ? sumOf(ws, (w) => w.speed * w.ms) / hostMs : null;
   // a thread's occupancy: known only when every window measured it
   const occ = {};
   for (const k of OCCUPANCY_THREADS) occ[k] = allKnown(ws, (w) => w.occupancy?.[k]) ? Math.max(...ws.map((w) => w.occupancy[k])) : null;
   const saturated = OCCUPANCY_THREADS.filter((k) => occ[k] != null && occ[k] >= busy);
+  // render-starved: full speed, the GPU thread saturated, and the core
+  // rendered (produced) under ATTRIBUTION_STARVED_SHARE of the cadence. The
+  // presenter then shows the old picture on each VI: "shown" (distinct VIs)
+  // counts those again, so it is capped at produced + the edge. Only then:
+  // a CPU-decoded movie writes the XFB without copies (produced ~0) with a
+  // quiet GPU thread, and its pictures are new.
+  const starved = speed != null && speed >= fullSpeed && occ.gpu != null && occ.gpu >= busy && produced < ATTRIBUTION_STARVED_SHARE * expected;
+  // shown unknown (parcours off WebGPU has no new-frames counter): taken as
+  // produced, only the production gap is judged
+  const shownRaw = shownKnown ? sumOf(ws, (w) => w.shown) : null;
+  const shown = !shownKnown ? produced : starved ? Math.min(shownRaw, produced + (ATTRIBUTION_SHOWN_EDGE * hostMs) / 1000) : shownRaw;
   const parts = {};
   const add = (k, f) => { if (f > 1e-9) parts[k] = (parts[k] ?? 0) + f; };
   const deficit = Math.max(0, expected - shown);
@@ -906,7 +950,8 @@ export function attributeSecond(ws, { cadence, viHz = null, fullSpeed = ATTRIBUT
         left -= f;
       }
       add("emulation:unexplained", left);
-    } else if (saturated.length) add(`game:${saturated.join("+")}`, productionGap);
+    } else if (starved) add("render-starved", productionGap);
+    else if (saturated.length) add(`game:${saturated.join("+")}`, productionGap);
     else if (OCCUPANCY_THREADS.some((k) => occ[k] == null)) add("game:unknown", productionGap);
     else if (contentRule({ speed, produced, expected, occupancy: occ }, { fullSpeed, contentBusy, contentShare })) add("content", productionGap);
     else if (OCCUPANCY_THREADS.some((k) => occ[k] >= contentBusy)) add("marginal", productionGap);
@@ -940,7 +985,7 @@ export function attributeSecond(ws, { cadence, viHz = null, fullSpeed = ATTRIBUT
   if (sumOf(ws, (w) => w.workerLagMs) >= stallMs && counted < stallMs) markers.push("gc-probable");
   const lost = Object.entries(parts).filter(([k]) => !NOT_LOST.has(k)).reduce((a, [, f]) => a + f, 0);
   return {
-    t: ws[0].t, phase: ws[0].phase ?? null, hostMs, expected: round(expected, 1), produced, shown, presents,
+    t: ws[0].t, phase: ws[0].phase ?? null, hostMs, expected: round(expected, 1), produced, shown: shownRaw == null ? null : round(shownRaw, 2), shownCounted: round(shown, 2), presents,
     speed: speed == null ? null : round(speed, 1), occupancy: occ,
     fluidity: expected > 0 ? round((100 * shown) / expected, 1) : null, deficit: round(deficit, 2),
     lostFrames: round(lost, 2), parts: Object.fromEntries(Object.entries(parts).map(([k, f]) => [k, round(f, 2)])), markers
@@ -1334,9 +1379,11 @@ export function dropWindowsForAttribution(windows, { presents = [], vi = [], dis
     const t1 = w.t0 + STEP_MS;
     return {
       t: w.t0, ms: STEP_MS, phase: w.label ?? null, speed: w.speed, vis: countIn(vi, w.t0, t1),
-      produced: w.xfb, shown: countIn(distinct, w.t0, t1), presents: w.presents,
+      // a negative counter difference (the 0113 counters reset, e.g. at a
+      // state load: -261 copies in one window) is no measure: unknown
+      produced: Number.isFinite(w.xfb) && w.xfb >= 0 ? w.xfb : null, shown: countIn(distinct, w.t0, t1), presents: w.presents,
       gaps: gapsIn(w.t0, t1), beatFrames: countIn(beat.proven.map((t) => ({ t })), w.t0, t1),
-      occupancy: { cpu: w.sleptMs == null ? null : round(Math.max(0, 1 - w.sleptMs / STEP_MS), 3), gpu: w.gpuWorkMs == null ? null : Math.min(1, w.gpuWorkMs / STEP_MS), replay: null },
+      occupancy: { cpu: w.sleptMs == null ? null : round(Math.max(0, 1 - w.sleptMs / STEP_MS), 3), gpu: Number.isFinite(w.gpuWorkMs) && w.gpuWorkMs >= 0 ? Math.min(1, w.gpuWorkMs / STEP_MS) : null, replay: null },
       causes: { ...w.causes, slot: w.causes.slot ?? null },
       mainLagMs: w.causes.mainPause ?? null, workerLagMs: w.causes.workerPause ?? null
     };

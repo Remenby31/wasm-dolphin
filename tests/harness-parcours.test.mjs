@@ -591,3 +591,25 @@ test("readNoise refuses an A/A analysed under another analysis version (its nois
   assert.match(probe, /analysisVersion: ANALYSIS_VERSION, reanalyzedAt/, "--analyze writes the current version");
   assert.match(probe, /probeVersion: PROBE_VERSION, analysisVersion: ANALYSIS_VERSION, at:/);
 });
+
+test("deriveSeconds off WebGPU: no produced counter, the sampler's XFB copies stand in; 7 copies at 60 VIs is render-starved", async () => {
+  const { attributeDips, parcoursWindowsForAttribution } = await import("../harness/lib/drops.mjs");
+  // the software renderer: the worker has no new-frames counters (newFps,
+  // producedFps, newShown absent), the VIs and presents keep 60 a second,
+  // the core renders 7 frames (XFB copies) with the GPU thread saturated
+  const s = samplesOf([["game", 5]], { busy: 0.9 });
+  let xfb = 0;
+  for (const x of s.slice(1)) {
+    delete x.info.newShown; delete x.info.producedFps;
+    x.info.cpuBusy = 0.4; x.info.replayBusy = 0.2; x.info.gpuBusy = 0.9;
+    xfb += 7; x.counters.xfbCopies = xfb;
+  }
+  const rows = deriveSeconds(s, { tps: TPS });
+  assert.deepEqual(rows.map((r) => r.producedFps), [7, 7, 7, 7, 7]);
+  assert.ok(rows.every((r) => r.producedFrom === "xfb" && r.xfbPerFrame === null && r.newFps === null));
+  // the worker's own counter still wins when it has one
+  assert.equal(deriveSeconds(samplesOf([["game", 2]]), { tps: TPS })[0].producedFrom, "worker");
+  const result = attributeDips(parcoursWindowsForAttribution(rows.map((r) => ({ ...r, cadence: 60 }))), { cadence: 60 });
+  assert.equal(result.dips.length, 5);
+  assert.ok(result.dips.every((d) => Object.keys(d.parts).length === 1 && Math.abs(d.parts["render-starved"] - 53) < 0.5), JSON.stringify(result.dips.map((d) => d.parts)));
+});

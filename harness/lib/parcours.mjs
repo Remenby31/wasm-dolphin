@@ -154,7 +154,11 @@ export function deriveSeconds(samples, { tps = null } = {}) {
     // swings by a post's worth (~45 / ~75 at 60); the count only without it
     const shown = delta(ia.newShown, ib.newShown);
     const newFps = num(ib.newFps) ?? (shown != null ? shown / dt : null);
-    const producedFps = num(ib.producedFps);
+    // the worker's produced rate (0208, WebGPU only); off WebGPU (the
+    // software renderer: none) the sampler's XFB copies a second, so a core
+    // rendering 7 frames a second at full speed is seen (render-starved)
+    const producedFps = num(ib.producedFps) ?? (carried?.xfbPerSec != null ? carried.xfbPerSec : null);
+    const producedFrom = num(ib.producedFps) != null ? "worker" : carried?.xfbPerSec != null ? "xfb" : null;
     const speed = carried?.speed ?? num(ib.speed);
     const draws = delta(ia.draws, ib.draws);
     const made = producedFps != null && producedFps * dt >= 1 ? producedFps * dt : null;
@@ -184,13 +188,15 @@ export function deriveSeconds(samples, { tps = null } = {}) {
     booted ||= (num(ib.newShown) ?? 0) > 0;
     rows.push({
       i: rows.length, t: round((b.t - t0) / 1000, 2), at: b.t, booted,
-      speed: round(speed, 1), newFps: round(newFps, 1), producedFps: round(producedFps, 1),
+      speed: round(speed, 1), newFps: round(newFps, 1), producedFps: round(producedFps, 1), producedFrom,
       cadence: ref, sceneCadence, content, smoothness: newFps == null || !(Number.isFinite(ref) && ref > 0) ? null : round(Math.max(0, Math.min(100, (newFps / ref) * 100)), 1),
       viRate: round(viRate, 1), presents: (b.presents ?? []).length, hitches50, hitches100, maxGapMs: round(maxGapMs, 1),
       // the presenting worker's longest stall in the second (sampler rows)
       workerLagMs: Array.isArray(b.samplerTicks) && b.samplerTicks.length ? Math.max(...b.samplerTicks.map((x) => x[1])) : null,
       discBps: carried?.discBps == null ? null : Math.round(carried.discBps),
-      xfbPerFrame: carried?.xfbPerSec != null && producedFps > 0 ? round(carried.xfbPerSec / producedFps, 2) : null,
+      // copies per frame need the worker's own produced count (off WebGPU
+      // produced IS the copies: 1 by construction, so unknown)
+      xfbPerFrame: producedFrom === "worker" && carried?.xfbPerSec != null && producedFps > 0 ? round(carried.xfbPerSec / producedFps, 2) : null,
       drawsPerFrame: draws != null && made ? round(draws / made, 1) : null,
       outOfOrder: delta(ia.outOfOrder, ib.outOfOrder),
       ...occupancy,

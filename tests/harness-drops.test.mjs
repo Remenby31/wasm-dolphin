@@ -758,3 +758,29 @@ test("drop-meter: a visit from the boot takes its new-frame start at the first t
   assert.equal(newFramesRate({ t: 1000, newShown: null }, { t: 11000, newShown: 600 }), null);
   assert.equal(newFramesRate({ t: 2000, newShown: 30, late: true }, { t: 12000, newShown: 630 }), 60);
 });
+
+test("render-starved in the summary: rendered per guest second and the GPU thread's share; a counter reset counts 0", async () => {
+  const { renderStarvedBrief } = await import("../harness/probes/drop-meter.mjs");
+  // 3 s at 100 %, 60 VIs and presents a second; the core renders 7 frames a
+  // second (XFB copies) with the GPU thread working 870 ms a second
+  const vi = viOf(3000);
+  const rows = rowsAt(3000, (t) => ({ ticks: (t / 1000) * TPS, xfbCopies: Math.floor((t / 1000) * 7), gpuWorkUs: t * 870 }));
+  const w = windowsOf({ vi, presents: presentsOf(vi), rows, tps: TPS });
+  const s = dropSummary({ windows: w, presents: presentsOf(vi), vi, tps: TPS, rows });
+  assert.equal(s.lostMs, 0, "speed sees nothing");
+  assert.ok(Math.abs(s.renderedPerGuestSec - 7) < 0.5, String(s.renderedPerGuestSec));
+  assert.ok(Math.abs(s.gpuBusyShare - 0.87) < 0.02, String(s.gpuBusyShare));
+  assert.match(renderStarvedBrief(s), /RENDER-STARVED/);
+  // the same core rendering 60: not flagged; a quiet GPU thread (a CPU-decoded movie, few copies): not flagged
+  assert.equal(renderStarvedBrief({ ...s, renderedPerGuestSec: 59.8 }), "");
+  assert.equal(renderStarvedBrief({ ...s, gpuBusyShare: 0.2 }), "");
+  assert.equal(renderStarvedBrief({ ...s, renderedPerGuestSec: null }), "");
+  // the counters reset in a window (a state load: the copies go back 261): that window counts 0
+  const reset = rowsAt(3000, (t) => ({ ticks: (t / 1000) * TPS, xfbCopies: t < 1000 ? Math.floor((t / 1000) * 60) + 261 : Math.floor((t / 1000) * 60), gpuWorkUs: t * 300 }));
+  const wr = windowsOf({ vi, presents: presentsOf(vi), rows: reset, tps: TPS });
+  assert.ok(wr.some((x) => x.xfb < 0));
+  const sr = dropSummary({ windows: wr, presents: presentsOf(vi), vi, tps: TPS, rows: reset });
+  // left out, not counted 0: the rate of the measured windows
+  assert.ok(Math.abs(sr.renderedPerGuestSec - 60) < 1, String(sr.renderedPerGuestSec));
+  assert.ok(Math.abs(sr.gameFps - 60) < 1, String(sr.gameFps));
+});
