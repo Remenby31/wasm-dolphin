@@ -427,3 +427,19 @@ test("drop-meter: patch 0212's audio queue and VI phase lock over a visit", asyn
     markers: [{ label: "boot", audioQueue: q(0, 0) }, { label: "race", audioQueue: { overflowSkips: 10 } }] });
   assert.deepEqual(partial.phases, { boot: null, race: null });
 });
+
+test("drop-meter: regionsDoneBeforeLoad, the region count flat over the 5 s after the load", async () => {
+  const { regionsDoneBeforeLoadOf } = await import("../harness/probes/drop-meter.mjs");
+  const load = { stateLoad: { loaded: true }, stateLoadT: 1000 };
+  const rows = (...counts) => counts.map((regionsInstalled, i) => ({ t: 1050 + i * 1000, regionsInstalled }));
+  assert.equal(regionsDoneBeforeLoadOf(load, rows(143, 143, 143)), true);
+  assert.equal(regionsDoneBeforeLoadOf(load, rows(33, 90, 143)), false, "a load at frame ~47: still installing");
+  // regions made later in the visit (a new scene) are outside the window
+  assert.equal(regionsDoneBeforeLoadOf(load, rows(143, 143, 143, 143, 143, 143, 150, 160)), true);
+  // one row in the window: not judged, never true by construction
+  assert.equal(regionsDoneBeforeLoadOf(load, [{ t: 1050, regionsInstalled: 143 }, { t: 9000, regionsInstalled: 150 }]), null);
+  // without the load's instant: the window from the first row
+  assert.equal(regionsDoneBeforeLoadOf({ stateLoad: { loaded: true } }, rows(33, 90)), false);
+  assert.equal(regionsDoneBeforeLoadOf({}, rows(143, 143)), null, "no state");
+  assert.equal(regionsDoneBeforeLoadOf(load, []), null, "no region counts");
+});

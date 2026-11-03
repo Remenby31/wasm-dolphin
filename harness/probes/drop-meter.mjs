@@ -163,6 +163,8 @@ async function playVisit(o, server, profileDir, shotDir, visit) {
       if (wait > 0) await page.waitForTimeout(wait);
       await page.route(STATE_ROUTE, (route) => route.fulfill({ path: o.state, contentType: "application/octet-stream" }));
       raw.stateLoad = await loadHarnessState(page, `${server.base}/`);
+      // the load's host instant (the rows' and markers' clock)
+      raw.stateLoadT = performance.timeOrigin + performance.now();
       if (!raw.stateLoad?.loaded) throw new Error(`savestate not loaded: ${JSON.stringify(raw.stateLoad).slice(0, 200)}`);
       base = (await guestSec(page))?.sec ?? 0;
       raw.stateBaseSec = base;
@@ -383,6 +385,22 @@ export function audioQueueOfVisit(raw) {
   return { overflowSkips: d("overflowSkips"), underrunFills: d("underrunFills"), trimPpm: b.trimPpm ?? null, phaseLock: b.phaseLock ?? null, ...(anyRead ? { phases } : {}) };
 }
 
+// --state: whether the region translation had finished before the load
+// (the player's case: a load after the optimisation; frame ~47 on a first
+// launch loads in the middle of it). The sampler starts after the load, so
+// the region count is read over its first `windowMs` (from the load's host
+// instant, else from the first row): still growing there says the load came
+// before the optimisation ended (false); flat says it had ended (true).
+// Regions made later in the visit (a new scene) fall outside the window.
+// null without a state, or with fewer than 2 rows with counts in the window.
+export function regionsDoneBeforeLoadOf(raw, rowsWithRegions, { windowMs = 5000 } = {}) {
+  if (!raw?.stateLoad || !rowsWithRegions?.length) return null;
+  const from = Number.isFinite(raw.stateLoadT) ? raw.stateLoadT : rowsWithRegions[0].t;
+  const inWindow = rowsWithRegions.filter((r) => r.t >= from && r.t <= from + windowMs);
+  if (inWindow.length < 2) return null;
+  return inWindow.at(-1).regionsInstalled === inWindow[0].regionsInstalled;
+}
+
 export function analyzeVisit(raw, { native = null } = {}) {
   // (raw is reassigned below with the markers placed on the VI ring)
   if (raw.error) return { error: raw.error };
@@ -422,6 +440,7 @@ export function analyzeVisit(raw, { native = null } = {}) {
   const finalRegions = withRegions.at(-1)?.regionsInstalled ?? null;
   const allAt = finalRegions == null ? null : withRegions.find((r) => r.regionsInstalled === finalRegions);
   const regionsDone = allAt ? { regions: finalRegions, hostMsFromLaunch: raw.launchT ? Math.round(allAt.t - raw.launchT) : null, guestSec: allAt.ticks != null && raw.tps ? round(allAt.ticks / raw.tps, 2) : null } : null;
+  const regionsDoneBeforeLoad = regionsDoneBeforeLoadOf(raw, withRegions);
   const rss = (raw.rss ?? []).map((x) => x[1]);
   const integrity = integrityOf(raw.integrityStart, raw.integrityEnd, { allow: raw.integrityAllow ?? [], postload: Boolean(raw.integrityPostload) });
   return {
@@ -430,7 +449,8 @@ export function analyzeVisit(raw, { native = null } = {}) {
     displayFilter: displayFilterCost(raw.displayFilter),
     load1: { median: round(median(loadAvg), 2), max: round(Math.max(...loadAvg), 2) },
     regionsDone, rssPeakMB: rss.length ? Math.max(...rss) : null,
-    summary: { ...dropSummary({ windows, presents, vi, tps: raw.tps, rows: rows.filter(span), displayed, page: page.filter(span) }), newFramesPerSec: newFramesRate(raw.newFramesStart, raw.newFramesEnd), loads: loads.length, loadExcessMs: loads.reduce((a, l) => a + l.excessMs, 0), rssPeakMB: rss.length ? Math.max(...rss) : null, regionsDoneMs: regionsDone?.hostMsFromLaunch ?? null },
+    regionsDoneBeforeLoad,
+    summary: { regionsDoneBeforeLoad, ...dropSummary({ windows, presents, vi, tps: raw.tps, rows: rows.filter(span), displayed, page: page.filter(span) }), newFramesPerSec: newFramesRate(raw.newFramesStart, raw.newFramesEnd), loads: loads.length, loadExcessMs: loads.reduce((a, l) => a + l.excessMs, 0), rssPeakMB: rss.length ? Math.max(...rss) : null, regionsDoneMs: regionsDone?.hostMsFromLaunch ?? null },
     phases, loads, worst: worstDrops(events), drops: events.length,
     audioQueue: audioQueueOfVisit(raw),
     attribution: attribution && { viHz: round(viHz, 3), seconds: attribution.seconds, beat: attribution.beat, dips: attribution.dips, hitches: attribution.hitches },
@@ -683,7 +703,7 @@ const audioQueueBrief = (q) => (!q || q.unavailable ? "" : `, audio skips ${q.ov
 function logRun(log, tag, a) {
   if (a.error) return log(`${tag}: ${a.error}`);
   const s = a.summary;
-  log(`${tag}: lost ${s.lostMs} ms, <95 % ${s.pctBelow95} %, <90 % ${s.pctBelow90} %, worst 1 s ${s.worstSecond} %, hitches >50 ${s.hitches50} >100 ${s.hitches100}, p99 ${s.presentP99} ms, new frames ${s.newFramesPerSec ?? "–"}/s, ${s.loads} loads +${s.loadExcessMs} ms, underruns ${s.underruns}, audio ${s.audioLatencyMs ?? "–"} ms (mixer ${s.audioMixerMs ?? "–"}), load1 ${a.load1.median}${audioQueueBrief(a.audioQueue)}${a.overloaded ? " OVERLOADED" : ""}${a.powerDrained ? ` POWER (charge fell or under ${MIN_BATTERY_PERCENT} %)` : ""}${integrityBrief(a.integrity)}`);
+  log(`${tag}: lost ${s.lostMs} ms, <95 % ${s.pctBelow95} %, <90 % ${s.pctBelow90} %, worst 1 s ${s.worstSecond} %, hitches >50 ${s.hitches50} >100 ${s.hitches100}, p99 ${s.presentP99} ms, new frames ${s.newFramesPerSec ?? "–"}/s, ${s.loads} loads +${s.loadExcessMs} ms, underruns ${s.underruns}, audio ${s.audioLatencyMs ?? "–"} ms (mixer ${s.audioMixerMs ?? "–"}), load1 ${a.load1.median}${a.regionsDoneBeforeLoad === false ? ", LOADED BEFORE REGIONS DONE" : a.regionsDoneBeforeLoad ? ", regions done before load" : ""}${audioQueueBrief(a.audioQueue)}${a.overloaded ? " OVERLOADED" : ""}${a.powerDrained ? ` POWER (charge fell or under ${MIN_BATTERY_PERCENT} %)` : ""}${integrityBrief(a.integrity)}`);
   for (const d of a.worst.slice(0, 3)) log(`   drop ${d.label} @${round(d.guestStart, 1)} gs: ${d.durationMs} ms, lost ${d.lostMs} ms, min ${d.minSpeed} %, cause ${d.cause}, ${d.jitBlocks} new blocks (${d.defers} deferred), causes ${JSON.stringify(d.causesMs)}`);
 }
 
