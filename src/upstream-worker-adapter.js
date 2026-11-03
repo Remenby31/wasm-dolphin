@@ -418,6 +418,8 @@ export class UpstreamWorkerAdapter {
     this.cpuThreadBusy = null;
     this.gpuThreadBusy = null;
     this.replayBusy = null;
+    // XFB copies per second of the last window (any renderer); null when unavailable.
+    this.xfbCopiesPerSec = null;
     this.visualChangeFps = 0;
     this.visualFrameHash = 0;
     this.visualSampleSource = "none";
@@ -1540,8 +1542,8 @@ export class UpstreamWorkerAdapter {
     for (const key of ["newFramesPerSec", "newFramesProducedPerSec", "newFramesShown", "framesOutOfOrder", "stalePresents"]) {
       if (key in response) this[key] = Number.isFinite(response[key]) ? response[key] : null;
     }
-    // Same for the occupancy shares (src/occupancy-stats.js): null is a value.
-    for (const key of ["cpuThreadBusy", "gpuThreadBusy", "replayBusy"]) {
+    // Same for the occupancy shares and the XFB copy rate (src/occupancy-stats.js): null is a value.
+    for (const key of ["cpuThreadBusy", "gpuThreadBusy", "replayBusy", "xfbCopiesPerSec"]) {
       if (key in response) this[key] = Number.isFinite(response[key]) ? response[key] : null;
     }
     if (Number.isFinite(response.visualChangeFps)) {

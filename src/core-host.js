@@ -1467,6 +1467,9 @@ export class EmulatorHost {
       cpuThreadBusy: this.mode === "dolphin" ? this.adapter.cpuThreadBusy ?? null : null,
       gpuThreadBusy: this.mode === "dolphin" ? this.adapter.gpuThreadBusy ?? null : null,
       replayBusy: this.mode === "dolphin" ? this.adapter.replayBusy ?? null : null,
+      // EFB-to-XFB copies per second of the same window: the game images
+      // made, with any renderer (the software one has no newFramesPerSec).
+      xfbCopiesPerSec: this.mode === "dolphin" ? this.adapter.xfbCopiesPerSec ?? null : null,
       visualChangeFps:
         this.mode === "dolphin"
           ? this.visibleSamplerEnabled &&

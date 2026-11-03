@@ -770,6 +770,9 @@ let occupancyHeadroomModule = null; // the core the counters were turned on in
 let cpuThreadBusy = null;
 let gpuThreadBusy = null;
 let replayBusy = null;
+// XFB copies per second of the same window (src/occupancy-stats.js): the game
+// images made, with any renderer; null when unavailable.
+let xfbCopiesPerSec = null;
 let visualFrameHash = 0;
 let lastVisualFrameHash = 0;
 let lastOglSwapCount = 0;
@@ -5122,6 +5125,7 @@ function resetPresentationBuffer() {
   cpuThreadBusy = null;
   gpuThreadBusy = null;
   replayBusy = null;
+  xfbCopiesPerSec = null;
   visualFrameHash = 0;
   lastVisualFrameHash = 0;
   lastOglSwapCount = 0;
@@ -5611,6 +5615,9 @@ function framePayload({ forceCausalTelemetry = false } = {}) {
     cpuThreadBusy,
     gpuThreadBusy,
     replayBusy,
+    // XFB copies per second of the last window: the game images made, any
+    // renderer (src/occupancy-stats.js); null when unavailable.
+    xfbCopiesPerSec,
     visualChangeFps,
     visualFrameHash,
     visualSampleSource,
@@ -6742,7 +6749,7 @@ function updatePresentationFps() {
     presentationWindowDropCount = presentationDropsSinceFps;
     visualChangeFps = Math.round((visualChangesSincePresentationFps * 1000) / profileElapsedMs);
     ({ newFramesPerSec, newFramesProducedPerSec } = wgpuNewFrames.window(profileElapsedMs));
-    ({ cpuThreadBusy, gpuThreadBusy, replayBusy } = occupancyMeter.window({ atMs: now, ...readOccupancyCounters() }));
+    ({ cpuThreadBusy, gpuThreadBusy, replayBusy, xfbCopiesPerSec } = occupancyMeter.window({ atMs: now, ...readOccupancyCounters() }));
     if (collectMetrics) {
       frameProfileStats = formatProfileWindow(profileElapsedMs);
       lastStructuredProfileWindow = stageWindowFromProfile(profileWindow, profileElapsedMs);
