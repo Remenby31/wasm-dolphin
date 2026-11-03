@@ -56,14 +56,14 @@
     {
       "path": "src/audio.js",
       "hashMode": "lf-normalized",
-      "size": 21672,
-      "sha256": "49ecdc583463c79056d691f26a0b59536a13c822c32f9c2344eb9b1996ccde6b"
+      "size": 21732,
+      "sha256": "5a03e256985034b5c6b41dfd47d51521f181762d8e4bb8773ed30048c9999220"
     },
     {
       "path": "src/audio-pcm-ring.js",
       "hashMode": "lf-normalized",
-      "size": 11377,
-      "sha256": "64dce6c22112e32c22912e1eca57005868a3b4612e264370495242d9884d50a5"
+      "size": 11481,
+      "sha256": "80e78a2cf5187d859915a3f449f88d5db7e35cf881bf57c9f842bc71c1d3a6db"
     },
     {
       "path": "src/audio-pcm-producer.js",
@@ -164,8 +164,8 @@
     {
       "path": "src/upstream-worker-adapter.js",
       "hashMode": "lf-normalized",
-      "size": 63678,
-      "sha256": "b40ffb99d2effd3127bce3e3947e7a3b8c701787ee2d081bb8b07d9a7af7bd81"
+      "size": 63776,
+      "sha256": "9f6302197808e0fd8585b0a0e6000977b0dd6d94e6e454b5edafd290916ce44b"
     },
     {
       "path": "src/upstream-worker-protocol.js",

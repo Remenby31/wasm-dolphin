@@ -39,10 +39,12 @@ export const AUDIO_PCM_HEADER = Object.freeze({
   RESAMPLE_EXTRA_FRAMES: 20,
 });
 
-// The consumer's rate control is bounded to +0.5 % (+8.6 cents) by default;
-// ?audioratemax lets the producer ask up to the ceiling, +1 % (+17 cents).
-export const AUDIO_PCM_MAX_RATE_PPM = 5000;
-export const AUDIO_PCM_RATE_CEILING_PPM = 10000;
+// The consumer's rate control is bounded to +1 % (+17 cents), the default
+// bound (#432) and the ceiling; ?audioratemax=N asks for less. The single
+// constant every fallback derives from (audio.js, the worker adapter, the
+// producer).
+export const AUDIO_PCM_MAX_RATE_PPM = 10000;
+export const AUDIO_PCM_RATE_CEILING_PPM = AUDIO_PCM_MAX_RATE_PPM;
 
 const HEADER_WORDS = AUDIO_PCM_HEADER_BYTES / Int32Array.BYTES_PER_ELEMENT;
 

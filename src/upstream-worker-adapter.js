@@ -1,3 +1,4 @@
+import { AUDIO_PCM_MAX_RATE_PPM } from "./audio-pcm-ring.js";
 import { DEFAULT_UPSTREAM_CORE_SHA256 } from "./default-core.js";
 import { widenU32Counter } from "./u32-counter.js";
 import { wgpuMappedStagingSlotCountOf, wgpuMappedStagingSlotMibOf } from "./wgpu-replay-diagnostics.js";
@@ -985,7 +986,7 @@ export class UpstreamWorkerAdapter {
     this.post("setAudioMuted", { muted: Boolean(muted) });
   }
 
-  async configureAudioWorklet({ enabled, muted, sab, targetFrames, rateControl = false, rateMaxPpm = 5000 }) {
+  async configureAudioWorklet({ enabled, muted, sab, targetFrames, rateControl = false, rateMaxPpm = AUDIO_PCM_MAX_RATE_PPM }) {
     if (!this.loaded) return { active: false, reason: "core-not-loaded" };
     const response = await this.request("configureAudioWorklet", {
       enabled: Boolean(enabled),
@@ -993,7 +994,7 @@ export class UpstreamWorkerAdapter {
       sab: sab ?? null,
       targetFrames: Number(targetFrames) || 0,
       rateControl: Boolean(rateControl),
-      rateMaxPpm: Number(rateMaxPpm) || 5000,
+      rateMaxPpm: Number(rateMaxPpm) || AUDIO_PCM_MAX_RATE_PPM,
     });
     if (enabled && !response.active) {
       this.onStatus(`AudioWorklet producer unavailable; using legacy audio: ${response.reason || "unknown"}`);

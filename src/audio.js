@@ -1,5 +1,6 @@
 import {
   AUDIO_PCM_HEADER,
+  AUDIO_PCM_MAX_RATE_PPM,
   AUDIO_PCM_STATE_RUNNING,
   audioPcmAvailableFrames,
   createAudioPcmRing,
@@ -14,7 +15,7 @@ import { wasmEngine } from "./wasm-engine.js";
 // (Safari Mac, iPhone; the worklet runs only at 48 kHz there and the iPhone's
 // audio has its own behaviour), SpiderMonkey (Firefox), unknown engines.
 // TODO measure Safari Mac, iPhone and Firefox before turning it on there.
-export const DEFAULT_AUDIO_RATE_MAX_PPM = 10000;
+export const DEFAULT_AUDIO_RATE_MAX_PPM = AUDIO_PCM_MAX_RATE_PPM;
 export function defaultAudioRate(engine) {
   return engine === "v8";
 }
@@ -86,7 +87,7 @@ export class AudioController {
     this.workletRateControl = requestedAudioRate(window.location.search, wasmEngine());
     // ?audioratemax=N (ppm, 1000-10000): the rate control's bound
     const rateMax = Number.parseInt(params.get("audioratemax") || "", 10);
-    this.workletRateMaxPpm = Number.isInteger(rateMax) && rateMax >= 1000 && rateMax <= 10000 ? rateMax : DEFAULT_AUDIO_RATE_MAX_PPM;
+    this.workletRateMaxPpm = Number.isInteger(rateMax) && rateMax >= 1000 && rateMax <= AUDIO_PCM_MAX_RATE_PPM ? rateMax : DEFAULT_AUDIO_RATE_MAX_PPM;
     this.chunkFrames = 1024;
     const pumpParam = Number.parseInt(params.get("audiopump") || "", 10);
     this.pumpIntervalMs =

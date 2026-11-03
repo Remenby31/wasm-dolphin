@@ -22,7 +22,7 @@ With it:
 
 | switch | values | default |
 |---|---|---|
-| `?audiorate` | `1` on, `0` off | on under V8 (Chrome, Edge); off under JavaScriptCore (Safari, iPhone), SpiderMonkey (Firefox) and unknown engines |
+| `?audiorate` | `1` on, `0` off | on under V8 (Chrome, Edge); off under JavaScriptCore (Safari, iPhone, and Chrome, Edge or Firefox on iOS), SpiderMonkey (Firefox) and unknown engines. The engine is detected (`src/wasm-engine.js`); the test override `?wasmengine=v8` turns the rate control on as well |
 | `?audioratemax` | 1000-10000 ppm | 10000 (+1 %, +17 cents) |
 
 Measured on a Mac (drop-meter `--audio-trace`, 2026-11-03, per visit, skips /
