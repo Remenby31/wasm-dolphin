@@ -383,6 +383,16 @@ export function audioQueueOfVisit(raw) {
   return { overflowSkips: d("overflowSkips"), underrunFills: d("underrunFills"), trimPpm: b.trimPpm ?? null, phaseLock: b.phaseLock ?? null, ...(anyRead ? { phases } : {}) };
 }
 
+// --state: whether the region translation had finished before the load
+// (the player's case: a load after the optimisation; frame ~47 on a first
+// launch loads in the middle of it). The sampler starts after the load: its
+// first row already at the final region count says done; a count still
+// growing after it says not. null without a state or region counts.
+export function regionsDoneBeforeLoadOf(raw, rowsWithRegions) {
+  if (!raw?.stateLoad || !rowsWithRegions?.length) return null;
+  return rowsWithRegions[0].regionsInstalled === rowsWithRegions.at(-1).regionsInstalled;
+}
+
 export function analyzeVisit(raw, { native = null } = {}) {
   // (raw is reassigned below with the markers placed on the VI ring)
   if (raw.error) return { error: raw.error };
@@ -422,6 +432,7 @@ export function analyzeVisit(raw, { native = null } = {}) {
   const finalRegions = withRegions.at(-1)?.regionsInstalled ?? null;
   const allAt = finalRegions == null ? null : withRegions.find((r) => r.regionsInstalled === finalRegions);
   const regionsDone = allAt ? { regions: finalRegions, hostMsFromLaunch: raw.launchT ? Math.round(allAt.t - raw.launchT) : null, guestSec: allAt.ticks != null && raw.tps ? round(allAt.ticks / raw.tps, 2) : null } : null;
+  const regionsDoneBeforeLoad = regionsDoneBeforeLoadOf(raw, withRegions);
   const rss = (raw.rss ?? []).map((x) => x[1]);
   const integrity = integrityOf(raw.integrityStart, raw.integrityEnd, { allow: raw.integrityAllow ?? [], postload: Boolean(raw.integrityPostload) });
   return {
@@ -430,7 +441,8 @@ export function analyzeVisit(raw, { native = null } = {}) {
     displayFilter: displayFilterCost(raw.displayFilter),
     load1: { median: round(median(loadAvg), 2), max: round(Math.max(...loadAvg), 2) },
     regionsDone, rssPeakMB: rss.length ? Math.max(...rss) : null,
-    summary: { ...dropSummary({ windows, presents, vi, tps: raw.tps, rows: rows.filter(span), displayed, page: page.filter(span) }), newFramesPerSec: newFramesRate(raw.newFramesStart, raw.newFramesEnd), loads: loads.length, loadExcessMs: loads.reduce((a, l) => a + l.excessMs, 0), rssPeakMB: rss.length ? Math.max(...rss) : null, regionsDoneMs: regionsDone?.hostMsFromLaunch ?? null },
+    regionsDoneBeforeLoad,
+    summary: { regionsDoneBeforeLoad, ...dropSummary({ windows, presents, vi, tps: raw.tps, rows: rows.filter(span), displayed, page: page.filter(span) }), newFramesPerSec: newFramesRate(raw.newFramesStart, raw.newFramesEnd), loads: loads.length, loadExcessMs: loads.reduce((a, l) => a + l.excessMs, 0), rssPeakMB: rss.length ? Math.max(...rss) : null, regionsDoneMs: regionsDone?.hostMsFromLaunch ?? null },
     phases, loads, worst: worstDrops(events), drops: events.length,
     audioQueue: audioQueueOfVisit(raw),
     attribution: attribution && { viHz: round(viHz, 3), seconds: attribution.seconds, beat: attribution.beat, dips: attribution.dips, hitches: attribution.hitches },
@@ -683,7 +695,7 @@ const audioQueueBrief = (q) => (!q || q.unavailable ? "" : `, audio skips ${q.ov
 function logRun(log, tag, a) {
   if (a.error) return log(`${tag}: ${a.error}`);
   const s = a.summary;
-  log(`${tag}: lost ${s.lostMs} ms, <95 % ${s.pctBelow95} %, <90 % ${s.pctBelow90} %, worst 1 s ${s.worstSecond} %, hitches >50 ${s.hitches50} >100 ${s.hitches100}, p99 ${s.presentP99} ms, new frames ${s.newFramesPerSec ?? "–"}/s, ${s.loads} loads +${s.loadExcessMs} ms, underruns ${s.underruns}, audio ${s.audioLatencyMs ?? "–"} ms (mixer ${s.audioMixerMs ?? "–"}), load1 ${a.load1.median}${audioQueueBrief(a.audioQueue)}${a.overloaded ? " OVERLOADED" : ""}${a.powerDrained ? ` POWER (charge fell or under ${MIN_BATTERY_PERCENT} %)` : ""}${integrityBrief(a.integrity)}`);
+  log(`${tag}: lost ${s.lostMs} ms, <95 % ${s.pctBelow95} %, <90 % ${s.pctBelow90} %, worst 1 s ${s.worstSecond} %, hitches >50 ${s.hitches50} >100 ${s.hitches100}, p99 ${s.presentP99} ms, new frames ${s.newFramesPerSec ?? "–"}/s, ${s.loads} loads +${s.loadExcessMs} ms, underruns ${s.underruns}, audio ${s.audioLatencyMs ?? "–"} ms (mixer ${s.audioMixerMs ?? "–"}), load1 ${a.load1.median}${a.regionsDoneBeforeLoad === false ? ", LOADED BEFORE REGIONS DONE" : a.regionsDoneBeforeLoad ? ", regions done before load" : ""}${audioQueueBrief(a.audioQueue)}${a.overloaded ? " OVERLOADED" : ""}${a.powerDrained ? ` POWER (charge fell or under ${MIN_BATTERY_PERCENT} %)` : ""}${integrityBrief(a.integrity)}`);
   for (const d of a.worst.slice(0, 3)) log(`   drop ${d.label} @${round(d.guestStart, 1)} gs: ${d.durationMs} ms, lost ${d.lostMs} ms, min ${d.minSpeed} %, cause ${d.cause}, ${d.jitBlocks} new blocks (${d.defers} deferred), causes ${JSON.stringify(d.causesMs)}`);
 }
 

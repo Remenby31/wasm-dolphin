@@ -427,3 +427,12 @@ test("drop-meter: patch 0212's audio queue and VI phase lock over a visit", asyn
     markers: [{ label: "boot", audioQueue: q(0, 0) }, { label: "race", audioQueue: { overflowSkips: 10 } }] });
   assert.deepEqual(partial.phases, { boot: null, race: null });
 });
+
+test("drop-meter: regionsDoneBeforeLoad, the region count already final at the first row after the load", async () => {
+  const { regionsDoneBeforeLoadOf } = await import("../harness/probes/drop-meter.mjs");
+  const rows = (...counts) => counts.map((regionsInstalled, i) => ({ t: i * 50, regionsInstalled }));
+  assert.equal(regionsDoneBeforeLoadOf({ stateLoad: { loaded: true } }, rows(143, 143, 143)), true);
+  assert.equal(regionsDoneBeforeLoadOf({ stateLoad: { loaded: true } }, rows(33, 90, 143)), false, "a load at frame ~47: still installing");
+  assert.equal(regionsDoneBeforeLoadOf({}, rows(143)), null, "no state");
+  assert.equal(regionsDoneBeforeLoadOf({ stateLoad: { loaded: true } }, []), null, "no region counts");
+});
