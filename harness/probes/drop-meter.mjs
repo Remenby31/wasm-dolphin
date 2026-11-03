@@ -163,6 +163,8 @@ async function playVisit(o, server, profileDir, shotDir, visit) {
       if (wait > 0) await page.waitForTimeout(wait);
       await page.route(STATE_ROUTE, (route) => route.fulfill({ path: o.state, contentType: "application/octet-stream" }));
       raw.stateLoad = await loadHarnessState(page, `${server.base}/`);
+      // the load's host instant (the rows' and markers' clock)
+      raw.stateLoadT = performance.timeOrigin + performance.now();
       if (!raw.stateLoad?.loaded) throw new Error(`savestate not loaded: ${JSON.stringify(raw.stateLoad).slice(0, 200)}`);
       base = (await guestSec(page))?.sec ?? 0;
       raw.stateBaseSec = base;
@@ -385,12 +387,18 @@ export function audioQueueOfVisit(raw) {
 
 // --state: whether the region translation had finished before the load
 // (the player's case: a load after the optimisation; frame ~47 on a first
-// launch loads in the middle of it). The sampler starts after the load: its
-// first row already at the final region count says done; a count still
-// growing after it says not. null without a state or region counts.
-export function regionsDoneBeforeLoadOf(raw, rowsWithRegions) {
+// launch loads in the middle of it). The sampler starts after the load, so
+// the region count is read over its first `windowMs` (from the load's host
+// instant, else from the first row): still growing there says the load came
+// before the optimisation ended (false); flat says it had ended (true).
+// Regions made later in the visit (a new scene) fall outside the window.
+// null without a state, or with fewer than 2 rows with counts in the window.
+export function regionsDoneBeforeLoadOf(raw, rowsWithRegions, { windowMs = 5000 } = {}) {
   if (!raw?.stateLoad || !rowsWithRegions?.length) return null;
-  return rowsWithRegions[0].regionsInstalled === rowsWithRegions.at(-1).regionsInstalled;
+  const from = Number.isFinite(raw.stateLoadT) ? raw.stateLoadT : rowsWithRegions[0].t;
+  const inWindow = rowsWithRegions.filter((r) => r.t >= from && r.t <= from + windowMs);
+  if (inWindow.length < 2) return null;
+  return inWindow.at(-1).regionsInstalled === inWindow[0].regionsInstalled;
 }
 
 export function analyzeVisit(raw, { native = null } = {}) {
