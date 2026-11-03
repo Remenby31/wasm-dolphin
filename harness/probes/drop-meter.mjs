@@ -855,6 +855,9 @@ async function main() {
     return;
   }
   if (!values.iso) throw new Error("usage: drop-meter.mjs --iso disc.iso --port N [--runs 6] [--visits 2] [--candidate ref|dir] [--baseline ref|dir] [--noise aa/summary.json] [--trend file.jsonl] | --analyze dir");
+  // the browser is checked before the disc (a CI run refuses the local-only
+  // disc, and a wrong --browser must say so first)
+  if (!["chrome", "firefox"].includes(values.browser)) throw new Error(`--browser ${values.browser}: chrome or firefox`);
   const iso = path.resolve(values.iso);
   if (isLocalOnly(iso) && process.env.CI) throw new Error("this disc is local-only and must never run in CI");
   const scenario = validateScenario(JSON.parse(readFileSync(values.scenario, "utf8")));
@@ -874,7 +877,7 @@ async function main() {
     sampleMs: num(values, "sample-ms", { min: 10 }), port: num(values, "port", { min: 1, int: true }),
     state: values.state ? path.resolve(values.state) : null, stateDelayMs: num(values, "state-delay-ms", { min: 0, int: true }),
     // --browser firefox: headless Firefox (lib/browser.mjs launchFirefox)
-    browser: ["chrome", "firefox"].includes(values.browser) ? values.browser : (() => { throw new Error(`--browser ${values.browser}: chrome or firefox`); })(),
+    browser: values.browser,
     regionCounters: values["region-counters"], audioTrace: values["audio-trace"], display: values.display || values.pipeline, pipeline: values.pipeline, pcWindow: values["pc-window"] ? values["pc-window"].split("-").map(Number) : null,
     maxLoad: values["max-load"] ? num(values, "max-load", { min: 0.1 }) : defaultMaxLoad(), loadWait: num(values, "load-wait", { min: 0 }),
     integrityAllow: parseIntegrityAllow(values["integrity-allow"])
