@@ -9,7 +9,7 @@
 //     [--noise <A/A>/summary.json] [--trend measures/drops/trend.jsonl]
 //     [--scenario harness/probes/drop-scenario.json] [--state scene.sav [--state-delay-ms N]]
 //     [--config product | --query "..."] [--baseline-query "..."] [--sample-ms 50] [--native ref.json]
-//     [--shots] [--display] [--pipeline] [--region-counters] [--pc-window FROM-TO] [--integrity-allow a,b] [--max-load L] [--load-wait 300] [--lock-wait 14400 | --no-lock]
+//     [--shots] [--display] [--pipeline] [--region-counters] [--audio-trace] [--pc-window FROM-TO] [--integrity-allow a,b] [--max-load L] [--load-wait 300] [--lock-wait 14400 | --no-lock]
 //     [--out dir]
 //   node harness/probes/drop-meter.mjs --analyze <out dir> [--native ref.json]
 //   node harness/probes/drop-meter.mjs --trace drop-trace-….json   (salon's dev HUD)
@@ -184,6 +184,9 @@ async function playVisit(o, server, profileDir, shotDir, visit) {
     // their rate over the visit is the smoothness reference.
     raw.newFramesStart = await readFrameInfo(page).catch(() => null);
     raw.sampler = await workerRequest(page, "validationDropSampler", { action: "start", everyMs: o.sampleMs }, 5000);
+    // --audio-trace: the AudioWorklet producer's 100 ms trace (ring target
+    // and fill, mixer queue, skips, fills, pulls), drained at the end
+    if (o.audioTrace) raw.audioTraceStart = await workerRequest(page, "validationAudioTrace", { action: "start", everyMs: 100 }, 5000).catch((e) => ({ error: String(e?.message ?? e) }));
     // An older tree (a baseline before the sampler) still gives the
     // timeline: speeds, presents, drops, without their causes.
     const sampling = Boolean(raw.sampler?.started);
@@ -262,6 +265,7 @@ async function playVisit(o, server, profileDir, shotDir, visit) {
     // The JIT cache and the off-thread compiler at the end (cheap, read only).
     raw.jitCache = await workerRequest(page, "validationReadJitCacheReadiness", {}, 5000);
     raw.audioQueueEnd = await workerRequest(page, "validationReadAudioQueue", {}, 5000).catch((e) => ({ error: String(e?.message ?? e) }));
+    if (o.audioTrace) raw.audioTrace = await workerRequest(page, "validationAudioTrace", { action: "stop" }, 10000).catch((e) => ({ error: String(e?.message ?? e) }));
     // The display filter (?fsr=, ?displayfit=): frames it drew and their GPU
     // time (timestamp queries, metrics on), canvas and backbuffer sizes.
     raw.displayFilter = (await workerRequest(page, "validationReadPresentVsync", {}, 5000))?.displayFilter ?? null;
@@ -807,7 +811,7 @@ async function main() {
       "false-positives": { type: "string", multiple: true }, draws: { type: "string", default: "2000" },
       config: { type: "string", default: "product" }, query: { type: "string" }, "baseline-query": { type: "string" }, "sample-ms": { type: "string", default: "50" },
       native: { type: "string" }, analyze: { type: "string" }, attribute: { type: "boolean", default: false }, trace: { type: "string" }, state: { type: "string" }, "state-delay-ms": { type: "string", default: "0" }, shots: { type: "boolean", default: false },
-      "region-counters": { type: "boolean", default: false }, "pc-window": { type: "string" }, "integrity-allow": { type: "string" },
+      "region-counters": { type: "boolean", default: false }, "audio-trace": { type: "boolean", default: false }, "pc-window": { type: "string" }, "integrity-allow": { type: "string" },
       "max-load": { type: "string" }, "load-wait": { type: "string", default: "300" }, "lock-wait": { type: "string", default: "14400" }, "calm-wait": { type: "string" }, "no-lock": { type: "boolean", default: false },
       port: { type: "string", default: process.env.HARNESS_PORT }, out: { type: "string" }
     }
@@ -848,7 +852,7 @@ async function main() {
     iso, scenario, query: query.toString(), baselineQuery: baselineQuery?.toString() ?? null, runs: num(values, "runs", { min: 1, int: true }), visits: num(values, "visits", { min: 1, int: true }),
     sampleMs: num(values, "sample-ms", { min: 10 }), port: num(values, "port", { min: 1, int: true }),
     state: values.state ? path.resolve(values.state) : null, stateDelayMs: num(values, "state-delay-ms", { min: 0, int: true }),
-    regionCounters: values["region-counters"], display: values.display || values.pipeline, pipeline: values.pipeline, pcWindow: values["pc-window"] ? values["pc-window"].split("-").map(Number) : null,
+    regionCounters: values["region-counters"], audioTrace: values["audio-trace"], display: values.display || values.pipeline, pipeline: values.pipeline, pcWindow: values["pc-window"] ? values["pc-window"].split("-").map(Number) : null,
     maxLoad: values["max-load"] ? num(values, "max-load", { min: 0.1 }) : defaultMaxLoad(), loadWait: num(values, "load-wait", { min: 0 }),
     integrityAllow: parseIntegrityAllow(values["integrity-allow"])
   };

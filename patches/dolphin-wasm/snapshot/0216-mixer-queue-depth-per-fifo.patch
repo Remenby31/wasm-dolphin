@@ -1,0 +1,20 @@
+diff --git a/Source/Core/AudioCommon/Mixer.h b/Source/Core/AudioCommon/Mixer.h
+--- a/Source/Core/AudioCommon/Mixer.h
++++ b/Source/Core/AudioCommon/Mixer.h
+@@ -54,6 +54,16 @@
+     return dma > streaming ? dma : streaming;
+   }
+ 
++  // 0216 (read-only, no effect on emulation): each FIFO's queue, the DMA
++  // (the game's sound effects and voices) and the streaming (disc audio)
++  // apart. They drain at the same output rate but fill on their own, so the
++  // longer one (0186) can stay ahead of the other: a pull sized on it empties
++  // the other into a gap fill. The AudioWorklet producer's rate control
++  // (?audiorate=1) sizes its pulls on the shorter, its overflow guard on the
++  // longer.
++  u64 GetDMAQueuedMicroseconds() const { return m_dma_mixer.QueuedMicroseconds(); }
++  u64 GetStreamingQueuedMicroseconds() const { return m_streaming_mixer.QueuedMicroseconds(); }
++
+   void SetDMAInputSampleRateDivisor(u32 rate_divisor);
+   void SetStreamInputSampleRateDivisor(u32 rate_divisor);
+   void SetGBAInputSampleRate(std::size_t device_number, u32 sample_rate);

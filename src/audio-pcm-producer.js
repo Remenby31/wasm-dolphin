@@ -1,5 +1,7 @@
 import {
   AUDIO_PCM_HEADER,
+  AUDIO_PCM_MAX_RATE_PPM,
+  AUDIO_PCM_RATE_CEILING_PPM,
   AUDIO_PCM_SAMPLE_RATE,
   AUDIO_PCM_STATE_MUTED,
   AUDIO_PCM_STATE_PREFILL,
@@ -18,6 +20,29 @@ export const AUDIO_PCM_START_FRAMES = 2400;
 export const ADAPT_CALM_MS = 5000;
 // The target's descent once calm: 0.5 % of the time, 5 ms of ring a second.
 export const ADAPT_DESCENT = 0.005;
+// ?audiorate=1 (rate control): the consumer plays up to +0.5 % faster while
+// the latency is over its target, the rate proportional to the excess (1000
+// ppm a ms over the dead band, so 5 ms more is the bound), under a 4 ms dead
+// band, moving at most 100 ppm a 10 ms tick (no step). The latency is the
+// ring's fill AND the mixer's queue (smoothed over ~200 ms), against the
+// ring's target plus MIXER_LOW_MS.
+// The mixer's queue is kept low, the latency held in the ring: a late tick
+// (the worker busy, 20-30 ms after a load) let a half-full mixer pass
+// AudioBufferSize (an overflow skip), and a pull bigger than the queue made
+// it loop (an underrun fill). So once over MIXER_HIGH_MS it is pulled down to
+// MIXER_LOW_MS into the ring, whatever the target, and a pull never takes
+// more than the queue holds (less one granule) while the ring has at least
+// RING_LOW_MS: below that, the mixer's own gap fill is kept (a loop rather
+// than silence while the core is slow).
+export const RATE_PPM_PER_MS = 1000;
+export const RATE_DEAD_BAND_MS = 4;
+export const RATE_SMOOTHING = 0.05;
+export const MIXER_HIGH_MS = 12;
+export const MIXER_LOW_MS = 8;
+export const MIXER_GRANULE_MS = 4;
+export const RING_LOW_MS = 20;
+export const RATE_SLEW_PPM = 100;
+
 
 function atomicMax(header, index, value) {
   let before = Atomics.load(header, index);
@@ -51,7 +76,7 @@ export class AudioPcmProducer {
   // targetFrames: the ring's fill the producer keeps (the AudioWorklet
   // path's latency, before the mixer's own queue); 120 ms by default, the
   // page passes ?audiolead. Playback starts at half of it (at most 50 ms).
-  install(sab, { muted = true, targetFrames = AUDIO_PCM_TARGET_FRAMES } = {}) {
+  install(sab, { muted = true, targetFrames = AUDIO_PCM_TARGET_FRAMES, rateControl = false, rateMaxPpm = AUDIO_PCM_MAX_RATE_PPM } = {}) {
     this.requestedTransport = "worklet";
     try {
       const ring = validateAudioPcmRing(openAudioPcmRing(sab));
@@ -69,6 +94,11 @@ export class AudioPcmProducer {
       this.startFrames = Math.min(AUDIO_PCM_START_FRAMES, this.floorFrames >> 1);
       this.calmSince = 0;
       this.underrunsSeen = 0;
+      this.rateControl = Boolean(rateControl);
+      this.rateMaxPpm = Math.max(0, Math.min(AUDIO_PCM_RATE_CEILING_PPM, Math.round(Number(rateMaxPpm) || AUDIO_PCM_MAX_RATE_PPM)));
+      this.ratePpm = 0;
+      this.excessMs = null;
+      Atomics.store(ring.header, AUDIO_PCM_HEADER.RATE_PPM, 0);
       this.activeTransport = "worklet";
       this.fallbackReason = "";
       this.muted = Boolean(muted);
@@ -110,6 +140,58 @@ export class AudioPcmProducer {
     return true;
   }
 
+  // Harness trace (validationAudioTrace): every `everyMs` one sample of the
+  // ring's target and fill, its underruns, the mixer's queue and its
+  // overflow skips and underrun fills (patch 0212), and the frames pulled
+  // since the previous sample (asked, returned, the largest single pull).
+  // Off unless started; at most `max` samples kept (the oldest dropped).
+  traceStart({ everyMs = 100, max = 6000 } = {}) {
+    this.trace = { everyMs, max, samples: [], lost: 0, nextAt: 0, asked: 0, got: 0, pulls: 0, maxPull: 0, empty: 0 };
+    return { started: true, everyMs, max };
+  }
+
+  traceDrain({ stop = false } = {}) {
+    const t = this.trace;
+    if (!t) return { samples: [], lost: 0, active: false };
+    const out = { samples: t.samples, lost: t.lost, everyMs: t.everyMs, active: !stop };
+    t.samples = [];
+    t.lost = 0;
+    if (stop) this.trace = null;
+    return out;
+  }
+
+  traceTick(now) {
+    const t = this.trace;
+    if (!t || now < t.nextAt) return;
+    t.nextAt = now + t.everyMs;
+    const ring = this.ring;
+    const core = this.api();
+    const events = core?.audioQueueEvents;
+    const queuedMs = core?.audioQueuedMs?.();
+    // a FIFO's queue, null when unknown (-1, or a core without 0216)
+    const fifoMs = (which) => { const v = core?.audioQueuedFifoMs?.(which); return Number.isFinite(v) && v >= 0 ? Math.round(v * 10) / 10 : null; };
+    t.samples.push({
+      t: performance.timeOrigin + now,
+      target: Math.round(this.targetFrames ?? 0),
+      floor: this.floorFrames ?? null,
+      fill: ring ? audioPcmAvailableFrames(ring.header) : null,
+      underruns: ring ? Atomics.load(ring.header, AUDIO_PCM_HEADER.UNDERRUN_EVENTS) >>> 0 : null,
+      mixerMs: Number.isFinite(queuedMs) && queuedMs >= 0 ? Math.round(queuedMs * 10) / 10 : null,
+      dmaMs: fifoMs(0),
+      streamingMs: fifoMs(1),
+      skips: typeof events === "function" ? events(0) : null,
+      fills: typeof events === "function" ? events(1) : null,
+      asked: t.asked, got: t.got, pulls: t.pulls, maxPull: t.maxPull, empty: t.empty,
+      ratePpm: ring ? Atomics.load(ring.header, AUDIO_PCM_HEADER.RATE_PPM) | 0 : null,
+      surplus: ring ? Atomics.load(ring.header, AUDIO_PCM_HEADER.PRODUCER_SURPLUS_FRAMES) >>> 0 : null,
+      resampled: ring ? Atomics.load(ring.header, AUDIO_PCM_HEADER.RESAMPLED_FRAMES) >>> 0 : null,
+      resampleExtra: ring ? Atomics.load(ring.header, AUDIO_PCM_HEADER.RESAMPLE_EXTRA_FRAMES) >>> 0 : null,
+      muted: this.muted,
+    });
+    t.asked = t.got = t.pulls = t.maxPull = t.empty = 0;
+    if (t.samples.length > t.max) { t.samples.shift(); t.lost += 1; }
+  }
+
   timerTick() {
     const now = performance.now();
     const gapMs = this.lastTimerAt ? now - this.lastTimerAt : 0;
@@ -122,6 +204,8 @@ export class AudioPcmProducer {
     this.lastTimerAt = now;
     this.adapt(now, gapMs);
     this.refill(2);
+    if (this.rateControl) this.rate();
+    if (this.trace) this.traceTick(now);
   }
 
   // The ring's target between the page's floor and 120 ms: +20 ms at each
@@ -153,6 +237,54 @@ export class AudioPcmProducer {
     }
   }
 
+  // rate control: the consumer's rate from the ring's excess over its target
+  rate() {
+    const ring = this.ring;
+    if (!ring) return;
+    // the latency the worklet can play out: the ring and the shorter FIFO
+    // (the longer's lead over it is not latency of the other's sound)
+    const mixerMs = this.mixerQueues(this.api())?.lo ?? MIXER_LOW_MS;
+    const rawMs = (audioPcmAvailableFrames(ring.header) - (this.targetFrames ?? AUDIO_PCM_TARGET_FRAMES)) / 48 + mixerMs - MIXER_LOW_MS;
+    this.excessMs = this.excessMs == null ? rawMs : this.excessMs + RATE_SMOOTHING * (rawMs - this.excessMs);
+    const excessMs = this.excessMs;
+    const goal = excessMs > RATE_DEAD_BAND_MS ? Math.min(this.rateMaxPpm ?? AUDIO_PCM_MAX_RATE_PPM, Math.round((excessMs - RATE_DEAD_BAND_MS) * RATE_PPM_PER_MS)) : 0;
+    const next = this.ratePpm + Math.max(-RATE_SLEW_PPM, Math.min(RATE_SLEW_PPM, goal - this.ratePpm));
+    this.ratePpm = next;
+    Atomics.store(ring.header, AUDIO_PCM_HEADER.RATE_PPM, next | 0);
+  }
+
+  // The mixer's queues in ms: lo the shorter of its DMA and streaming FIFOs
+  // (0216; a FIFO at 0 beside a fed one is taken as not playing), hi the
+  // longer; a core without 0216 gives 0186's longer for both. null unknown.
+  mixerQueues(core) {
+    const one = (which) => { const v = core?.audioQueuedFifoMs?.(which); return Number.isFinite(v) && v >= 0 ? v : null; };
+    const dma = one(0), streaming = one(1);
+    if (dma != null && streaming != null) {
+      const fed = [dma, streaming].filter((v) => v > 0);
+      return { lo: fed.length ? Math.min(...fed) : 0, hi: Math.max(dma, streaming), dma, streaming };
+    }
+    const queuedMs = core?.audioQueuedMs?.();
+    return Number.isFinite(queuedMs) && queuedMs >= 0 ? { lo: queuedMs, hi: queuedMs, dma: null, streaming: null } : null;
+  }
+
+  // rate control: how much a pull may take and must take from the mixer.
+  // null without rate control or without the mixer's queue (0186).
+  mixerBounds(core, fill) {
+    if (!this.rateControl) return null;
+    const q = this.mixerQueues(core);
+    if (!q) return null;
+    return {
+      // never more than the shorter FIFO holds while the ring has slack (a
+      // pull drains both at the same rate: more empties it into a gap fill).
+      // This cap comes first: when the FIFOs drift far apart (more than about
+      // AudioBufferSize less MIXER_HIGH_MS), the longer can still overflow,
+      // a skip in the one ahead rather than a loop in the one behind.
+      maxFrames: fill >= RING_LOW_MS * 48 ? Math.max(0, Math.floor((q.lo - MIXER_GRANULE_MS) * 48)) : Infinity,
+      // the longer back down once over MIXER_HIGH_MS (it overflows first)
+      minFrames: q.hi > MIXER_HIGH_MS ? Math.round((q.hi - MIXER_LOW_MS) * 48) : 0,
+    };
+  }
+
   refill(maxMixes = 2) {
     const ring = this.ring;
     if (!ring) return 0;
@@ -169,12 +301,22 @@ export class AudioPcmProducer {
       const fill = audioPcmAvailableFrames(ring.header);
       const free = audioPcmFreeFrames(ring.header);
       const target = Math.round(this.targetFrames ?? AUDIO_PCM_TARGET_FRAMES);
-      if (fill >= target || free <= 0) break;
+      const bounds = this.mixerBounds(core, fill);
+      const want = Math.min(Math.max(target - fill, bounds?.minFrames ?? 0), bounds?.maxFrames ?? Infinity);
+      if (want <= 0 || free <= 0) break;
       const maxFrames = Math.max(1, core.audioBufferFrames?.() || 4096);
-      const requested = Math.min(maxFrames, target - fill, free);
+      const requested = Math.min(maxFrames, want, free);
+      if (target - fill < requested) Atomics.add(ring.header, AUDIO_PCM_HEADER.PRODUCER_SURPLUS_FRAMES, requested - Math.max(0, target - fill));
       const started = performance.now();
       const mixed = Math.max(0, Math.min(requested, core.mixAudio(requested) | 0));
       this.recordMix(requested, mixed, performance.now() - started);
+      if (this.trace) {
+        this.trace.asked += requested;
+        this.trace.got += mixed;
+        this.trace.pulls += 1;
+        this.trace.maxPull = Math.max(this.trace.maxPull, requested);
+        if (mixed <= 0) this.trace.empty += 1;
+      }
       if (mixed <= 0) {
         Atomics.add(ring.header, AUDIO_PCM_HEADER.PRODUCER_EMPTY_MIXES, 1);
         break;
@@ -205,6 +347,9 @@ export class AudioPcmProducer {
       transportFallbackReason: this.fallbackReason,
       targetFrames: Math.round(this.targetFrames ?? AUDIO_PCM_TARGET_FRAMES),
       floorFrames: this.floorFrames ?? null,
+      rateControl: Boolean(this.rateControl),
+      ratePpm: this.ratePpm ?? 0,
+      rateMaxPpm: this.rateMaxPpm ?? null,
       workletRing: this.ring ? snapshotAudioPcmRing(this.ring) : null,
     };
   }

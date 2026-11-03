@@ -972,6 +972,8 @@ const workletAudioProducer = new AudioPcmProducer({
     audioChannels: api?.audioChannels,
     audioSampleRate: api?.audioSampleRate,
     audioQueuedMs: api?.audioQueuedMs,
+    audioQueueEvents: api?.audioQueueEvents,
+    audioQueuedFifoMs: api?.audioQueuedFifoMs,
     heapU8: moduleInstance?.HEAPU8,
   }),
   recordMix: (requested, returned, durationMs) =>
@@ -2446,6 +2448,12 @@ async function handleMessage(type, payload) {
             trimPpm: typeof moduleInstance?._DolphinWeb_ThrottleRatePpm === "function" ? moduleInstance._DolphinWeb_ThrottleRatePpm() : null,
             phaseLock: wgpuViLock ? { ...wgpuViLock.stats } : null }
         : { unavailable: "core without patch 0212" };
+    case "validationAudioTrace":
+      // the AudioWorklet producer's 100 ms trace (audio-pcm-producer.js)
+      if (!harnessEnabled) return { error: "harness hooks are off" };
+      if (payload?.action === "start") return workletAudioProducer.traceStart({ everyMs: Number(payload.everyMs) || 100 });
+      if (payload?.action === "drain" || payload?.action === "stop") return workletAudioProducer.traceDrain({ stop: payload.action === "stop" });
+      return { error: `validationAudioTrace: unknown action ${payload?.action}` };
     case "validationFlickerWatch":
       return harnessFlickerRequest(payload);
     case "validationUniqueFrames":
@@ -2855,6 +2863,8 @@ async function handleMessage(type, payload) {
       const result = workletAudioProducer.install(payload.sab, {
         muted: Boolean(payload.muted),
         targetFrames: Number(payload.targetFrames) || undefined,
+        rateControl: Boolean(payload.rateControl),
+        rateMaxPpm: Number(payload.rateMaxPpm) || undefined,
       });
       if (result.active) api?.setAudioMuted?.(payload.muted ? 1 : 0);
       return result;
@@ -4171,6 +4181,12 @@ function bindApi(module) {
     audioQueuedMs:
       typeof module._DolphinWeb_AudioQueuedMs === "function"
         ? () => module._DolphinWeb_AudioQueuedMs()
+        : null,
+    // 0216: one FIFO's queue in ms (0 DMA, 1 streaming; -1 unknown); absent
+    // on an older core
+    audioQueuedFifoMs:
+      typeof module._DolphinWeb_AudioQueuedFifoMs === "function"
+        ? (which) => module._DolphinWeb_AudioQueuedFifoMs(which | 0)
         : null,
     setPresentationScale:
       typeof module._SetPresentationScale === "function"

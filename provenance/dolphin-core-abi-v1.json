@@ -44,8 +44,8 @@
     {
       "path": "core/upstream/dolphin_web_core.cpp",
       "hashMode": "lf-normalized",
-      "size": 79731,
-      "sha256": "6fbc4b8ae1def59f3f21625219115d7d8e91d84150cebc43430a69fb8296176e"
+      "size": 80536,
+      "sha256": "c9fe8f882df26ec00a32ad8bac90940a27ee79754a37931c310ec2dc0fb435d5"
     },
     {
       "path": "src/app.js",
@@ -56,20 +56,20 @@
     {
       "path": "src/audio.js",
       "hashMode": "lf-normalized",
-      "size": 19728,
-      "sha256": "8f2c191a68903d5ce77f8ad5f212d8de6f5012b61a5bf3d48ddd216bcafeb0f4"
+      "size": 20521,
+      "sha256": "f8ebb5b09e48e7018ab4f05dbd202d3eeb734d951a1265779350acf56b87877d"
     },
     {
       "path": "src/audio-pcm-ring.js",
       "hashMode": "lf-normalized",
-      "size": 8727,
-      "sha256": "d3e6115b0eb8693265b92e6b965e2af1ee1f07c0caa88d7bc9a7bdf886bcfd6f"
+      "size": 11377,
+      "sha256": "64dce6c22112e32c22912e1eca57005868a3b4612e264370495242d9884d50a5"
     },
     {
       "path": "src/audio-pcm-producer.js",
       "hashMode": "lf-normalized",
-      "size": 8735,
-      "sha256": "327b19af563461353d5ed7a0e871c3f09af3ba497d1f247416348de5f72e2cf5"
+      "size": 16522,
+      "sha256": "9451285c775ff34f7823a53a8bba5f2eb14373603b97921211e2f04145371ab6"
     },
     {
       "path": "src/audio-worklet-processor.js",
@@ -140,8 +140,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 787524,
-      "sha256": "247b3fc396cab01c805227f3f94206f0acc27487bcc263bf98745aa0044dd30f"
+      "size": 788532,
+      "sha256": "3307cd2ad99e58026068313afcd73dbd457a2190de58dfea20200de3c60e3f81"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",
@@ -164,8 +164,8 @@
     {
       "path": "src/upstream-worker-adapter.js",
       "hashMode": "lf-normalized",
-      "size": 63551,
-      "sha256": "82bbb48470f5a17023c24d9a429233d654e231de8c433dd184779dbb3e9dad4b"
+      "size": 63678,
+      "sha256": "b40ffb99d2effd3127bce3e3947e7a3b8c701787ee2d081bb8b07d9a7af7bd81"
     },
     {
       "path": "src/upstream-worker-protocol.js",
@@ -724,6 +724,7 @@
       "streamCaptureStats",
       "streamCaptureStop",
       "validationAotCacheProbe",
+      "validationAudioTrace",
       "validationBeginWgpuRendererProbeMeasurement",
       "validationCaptureAtVi",
       "validationDropSampler",
