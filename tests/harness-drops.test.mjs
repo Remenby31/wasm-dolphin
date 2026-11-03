@@ -249,7 +249,7 @@ test("power source: parsed from pmset, recorded, and checked by --noise", async 
   const path = await import("node:path");
   const root = mkdtempSync(path.join(os.tmpdir(), "drops-power-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const base = { probe: "drop-meter", probeVersion: 2, scenario: "s.json", state: null, query: "q", sampleMs: 50, display: true, visitSummary: [{ visit: 1, noise: {}, phases: {} }] };
+  const base = { probe: "drop-meter", analysisVersion: 2, probeVersion: 2, scenario: "s.json", state: null, query: "q", sampleMs: 50, display: true, visitSummary: [{ visit: 1, noise: {}, phases: {} }] };
   const expect = { probeVersion: 2, scenario: "s.json", state: null, query: "q", sampleMs: 50, display: true };
   writeFileSync(path.join(root, "ac.json"), JSON.stringify({ ...base, machine: { power: { source: "ac", percent: 100 } } }));
   writeFileSync(path.join(root, "old.json"), JSON.stringify(base));
@@ -299,7 +299,7 @@ test("power: a visit unplugged midway is mixed; an A/A with mixed sources is no 
   const path = await import("node:path");
   const root = mkdtempSync(path.join(os.tmpdir(), "drops-power-mixed-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const base = { probe: "drop-meter", probeVersion: 3, scenario: "s.json", state: null, query: "q", sampleMs: 50, display: true, visitSummary: [{ visit: 1, noise: {}, phases: {} }] };
+  const base = { probe: "drop-meter", analysisVersion: 2, probeVersion: 3, scenario: "s.json", state: null, query: "q", sampleMs: 50, display: true, visitSummary: [{ visit: 1, noise: {}, phases: {} }] };
   const expect = { probeVersion: 3, scenario: "s.json", state: null, query: "q", sampleMs: 50, display: true };
   writeFileSync(path.join(root, "mixed.json"), JSON.stringify({ ...base, powerSources: ["ac", "battery"] }));
   writeFileSync(path.join(root, "ac.json"), JSON.stringify({ ...base, powerSources: ["ac"] }));
@@ -715,7 +715,7 @@ test("--noise must have loaded the savestate at the same delay; an older summary
   const path = await import("node:path");
   const root = mkdtempSync(path.join(os.tmpdir(), "drops-delay-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const base = { probe: "drop-meter", probeVersion: 2, scenario: "drop-scenario-state.json", state: "scene.sav", query: "q", sampleMs: 50, display: true, visitSummary: [{ visit: 1, noise: {}, phases: {} }] };
+  const base = { probe: "drop-meter", analysisVersion: 2, probeVersion: 2, scenario: "drop-scenario-state.json", state: "scene.sav", query: "q", sampleMs: 50, display: true, visitSummary: [{ visit: 1, noise: {}, phases: {} }] };
   const expect = { probeVersion: 2, scenario: "drop-scenario-state.json", state: "scene.sav", query: "q", sampleMs: 50, display: true };
   writeFileSync(path.join(root, "old.json"), JSON.stringify(base));
   writeFileSync(path.join(root, "late.json"), JSON.stringify({ ...base, stateDelayMs: 3300 }));
