@@ -251,7 +251,7 @@ test("consumer: at 0 ppm the plain copy; at +5000 ppm 0.5 % more input per outpu
   consumeAudioPcm(ring, L, R, 1000, res);
   assert.equal(res.consumedFrames, 1000);
   assert.equal(L[999] * 32768, 999, "plain copy");
-  Atomics.store(ring.header, AUDIO_PCM_HEADER.RATE_PPM, AUDIO_PCM_MAX_RATE_PPM);
+  Atomics.store(ring.header, AUDIO_PCM_HEADER.RATE_PPM, 5000);
   consumeAudioPcm(ring, L, R, 1000, res);
   assert.equal(res.consumedFrames, 1005);
   assert.ok(Math.abs(L[500] * 32768 - (1000 + 500 * 1.005)) < 1e-6, `${L[500] * 32768}`);
@@ -404,22 +404,21 @@ test("plumbing: ?audiorate and ?audioratemax reach the producer", async () => {
   const { readFile } = await import("node:fs/promises");
   const read = (p) => readFile(new URL(p, import.meta.url), "utf8");
   const [audio, adapter, worker] = await Promise.all([read("../src/audio.js"), read("../src/upstream-worker-adapter.js"), read("../src/upstream-discio-worker.js")]);
-  assert.match(audio, /this\.workletRateControl = params\.get\("audiorate"\) === "1";/);
   assert.equal(audio.match(/rateControl: this\.workletRateControl/g).length, 3);
   assert.equal(audio.match(/rateMaxPpm: this\.workletRateMaxPpm/g).length, 3);
-  assert.match(adapter, /rateMaxPpm: Number\(rateMaxPpm\) \|\| 5000,/);
+  assert.match(adapter, /rateMaxPpm: Number\(rateMaxPpm\) \|\| AUDIO_PCM_MAX_RATE_PPM,/);
   assert.match(worker, /rateMaxPpm: Number\(payload\.rateMaxPpm\) \|\| undefined,/);
-  assert.match(adapter, /async configureAudioWorklet\(\{ enabled, muted, sab, targetFrames, rateControl = false, rateMaxPpm = 5000 \}\)/);
+  assert.match(adapter, /async configureAudioWorklet\(\{ enabled, muted, sab, targetFrames, rateControl = false, rateMaxPpm = AUDIO_PCM_MAX_RATE_PPM \}\)/);
   assert.match(adapter, /rateControl: Boolean\(rateControl\),/);
   assert.match(worker, /rateControl: Boolean\(payload\.rateControl\),\n\s+rateMaxPpm: Number\(payload\.rateMaxPpm\) \|\| undefined,/);
   assert.doesNotMatch(worker, /mixerCapMs/);
 });
 
-test("rate bound: 0.5 % by default, up to the 1 % ceiling when asked, never above", () => {
+test("rate bound: 1 % by default and at most, less when asked", () => {
   const ring = createAudioPcmRing();
   const mk = (opts) => { const f = fixture(); f.producer.install(ring.sab, { muted: false, rateControl: true, ...opts }); return f.producer; };
   const fill = () => { Atomics.store(ring.header, AUDIO_PCM_HEADER.READ_INDEX, 0); Atomics.store(ring.header, AUDIO_PCM_HEADER.WRITE_INDEX, 8000); };
-  for (const [opts, bound] of [[{}, 5000], [{ rateMaxPpm: 10000 }, 10000], [{ rateMaxPpm: 50000 }, 10000]]) {
+  for (const [opts, bound] of [[{}, 10000], [{ rateMaxPpm: 5000 }, 5000], [{ rateMaxPpm: 50000 }, 10000]]) {
     const p = mk(opts);
     p.targetFrames = 1920;
     fill();
@@ -430,7 +429,7 @@ test("rate bound: 0.5 % by default, up to the 1 % ceiling when asked, never abov
 
 test("model: the 1 % bound brings the latency back about twice as fast", () => {
   const speedAt = (t) => (t < 3000 ? 0.75 : t < 4000 ? 1.14 : 1);
-  const b = simulate({ rateControl: true, speedAt, seconds: 30, trackOverMs: 100 });
+  const b = simulate({ rateControl: true, speedAt, seconds: 30, trackOverMs: 100, rateMaxPpm: 5000 });
   const c = simulate({ rateControl: true, speedAt, seconds: 30, trackOverMs: 100, rateMaxPpm: 10000 });
   assert.ok(c.overMs < b.overMs * 0.7, JSON.stringify({ b, c }));
 });
@@ -484,4 +483,19 @@ test("review of #430: an epoch flush drops the resampler's fraction; the trace k
   const [s] = f.producer.traceDrain().samples;
   assert.equal(s.dmaMs, null);
   assert.equal(s.streamingMs, null);
+});
+
+test("rate control default: on under V8, off under JavaScriptCore, SpiderMonkey and unknown; ?audiorate=1|0 forces it; the bound 1 %", async () => {
+  const { defaultAudioRate, requestedAudioRate, DEFAULT_AUDIO_RATE_MAX_PPM } = await import("../src/audio.js");
+  assert.equal(defaultAudioRate("v8"), true);
+  for (const e of ["jsc", "spidermonkey", "unknown"]) assert.equal(defaultAudioRate(e), false, e);
+  assert.equal(requestedAudioRate("", "v8"), true);
+  assert.equal(requestedAudioRate("?audiorate=0", "v8"), false, "the old behaviour forced");
+  assert.equal(requestedAudioRate("?audiorate=1", "jsc"), true);
+  assert.equal(requestedAudioRate("?audiorate=yes", "jsc"), false);
+  assert.equal(DEFAULT_AUDIO_RATE_MAX_PPM, 10000);
+  const { readFile } = await import("node:fs/promises");
+  const audio = await readFile(new URL("../src/audio.js", import.meta.url), "utf8");
+  assert.match(audio, /this\.workletRateControl = requestedAudioRate\(window\.location\.search, wasmEngine\(\)\);/);
+  assert.match(audio, /rateMax <= AUDIO_PCM_MAX_RATE_PPM \? rateMax : DEFAULT_AUDIO_RATE_MAX_PPM;/);
 });
