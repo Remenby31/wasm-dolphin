@@ -9,7 +9,8 @@ import {
   gpuThreadBusyShare,
   HEADROOM_LAYOUT_BYTES,
   readHeadroomStats,
-  replayBusyShare
+  replayBusyShare,
+  xfbCopiesPerSec
 } from "../src/occupancy-stats.js";
 import { decodeHeadroomStats, headroomOf } from "../harness/lib/headroom.mjs";
 import { UpstreamWorkerAdapter } from "../src/upstream-worker-adapter.js";
@@ -18,17 +19,19 @@ const worker = readFileSync(new URL("../src/upstream-discio-worker.js", import.m
 const host = readFileSync(new URL("../src/core-host.js", import.meta.url), "utf8");
 
 // A 0113 v1 struct at byte 64 of a heap.
-function heapWith({ on = 1, version = 1, size = 96, windowUs = 0, cpuSleepUs = 0, flushGpuWaitUs = 0, guestTicks = 0, gpuWorkUs = 0, gpuConsumerWaitUs = 0, presentSleepUs = 0 } = {}) {
+function heapWith({ on = 1, version = 1, size = 96, windowUs = 0, cpuSleepUs = 0, flushGpuWaitUs = 0, guestTicks = 0, gpuWorkUs = 0, gpuConsumerWaitUs = 0, presentSleepUs = 0, xfbCopies = 0 } = {}) {
   const buffer = new ArrayBuffer(256);
   const ptr = 64;
   new Uint32Array(buffer, ptr, 4).set([version, size, on, 0]);
   const f = new Float64Array(buffer, ptr + 16, 10);
-  f[0] = windowUs; f[1] = cpuSleepUs; f[2] = gpuWorkUs; f[5] = flushGpuWaitUs; f[7] = gpuConsumerWaitUs; f[8] = guestTicks; f[9] = presentSleepUs;
+  f[0] = windowUs; f[1] = cpuSleepUs; f[2] = gpuWorkUs; f[5] = flushGpuWaitUs; f[7] = gpuConsumerWaitUs; f[8] = guestTicks; f[9] = presentSleepUs; f[3] = xfbCopies;
   return { buffer, ptr };
 }
 const cpu = (windowUs, cpuSleepUs, flushGpuWaitUs = 0, guestTicks = windowUs * 486) => ({ on: true, windowUs, cpuSleepUs, flushGpuWaitUs, guestTicks, gpuWorkUs: 0, gpuConsumerWaitUs: 0, presentSleepUs: 0 });
 // windowUs plus the GPU thread's counters
 const gpu = (windowUs, gpuWorkUs, gpuConsumerWaitUs = 0, presentSleepUs = 0) => ({ ...cpu(windowUs, 0), gpuWorkUs, gpuConsumerWaitUs, presentSleepUs });
+// windowUs plus the XFB copies
+const xfb = (windowUs, xfbCopies) => ({ ...cpu(windowUs, 0), xfbCopies });
 
 test("clampShare: 0..1, null for an unusable span", () => {
   assert.equal(clampShare(250, 500), 0.5);
@@ -40,8 +43,8 @@ test("clampShare: 0..1, null for an unusable span", () => {
 });
 
 test("readHeadroomStats reads the v1 struct, refuses another layout, says when off", () => {
-  const { buffer, ptr } = heapWith({ windowUs: 1e6, cpuSleepUs: 4e5, flushGpuWaitUs: 1e4, guestTicks: 5e8, gpuWorkUs: 6e5, gpuConsumerWaitUs: 1e5, presentSleepUs: 2e5 });
-  assert.deepEqual(readHeadroomStats(buffer, ptr), { on: true, windowUs: 1e6, cpuSleepUs: 4e5, flushGpuWaitUs: 1e4, guestTicks: 5e8, gpuWorkUs: 6e5, gpuConsumerWaitUs: 1e5, presentSleepUs: 2e5 });
+  const { buffer, ptr } = heapWith({ windowUs: 1e6, cpuSleepUs: 4e5, flushGpuWaitUs: 1e4, guestTicks: 5e8, gpuWorkUs: 6e5, gpuConsumerWaitUs: 1e5, presentSleepUs: 2e5, xfbCopies: 60 });
+  assert.deepEqual(readHeadroomStats(buffer, ptr), { on: true, windowUs: 1e6, cpuSleepUs: 4e5, flushGpuWaitUs: 1e4, guestTicks: 5e8, gpuWorkUs: 6e5, gpuConsumerWaitUs: 1e5, presentSleepUs: 2e5, xfbCopies: 60 });
   assert.deepEqual(readHeadroomStats(heapWith({ on: 0 }).buffer, 64), { on: false });
   assert.equal(readHeadroomStats(heapWith({ version: 2 }).buffer, 64), null);
   assert.equal(readHeadroomStats(heapWith({ size: 88 }).buffer, 64), null);
@@ -148,23 +151,46 @@ test("replayBusyShare: busy time over host time, null when not collected or back
   assert.equal(replayBusyShare(100, 300, 0), null);
 });
 
+test("xfbCopiesPerSec: the harness's gameFramesPerSecond over the delta, any renderer", () => {
+  // 500 ms, 4 copies: 8 a second (the software renderer's saturated GPU thread)
+  assert.equal(xfbCopiesPerSec(xfb(1e6, 100), xfb(1.5e6, 104), 500), 8);
+  assert.equal(xfbCopiesPerSec(xfb(1e6, 100), xfb(1.5e6, 130), 500), 60);
+  assert.equal(xfbCopiesPerSec(xfb(1e6, 100), xfb(1.6e6, 104), 600), 6.7, "one decimal");
+  assert.equal(xfbCopiesPerSec(xfb(1e6, 100), xfb(1.5e6, 100), 500), 0, "no copy: no new image");
+  // same as harness/lib/headroom.mjs over a window starting at a reset
+  const { buffer, ptr } = heapWith({ windowUs: 5e5, guestTicks: 5e5 * 486, xfbCopies: 15 });
+  const h = headroomOf(decodeHeadroomStats(Array.from(new Uint8Array(buffer, ptr, 96))), { ticksPerSecond: 486e6 });
+  assert.equal(xfbCopiesPerSec(xfb(0, 0), readHeadroomStats(buffer, ptr), 500), h.gameFramesPerSecond);
+});
+
+test("xfbCopiesPerSec: null for a reset in between, missing or off counters", () => {
+  // the CPU thread applied a reset: the window went back
+  assert.equal(xfbCopiesPerSec(xfb(9e6, 500), xfb(3e5, 510), 500), null);
+  // the GPU thread zeroed its own one read later
+  assert.equal(xfbCopiesPerSec(xfb(3e5, 500), xfb(8e5, 2), 500), null);
+  assert.equal(xfbCopiesPerSec(xfb(2e5, 1), xfb(4e5, 3), 500), null, "window grew by far less than the host time");
+  assert.equal(xfbCopiesPerSec(null, xfb(1e6, 1), 500), null);
+  assert.equal(xfbCopiesPerSec({ on: false }, xfb(1e6, 1), 500), null);
+  assert.equal(xfbCopiesPerSec(cpu(1e6, 0), cpu(1.5e6, 0), 500), null, "no xfbCopies field");
+});
+
 test("the meter: null on the first window and after a reset, then the shares of each span", () => {
   const m = createOccupancyMeter();
-  const none = { cpuThreadBusy: null, gpuThreadBusy: null, replayBusy: null };
-  const h = (w, sleep, work) => ({ ...cpu(w, sleep), gpuWorkUs: work });
-  assert.deepEqual(m.window({ atMs: 1000, headroom: h(1e6, 5e5, 1e5), busyMs: 10 }), none);
-  assert.deepEqual(m.window({ atMs: 1500, headroom: h(1.5e6, 8e5, 4e5), busyMs: 110 }), { cpuThreadBusy: 0.4, gpuThreadBusy: 0.6, replayBusy: 0.2 });
+  const none = { cpuThreadBusy: null, gpuThreadBusy: null, replayBusy: null, xfbCopiesPerSec: null };
+  const h = (w, sleep, work, copies = 0) => ({ ...cpu(w, sleep), gpuWorkUs: work, xfbCopies: copies });
+  assert.deepEqual(m.window({ atMs: 1000, headroom: h(1e6, 5e5, 1e5, 10), busyMs: 10 }), none);
+  assert.deepEqual(m.window({ atMs: 1500, headroom: h(1.5e6, 8e5, 4e5, 14), busyMs: 110 }), { cpuThreadBusy: 0.4, gpuThreadBusy: 0.6, replayBusy: 0.2, xfbCopiesPerSec: 8 });
   assert.deepEqual(m.window({ atMs: 2000, headroom: null, busyMs: null }), none);
   assert.deepEqual(m.window({ atMs: 2500, headroom: h(2.5e6, 1e6, 6e5), busyMs: 160 }), none);
   m.reset();
   assert.deepEqual(m.window({ atMs: 3000, headroom: h(3e6, 1e6, 7e5), busyMs: 170 }), none);
-  assert.deepEqual(m.window({ atMs: 3500, headroom: h(3.5e6, 1.25e6, 7e5), busyMs: 220 }), { cpuThreadBusy: 0.5, gpuThreadBusy: null, replayBusy: 0.1 });
+  assert.deepEqual(m.window({ atMs: 3500, headroom: h(3.5e6, 1.25e6, 7e5), busyMs: 220 }), { cpuThreadBusy: 0.5, gpuThreadBusy: null, replayBusy: 0.1, xfbCopiesPerSec: 0 });
 });
 
 test("the worker reads the counters once per window, turns the headroom counters on once, never resets them under the harness", () => {
   assert.match(worker, /import \{ createBusyClock, createOccupancyMeter, readHeadroomStats \} from "\.\/occupancy-stats\.js";/);
   const fps = worker.slice(worker.indexOf("function updatePresentationFps()"), worker.indexOf("function readOccupancyCounters()"));
-  assert.match(fps, /\(\{ newFramesPerSec, newFramesProducedPerSec \} = wgpuNewFrames\.window\(profileElapsedMs\)\);\n\s+\(\{ cpuThreadBusy, gpuThreadBusy, replayBusy \} = occupancyMeter\.window\(\{ atMs: now, \.\.\.readOccupancyCounters\(\) \}\)\);/);
+  assert.match(fps, /\(\{ newFramesPerSec, newFramesProducedPerSec \} = wgpuNewFrames\.window\(profileElapsedMs\)\);\n\s+\(\{ cpuThreadBusy, gpuThreadBusy, replayBusy, xfbCopiesPerSec \} = occupancyMeter\.window\(\{ atMs: now, \.\.\.readOccupancyCounters\(\) \}\)\);/);
   const read = worker.slice(worker.indexOf("function readOccupancyCounters()"), worker.indexOf("function checkBootStallWatchdog()"));
   // read only (-1); a reset (0) only while off, once per core
   assert.match(read, /readHeadroomStats\(m\.HEAPU8\.buffer, stats\(-1\) >>> 0\)/);
@@ -180,8 +206,8 @@ test("the worker reads the counters once per window, turns the headroom counters
   assert.match(remap, /return occupancyRemapBaseMs \+ pool\.remapCallbackTotalMs\(\);/);
   // reset at boot, sent with the frame stats
   const reset = worker.slice(worker.indexOf("function resetPresentationBuffer()"), worker.indexOf("function readDetailedCoreStat("));
-  assert.match(reset, /occupancyMeter\.reset\(\);\n\s+cpuThreadBusy = null;\n\s+gpuThreadBusy = null;\n\s+replayBusy = null;/);
-  for (const field of ["cpuThreadBusy,", "gpuThreadBusy,", "replayBusy,"]) assert.ok(worker.includes(`    ${field}\n`), field);
+  assert.match(reset, /occupancyMeter\.reset\(\);\n\s+cpuThreadBusy = null;\n\s+gpuThreadBusy = null;\n\s+replayBusy = null;\n\s+xfbCopiesPerSec = null;/);
+  for (const field of ["cpuThreadBusy,", "gpuThreadBusy,", "replayBusy,", "xfbCopiesPerSec,"]) assert.ok(worker.includes(`    ${field}\n`), field);
 });
 
 test("the worker times its product entry points with one busy clock", () => {
@@ -203,21 +229,21 @@ test("the worker times its product entry points with one busy clock", () => {
   assert.doesNotMatch(drain, /workerBusy/);
 });
 
-test("the adapter keeps the occupancy fields, null included", () => {
+test("the adapter keeps the occupancy fields and the XFB copy rate, null included", () => {
   const adapter = new UpstreamWorkerAdapter();
-  const read = () => [adapter.cpuThreadBusy, adapter.gpuThreadBusy, adapter.replayBusy];
-  assert.deepEqual(read(), [null, null, null]);
-  adapter.applyFrame({ frame: 10, cpuThreadBusy: 0.42, gpuThreadBusy: 0.9, replayBusy: 0.1 });
-  assert.deepEqual(read(), [0.42, 0.9, 0.1]);
-  adapter.applyFrame({ frame: 11, cpuThreadBusy: null, gpuThreadBusy: null, replayBusy: null });
-  assert.deepEqual(read(), [null, null, null]);
+  const read = () => [adapter.cpuThreadBusy, adapter.gpuThreadBusy, adapter.replayBusy, adapter.xfbCopiesPerSec];
+  assert.deepEqual(read(), [null, null, null, null]);
+  adapter.applyFrame({ frame: 10, cpuThreadBusy: 0.42, gpuThreadBusy: 0.9, replayBusy: 0.1, xfbCopiesPerSec: 7.5 });
+  assert.deepEqual(read(), [0.42, 0.9, 0.1, 7.5]);
+  adapter.applyFrame({ frame: 11, cpuThreadBusy: null, gpuThreadBusy: null, replayBusy: null, xfbCopiesPerSec: null });
+  assert.deepEqual(read(), [null, null, null, null]);
   // an older worker does not send them: nothing changes
-  adapter.applyFrame({ frame: 12, cpuThreadBusy: 0.5, gpuThreadBusy: 0.6 });
+  adapter.applyFrame({ frame: 12, cpuThreadBusy: 0.5, gpuThreadBusy: 0.6, xfbCopiesPerSec: 60 });
   adapter.applyFrame({ frame: 13 });
-  assert.deepEqual(read(), [0.5, 0.6, null]);
+  assert.deepEqual(read(), [0.5, 0.6, null, 60]);
 });
 
-test("core-host passes the occupancy fields to onFrame", () => {
-  for (const field of ["cpuThreadBusy", "gpuThreadBusy", "replayBusy"])
+test("core-host passes the occupancy fields and the XFB copy rate to onFrame", () => {
+  for (const field of ["cpuThreadBusy", "gpuThreadBusy", "replayBusy", "xfbCopiesPerSec"])
     assert.match(host, new RegExp(`${field}: this\\.mode === "dolphin" \\? this\\.adapter\\.${field} \\?\\? null : null,`), field);
 });

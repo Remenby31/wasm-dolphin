@@ -33,6 +33,10 @@
 //   input visual markers, the detached presenter, harness captures, dtrace,
 //   first-EFB-pass and classifier probes). Cost: two performance.now() per
 //   counted entry, nothing per command.
+// - xfbCopiesPerSec: EFB-to-XFB copies per second of the same window, the
+//   game images made (harness/lib/headroom.mjs gameFramesPerSecond). Counted
+//   in VideoCommon (BPStructs), so with any renderer: the software one has no
+//   frame tags (no newFramesPerSec) but has this.
 //
 // Deltas against the previous read, never a reset: the harness resets the
 // headroom counters per measurement window (n >= 0). A reset between two
@@ -46,7 +50,7 @@
 export const HEADROOM_LAYOUT_VERSION = 1;
 export const HEADROOM_LAYOUT_BYTES = 96;
 // f64 fields after the 16-byte header (harness/lib/headroom.mjs F64).
-const WINDOW_US = 0, CPU_SLEEP_US = 1, GPU_WORK_US = 2, FLUSH_GPU_WAIT_US = 5, GPU_CONSUMER_WAIT_US = 7, GUEST_TICKS = 8, PRESENT_SLEEP_US = 9;
+const WINDOW_US = 0, CPU_SLEEP_US = 1, GPU_WORK_US = 2, XFB_COPIES = 3, FLUSH_GPU_WAIT_US = 5, GPU_CONSUMER_WAIT_US = 7, GUEST_TICKS = 8, PRESENT_SLEEP_US = 9;
 const FIELDS = 10;
 
 const round3 = (v) => Math.round(v * 1000) / 1000;
@@ -73,7 +77,8 @@ export function readHeadroomStats(buffer, ptr) {
   }
   return {
     on: true, windowUs: a[WINDOW_US], cpuSleepUs: a[CPU_SLEEP_US], flushGpuWaitUs: a[FLUSH_GPU_WAIT_US], guestTicks: a[GUEST_TICKS],
-    gpuWorkUs: a[GPU_WORK_US], gpuConsumerWaitUs: a[GPU_CONSUMER_WAIT_US], presentSleepUs: a[PRESENT_SLEEP_US]
+    gpuWorkUs: a[GPU_WORK_US], gpuConsumerWaitUs: a[GPU_CONSUMER_WAIT_US], presentSleepUs: a[PRESENT_SLEEP_US],
+    xfbCopies: a[XFB_COPIES]
   };
 }
 
@@ -117,6 +122,17 @@ export function gpuThreadBusyShare(prev, cur, hostMs) {
   return clampShare(dWork - dConsumer - dPresent, dWindow);
 }
 
+// Same reads, same window: XFB copies per second of the CPU thread's window,
+// one decimal. null when unusable as above, or when the GPU thread zeroed its
+// counters (a reset: they went back).
+export function xfbCopiesPerSec(prev, cur, hostMs) {
+  const dWindow = windowDeltaUs(prev, cur, hostMs);
+  if (dWindow == null) return null;
+  const d = cur.xfbCopies - prev.xfbCopies;
+  if (!Number.isFinite(d) || d < 0) return null;
+  return Math.round((d * 1e7) / dWindow) / 10;
+}
+
 // prevMs, curMs: the worker's cumulative busy time (null when unavailable).
 export function replayBusyShare(prevMs, curMs, hostMs) {
   if (prevMs == null || curMs == null) return null;
@@ -148,7 +164,8 @@ export function createBusyClock(now = () => performance.now()) {
   };
 }
 
-// One read per window; the shares of the span since the previous read.
+// One read per window; the shares and the XFB copy rate of the span since the
+// previous read.
 export function createOccupancyMeter() {
   let prev = null;
   return {
@@ -160,9 +177,10 @@ export function createOccupancyMeter() {
         ? {
             cpuThreadBusy: cpuThreadBusyShare(prev.headroom, headroom, span),
             gpuThreadBusy: gpuThreadBusyShare(prev.headroom, headroom, span),
-            replayBusy: replayBusyShare(prev.busyMs, busyMs, span)
+            replayBusy: replayBusyShare(prev.busyMs, busyMs, span),
+            xfbCopiesPerSec: xfbCopiesPerSec(prev.headroom, headroom, span)
           }
-        : { cpuThreadBusy: null, gpuThreadBusy: null, replayBusy: null };
+        : { cpuThreadBusy: null, gpuThreadBusy: null, replayBusy: null, xfbCopiesPerSec: null };
       prev = { atMs, headroom, busyMs };
       return out;
     },
