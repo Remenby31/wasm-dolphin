@@ -22,7 +22,7 @@ With it:
 
 | switch | values | default |
 |---|---|---|
-| `?audiorate` | `1` on, `0` off | on under V8 (Chrome, Edge); off under JavaScriptCore (Safari, iPhone, and Chrome, Edge or Firefox on iOS), SpiderMonkey (Firefox) and unknown engines. The engine is detected (`src/wasm-engine.js`); the test override `?wasmengine=v8` turns the rate control on as well |
+| `?audiorate` | `1` on, `0` off | on under V8 (Chrome, Edge) and SpiderMonkey (Firefox); off under JavaScriptCore (Safari, iPhone, and Chrome, Edge or Firefox on iOS) and unknown engines. The engine is detected (`src/wasm-engine.js`); the test override `?wasmengine=v8` turns the rate control on as well |
 | `?audioratemax` | 1000-10000 ppm | 10000 (+1 %, +17 cents) |
 
 Measured on a Mac (drop-meter `--audio-trace`, 2026-11-03, per visit, skips /
@@ -31,8 +31,13 @@ fills / seconds over 100 ms of latency): 1P 61.5 / 168.8 / 18.0 -> 7.0 /
 skips, 0 fills, latency 75 ms (79 without). The fills left are the slow
 seconds after a load, when the game makes less sound than is played.
 
-TODO before turning it on elsewhere: Safari on a Mac, an iPhone (the worklet
-runs only at 48 kHz under JavaScriptCore) and Firefox, each an A/B with
+Firefox (headless, `drop-meter --browser firefox`, state loaded at +6 s,
+6 + 6, warm visit): 215.8 / 292.2 / 16.1 -> 2.2 / 11.0 / 12.7; in the race 61
+skips and 82 fills -> 0.8 and 1.5, latency 69 ms (75 without). Without it,
+Firefox skips even in the race (the cause not investigated).
+
+TODO before turning it on elsewhere: Safari on a Mac and an iPhone (the
+worklet runs only at 48 kHz under JavaScriptCore), each an A/B with
 `--audio-trace`.
 
 ## Other switches

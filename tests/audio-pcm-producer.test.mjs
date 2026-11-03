@@ -485,10 +485,11 @@ test("review of #430: an epoch flush drops the resampler's fraction; the trace k
   assert.equal(s.streamingMs, null);
 });
 
-test("rate control default: on under V8, off under JavaScriptCore, SpiderMonkey and unknown; ?audiorate=1|0 forces it; the bound 1 %", async () => {
+test("rate control default: on under V8 and SpiderMonkey, off under JavaScriptCore and unknown; ?audiorate=1|0 forces it; the bound 1 %", async () => {
   const { defaultAudioRate, requestedAudioRate, DEFAULT_AUDIO_RATE_MAX_PPM } = await import("../src/audio.js");
   assert.equal(defaultAudioRate("v8"), true);
-  for (const e of ["jsc", "spidermonkey", "unknown"]) assert.equal(defaultAudioRate(e), false, e);
+  assert.equal(defaultAudioRate("spidermonkey"), true, "Firefox, measured 2026-11-03");
+  for (const e of ["jsc", "unknown"]) assert.equal(defaultAudioRate(e), false, e);
   assert.equal(requestedAudioRate("", "v8"), true);
   assert.equal(requestedAudioRate("?audiorate=0", "v8"), false, "the old behaviour forced");
   assert.equal(requestedAudioRate("?audiorate=1", "jsc"), true);
