@@ -11,13 +11,15 @@ import { wasmEngine } from "./wasm-engine.js";
 // The AudioWorklet's rate control (#430, patch 0216): on by default under V8
 // (Chrome, Edge; drop-meter pairs on a Mac 2026-11-03, skips + fills + seconds
 // over 100 ms of latency per visit 248 -> 132 in 1P, 309 -> 206 in 2P, none
-// of either in the race), off elsewhere until measured: JavaScriptCore
-// (Safari Mac, iPhone; the worklet runs only at 48 kHz there and the iPhone's
-// audio has its own behaviour), SpiderMonkey (Firefox), unknown engines.
-// TODO measure Safari Mac, iPhone and Firefox before turning it on there.
+// of either in the race) and SpiderMonkey (Firefox; headless pair on a Mac,
+// state loaded at +6 s, warm visit 524 -> 26, the race 61 skips and 82 fills
+// -> 0.8 and 1.5). Off elsewhere until measured: JavaScriptCore (Safari Mac,
+// iPhone; the worklet runs only at 48 kHz there and the iPhone's audio has
+// its own behaviour) and unknown engines.
+// TODO measure Safari Mac and iPhone before turning it on there.
 export const DEFAULT_AUDIO_RATE_MAX_PPM = AUDIO_PCM_MAX_RATE_PPM;
 export function defaultAudioRate(engine) {
-  return engine === "v8";
+  return engine === "v8" || engine === "spidermonkey";
 }
 
 // ?audiorate=1|0 forces the rate control on or off, else the engine's default.
