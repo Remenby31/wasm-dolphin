@@ -2449,7 +2449,7 @@ async function handleMessage(type, payload) {
       return api?.audioQueueEvents
         ? { overflowSkips: api.audioQueueEvents(0), underrunFills: api.audioQueueEvents(1),
             trimPpm: typeof moduleInstance?._DolphinWeb_ThrottleRatePpm === "function" ? moduleInstance._DolphinWeb_ThrottleRatePpm() : null,
-            phaseLock: wgpuViLock ? { ...wgpuViLock.stats } : null }
+            phaseLock: viLockStatus() }
         : { unavailable: "core without patch 0212" };
     case "validationAudioTrace":
       // the AudioWorklet producer's 100 ms trace (audio-pcm-producer.js)
@@ -2583,7 +2583,7 @@ async function handleMessage(type, payload) {
         // frames waiting now (the `queued` counter is the total queued)
         waiting: wgpuVsync.waiting,
         // ?vilock=1: the phase lock's counters (src/wgpu-vi-phase-lock.js)
-        phaseLock: wgpuViLock ? { ...wgpuViLock.stats } : null,
+        phaseLock: viLockStatus(),
         ticks: wgpuVsyncTick,
         // backbuffer passes and presents since boot: with one pass a frame
         // they match; more passes than presents is a frame's pass reopened
@@ -3443,9 +3443,15 @@ async function loadCore({
   setWgpuDisplayFilter(displayFilter ?? {});
   wgpuPresentGamePace = presentGamePace === true;
   wgpuPresentPaceStats = presentPaceStats === true || wgpuPresentGamePace;
-  // ?vilock=1: only on the vsync presenter (its rAF measures the refresh) and
-  // at the normal speed (an unlimited or other speed is the user's)
-  wgpuViLock = viLock === true && wgpuPresentVsync && Number(emulationSpeed) === 1 ? createViPhaseLock() : null;
+  // ?vilock=1: only on the WebGPU video path with the vsync presenter (its
+  // rAF measures the refresh) and at the normal speed (an unlimited or other
+  // speed is the user's). Asked for where it cannot run, its status says why
+  // (the software renderer used to report "starting" for ever).
+  wgpuViLockUnavailable = viLock !== true ? null
+    : !hardwareVideoBackend ? "not available on this video path"
+    : !wgpuPresentVsync ? "not available with this presenter"
+    : Number(emulationSpeed) !== 1 ? "not at this speed" : null;
+  wgpuViLock = viLock === true && !wgpuViLockUnavailable ? createViPhaseLock() : null;
   wgpuGamePacer.reset({ arrival: true });
   wgpuRefreshHistogram.reset();
   releaseWgpuReadback();
@@ -5703,7 +5709,7 @@ function maybeCreateCausalTelemetry(videoStats, { force = false } = {}) {
         gamePace: wgpuPresentGamePace ? { ...wgpuGamePacer.stats, periodMs: wgpuGamePacer.period } : null,
         // ?vilock=1: on/off, the speed's nudge (ppm), the drift it cancels,
         // locks taken and lost, why not locked, the refresh and frame periods
-        phaseLock: wgpuViLock ? { ...wgpuViLock.stats } : null
+        phaseLock: viLockStatus()
       } : null,
       visualCadence: wgpuVisualCadenceSnapshot(),
       mappedStaging: wgpuMappedStagingPool?.snapshot() ?? null,
@@ -13310,6 +13316,15 @@ let wgpuPresentGamePace = false;
 // without rAF (hidden), from the next arrival. A core without the trim: no
 // lock, and why.
 let wgpuViLock = null;
+// why ?vilock=1 was not honoured (null: not asked, or running)
+let wgpuViLockUnavailable = null;
+// The VI phase lock's status for the audio queue telemetry: its stats when
+// it runs, off with the reason when ?vilock=1 could not run, null when not asked.
+function viLockStatus() {
+  if (wgpuViLock) return { ...wgpuViLock.stats };
+  if (wgpuViLockUnavailable) return { on: false, ppm: 0, locks: 0, lost: 0, why: wgpuViLockUnavailable, driftPpm: null, refreshMs: null, frameMs: null, ratio: null, phase: null };
+  return null;
+}
 let wgpuViLockLastUpdate = 0;
 function wgpuViLockUpdate(now) {
   if (!wgpuViLock || now - wgpuViLockLastUpdate < 500) return;
