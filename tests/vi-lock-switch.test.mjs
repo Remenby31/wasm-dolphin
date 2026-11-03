@@ -44,7 +44,13 @@ test("vilock: host, worker and patch 0212 (a trim of the throttle's wall rate on
   assert.match(host, /\n {12}viLock: this\.pacing\.viLock,\n/);
   assert.match(worker, /\n {8}viLock: payload\.viLock,\n/);
   // the lock only on the vsync presenter at the normal speed, and only through the core's trim
-  assert.match(worker, /wgpuViLock = viLock === true && wgpuPresentVsync && Number\(emulationSpeed\) === 1 \? createViPhaseLock\(\) : null;/);
+  // only on the WebGPU path with the vsync presenter at speed 1; asked for
+  // elsewhere, the status says why (the software renderer said "starting")
+  assert.match(worker, /wgpuViLockUnavailable = viLock !== true \? null\n\s+: !hardwareVideoBackend \? "not available on this video path"\n\s+: !wgpuPresentVsync \? "not available with this presenter"\n\s+: Number\(emulationSpeed\) !== 1 \? "not at this speed" : null;/);
+  assert.match(worker, /wgpuViLock = viLock === true && !wgpuViLockUnavailable \? createViPhaseLock\(\) : null;/);
+  assert.match(worker, /if \(wgpuViLockUnavailable\) return \{ on: false, ppm: 0, locks: 0, lost: 0, why: wgpuViLockUnavailable,/);
+  assert.equal(worker.match(/phaseLock: viLockStatus\(\)/g)?.length, 3, "every audio-queue report goes through viLockStatus");
+  assert.doesNotMatch(worker, /phaseLock: wgpuViLock \?/);
   assert.match(worker, /module\._DolphinWeb_SetThrottleRatePpm\(Math\.round\(Number\(ppm\)\) \| 0\)/);
   assert.match(worker, /if \(r\.changed\) api\.setThrottleRatePpm\(wgpuViLock\.stats\.ppm\);/);
   assert.doesNotMatch(worker, /setEmulationSpeed\?\.\(r\.factor\)/, "never the pre-boot speed setter");
