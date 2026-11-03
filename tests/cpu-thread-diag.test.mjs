@@ -402,3 +402,14 @@ test("--sampler-ms: the drain's last row as counters, deltas per row (u32 µs wr
   assert.equal(lastSamplerRow({ columns: ["t"], rows: [] }), null);
   assert.equal(samplerDelta(null, b), null);
 });
+
+test("probe contract: --reload-after plays, counts the installed regions, loads the state again; rows from that load", () => {
+  const src = read("../harness/probes/cpu-window.mjs");
+  const at = src.indexOf("if (o.reloadAfter) {");
+  const body = src.slice(at, src.indexOf("} else if (o.steps) {", at));
+  assert.match(body, /await page\.waitForTimeout\(o\.reloadAfter \* 1000\);/);
+  assert.match(body, /validationReadJitRegionStats/);
+  assert.match(body, /const again = await loadHarnessState\(page, session\.url\);/);
+  assert.match(body, /loadedAt = performance\.now\(\);/);
+  assert.match(src, /warm: run\.warm,/);
+});

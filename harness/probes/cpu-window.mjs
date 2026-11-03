@@ -233,11 +233,23 @@ async function measure(o, server) {
       enabled = await enableStats(page, { light: o.light });
       await page.waitForTimeout(Math.max(o.memWarm, 1) * 1000);
     }
-    let loadedAt = null;
+    let loadedAt = null, warm = null;
     if (o.state) {
       const loaded = await loadHarnessState(page, session.url);
       if (!loaded?.loaded) throw new Error(`savestate load failed: ${JSON.stringify(loaded)}`);
       loadedAt = performance.now();
+      // --reload-after S: the warm case (the player has played, the regions
+      // are built and installed): S seconds of play, then the same state
+      // loaded again in the same session; the rows start at that second load.
+      if (o.reloadAfter) {
+        await page.waitForTimeout(o.reloadAfter * 1000);
+        const before = decodeRegionStats((await workerRequest(page, "validationReadJitRegionStats", {}, 10000).catch(() => null))?.bytes ?? null);
+        const again = await loadHarnessState(page, session.url);
+        if (!again?.loaded) throw new Error(`savestate reload failed: ${JSON.stringify(again)}`);
+        loadedAt = performance.now();
+        warm = { afterSec: o.reloadAfter, regionsInstalled: before?.diagnostics?.regionsInstalled ?? null, regionsQueued: before?.diagnostics?.regionsQueued ?? null };
+        log(`warm: reloaded after ${o.reloadAfter} s, ${warm.regionsInstalled} region(s) installed, ${warm.regionsQueued} queued`);
+      }
     } else if (o.steps) {
       await runSteps(page, o.steps);
     }
@@ -288,7 +300,7 @@ async function measure(o, server) {
     if (duringDone?.unfinished) throw new Error(`--steps-during did not finish within --secs ${o.secs}: lengthen --secs`);
     const medianLoad = median(loads);
     const rowsStartAfterLoadSec = loadedAt != null && Number.isFinite(snaps[0]?.t) ? round((snaps[0].t - loadedAt) / 1000, 2) : null;
-    return { enabled, untimed, rows, snapshots: snaps, rowsStartAfterLoadSec, stepsDuringDoneS: duringDone?.doneS ?? null, load1: { median: round(medianLoad, 2), max: round(Math.max(...loads), 2), limit: o.maxLoad }, overloaded: medianLoad > o.maxLoad, fatal: session.watch.fatal() };
+    return { enabled, untimed, rows, snapshots: snaps, rowsStartAfterLoadSec, stepsDuringDoneS: duringDone?.doneS ?? null, warm, load1: { median: round(medianLoad, 2), max: round(Math.max(...loads), 2), limit: o.maxLoad }, overloaded: medianLoad > o.maxLoad, fatal: session.watch.fatal() };
   } finally {
     if (o.hold) await page.keyboard.up(o.hold).catch(() => {});
     await closeBounded(session);
@@ -308,7 +320,7 @@ async function main() {
       port: { type: "string", default: process.env.HARNESS_PORT }, out: { type: "string" },
       // set by spark-run for every probe: one tree, one window here
       runs: { type: "string" }, baseline: { type: "string" }, "baseline-query": { type: "string" },
-      "counters-before-load": { type: "boolean", default: false }, light: { type: "boolean", default: false }, display: { type: "boolean", default: false }, "sampler-ms": { type: "string" }
+      "counters-before-load": { type: "boolean", default: false }, light: { type: "boolean", default: false }, display: { type: "boolean", default: false }, "sampler-ms": { type: "string" }, "reload-after": { type: "string" }
     },
     allowPositionals: false
   });
@@ -332,7 +344,7 @@ async function main() {
     iso, state, steps, during, root,
     query: `${values.query ?? (values.config === "product" ? PRODUCT_QUERY : PRESETS[values.config] ?? values.config)}&metrics=1`,
     warmup: num(values, "warmup", { min: 0 }), secs: num(values, "secs", { min: 1 }), step: num(values, "step", { min: 0.25 }),
-    hold: values.hold || null, vi: parseViRange(values.vi), countersBeforeLoad: Boolean(values["counters-before-load"]), light: Boolean(values.light), display: Boolean(values.display), samplerMs: values["sampler-ms"] ? num(values, "sampler-ms", { min: 10, int: true }) : null,
+    hold: values.hold || null, vi: parseViRange(values.vi), countersBeforeLoad: Boolean(values["counters-before-load"]), light: Boolean(values.light), display: Boolean(values.display), samplerMs: values["sampler-ms"] ? num(values, "sampler-ms", { min: 10, int: true }) : null, reloadAfter: values["reload-after"] ? num(values, "reload-after", { min: 1 }) : null,
     dipSpeed: num(values, "dip-speed", { min: 0 }), dipBusy: num(values, "dip-busy", { min: 0 }),
     regionSample: num(values, "region-sample", { min: 0, int: true }), memWarm: num(values, "mem-warm", { min: 0 }), untimedSecs: num(values, "untimed-secs", { min: 0 }),
     maxLoad: values["max-load"] ? num(values, "max-load", { min: 0.1 }) : defaultMaxLoad(),
@@ -390,6 +402,8 @@ async function main() {
       // a transition played with --steps-during: COMPLETE only when the
       // rows show the compile wave, then the game phase after it; an
       // INCOMPLETE run (the route lost its way) is left out, as in parcours
+      // --reload-after: the rows follow a second load of the state, after that much play
+      warm: run.warm,
       stepsDuring: values["steps-during"] ? { file: path.basename(values["steps-during"]), doneAtS: run.stepsDuringDoneS, ...phaseCheck(run.rows) } : null,
       vi: o.vi, dipSpeed: o.dipSpeed, dipBusy: o.dipBusy, loadGate: gate, load1: run.load1, overloaded: run.overloaded, fatal: run.fatal,
       enabled: run.enabled, regionsInstalled, meanRegionCoverage: meanCoverage, regionWarning: warning,
