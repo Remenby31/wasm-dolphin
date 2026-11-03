@@ -62,7 +62,7 @@ import { parseArgs } from "node:util";
 import { gunzipSync, gzipSync } from "node:zlib";
 
 import { bootIso, ensureServer, grabFrame, launchBrowser, loadHarnessState, readFrameInfo, readTimeline, REPO_ROOT, workerRequest } from "../lib/browser.mjs";
-import { ANALYSIS_VERSION, attributeDips, attributionLines, attributionTable, dropEvents, dropSummary, dropWindowsForAttribution, loadSegments, nativeFps, noiseOf, phaseSummaries, rowsOf, trendLine, trendTable, VERDICT_MIN_RUNS, visitVerdict, windowsOf, worstDrops } from "../lib/drops.mjs";
+import { ANALYSIS_VERSION, ATTRIBUTION_CONTENT_BUSY, ATTRIBUTION_STARVED_SHARE, attributeDips, attributionLines, attributionTable, dropEvents, dropSummary, dropWindowsForAttribution, loadSegments, nativeFps, noiseOf, phaseSummaries, rowsOf, trendLine, trendTable, VERDICT_MIN_RUNS, visitVerdict, windowsOf, worstDrops } from "../lib/drops.mjs";
 import { exportRef } from "../cli.mjs";
 import { calmLock, defaultMaxLoad, loadGaveUp, loadLimit } from "../lib/env.mjs";
 import { claim } from "../lib/ownership.mjs";
@@ -495,7 +495,7 @@ export function humanSummary(summary) {
   for (const f of summary.integrity ?? []) lines.push(`INTEGRITY ${f.side} run ${f.run} visit ${f.visit}: ${f.fatal.join(", ")}`);
   for (const v of summary.visitSummary) {
     const n = v.candidate.noise, top = v.candidate.worst[0];
-    lines.push(`${v.visit === 1 ? "cold" : "warm"} (${v.candidate.runs} runs): lost ${n.lostMs?.median ?? "–"} ms, <95 % ${n.pctBelow95?.median ?? "–"} % of the time, worst 1 s ${n.worstSecond?.median ?? "–"} %, hitches >100 ms ${n.hitches100?.median ?? "–"}, new frames ${n.newFramesPerSec?.median ?? "–"}/s, load excess ${n.loadExcessMs?.median ?? "–"} ms; worst drop ${top ? `${top.label} ${Math.round(top.lostMs)} ms (${top.cause})` : "none"}`);
+    lines.push(`${v.visit === 1 ? "cold" : "warm"} (${v.candidate.runs} runs): lost ${n.lostMs?.median ?? "–"} ms, <95 % ${n.pctBelow95?.median ?? "–"} % of the time, worst 1 s ${n.worstSecond?.median ?? "–"} %, hitches >100 ms ${n.hitches100?.median ?? "–"}, new frames ${n.newFramesPerSec?.median ?? "–"}/s, rendered ${n.renderedPerGuestSec?.median ?? "–"}/guest s, load excess ${n.loadExcessMs?.median ?? "–"} ms; worst drop ${top ? `${top.label} ${Math.round(top.lostMs)} ms (${top.cause})` : "none"}`);
     if (v.verdict) {
       const bad = v.verdict.regressions.map((r) => `${r.where} ${r.metric} ${r.baseline} → ${r.candidate} (> ${r.threshold})`);
       lines.push(`   verdict: ${v.verdict.inconclusive ? "NO VERDICT (see noVerdict)" : v.verdict.regression ? `REGRESSION ${bad.join(", ")}` : "no regression beyond the noise"}${v.verdict.improvement ? " (some improvement)" : ""}`);
@@ -699,12 +699,22 @@ export function readNoise(file, expect = null) {
   return Object.fromEntries(s.visitSummary.map((v) => [v.visit, { run: (v.candidate ?? v).noise, phases: (v.candidate ?? v).phases ?? {} }]));
 }
 
+// RENDER-STARVED: the GPU thread busy over the run (≥ the content margin,
+// ATTRIBUTION_CONTENT_BUSY: a run mean, lower than its seconds' peaks) and
+// the core rendering (XFB copies) under half the presents' rate per guest
+// second (the VI rate; 5 % margin so a 30 fps scene at 60 Hz, or 25 at 50 Hz,
+// is not flagged). Speed and pictures per VI cannot see it. A CPU-decoded
+// movie (few copies, quiet GPU thread) is not flagged.
+export function renderStarvedBrief(s) {
+  const r = s?.renderedPerGuestSec, p = s?.presentsPerGuestSec, g = s?.gpuBusyShare;
+  return Number.isFinite(r) && p > 0 && g >= ATTRIBUTION_CONTENT_BUSY && r < ATTRIBUTION_STARVED_SHARE * 0.95 * p ? ` RENDER-STARVED (${r} rendered for ${p} presented per guest s, GPU thread ${Math.round(g * 100)} % busy)` : "";
+}
 const audioQueueBrief = (q) => (!q || q.unavailable ? "" : `, audio skips ${q.overflowSkips ?? "–"} fills ${q.underrunFills ?? "–"}${q.phaseLock ? `, vilock ${q.phaseLock.on ? "on" : "off"}${q.phaseLock.why ? ` (${q.phaseLock.why})` : ""} ppm ${q.phaseLock.ppm ?? "–"} locks ${q.phaseLock.locks ?? "–"} lost ${q.phaseLock.lost ?? "–"}` : ""}`);
 
 function logRun(log, tag, a) {
   if (a.error) return log(`${tag}: ${a.error}`);
   const s = a.summary;
-  log(`${tag}: lost ${s.lostMs} ms, <95 % ${s.pctBelow95} %, <90 % ${s.pctBelow90} %, worst 1 s ${s.worstSecond} %, hitches >50 ${s.hitches50} >100 ${s.hitches100}, p99 ${s.presentP99} ms, new frames ${s.newFramesPerSec ?? "–"}/s, ${s.loads} loads +${s.loadExcessMs} ms, underruns ${s.underruns}, audio ${s.audioLatencyMs ?? "–"} ms (mixer ${s.audioMixerMs ?? "–"}), load1 ${a.load1.median}${a.regionsDoneBeforeLoad === false ? ", LOADED BEFORE REGIONS DONE" : a.regionsDoneBeforeLoad ? ", regions done before load" : ""}${audioQueueBrief(a.audioQueue)}${a.overloaded ? " OVERLOADED" : ""}${a.powerDrained ? ` POWER (charge fell or under ${MIN_BATTERY_PERCENT} %)` : ""}${integrityBrief(a.integrity)}`);
+  log(`${tag}: lost ${s.lostMs} ms, <95 % ${s.pctBelow95} %, <90 % ${s.pctBelow90} %, worst 1 s ${s.worstSecond} %, hitches >50 ${s.hitches50} >100 ${s.hitches100}, p99 ${s.presentP99} ms, new frames ${s.newFramesPerSec ?? "–"}/s, rendered ${s.renderedPerGuestSec ?? "–"}/guest s${renderStarvedBrief(s)}, ${s.loads} loads +${s.loadExcessMs} ms, underruns ${s.underruns}, audio ${s.audioLatencyMs ?? "–"} ms (mixer ${s.audioMixerMs ?? "–"}), load1 ${a.load1.median}${a.regionsDoneBeforeLoad === false ? ", LOADED BEFORE REGIONS DONE" : a.regionsDoneBeforeLoad ? ", regions done before load" : ""}${audioQueueBrief(a.audioQueue)}${a.overloaded ? " OVERLOADED" : ""}${a.powerDrained ? ` POWER (charge fell or under ${MIN_BATTERY_PERCENT} %)` : ""}${integrityBrief(a.integrity)}`);
   for (const d of a.worst.slice(0, 3)) log(`   drop ${d.label} @${round(d.guestStart, 1)} gs: ${d.durationMs} ms, lost ${d.lostMs} ms, min ${d.minSpeed} %, cause ${d.cause}, ${d.jitBlocks} new blocks (${d.defers} deferred), causes ${JSON.stringify(d.causesMs)}`);
 }
 

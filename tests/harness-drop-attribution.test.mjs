@@ -12,7 +12,7 @@ const quiet = { cpu: 0.3, gpu: 0.3, replay: 0.2 };
 function second(t, { speed = 100, produced = 60, shown = 60, presents = 60, causes = {}, occupancy = quiet, gaps = [], phase = null, mainLagMs = 0, workerLagMs = 0, beatFrames = 0, cadence } = {}) {
   return Array.from({ length: 10 }, (_, i) => ({
     t: t + i * 100, ms: 100, phase, speed, cadence,
-    produced: produced / 10, shown: shown / 10, presents: presents == null ? null : presents / 10,
+    produced: produced / 10, shown: shown == null ? null : shown / 10, presents: presents == null ? null : presents / 10,
     causes: Object.fromEntries(Object.entries(causes).map(([k, v]) => [k, v / 10])),
     occupancy, gaps: i === 0 ? gaps : [], mainLagMs: mainLagMs / 10, workerLagMs: workerLagMs == null ? null : workerLagMs / 10, beatFrames: i === 0 ? beatFrames : 0
   }));
@@ -34,9 +34,33 @@ test("the parts always add up to the deficit (cadence − shown), shown above pr
     const causes = { jit: rnd() * 600, disc: rnd() * 300, uncountedBusy: rnd() * 200 };
     const gaps = [{ ms: 20 + rnd() * 200, vis: rnd() < 0.3 ? null : Math.round(rnd() * 12), workerLagMs: rnd() < 0.3 ? null : rnd() * 200 }];
     const s = attributeSecond(second(0, { produced, shown, presents, speed, occupancy, causes, gaps, beatFrames: Math.round(rnd() * 5) }), { cadence: 60 });
-    assert.ok(Math.abs(allParts(s) - Math.max(0, 60 - shown)) < 0.05, `n=${n} ${JSON.stringify({ produced, shown, presents, speed, parts: s.parts })}`);
+    // shown as counted: capped at produced + the edge in a render-starved second
+    assert.ok(s.shownCounted <= shown + 1e-9);
+    assert.ok(Math.abs(allParts(s) - Math.max(0, 60 - s.shownCounted)) < 0.05, `n=${n} ${JSON.stringify({ produced, shown, presents, speed, parts: s.parts })}`);
     assert.ok(Object.values(s.parts).every((f) => f > 0));
   }
+});
+
+test("render-starved: VI at 60, 7 frames rendered at full speed with the GPU thread saturated is a loss, whatever the VIs show", () => {
+  // the software renderer (2026-11-03): 60 presents and 54 distinct VIs a
+  // second, the same picture on each; 7 XFB copies; guest speed 100 %
+  const sw = attributeSecond(second(0, { produced: 7, shown: 54, presents: 60, occupancy: { cpu: 0.4, gpu: 0.88, replay: null } }), { cadence: 60 });
+  assert.deepEqual(sw.parts, { "render-starved": 51 });
+  assert.equal(sw.lostFrames, 51);
+  assert.equal(sw.shown, 54);
+  assert.equal(sw.shownCounted, 9);
+  assert.ok(sw.fluidity < 20);
+  // shown not measured (parcours off WebGPU): judged on what was produced
+  assert.deepEqual(attributeSecond(second(0, { produced: 7, shown: null, presents: 60, occupancy: { cpu: 0.4, gpu: 0.9, replay: null } }), { cadence: 60 }).parts, { "render-starved": 53 });
+  assert.deepEqual(attributeSecond(second(0, { produced: 60, shown: null, presents: 60 }), { cadence: 60 }).parts, {});
+  // a CPU-decoded movie: no copies, a quiet GPU thread, new pictures on screen: not starved, nothing capped
+  const movie = attributeSecond(second(0, { produced: 0, shown: 30, presents: 60, occupancy: quiet }), { cadence: 30 });
+  assert.equal(movie.parts["render-starved"], undefined);
+  assert.equal(movie.shownCounted, 30);
+  // slow guest: the emulation causes, never render-starved
+  assert.equal(attributeSecond(second(0, { speed: 80, produced: 7, shown: 54, presents: 60, occupancy: { cpu: 0.9, gpu: 0.9, replay: null }, causes: { jit: 100 } }), { cadence: 60 }).parts["render-starved"], undefined);
+  // half or more rendered with the GPU saturated: game:gpu as before
+  assert.deepEqual(attributeSecond(second(0, { produced: 45, shown: 45, presents: 60, occupancy: { cpu: 0.3, gpu: 0.95, replay: 0.3 } }), { cadence: 60 }).parts, { "game:gpu": 15 });
 });
 
 test("a slow guest: the production gap shared in proportion to the counted causes", () => {
