@@ -1,19 +1,19 @@
 {
   "schemaVersion": 1,
   "abiVersion": 1,
-  "coreId": "sha256:3846f50df7fd0af3127ad65f9c649f480a5ab5298572e9d35a14a863e9cec7f0",
+  "coreId": "sha256:cfdcda2d67d603ed39992871d831948c403118d61717cbf2d54347da9c4e2f0a",
   "upstreamCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
   "artifacts": [
     {
       "path": "cores/dolphin/dolphin-core-upstream.js",
       "hashMode": "lf-normalized",
-      "size": 291345,
-      "sha256": "850630b550e632c2a858809af16ff8b749bda4bc6fae9e6318f5f99419f7d4e0"
+      "size": 291463,
+      "sha256": "afb6a5074e122fff44d96f8dfaee203fbe7092bc8f6f071f1bb6520a2e182775"
     },
     {
       "path": "cores/dolphin/dolphin-core-upstream.wasm",
-      "size": 13265115,
-      "sha256": "3846f50df7fd0af3127ad65f9c649f480a5ab5298572e9d35a14a863e9cec7f0"
+      "size": 13265410,
+      "sha256": "cfdcda2d67d603ed39992871d831948c403118d61717cbf2d54347da9c4e2f0a"
     }
   ],
   "contractSources": [
@@ -413,6 +413,7 @@
     "_DolphinWeb_AotTranslateForTest",
     "_DolphinWeb_AotUnverifyForTest",
     "_DolphinWeb_AudioQueueEvents",
+    "_DolphinWeb_AudioQueuedFifoMs",
     "_DolphinWeb_AudioQueuedMs",
     "_DolphinWeb_AxHleStats",
     "_DolphinWeb_DirectPadBlock",
