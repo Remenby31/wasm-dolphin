@@ -404,7 +404,6 @@ test("plumbing: ?audiorate and ?audioratemax reach the producer", async () => {
   const { readFile } = await import("node:fs/promises");
   const read = (p) => readFile(new URL(p, import.meta.url), "utf8");
   const [audio, adapter, worker] = await Promise.all([read("../src/audio.js"), read("../src/upstream-worker-adapter.js"), read("../src/upstream-discio-worker.js")]);
-  assert.match(audio, /this\.workletRateControl = params\.get\("audiorate"\) === "1";/);
   assert.equal(audio.match(/rateControl: this\.workletRateControl/g).length, 3);
   assert.equal(audio.match(/rateMaxPpm: this\.workletRateMaxPpm/g).length, 3);
   assert.match(adapter, /rateMaxPpm: Number\(rateMaxPpm\) \|\| 5000,/);
@@ -484,4 +483,19 @@ test("review of #430: an epoch flush drops the resampler's fraction; the trace k
   const [s] = f.producer.traceDrain().samples;
   assert.equal(s.dmaMs, null);
   assert.equal(s.streamingMs, null);
+});
+
+test("rate control default: on under V8, off under JavaScriptCore, SpiderMonkey and unknown; ?audiorate=1|0 forces it; the bound 1 %", async () => {
+  const { defaultAudioRate, requestedAudioRate, DEFAULT_AUDIO_RATE_MAX_PPM } = await import("../src/audio.js");
+  assert.equal(defaultAudioRate("v8"), true);
+  for (const e of ["jsc", "spidermonkey", "unknown"]) assert.equal(defaultAudioRate(e), false, e);
+  assert.equal(requestedAudioRate("", "v8"), true);
+  assert.equal(requestedAudioRate("?audiorate=0", "v8"), false, "the old behaviour forced");
+  assert.equal(requestedAudioRate("?audiorate=1", "jsc"), true);
+  assert.equal(requestedAudioRate("?audiorate=yes", "jsc"), false);
+  assert.equal(DEFAULT_AUDIO_RATE_MAX_PPM, 10000);
+  const { readFile } = await import("node:fs/promises");
+  const audio = await readFile(new URL("../src/audio.js", import.meta.url), "utf8");
+  assert.match(audio, /this\.workletRateControl = requestedAudioRate\(window\.location\.search, wasmEngine\(\)\);/);
+  assert.match(audio, /rateMax <= 10000 \? rateMax : DEFAULT_AUDIO_RATE_MAX_PPM;/);
 });

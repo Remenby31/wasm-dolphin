@@ -5,6 +5,27 @@ import {
   createAudioPcmRing,
   snapshotAudioPcmRing,
 } from "./audio-pcm-ring.js";
+import { wasmEngine } from "./wasm-engine.js";
+
+// The AudioWorklet's rate control (#430, patch 0216): on by default under V8
+// (Chrome, Edge; drop-meter pairs on a Mac 2026-11-03, skips + fills + seconds
+// over 100 ms of latency per visit 248 -> 132 in 1P, 309 -> 206 in 2P, none
+// of either in the race), off elsewhere until measured: JavaScriptCore
+// (Safari Mac, iPhone; the worklet runs only at 48 kHz there and the iPhone's
+// audio has its own behaviour), SpiderMonkey (Firefox), unknown engines.
+// TODO measure Safari Mac, iPhone and Firefox before turning it on there.
+export const DEFAULT_AUDIO_RATE_MAX_PPM = 10000;
+export function defaultAudioRate(engine) {
+  return engine === "v8";
+}
+
+// ?audiorate=1|0 forces the rate control on or off, else the engine's default.
+export function requestedAudioRate(search = globalThis.location?.search ?? "", engine = "unknown") {
+  const raw = new URLSearchParams(search).get("audiorate");
+  if (raw === "1") return true;
+  if (raw === "0") return false;
+  return defaultAudioRate(engine);
+}
 
 // The worklet's ring RUNNING, holding frames, and not read while the
 // context's clock advanced this long: a processor gone.
@@ -58,13 +79,14 @@ export class AudioController {
     this.workletLeadSeconds =
       Number.isFinite(leadParam) && leadParam >= 0.02 && leadParam <= 1 ? Math.min(leadParam, 0.12) : 0.04;
     this.startLeadSeconds = 0.05;
-    // ?audiorate=1: the worklet's rate control (audio-pcm-producer.js): the
-    // ring's excess over its target played up to 0.5 % faster, and the
-    // mixer's queue pulled before it overflows, instead of mixer skips
-    this.workletRateControl = params.get("audiorate") === "1";
-    // ?audioratemax=N (ppm, 1000-10000): the rate control's bound, 5000 by default
+    // The worklet's rate control (audio-pcm-producer.js): the latency over
+    // its target played up to 1 % faster and the mixer's queues kept low,
+    // instead of mixer skips. On by default where measured (V8: Chrome,
+    // Edge), else off; ?audiorate=1|0 forces it (requestedAudioRate).
+    this.workletRateControl = requestedAudioRate(window.location.search, wasmEngine());
+    // ?audioratemax=N (ppm, 1000-10000): the rate control's bound
     const rateMax = Number.parseInt(params.get("audioratemax") || "", 10);
-    this.workletRateMaxPpm = Number.isInteger(rateMax) && rateMax >= 1000 && rateMax <= 10000 ? rateMax : 5000;
+    this.workletRateMaxPpm = Number.isInteger(rateMax) && rateMax >= 1000 && rateMax <= 10000 ? rateMax : DEFAULT_AUDIO_RATE_MAX_PPM;
     this.chunkFrames = 1024;
     const pumpParam = Number.parseInt(params.get("audiopump") || "", 10);
     this.pumpIntervalMs =
