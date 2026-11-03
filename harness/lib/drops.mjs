@@ -550,6 +550,11 @@ export function audioLatencyOf(page, windows) {
 // earlier in the span. A plain sum went negative when the span opened on the
 // catch-up of a stall before it: the first window after a state load ran at
 // 151 % repaying the load's own pause (lost -49 ms on a visit, 2026-11-03).
+// The analysis's version, in summary.json: --noise refuses an A/A analysed
+// with another one (re-analyse it: drop-meter.mjs --analyze <its dir>).
+// 2: lostMs as a backlog never below 0 (netLostMs), 1 its plain sum.
+export const ANALYSIS_VERSION = 2;
+
 export function netLostMs(windows) {
   return windows.reduce((backlog, w) => Math.max(0, backlog + (w.lostMs ?? 0)), 0);
 }

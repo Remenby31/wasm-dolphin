@@ -458,3 +458,18 @@ test("lostMs: a catch-up repays only a loss counted earlier in the span, never b
   assert.equal(netLostMs([{ lostMs: 30 }, { lostMs: -80 }, { lostMs: 10 }]), 10);
   assert.equal(netLostMs([{ lostMs: null }, { lostMs: 5 }]), 5);
 });
+
+test("drop-meter --noise refuses an A/A analysed with another analysis version", async () => {
+  const { readNoise } = await import("../harness/probes/drop-meter.mjs");
+  const { ANALYSIS_VERSION } = await import("../harness/lib/drops.mjs");
+  const { mkdtempSync, writeFileSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const { tmpdir } = await import("node:os");
+  const dir = mkdtempSync(join(tmpdir(), "noise-"));
+  const old = join(dir, "old.json");
+  writeFileSync(old, JSON.stringify({ probe: "drop-meter", visitSummary: [] }));
+  assert.throws(() => readNoise(old), /analysis version 1, this probe judges with 2: re-analyse it/);
+  const current = join(dir, "current.json");
+  writeFileSync(current, JSON.stringify({ probe: "drop-meter", analysisVersion: ANALYSIS_VERSION, visitSummary: [] }));
+  assert.doesNotThrow(() => readNoise(current));
+});

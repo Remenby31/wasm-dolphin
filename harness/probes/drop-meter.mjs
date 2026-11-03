@@ -62,7 +62,7 @@ import { parseArgs } from "node:util";
 import { gunzipSync, gzipSync } from "node:zlib";
 
 import { bootIso, ensureServer, grabFrame, launchChrome, loadHarnessState, readFrameInfo, readTimeline, REPO_ROOT, workerRequest } from "../lib/browser.mjs";
-import { attributeDips, attributionLines, attributionTable, dropEvents, dropSummary, dropWindowsForAttribution, loadSegments, nativeFps, noiseOf, phaseSummaries, rowsOf, trendLine, trendTable, VERDICT_MIN_RUNS, visitVerdict, windowsOf, worstDrops } from "../lib/drops.mjs";
+import { ANALYSIS_VERSION, attributeDips, attributionLines, attributionTable, dropEvents, dropSummary, dropWindowsForAttribution, loadSegments, nativeFps, noiseOf, phaseSummaries, rowsOf, trendLine, trendTable, VERDICT_MIN_RUNS, visitVerdict, windowsOf, worstDrops } from "../lib/drops.mjs";
 import { exportRef } from "../cli.mjs";
 import { calmLock, defaultMaxLoad, loadGaveUp, loadLimit } from "../lib/env.mjs";
 import { claim } from "../lib/ownership.mjs";
@@ -595,7 +595,7 @@ export function noVerdictReasons({ analyses, visits, gaveUp = null, verdicts }) 
 }
 
 function writeSummary(outDir, meta, analyses, visits, { noise = null, confirm = null } = {}) {
-  const summary = { ...meta, visitSummary: [] };
+  const summary = { ...meta, analysisVersion: ANALYSIS_VERSION, visitSummary: [] };
   const verdicts = {};
   for (let v = 1; v <= visits; v += 1) {
     const of = (side) => analyses.filter((a) => a.visit === v && a.side === side).map((a) => a.analysis);
@@ -676,6 +676,7 @@ export function integrityFailures(analyses) {
 export function readNoise(file, expect = null) {
   const s = JSON.parse(readFileSync(file, "utf8"));
   if (s.probe !== "drop-meter") throw new Error(`--noise ${file}: not a drop-meter summary`);
+  if ((s.analysisVersion ?? 1) !== ANALYSIS_VERSION) throw new Error(`--noise ${file}: analysed with analysis version ${s.analysisVersion ?? 1}, this probe judges with ${ANALYSIS_VERSION}: re-analyse it (drop-meter.mjs --analyze <its dir>) or rerun the A/A`);
   if (expect) {
     // unset in a summary from before the option: the default (false, 0)
     const unset = { display: false, pipeline: false, stateDelayMs: 0 };
