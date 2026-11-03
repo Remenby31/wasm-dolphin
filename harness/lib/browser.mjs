@@ -268,13 +268,44 @@ function profilePids(profileDir) {
 
 // macOS only (the user's screen): the Spark's x11 mode shows Chrome on an X
 // server nobody looks at, and Linux has no on-screen window list here.
-async function assertNoWindow(profileDir, when, close) {
+async function assertNoWindow(profileDir, when, close, name = "Chrome") {
   if (process.platform !== "darwin") return;
   const visible = onScreenWindows(profilePids(profileDir));
   if (visible.length) {
     await close().catch(() => {});
-    throw new Error(`our Chrome has a window on screen ${when} (${visible.join("; ")}): closed`);
+    throw new Error(`our ${name} has a window on screen ${when} (${visible.join("; ")}): closed`);
   }
+}
+
+// Firefox (Playwright's build; PLAYWRIGHT_MODULE when the default
+// Playwright expects another one), for measures under SpiderMonkey. Headless
+// only, whatever HARNESS_DISPLAY says: a visible mode is refused before the
+// launch. assertInvisible lists the on-screen windows of the processes of
+// this profile (the same check as Chrome's), and close() ends them: the
+// context, then a SIGKILL to any process still running with this profile in
+// its command line, exactly those (a user's own Firefox is never touched).
+export async function launchFirefox({ profileDir, display = defaultDisplay() }) {
+  if (display !== "headless") throw new Error(`Firefox runs headless only (display ${display} refused): no window may appear on this Mac`);
+  const { firefox } = await importPlaywright();
+  const context = await firefox.launchPersistentContext(profileDir, { headless: true, viewport: harnessViewport(process.env.HARNESS_VIEWPORT) });
+  const closeContext = context.close.bind(context);
+  context.close = async () => {
+    await closeContext().catch(() => {});
+    for (let i = 0; i < 20 && profilePids(profileDir).length; i += 1) await new Promise((r) => setTimeout(r, 100));
+    for (const pid of profilePids(profileDir)) {
+      try { process.kill(pid, "SIGKILL"); } catch {}
+    }
+  };
+  context.assertInvisible = (when) => assertNoWindow(profileDir, when, () => context.close(), "Firefox");
+  context.browserName = "firefox";
+  return context;
+}
+
+// The probe's browser: Chrome by default, Firefox on request.
+export async function launchBrowser({ browser = "chrome", profileDir, ...opts }) {
+  if (browser === "firefox") return launchFirefox({ profileDir, ...opts });
+  if (browser !== "chrome") throw new Error(`--browser ${browser}: chrome or firefox`);
+  return launchChrome({ profileDir, ...opts });
 }
 
 export function watchPage(page) {

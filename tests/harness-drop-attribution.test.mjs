@@ -473,3 +473,22 @@ test("drop-meter --noise refuses an A/A analysed with another analysis version",
   writeFileSync(current, JSON.stringify({ probe: "drop-meter", analysisVersion: ANALYSIS_VERSION, visitSummary: [] }));
   assert.doesNotThrow(() => readNoise(current));
 });
+
+test("drop-meter --browser firefox: headless only, its windows checked, only its own processes ended", async () => {
+  const { launchFirefox, launchBrowser } = await import("../harness/lib/browser.mjs");
+  await assert.rejects(() => launchFirefox({ profileDir: "/nonexistent", display: "x11" }), /Firefox runs headless only/);
+  await assert.rejects(() => launchBrowser({ browser: "safari", profileDir: "/nonexistent" }), /--browser safari: chrome or firefox/);
+  const { readFile } = await import("node:fs/promises");
+  const src = await readFile(new URL("../harness/lib/browser.mjs", import.meta.url), "utf8");
+  const fn = src.slice(src.indexOf("export async function launchFirefox"), src.indexOf("export async function launchBrowser"));
+  assert.match(fn, /firefox\.launchPersistentContext\(profileDir, \{ headless: true,/);
+  assert.match(fn, /context\.assertInvisible = \(when\) => assertNoWindow\(profileDir, when, \(\) => context\.close\(\), "Firefox"\);/);
+  // the only kill: the processes whose command line holds this profile
+  assert.equal(fn.match(/process\.kill\(/g).length, 1);
+  assert.match(fn, /for \(const pid of profilePids\(profileDir\)\) \{\n\s+try \{ process\.kill\(pid, "SIGKILL"\); \} catch \{\}/);
+  const probe = new URL("../harness/probes/drop-meter.mjs", import.meta.url).pathname;
+  const { spawnSync } = await import("node:child_process");
+  const res = spawnSync(process.execPath, [probe, "--browser", "safari", "--port", "1", "--iso", "/nonexistent.iso"], { encoding: "utf8", timeout: 20000 });
+  assert.notEqual(res.status, 0);
+  assert.match(res.stderr, /--browser safari: chrome or firefox/);
+});

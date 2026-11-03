@@ -7,7 +7,7 @@
 //   node harness/probes/drop-meter.mjs --iso disc.iso --port N [--runs 6]
 //     [--visits 2] [--candidate ref|dir] [--baseline ref|dir]
 //     [--noise <A/A>/summary.json] [--trend measures/drops/trend.jsonl]
-//     [--scenario harness/probes/drop-scenario.json] [--state scene.sav [--state-delay-ms N]]
+//     [--scenario harness/probes/drop-scenario.json] [--state scene.sav [--state-delay-ms N]] [--browser chrome|firefox]
 //     [--config product | --query "..."] [--baseline-query "..."] [--sample-ms 50] [--native ref.json]
 //     [--shots] [--display] [--pipeline] [--region-counters] [--audio-trace] [--pc-window FROM-TO] [--integrity-allow a,b] [--max-load L] [--load-wait 300] [--lock-wait 14400 | --no-lock]
 //     [--out dir]
@@ -61,7 +61,7 @@ import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { gunzipSync, gzipSync } from "node:zlib";
 
-import { bootIso, ensureServer, grabFrame, launchChrome, loadHarnessState, readFrameInfo, readTimeline, REPO_ROOT, workerRequest } from "../lib/browser.mjs";
+import { bootIso, ensureServer, grabFrame, launchBrowser, loadHarnessState, readFrameInfo, readTimeline, REPO_ROOT, workerRequest } from "../lib/browser.mjs";
 import { ANALYSIS_VERSION, attributeDips, attributionLines, attributionTable, dropEvents, dropSummary, dropWindowsForAttribution, loadSegments, nativeFps, noiseOf, phaseSummaries, rowsOf, trendLine, trendTable, VERDICT_MIN_RUNS, visitVerdict, windowsOf, worstDrops } from "../lib/drops.mjs";
 import { exportRef } from "../cli.mjs";
 import { calmLock, defaultMaxLoad, loadGaveUp, loadLimit } from "../lib/env.mjs";
@@ -139,7 +139,7 @@ export const stepsFor = (scenario, visit) => scenario.steps.filter((x) => x.only
 
 async function playVisit(o, server, profileDir, shotDir, visit) {
   const raw = { markers: [], chunks: [], rows: [], page: [], loads: [], rss: [] };
-  const context = await launchChrome({ profileDir });
+  const context = await launchBrowser({ browser: o.browser, profileDir });
   try {
     await context.assertInvisible("after launch");
     await context.addInitScript(installPageSampler, o.sampleMs);
@@ -150,7 +150,7 @@ async function playVisit(o, server, profileDir, shotDir, visit) {
     // --display: the worker's rAF records what each BeginFrame put on screen.
     await bootIso(page, { url: `${server.base}?${o.query}`, iso: o.iso, timeoutMs: 120000, harness: o.display ? { displayed: true, ...(o.pipeline ? { pipeline: true } : {}) } : {} });
     raw.bootMs = Date.now() - t0;
-    raw.browser = await page.evaluate(() => navigator.userAgent.match(/(?:Headless)?Chrome\/[\d.]+/)?.[0] ?? navigator.userAgent).catch(() => null);
+    raw.browser = await page.evaluate(() => navigator.userAgent.match(/(?:Headless)?Chrome\/[\d.]+|Firefox\/[\d.]+/)?.[0] ?? navigator.userAgent).catch(() => null);
     await context.assertInvisible("after boot");
     // --state: the scene starts at a savestate (e.g. a 2-player race); the
     // scenario's guest seconds then count from the load.
@@ -831,7 +831,7 @@ async function main() {
       candidate: { type: "string" }, baseline: { type: "string" }, noise: { type: "string" }, trend: { type: "string" }, "no-confirm": { type: "boolean", default: false }, display: { type: "boolean", default: false }, pipeline: { type: "boolean", default: false }, "noise-stale-ok": { type: "boolean", default: false },
       "false-positives": { type: "string", multiple: true }, draws: { type: "string", default: "2000" },
       config: { type: "string", default: "product" }, query: { type: "string" }, "baseline-query": { type: "string" }, "sample-ms": { type: "string", default: "50" },
-      native: { type: "string" }, analyze: { type: "string" }, attribute: { type: "boolean", default: false }, trace: { type: "string" }, state: { type: "string" }, "state-delay-ms": { type: "string", default: "0" }, shots: { type: "boolean", default: false },
+      native: { type: "string" }, analyze: { type: "string" }, attribute: { type: "boolean", default: false }, trace: { type: "string" }, state: { type: "string" }, "state-delay-ms": { type: "string", default: "0" }, browser: { type: "string", default: "chrome" }, shots: { type: "boolean", default: false },
       "region-counters": { type: "boolean", default: false }, "audio-trace": { type: "boolean", default: false }, "pc-window": { type: "string" }, "integrity-allow": { type: "string" },
       "max-load": { type: "string" }, "load-wait": { type: "string", default: "300" }, "lock-wait": { type: "string", default: "14400" }, "calm-wait": { type: "string" }, "no-lock": { type: "boolean", default: false },
       port: { type: "string", default: process.env.HARNESS_PORT }, out: { type: "string" }
@@ -873,6 +873,8 @@ async function main() {
     iso, scenario, query: query.toString(), baselineQuery: baselineQuery?.toString() ?? null, runs: num(values, "runs", { min: 1, int: true }), visits: num(values, "visits", { min: 1, int: true }),
     sampleMs: num(values, "sample-ms", { min: 10 }), port: num(values, "port", { min: 1, int: true }),
     state: values.state ? path.resolve(values.state) : null, stateDelayMs: num(values, "state-delay-ms", { min: 0, int: true }),
+    // --browser firefox: headless Firefox (lib/browser.mjs launchFirefox)
+    browser: ["chrome", "firefox"].includes(values.browser) ? values.browser : (() => { throw new Error(`--browser ${values.browser}: chrome or firefox`); })(),
     regionCounters: values["region-counters"], audioTrace: values["audio-trace"], display: values.display || values.pipeline, pipeline: values.pipeline, pcWindow: values["pc-window"] ? values["pc-window"].split("-").map(Number) : null,
     maxLoad: values["max-load"] ? num(values, "max-load", { min: 0.1 }) : defaultMaxLoad(), loadWait: num(values, "load-wait", { min: 0 }),
     integrityAllow: parseIntegrityAllow(values["integrity-allow"])
@@ -907,7 +909,7 @@ async function main() {
   });
   const outDir = probeOutDir("drop-meter", iso, values.out);
   const meta = {
-    probe: "drop-meter", at: new Date().toISOString(), locked: !values["no-lock"], machine: machineSnapshot(), chrome: chromeInfo(), iso: path.basename(iso),
+    probe: "drop-meter", at: new Date().toISOString(), locked: !values["no-lock"], browserName: o.browser, machine: machineSnapshot(), chrome: chromeInfo(), iso: path.basename(iso),
     probeVersion: PROBE_VERSION, scenario: path.basename(values.scenario), state: o.state ? path.basename(o.state) : null, stateDelayMs: o.state ? o.stateDelayMs : 0, display: o.display, pipeline: o.pipeline, query: o.query, ...(o.baselineQuery ? { baselineQuery: o.baselineQuery } : {}), sampleMs: o.sampleMs, runs: o.runs, visits: o.visits, maxLoad: o.maxLoad,
     sides: Object.fromEntries(Object.entries(sides).map(([k, s]) => [k, s.label])), cores, noise: values.noise ?? null, noiseCore,
     definition: "windows of 100 ms from the scenario's first step; speed = guest/host time (VI ticks); drops: windows < 90 % or a present gap > 50 ms, merged; loads: disc reads ≥ 2.5 MiB/s (0.5 s average), merged within 1 s, excess = host − guest ms; time under 95/90 %: 1 s sliding windows; verdict: median moved the worse way beyond the A/A noise"
