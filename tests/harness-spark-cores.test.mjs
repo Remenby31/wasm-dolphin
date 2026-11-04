@@ -88,7 +88,7 @@ test("spark queue: a pair whose lane's cores are busy steps aside, asks again, g
   }
 });
 
-test("spark-race: exit codes: the queue's 3 (cores busy for 30 min) is 4, any other failure 2 at once, 0 runs the pair", () => {
+test("spark-race: exit codes: the queue's 3 (cores busy for SPARK_QUEUE_WAIT s, 1800 by default) is 4, any other failure 2 at once, 0 runs the pair", () => {
   // A stand-in node on the bench's PATH: the queue's `wait` exits $FAKE_WAIT
   // (printing lane a on 0) and logs every call; race-perf exits 0.
   const run = (wait) => {
@@ -112,7 +112,8 @@ test("spark-race: exit codes: the queue's 3 (cores busy for 30 min) is 4, any ot
   };
   const busy = run(3);
   assert.deepEqual([busy.status, busy.exit, busy.waits, busy.raced], [4, "4", 1, false]);
-  assert.match(busy.log, /stayed busy for 30 min: no pair/);
+  // the wait given (spark-run --queue-wait), 1800 s by default
+  assert.match(busy.log, /stayed busy for 1800 s: no pair/);
   for (const code of [2, 1]) assert.deepEqual((({ status, exit, waits, raced }) => [status, exit, waits, raced])(run(code)), [2, "2", 1, false], `queue exit ${code}`);
   const ok = run(0);
   assert.deepEqual([ok.exit, ok.waits, ok.raced], ["0", 1, true]);
