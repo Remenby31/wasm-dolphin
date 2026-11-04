@@ -181,9 +181,10 @@ test("gpuContaminated: another user's process on the GPU during a visit (median,
 
 test("drop-meter: a GPU-contaminated visit is marked and left out like an overloaded one", async () => {
   const { visitGpu } = await import("../harness/probes/drop-meter.mjs");
-  assert.deepEqual(await visitGpu({ gpu: [[1, 0, null], [2, 84, "VLLM::EngineCor"], [3, 85, "VLLM::EngineCor"]] }), { contaminated: true, gpuForeignMax: 85, gpuForeignBy: "VLLM::EngineCor" });
-  assert.deepEqual(await visitGpu({ gpu: [[1, 0, null], [2, 5, "x"]] }), { contaminated: false, gpuForeignMax: 5, gpuForeignBy: "x" });
-  assert.deepEqual(await visitGpu({}), { contaminated: false, gpuForeignMax: null, gpuForeignBy: null });
+  assert.deepEqual(await visitGpu({ gpu: [[1, 0, null, 30], [2, 84, "VLLM::EngineCor", 99], [3, 85, "VLLM::EngineCor", 99]] }), { contaminated: true, gpuForeignMax: 85, gpuForeignBy: "VLLM::EngineCor", gpuTotalMax: 99 });
+  // our own WebGPU use is in the total, never in the foreign share: our run alone at 60 % is clean
+  assert.deepEqual(await visitGpu({ gpu: [[1, 0, null, 60], [2, 0, null, 62], [3, 0, null, 58]] }), { contaminated: false, gpuForeignMax: 0, gpuForeignBy: null, gpuTotalMax: 62 });
+  assert.deepEqual(await visitGpu({}), { contaminated: false, gpuForeignMax: null, gpuForeignBy: null, gpuTotalMax: null });
   // every place an overloaded run is left out leaves a contaminated one out too
   const { readFileSync } = await import("node:fs");
   const src = readFileSync(new URL("../harness/probes/drop-meter.mjs", import.meta.url), "utf8");
@@ -195,4 +196,8 @@ test("drop-meter: a GPU-contaminated visit is marked and left out like an overlo
   assert.match(src, /CONTAMINATED \(GPU: /);
   // sampled on the bench only, when the visit uses the GPU
   assert.match(src, /process\.env\.SPARK_LANE_CPUS \? await import\("\.\.\/lib\/bench-load\.mjs"\)/);
+  // per process (pmon), our tree and the bench's Xorg out: the foreign share never counts our Chrome
+  const bench = readFileSync(new URL("../harness/lib/bench-load.mjs", import.meta.url), "utf8");
+  assert.match(bench, /run\(\["pmon", "-c", "1", "-s", "um"\]\)/);
+  assert.match(bench, /procs\.filter\(\(p\) => !ours\.has\(p\.pid\) && p\.command !== "Xorg"\)/);
 });

@@ -218,7 +218,9 @@ async function playVisit(o, server, profileDir, shotDir, visit) {
       raw.loads.push([Date.now(), os.loadavg()[0]]);
       if (gpuSampled && drains++ % GPU_SAMPLE_EVERY === 0) {
         const g = gpuBench.gpuNow();
-        raw.gpu.push([Date.now(), g ? g.foreignSm : null, g?.foreign?.[0]?.command ?? null]);
+        // [t, other users' SM share (per process, our job's tree and the
+        // bench's Xorg left out), its top process, the GPU's total use (ours included)]
+        raw.gpu.push([Date.now(), g ? g.foreignSm : null, g?.foreign?.[0]?.command ?? null, g ? g.util : null]);
       }
       // Resident memory of this profile's Chrome processes (MB): the peak of
       // a launch (e.g. regions kept as bytes and as modules).
@@ -739,10 +741,11 @@ export const GPU_SAMPLE_EVERY = 5;
 // { contaminated, gpuForeignMax, gpuForeignBy } from raw.gpu; false without samples.
 export async function visitGpu(raw) {
   const s = Array.isArray(raw?.gpu) ? raw.gpu : [];
-  if (!s.length) return { contaminated: false, gpuForeignMax: null, gpuForeignBy: null };
+  if (!s.length) return { contaminated: false, gpuForeignMax: null, gpuForeignBy: null, gpuTotalMax: null };
   const { gpuContaminated } = await import("../lib/bench-load.mjs");
   const top = s.reduce((m, x) => (Number.isFinite(x[1]) && x[1] > (m?.[1] ?? -1) ? x : m), null);
-  return { contaminated: gpuContaminated(s.map((x) => x[1])), gpuForeignMax: top?.[1] ?? null, gpuForeignBy: top?.[2] ?? null };
+  const totals = s.map((x) => x[3]).filter(Number.isFinite);
+  return { contaminated: gpuContaminated(s.map((x) => x[1])), gpuForeignMax: top?.[1] ?? null, gpuForeignBy: top?.[2] ?? null, gpuTotalMax: totals.length ? Math.max(...totals) : null };
 }
 
 async function analyzeDir(dir, native, log, noiseFile = null, { attribute = false } = {}) {
