@@ -57,14 +57,35 @@ const why = (g) => `${g.over?.length ? g.over.join(", ") : `load ${g.load} > ${g
 
 // Wait (bounded) for the gate to open: the load under the limit (and, on the
 // bench, the lane's cores free).
-export async function waitForLoad({ maxLoad, waitSec = 60, pollSec = 5, log = () => {}, read = gateReader({ maxLoad }) }) {
+// Once the gate has seen another user's process on the GPU, it opens only on
+// a calm stretch: GPU_CALM_READS readings in a row, calmPollSec apart. A job
+// that works in bursts (a vLLM, 2026-11-04: 10 readings at 50-86 %, then one
+// dip under 20 %) let a run start on a single dip and measure at 96 %.
+export const GPU_CALM_READS = 3;
+export const GPU_CALM_POLL_SEC = 10;
+const gpuOver = (g) => Array.isArray(g?.over) && g.over.some((s) => String(s).startsWith("GPU:"));
+export async function waitForLoad({ maxLoad, waitSec = 60, pollSec = 5, calmPollSec = GPU_CALM_POLL_SEC, log = () => {}, read = gateReader({ maxLoad }) }) {
   const end = Date.now() + waitSec * 1000;
+  const sleep = (s) => new Promise((r) => setTimeout(r, s * 1000));
   let g = await read();
-  while (!g.ok && Date.now() < end) {
-    log(`${why(g)}, waiting`);
-    await new Promise((r) => setTimeout(r, pollSec * 1000));
+  let gpuSeen = gpuOver(g);
+  let streak = g.ok ? 1 : 0;
+  while (Date.now() < end) {
+    if (g.ok && (!gpuSeen || streak >= GPU_CALM_READS)) break;
+    if (g.ok) {
+      // calm after foreign GPU use: confirm the stretch
+      log(`GPU calm ${streak}/${GPU_CALM_READS}, confirming`);
+      await sleep(calmPollSec);
+    } else {
+      log(`${why(g)}, waiting`);
+      await sleep(pollSec);
+    }
     g = await read();
+    gpuSeen ||= gpuOver(g);
+    streak = g.ok ? streak + 1 : 0;
   }
+  // the stretch not reached within waitSec: still closed
+  if (g.ok && gpuSeen && streak < GPU_CALM_READS) return { ...g, ok: false, over: [...(g.over ?? []), `GPU calm for ${streak} of ${GPU_CALM_READS} readings only`] };
   return g;
 }
 

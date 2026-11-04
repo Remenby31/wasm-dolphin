@@ -201,3 +201,28 @@ test("drop-meter: a GPU-contaminated visit is marked and left out like an overlo
   assert.match(bench, /run\(\["pmon", "-c", "1", "-s", "um"\]\)/);
   assert.match(bench, /procs\.filter\(\(p\) => !ours\.has\(p\.pid\) && p\.command !== "Xorg"\)/);
 });
+
+test("calm gate: after another user's GPU use, it opens only on 3 calm readings in a row (a burst job's single dip never starts a run)", async () => {
+  const { waitForLoad, GPU_CALM_READS } = await import("../harness/lib/env.mjs");
+  assert.equal(GPU_CALM_READS, 3);
+  const busy = { load: 2, limit: 40, ok: false, over: ["GPU: VLLM::EngineCor (pid 1) at 80 % > 20"] };
+  const calm = { load: 2, limit: 40, ok: true, over: [] };
+  const seq = (list) => { let i = 0; return async () => list[Math.min(i++, list.length - 1)]; };
+  // the vLLM in bursts: busy, one dip, busy again, then a calm stretch
+  let reads = [busy, busy, calm, busy, calm, calm, calm];
+  let n = 0;
+  const read = seq(reads);
+  const counted = async () => { n += 1; return read(); };
+  const g = await waitForLoad({ waitSec: 5, pollSec: 0.001, calmPollSec: 0.001, read: counted });
+  assert.equal(g.ok, true);
+  assert.equal(n, 7, "opened on the 3rd calm reading in a row, never on the lone dip");
+  // the stretch not reached in time: closed, and says so
+  const g2 = await waitForLoad({ waitSec: 0.05, pollSec: 0.001, calmPollSec: 0.2, read: seq([busy, calm, calm, calm]) });
+  assert.equal(g2.ok, false);
+  assert.match(g2.over.at(-1), /GPU calm for \d of 3 readings only/);
+  // no foreign GPU seen: the first calm reading opens at once (no 30 s delay for a calm machine)
+  let m = 0;
+  const g3 = await waitForLoad({ waitSec: 5, pollSec: 0.001, calmPollSec: 0.001, read: async () => { m += 1; return m < 3 ? { load: 50, limit: 40, ok: false, over: ["load 50 > 40"] } : calm; } });
+  assert.equal(g3.ok, true);
+  assert.equal(m, 3);
+});
