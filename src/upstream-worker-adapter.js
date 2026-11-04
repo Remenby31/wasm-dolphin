@@ -988,7 +988,7 @@ export class UpstreamWorkerAdapter {
     this.post("setAudioMuted", { muted: Boolean(muted) });
   }
 
-  async configureAudioWorklet({ enabled, muted, sab, targetFrames, rateControl = false, rateMaxPpm = AUDIO_PCM_MAX_RATE_PPM }) {
+  async configureAudioWorklet({ enabled, muted, sab, targetFrames, rateControl = false, rateMaxPpm = AUDIO_PCM_MAX_RATE_PPM, ringLowMs = null }) {
     if (!this.loaded) return { active: false, reason: "core-not-loaded" };
     const response = await this.request("configureAudioWorklet", {
       enabled: Boolean(enabled),
@@ -997,6 +997,7 @@ export class UpstreamWorkerAdapter {
       targetFrames: Number(targetFrames) || 0,
       rateControl: Boolean(rateControl),
       rateMaxPpm: Number(rateMaxPpm) || AUDIO_PCM_MAX_RATE_PPM,
+      ringLowMs: Number(ringLowMs) || null,
     });
     if (enabled && !response.active) {
       this.onStatus(`AudioWorklet producer unavailable; using legacy audio: ${response.reason || "unknown"}`);

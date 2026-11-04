@@ -90,6 +90,10 @@ export class AudioController {
     // ?audioratemax=N (ppm, 1000-10000): the rate control's bound
     const rateMax = Number.parseInt(params.get("audioratemax") || "", 10);
     this.workletRateMaxPpm = Number.isInteger(rateMax) && rateMax >= 1000 && rateMax <= AUDIO_PCM_MAX_RATE_PPM ? rateMax : DEFAULT_AUDIO_RATE_MAX_PPM;
+    // ?audioringlow=ms (2-40, a test switch): the ring's fill under which the
+    // producer's per-FIFO cap is lifted (audio-pcm-producer.js); absent: 20 ms
+    const ringLow = Number.parseInt(params.get("audioringlow") || "", 10);
+    this.workletRingLowMs = Number.isInteger(ringLow) && ringLow >= 2 && ringLow <= 40 ? ringLow : null;
     this.chunkFrames = 1024;
     const pumpParam = Number.parseInt(params.get("audiopump") || "", 10);
     this.pumpIntervalMs =
@@ -160,7 +164,7 @@ export class AudioController {
     if (!muted) {
       await this.ensureContext();
       if (this.activeTransport === "worklet") {
-        await this.transportBridge?.({ enabled: true, muted: false, sab: this.workletRing.sab, targetFrames: this.workletTargetFrames(), rateControl: this.workletRateControl, rateMaxPpm: this.workletRateMaxPpm });
+        await this.transportBridge?.({ enabled: true, muted: false, sab: this.workletRing.sab, targetFrames: this.workletTargetFrames(), rateControl: this.workletRateControl, rateMaxPpm: this.workletRateMaxPpm, ringLowMs: this.workletRingLowMs });
         if (!this.workletWatchdog) this.startWorkletWatchdog();
       } else {
         this.startPump();
@@ -170,7 +174,7 @@ export class AudioController {
       this.stopPump();
       this.stopWorkletWatchdog();
       if (this.activeTransport === "worklet") {
-        await this.transportBridge?.({ enabled: true, muted: true, sab: this.workletRing.sab, targetFrames: this.workletTargetFrames(), rateControl: this.workletRateControl, rateMaxPpm: this.workletRateMaxPpm });
+        await this.transportBridge?.({ enabled: true, muted: true, sab: this.workletRing.sab, targetFrames: this.workletTargetFrames(), rateControl: this.workletRateControl, rateMaxPpm: this.workletRateMaxPpm, ringLowMs: this.workletRingLowMs });
       }
     }
     this.update();
@@ -286,6 +290,7 @@ export class AudioController {
         targetFrames: this.workletTargetFrames(),
         rateControl: this.workletRateControl,
         rateMaxPpm: this.workletRateMaxPpm,
+        ringLowMs: this.workletRingLowMs,
       });
       const activated = typeof activation === "object" ? activation?.active : activation;
       if (!activated) {

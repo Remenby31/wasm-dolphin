@@ -2868,6 +2868,7 @@ async function handleMessage(type, payload) {
         targetFrames: Number(payload.targetFrames) || undefined,
         rateControl: Boolean(payload.rateControl),
         rateMaxPpm: Number(payload.rateMaxPpm) || undefined,
+        ringLowMs: Number(payload.ringLowMs) || null,
       });
       if (result.active) api?.setAudioMuted?.(payload.muted ? 1 : 0);
       return result;
