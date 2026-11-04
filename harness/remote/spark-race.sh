@@ -32,7 +32,8 @@ export PATH="$B/node/bin:$PATH"
   # once that lane's cores are free of other people's processes (the bench
   # is shared: another user's evals run there, never touched). Over 50 % of
   # a core there (spark-cores.mjs, read only, thread by thread), the ticket
-  # steps aside and asks again every 60 s, 30 min at most (queue exit 3:
+  # steps aside and asks again every 60 s, SPARK_QUEUE_WAIT s at most
+  # (spark-run --queue-wait; 1800 by default) (queue exit 3:
   # exit 4 here, no pair rather than measure on shared cores); any other
   # failure is an error (2), never retried. The last check is kept as
   # <out>.cores.
@@ -44,12 +45,12 @@ export PATH="$B/node/bin:$PATH"
     lane=$(node harness/remote/spark-queue.mjs wait --pid $$ --kind pair --lanes "$want" --name "$(basename "$out")" -- "$@")
   else
     lane=$(node harness/remote/spark-queue.mjs wait --pid $$ --kind pair --lanes "$want" --name "$(basename "$out")" \
-      --cores "a=${SPARK_CHROME_CPUS:-15-19},${SPARK_NODE_CPUS:-10-14}" --cores-out "$out.cores" -- "$@")
+      --cores "a=${SPARK_CHROME_CPUS:-15-19},${SPARK_NODE_CPUS:-10-14}" --cores-out "$out.cores" --give-up "${SPARK_QUEUE_WAIT:-1800}" -- "$@")
   fi
   code=$?
   case $code in
     0) ;;
-    3) echo "[spark-race] the lane's cores stayed busy for 30 min: no pair"; echo 4 > "$out.exit"; exit 4 ;;
+    3) echo "[spark-race] the lane's cores stayed busy for ${SPARK_QUEUE_WAIT:-1800} s: no pair"; echo 4 > "$out.exit"; exit 4 ;;
     *) echo "[spark-race] the queue failed (exit $code)"; echo 2 > "$out.exit"; exit 2 ;;
   esac
   case $lane in

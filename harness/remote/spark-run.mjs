@@ -12,6 +12,7 @@
 //     [--keep-video] [--headed :2 [--xauth /run/salon-xorg/xauth] | --headless]
 //     [--probe race-perf | drop-meter | replay-gates | parcours [--film <local film.json>] | cpu-window]
 //     (the load gate: lib/bench-load.mjs; a --max-load given only caps it) [--noise <date>/<drop-meter A/A on the bench>]
+//     [--queue-wait S (a busy lane is asked again for S s, 1800 by default)]
 //     (lane a only, cpus 10-19: since 2026-10-29 cpus 0-9 are Excalibur's, no --lane b, --screen or --multi)
 //     [-- <the probe's options: --query, --warmup, --secs, --max-load, …>]
 //   (--multi: refused since 2026-10-29, its arms ran on 5-9; an older one still comes back with --fetch)
@@ -358,10 +359,22 @@ export function checkProbeInputs(probe, { state, film }) {
 export const LOADED_PROBES = Object.freeze(["replay-gates"]);
 export const LOADED_NOTE = "lane cores not waited free of other processes (correctness run): no speed reading from it";
 
-export function launchCommand({ harnessDir, outDir, lane = "auto", raceArgs, chromeCpus, nodeCpus, headed = null, headless = false, xauth = BENCH_XAUTHORITY, probe = "race-perf", loaded = false }) {
+// --queue-wait <s>: how long the ticket asks again for a lane whose cores
+// are busy with other people's processes before giving up (spark-queue.mjs
+// wait --give-up; 1800 s by default). A run that may start late (overnight
+// behind another user's job) passes a longer wait; it never takes a busy lane.
+export const QUEUE_WAIT_DEFAULT_SEC = 1800;
+export function queueWaitSec(value) {
+  if (value == null) return null;
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 60 || n > 86400) throw new Error(`--queue-wait ${value}: whole seconds, 60 to 86400`);
+  return n;
+}
+
+export function launchCommand({ harnessDir, outDir, lane = "auto", raceArgs, chromeCpus, nodeCpus, headed = null, headless = false, xauth = BENCH_XAUTHORITY, probe = "race-perf", loaded = false, queueWait = null }) {
   if (!SPARK_PROBES.includes(probe)) throw new Error(`probe ${probe}: one of ${SPARK_PROBES.join(", ")}`);
   if (loaded && !LOADED_PROBES.includes(probe)) throw new Error(`loaded: correctness probes only, not ${probe}`);
-  const env = [chromeCpus && `SPARK_CHROME_CPUS=${sh(chromeCpus)}`, nodeCpus && `SPARK_NODE_CPUS=${sh(nodeCpus)}`, probe !== "race-perf" && `SPARK_PROBE=${sh(probe)}`, loaded && "SPARK_LOADED=1", ...headedEnv(headed, xauth, { headless })].filter(Boolean).join(" ");
+  const env = [chromeCpus && `SPARK_CHROME_CPUS=${sh(chromeCpus)}`, nodeCpus && `SPARK_NODE_CPUS=${sh(nodeCpus)}`, probe !== "race-perf" && `SPARK_PROBE=${sh(probe)}`, loaded && "SPARK_LOADED=1", queueWait != null && `SPARK_QUEUE_WAIT=${sh(String(queueWaitSec(queueWait)))}`, ...headedEnv(headed, xauth, { headless })].filter(Boolean).join(" ");
   return [
     `mkdir -p ${sh(path.posix.dirname(outDir))}`,
     // Two pairs never share a name (race-perf refuses an existing --out, the log would mix).
@@ -614,7 +627,7 @@ async function main() {
       detach: { type: "boolean", default: false }, fetch: { type: "string" }, build: { type: "string" },
       "multi-lanes": { type: "string" }, queue: { type: "boolean", default: false },
       probe: { type: "string", default: "race-perf" }, film: { type: "string" }, noise: { type: "string" }, screen: { type: "boolean", default: false },
-      loaded: { type: "boolean", default: false }
+      loaded: { type: "boolean", default: false }, "queue-wait": { type: "string" }
     },
     allowPositionals: true
   });
@@ -690,7 +703,7 @@ async function main() {
     headed: values.headed ?? null, headless: values.headless,
     raceArgs
   };
-  ssh(host, launchCommand({ harnessDir: abs(harness.dest), outDir, lane: values.lane, raceArgs, chromeCpus: values["chrome-cpus"], nodeCpus: values["node-cpus"], headed: values.headed, headless: values.headless, xauth: values.xauth, probe: values.probe, loaded: values.loaded }));
+  ssh(host, launchCommand({ harnessDir: abs(harness.dest), outDir, lane: values.lane, raceArgs, chromeCpus: values["chrome-cpus"], nodeCpus: values["node-cpus"], headed: values.headed, headless: values.headless, xauth: values.xauth, probe: values.probe, loaded: values.loaded, queueWait: queueWaitSec(values["queue-wait"]) }));
   mkdirSync(path.join(MEASURES, date, name), { recursive: true });
   writeFileSync(path.join(MEASURES, date, name, "spark.json"), JSON.stringify(meta, null, 1) + "\n");
   console.log(`[spark-run] started on ${host}: ${date}/${name}, lane ${values.lane} (${values.probe} waits for its lane's perf lock)`);

@@ -11,7 +11,7 @@ import test from "node:test";
 
 import { kpiTable } from "../harness/lib/kpi.mjs";
 import { estimateMin, eta, isBuildProcess, MAX_BUILDS_PER_OWNER, move, movedId, nextStep, ownerBuilds, readTickets, waitTurn } from "../harness/remote/spark-queue.mjs";
-import { BENCH_XAUTHORITY, benchQuery, benchRaceArgs, builtOnBenchTest, headedEnv, launchCommand, RACE_QUERY, runId, sh, stampSummary } from "../harness/remote/spark-run.mjs";
+import { BENCH_XAUTHORITY, benchQuery, benchRaceArgs, builtOnBenchTest, headedEnv, launchCommand, QUEUE_WAIT_DEFAULT_SEC, queueWaitSec, RACE_QUERY, runId, sh, stampSummary } from "../harness/remote/spark-run.mjs";
 
 const race = (extra = {}) => ({
   kind: "race-perf", file: "race",
@@ -571,4 +571,21 @@ test("spark-run --probe: every probe is presentation-checked unless exempt; cpu-
   assert.match(probe, /console\.error\(`\[cpu-window\] --runs \$\{values\.runs\} ignored/);
   assert.match(probe, /countersBeforeLoad: o\.countersBeforeLoad,/);
   assert.match(probe, /rowsStartAfterLoadSec: run\.rowsStartAfterLoadSec,/);
+});
+
+test("--queue-wait: a busy lane asked again for S s (SPARK_QUEUE_WAIT → spark-queue wait --give-up), 1800 by default", async () => {
+  const { readFileSync } = await import("node:fs");
+  assert.equal(QUEUE_WAIT_DEFAULT_SEC, 1800);
+  assert.match(launchCommand({ harnessDir: "/h/k", outDir: "/h/r/d/n", lane: "a", raceArgs: [], queueWait: 43200 }), /\{ SPARK_QUEUE_WAIT='43200' setsid nohup sh /);
+  assert.doesNotMatch(launchCommand({ harnessDir: "/h/k", outDir: "/h/r/d/n", lane: "a", raceArgs: [] }), /SPARK_QUEUE_WAIT/);
+  assert.equal(queueWaitSec(null), null);
+  assert.equal(queueWaitSec("43200"), 43200);
+  for (const bad of ["30", "86401", "1.5", "x", "-60"]) assert.throws(() => queueWaitSec(bad), /--queue-wait/, bad);
+  // the bench side: the race script passes it on, the queue uses it and says how long it waited
+  const race = readFileSync(new URL("../harness/remote/spark-race.sh", import.meta.url), "utf8");
+  assert.match(race, /--give-up "\$\{SPARK_QUEUE_WAIT:-1800\}" -- "\$@"\)/);
+  assert.match(race, /stayed busy for \$\{SPARK_QUEUE_WAIT:-1800\} s: no pair/);
+  const queue = readFileSync(new URL("../harness/remote/spark-queue.mjs", import.meta.url), "utf8");
+  assert.match(queue, /"give-up": \{ type: "string", default: "1800" \}/);
+  assert.match(queue, /waitTurn\(\{[^}]*giveUpSec,/);
 });
