@@ -187,6 +187,7 @@ export class AudioPcmProducer {
       resampled: ring ? Atomics.load(ring.header, AUDIO_PCM_HEADER.RESAMPLED_FRAMES) >>> 0 : null,
       resampleExtra: ring ? Atomics.load(ring.header, AUDIO_PCM_HEADER.RESAMPLE_EXTRA_FRAMES) >>> 0 : null,
       muted: this.muted,
+      ...(this.traceExtra ? this.traceExtra() : {}),
     });
     t.asked = t.got = t.pulls = t.maxPull = t.empty = 0;
     if (t.samples.length > t.max) { t.samples.shift(); t.lost += 1; }

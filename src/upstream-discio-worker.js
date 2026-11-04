@@ -13312,8 +13312,18 @@ function wgpuViLockUpdate(now) {
     return;
   }
   const r = wgpuViLock.update(now);
-  if (r.changed) api.setThrottleRatePpm(wgpuViLock.stats.ppm);
+  if (r.changed) { api.setThrottleRatePpm(wgpuViLock.stats.ppm); wgpuViLockWrites += 1; }
 }
+let wgpuViLockWrites = 0;
+// DIAG (not for main): the lock's trim beside each audio trace sample
+workletAudioProducer.traceExtra = () => ({
+  trimPpm: wgpuViLock ? wgpuViLock.stats.ppm : null,
+  appliedPpm: typeof moduleInstance?._DolphinWeb_ThrottleRatePpm === "function" ? moduleInstance._DolphinWeb_ThrottleRatePpm() : null,
+  lockOn: wgpuViLock ? wgpuViLock.stats.on : null,
+  trimWrites: wgpuViLockWrites,
+  lockPhase: wgpuViLock ? wgpuViLock.stats.phase : null,
+  lockDrift: wgpuViLock ? wgpuViLock.stats.driftPpm : null
+});
 // The frames' arrival period, the screen's refresh and the refresh histogram
 // are kept only with ?presentpace=game|observe or the harness: by default the
 // presenter does none of this work.

@@ -229,6 +229,8 @@ async function playRun(o, server, { side, run, outDir }) {
     // no sampler (an older tree): its counters and the worker's stalls unknown
     if (!raw.sampler?.started) raw.samplerMissing = raw.sampler?.error ?? "engine without validationDropSampler";
     raw.integrityStart = await readIntegrity(page, { expected: o.integrityExpected });
+    // DIAG: the producer's 100 ms audio trace over the whole run
+    if (process.env.PARCOURS_AUDIO_TRACE) raw.audioTraceStart = await workerRequest(page, "validationAudioTrace", { action: "start", everyMs: 100 }, 5000).catch((e) => ({ error: String(e?.message ?? e) }));
     raw.film = await startPadFilm(page, o.film ? { film: o.film } : { record: { ports: recordPorts(o.recordSteps), auto: o.auto } });
     if (raw.film?.error) throw new Error(`pad film: ${raw.film.error}`);
     let rows = [];
@@ -313,6 +315,7 @@ async function playRun(o, server, { side, run, outDir }) {
     if (edgeOn) raw.edgeStats = await stopEdgeFollower(page);
     await recording;
     raw.filmResult = await stopPadFilm(page);
+    if (process.env.PARCOURS_AUDIO_TRACE) raw.audioTrace = await workerRequest(page, "validationAudioTrace", { action: "stop" }, 10000).catch((e) => ({ error: String(e?.message ?? e) }));
     raw.integrityEnd = await readIntegrity(page, { expected: o.integrityExpected });
     await workerRequest(page, "validationDropSampler", { action: "stop" }, 5000);
     raw.powerEnd = powerSnapshot();
