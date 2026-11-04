@@ -41,6 +41,14 @@ export const MIXER_HIGH_MS = 12;
 export const MIXER_LOW_MS = 8;
 export const MIXER_GRANULE_MS = 4;
 export const RING_LOW_MS = 20;
+// ?audioringlow=ms (2-40, a test switch): the ring's fill under which the cap
+// is lifted. A late tick that leaves the ring just under 20 ms lifted it (a
+// pull of target - fill, larger than the shorter FIFO: the mixer looped the
+// rest, fills that stay as latency; 2026-11-04, the race entry). With the
+// switch, the uncapped pull refills the ring to that level only, the rest
+// under the cap. Without it, 20 ms and a refill to the target as before.
+export const RING_LOW_MIN_MS = 2;
+export const RING_LOW_MAX_MS = 40;
 export const RATE_SLEW_PPM = 100;
 
 
@@ -76,7 +84,7 @@ export class AudioPcmProducer {
   // targetFrames: the ring's fill the producer keeps (the AudioWorklet
   // path's latency, before the mixer's own queue); 120 ms by default, the
   // page passes ?audiolead. Playback starts at half of it (at most 50 ms).
-  install(sab, { muted = true, targetFrames = AUDIO_PCM_TARGET_FRAMES, rateControl = false, rateMaxPpm = AUDIO_PCM_MAX_RATE_PPM } = {}) {
+  install(sab, { muted = true, targetFrames = AUDIO_PCM_TARGET_FRAMES, rateControl = false, rateMaxPpm = AUDIO_PCM_MAX_RATE_PPM, ringLowMs = null } = {}) {
     this.requestedTransport = "worklet";
     try {
       const ring = validateAudioPcmRing(openAudioPcmRing(sab));
@@ -96,6 +104,9 @@ export class AudioPcmProducer {
       this.underrunsSeen = 0;
       this.rateControl = Boolean(rateControl);
       this.rateMaxPpm = Math.max(0, Math.min(AUDIO_PCM_RATE_CEILING_PPM, Math.round(Number(rateMaxPpm) || AUDIO_PCM_MAX_RATE_PPM)));
+      // ?audioringlow: null keeps RING_LOW_MS and the refill to the target
+      const low = Number(ringLowMs);
+      this.ringLowMs = Number.isFinite(low) && low >= RING_LOW_MIN_MS && low <= RING_LOW_MAX_MS ? low : null;
       this.ratePpm = 0;
       this.excessMs = null;
       Atomics.store(ring.header, AUDIO_PCM_HEADER.RATE_PPM, 0);
@@ -279,7 +290,10 @@ export class AudioPcmProducer {
       // This cap comes first: when the FIFOs drift far apart (more than about
       // AudioBufferSize less MIXER_HIGH_MS), the longer can still overflow,
       // a skip in the one ahead rather than a loop in the one behind.
-      maxFrames: fill >= RING_LOW_MS * 48 ? Math.max(0, Math.floor((q.lo - MIXER_GRANULE_MS) * 48)) : Infinity,
+      maxFrames: fill >= (this.ringLowMs ?? RING_LOW_MS) * 48 ? Math.max(0, Math.floor((q.lo - MIXER_GRANULE_MS) * 48))
+        // under ?audioringlow: the uncapped pull refills the ring to that level, plus what the cap allows
+        : this.ringLowMs != null ? Math.max(0, Math.round(this.ringLowMs * 48 - fill)) + Math.max(0, Math.floor((q.lo - MIXER_GRANULE_MS) * 48))
+        : Infinity,
       // the longer back down once over MIXER_HIGH_MS (it overflows first)
       minFrames: q.hi > MIXER_HIGH_MS ? Math.round((q.hi - MIXER_LOW_MS) * 48) : 0,
     };
@@ -350,6 +364,7 @@ export class AudioPcmProducer {
       rateControl: Boolean(this.rateControl),
       ratePpm: this.ratePpm ?? 0,
       rateMaxPpm: this.rateMaxPpm ?? null,
+      ringLowMs: this.ringLowMs ?? RING_LOW_MS,
       workletRing: this.ring ? snapshotAudioPcmRing(this.ring) : null,
     };
   }

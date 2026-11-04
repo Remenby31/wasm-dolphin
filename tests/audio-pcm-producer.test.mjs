@@ -408,7 +408,7 @@ test("plumbing: ?audiorate and ?audioratemax reach the producer", async () => {
   assert.equal(audio.match(/rateMaxPpm: this\.workletRateMaxPpm/g).length, 3);
   assert.match(adapter, /rateMaxPpm: Number\(rateMaxPpm\) \|\| AUDIO_PCM_MAX_RATE_PPM,/);
   assert.match(worker, /rateMaxPpm: Number\(payload\.rateMaxPpm\) \|\| undefined,/);
-  assert.match(adapter, /async configureAudioWorklet\(\{ enabled, muted, sab, targetFrames, rateControl = false, rateMaxPpm = AUDIO_PCM_MAX_RATE_PPM \}\)/);
+  assert.match(adapter, /async configureAudioWorklet\(\{ enabled, muted, sab, targetFrames, rateControl = false, rateMaxPpm = AUDIO_PCM_MAX_RATE_PPM, ringLowMs = null \}\)/);
   assert.match(adapter, /rateControl: Boolean\(rateControl\),/);
   assert.match(worker, /rateControl: Boolean\(payload\.rateControl\),\n\s+rateMaxPpm: Number\(payload\.rateMaxPpm\) \|\| undefined,/);
   assert.doesNotMatch(worker, /mixerCapMs/);
@@ -499,4 +499,36 @@ test("rate control default: on under V8 and SpiderMonkey, off under JavaScriptCo
   const audio = await readFile(new URL("../src/audio.js", import.meta.url), "utf8");
   assert.match(audio, /this\.workletRateControl = requestedAudioRate\(window\.location\.search, wasmEngine\(\)\);/);
   assert.match(audio, /rateMax <= AUDIO_PCM_MAX_RATE_PPM \? rateMax : DEFAULT_AUDIO_RATE_MAX_PPM;/);
+});
+
+test("?audioringlow: the ring level under which the per-FIFO cap lifts (default 20 ms, refill to the target); with the switch the uncapped pull refills to that level only", async () => {
+  const f = fixture();
+  let queued = 8;
+  f.core.audioQueuedMs = () => queued;
+  // default: unchanged (a ring at 19 ms lifts the cap, the refill may take target - fill)
+  f.producer.install(createAudioPcmRing().sab, { muted: false, rateControl: true });
+  assert.equal(f.producer.ringLowMs, null);
+  assert.equal(f.producer.mixerBounds(f.core, 19 * 48).maxFrames, Infinity);
+  assert.equal(f.producer.telemetry().ringLowMs, 20);
+  // 6 ms: the race entry's dip to 19 ms keeps the cap (the shorter FIFO less a granule: 4 ms)
+  f.producer.install(createAudioPcmRing().sab, { muted: false, rateControl: true, ringLowMs: 6 });
+  assert.equal(f.producer.ringLowMs, 6);
+  assert.equal(f.producer.mixerBounds(f.core, 19 * 48).maxFrames, 4 * 48);
+  // under 6 ms: back up to 6 ms uncapped, plus what the cap allows; never more
+  assert.equal(f.producer.mixerBounds(f.core, 3 * 48).maxFrames, 3 * 48 + 4 * 48);
+  queued = 2;
+  assert.equal(f.producer.mixerBounds(f.core, 0).maxFrames, 6 * 48);
+  assert.equal(f.producer.telemetry().ringLowMs, 6);
+  // out of range: ignored (default)
+  for (const bad of [1, 41, "x"]) {
+    f.producer.install(createAudioPcmRing().sab, { muted: false, rateControl: true, ringLowMs: bad });
+    assert.equal(f.producer.ringLowMs, null, String(bad));
+  }
+  // plumbing: page query -> transport bridge -> adapter -> worker -> producer
+  const { readFileSync } = await import("node:fs");
+  const src = (p) => readFileSync(new URL(`../src/${p}`, import.meta.url), "utf8");
+  assert.match(src("audio.js"), /params\.get\("audioringlow"\)/);
+  assert.equal(src("audio.js").match(/ringLowMs: this\.workletRingLowMs/g)?.length, 3, "every bridge call passes it");
+  assert.match(src("upstream-worker-adapter.js"), /ringLowMs: Number\(ringLowMs\) \|\| null,/);
+  assert.match(src("upstream-discio-worker.js"), /ringLowMs: Number\(payload\.ringLowMs\) \|\| null,/);
 });
