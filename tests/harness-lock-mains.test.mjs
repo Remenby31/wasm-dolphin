@@ -194,7 +194,7 @@ test("drop meter: a visit whose charge fell on mains, or ended under 30 %, is a 
   const run = (side, n, drained) => ({ side, run: n, visit: 1, analysis: { sampled: true, power: "ac", powerDrained: drained } });
   const analyses = [run("baseline", 1, false), run("baseline", 2, true), run("baseline", 3, true), run("candidate", 1, false), run("candidate", 2, false), run("candidate", 3, false)];
   const reasons = noVerdictReasons({ analyses, visits: 1, verdicts: { 1: {} } });
-  assert.ok(reasons.some((r) => /visit 1: 1 usable baseline run\(s\) \(errors, overloaded and power-draining runs left out\)/.test(r)), reasons.join("; "));
+  assert.ok(reasons.some((r) => /visit 1: 1 usable baseline run\(s\) \(errors, overloaded, GPU-contaminated and power-draining runs left out\)/.test(r)), reasons.join("; "));
 });
 
 // race-perf decides speed: a side whose charge fell on mains (or ended under

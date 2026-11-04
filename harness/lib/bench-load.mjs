@@ -201,6 +201,19 @@ export function benchJudge({ load, background, cap = null, gpu = null, mem = nul
 // a row are (a burst of seconds; a single one may be a scan's own instant).
 // Pair #361 (2026-10-29) let windows through at a median of 0-1 with peaks
 // of 6-8 and scattered -10 to +21 % (pure: tested).
+// A visit is CONTAMINATED when another user's process held the GPU during it:
+// the median of its foreign-SM samples (gpuNow, every few seconds) over
+// GPU_FOREIGN_MAX, or two samples in a row over it. The calm gate reads the
+// GPU only before a run: on 2026-11-04 a vLLM started mid-run (0 % before,
+// 84 % after) and that run lost 1138 ms where its neighbours lost 0-71
+// (pure: tested). Null samples (nvidia-smi missing) are skipped.
+export function gpuContaminated(samples, max = GPU_FOREIGN_MAX) {
+  const finite = samples.filter(Number.isFinite);
+  const v = [...finite].sort((a, b) => a - b);
+  if (v.length > 0 && v[v.length >> 1] > max) return true;
+  return finite.some((x, i) => i > 0 && x > max && finite[i - 1] > max);
+}
+
 export function salonOverloaded(samples) {
   const finite = samples.filter(Number.isFinite);
   const v = [...finite].sort((a, b) => a - b);

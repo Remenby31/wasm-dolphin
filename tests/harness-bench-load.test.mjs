@@ -164,3 +164,65 @@ test("bench gate: the GPU gate only for a run on the GPU (headed or video=wgpu);
   assert.match(perf, /\(o\.benchGpuGate && \[gpuStart, gpuEnd\]\.some/, "a headless window keeps gpu but is not judged on it");
 });
 
+
+test("gpuContaminated: another user's process on the GPU during a visit (median, or two samples in a row, over GPU_FOREIGN_MAX)", async () => {
+  const { gpuContaminated, GPU_FOREIGN_MAX } = await import("../harness/lib/bench-load.mjs");
+  assert.equal(GPU_FOREIGN_MAX, 20);
+  // the vLLM that started mid-run (2026-11-04): 0 % before, 84 % from the middle on
+  assert.equal(gpuContaminated([0, 0, 0, 84, 84, 84]), true);
+  // one sample over (a scan's instant) is not enough; two in a row are
+  assert.equal(gpuContaminated([0, 30, 0, 0, 0]), false);
+  assert.equal(gpuContaminated([0, 30, 31, 0, 0]), true);
+  assert.equal(gpuContaminated([50, 50, 10]), true);
+  // nvidia-smi missing: no sample, never contaminated
+  assert.equal(gpuContaminated([null, null]), false);
+  assert.equal(gpuContaminated([]), false);
+});
+
+test("drop-meter: a GPU-contaminated visit is marked and left out like an overloaded one", async () => {
+  const { visitGpu } = await import("../harness/probes/drop-meter.mjs");
+  assert.deepEqual(await visitGpu({ gpu: [[1, 0, null, 30], [2, 84, "VLLM::EngineCor", 99], [3, 85, "VLLM::EngineCor", 99]] }), { contaminated: true, gpuForeignMax: 85, gpuForeignBy: "VLLM::EngineCor", gpuTotalMax: 99 });
+  // our own WebGPU use is in the total, never in the foreign share: our run alone at 60 % is clean
+  assert.deepEqual(await visitGpu({ gpu: [[1, 0, null, 60], [2, 0, null, 62], [3, 0, null, 58]] }), { contaminated: false, gpuForeignMax: 0, gpuForeignBy: null, gpuTotalMax: 62 });
+  assert.deepEqual(await visitGpu({}), { contaminated: false, gpuForeignMax: null, gpuForeignBy: null, gpuTotalMax: null });
+  // every place an overloaded run is left out leaves a contaminated one out too
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(new URL("../harness/probes/drop-meter.mjs", import.meta.url), "utf8");
+  const overloadedFilters = src.match(/\.overloaded \|\|/g)?.length ?? 0;
+  const both = src.match(/\.overloaded \|\| [a-z.]*contaminated/g)?.length ?? 0;
+  assert.ok(overloadedFilters >= 3 && both === overloadedFilters, `${both} of ${overloadedFilters} filters`);
+  assert.match(src, /!a\.analysis\.overloaded && !a\.analysis\.contaminated/);
+  assert.match(src, /!a\.overloaded && !a\.contaminated/);
+  assert.match(src, /CONTAMINATED \(GPU: /);
+  // sampled on the bench only, when the visit uses the GPU
+  assert.match(src, /process\.env\.SPARK_LANE_CPUS \? await import\("\.\.\/lib\/bench-load\.mjs"\)/);
+  // per process (pmon), our tree and the bench's Xorg out: the foreign share never counts our Chrome
+  const bench = readFileSync(new URL("../harness/lib/bench-load.mjs", import.meta.url), "utf8");
+  assert.match(bench, /run\(\["pmon", "-c", "1", "-s", "um"\]\)/);
+  assert.match(bench, /procs\.filter\(\(p\) => !ours\.has\(p\.pid\) && p\.command !== "Xorg"\)/);
+});
+
+test("calm gate: after another user's GPU use, it opens only on 3 calm readings in a row (a burst job's single dip never starts a run)", async () => {
+  const { waitForLoad, GPU_CALM_READS } = await import("../harness/lib/env.mjs");
+  assert.equal(GPU_CALM_READS, 3);
+  const busy = { load: 2, limit: 40, ok: false, over: ["GPU: VLLM::EngineCor (pid 1) at 80 % > 20"] };
+  const calm = { load: 2, limit: 40, ok: true, over: [] };
+  const seq = (list) => { let i = 0; return async () => list[Math.min(i++, list.length - 1)]; };
+  // the vLLM in bursts: busy, one dip, busy again, then a calm stretch
+  let reads = [busy, busy, calm, busy, calm, calm, calm];
+  let n = 0;
+  const read = seq(reads);
+  const counted = async () => { n += 1; return read(); };
+  const g = await waitForLoad({ waitSec: 5, pollSec: 0.001, calmPollSec: 0.001, read: counted });
+  assert.equal(g.ok, true);
+  assert.equal(n, 7, "opened on the 3rd calm reading in a row, never on the lone dip");
+  // the stretch not reached in time: closed, and says so
+  const g2 = await waitForLoad({ waitSec: 0.05, pollSec: 0.001, calmPollSec: 0.2, read: seq([busy, calm, calm, calm]) });
+  assert.equal(g2.ok, false);
+  assert.match(g2.over.at(-1), /GPU calm for \d of 3 readings only/);
+  // no foreign GPU seen: the first calm reading opens at once (no 30 s delay for a calm machine)
+  let m = 0;
+  const g3 = await waitForLoad({ waitSec: 5, pollSec: 0.001, calmPollSec: 0.001, read: async () => { m += 1; return m < 3 ? { load: 50, limit: 40, ok: false, over: ["load 50 > 40"] } : calm; } });
+  assert.equal(g3.ok, true);
+  assert.equal(m, 3);
+});

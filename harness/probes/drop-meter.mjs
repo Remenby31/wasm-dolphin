@@ -61,7 +61,7 @@ import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { gunzipSync, gzipSync } from "node:zlib";
 
-import { bootIso, ensureServer, grabFrame, launchBrowser, loadHarnessState, readFrameInfo, readTimeline, REPO_ROOT, workerRequest } from "../lib/browser.mjs";
+import { defaultDisplay, bootIso, ensureServer, grabFrame, launchBrowser, loadHarnessState, readFrameInfo, readTimeline, REPO_ROOT, workerRequest } from "../lib/browser.mjs";
 import { ANALYSIS_VERSION, ATTRIBUTION_CONTENT_BUSY, ATTRIBUTION_STARVED_SHARE, attributeDips, attributionLines, attributionTable, dropEvents, dropSummary, dropWindowsForAttribution, loadSegments, nativeFps, noiseOf, phaseSummaries, rowsOf, trendLine, trendTable, VERDICT_MIN_RUNS, visitVerdict, windowsOf, worstDrops } from "../lib/drops.mjs";
 import { exportRef } from "../cli.mjs";
 import { calmLock, defaultMaxLoad, loadGaveUp, loadLimit } from "../lib/env.mjs";
@@ -139,6 +139,13 @@ export const stepsFor = (scenario, visit) => scenario.steps.filter((x) => x.only
 
 async function playVisit(o, server, profileDir, shotDir, visit) {
   const raw = { markers: [], chunks: [], rows: [], page: [], loads: [], rss: [] };
+  // On the bench (spark-run sets SPARK_LANE_CPUS), a visit that uses the GPU
+  // (headed, or video=wgpu) samples other users' share of it every
+  // GPU_SAMPLE_EVERY drains: the calm gate reads it only before the run.
+  const gpuBench = process.env.SPARK_LANE_CPUS ? await import("../lib/bench-load.mjs") : null;
+  const gpuSampled = Boolean(gpuBench?.gpuGateApplies({ display: defaultDisplay(), queries: [o.query] }));
+  if (gpuSampled) raw.gpu = [];
+  let drains = 0;
   const context = await launchBrowser({ browser: o.browser, profileDir });
   try {
     await context.assertInvisible("after launch");
@@ -209,6 +216,12 @@ async function playVisit(o, server, profileDir, shotDir, visit) {
       const p = await page.evaluate(() => window.__dropPage?.drain() ?? []).catch(() => []);
       raw.page.push(...p);
       raw.loads.push([Date.now(), os.loadavg()[0]]);
+      if (gpuSampled && drains++ % GPU_SAMPLE_EVERY === 0) {
+        const g = gpuBench.gpuNow();
+        // [t, other users' SM share (per process, our job's tree and the
+        // bench's Xorg left out), its top process, the GPU's total use (ours included)]
+        raw.gpu.push([Date.now(), g ? g.foreignSm : null, g?.foreign?.[0]?.command ?? null, g ? g.util : null]);
+      }
       // Resident memory of this profile's Chrome processes (MB): the peak of
       // a launch (e.g. regions kept as bytes and as modules).
       const m = sampleChromeRss(profileDir);
@@ -335,7 +348,7 @@ export function noPresentAcross(analyses) {
       x.runs += 1; x.swaps += l.swaps ?? 0; x.pipeline += l.pipeline ?? 0;
       lostRuns.set(k, x);
     }
-    if (!a?.noPresent || a.error || a.overloaded || a.powerDrained) continue;
+    if (!a?.noPresent || a.error || a.overloaded || a.contaminated || a.powerDrained) continue;
     for (const [phase, table] of Object.entries(a.noPresent.phases)) {
       const key = `${side}|${visit}|${phase}`;
       if (!groups.has(key)) groups.set(key, { side, visit, phase, tables: [], pipeline: true });
@@ -586,8 +599,8 @@ export function noVerdictReasons({ analyses, visits, gaveUp = null, verdicts }) 
     const vv = verdicts[v];
     if (!vv) continue;
     for (const side of ["baseline", "candidate"]) {
-      const usable = analyses.filter((a) => a.visit === v && a.side === side && !a.analysis.error && !a.analysis.overloaded && !a.analysis.powerDrained && !a.analysis.integrityFailed).length;
-      if (usable < VERDICT_MIN_RUNS) reasons.push(`visit ${v}: ${usable} usable ${side} run(s) (errors, overloaded and power-draining runs left out), ${VERDICT_MIN_RUNS} needed`);
+      const usable = analyses.filter((a) => a.visit === v && a.side === side && !a.analysis.error && !a.analysis.overloaded && !a.analysis.contaminated && !a.analysis.powerDrained && !a.analysis.integrityFailed).length;
+      if (usable < VERDICT_MIN_RUNS) reasons.push(`visit ${v}: ${usable} usable ${side} run(s) (errors, overloaded, GPU-contaminated and power-draining runs left out), ${VERDICT_MIN_RUNS} needed`);
     }
     if (vv.inconclusive) reasons.push(`visit ${v}: a metric or a phase has no verdict`);
   }
@@ -603,7 +616,7 @@ function writeSummary(outDir, meta, analyses, visits, { noise = null, confirm = 
     const entry = { visit: v, candidate };
     if (analyses.some((a) => a.side === "baseline")) {
       entry.baseline = summarizeVisits(of("baseline"));
-      const ok = (xs) => xs.filter((a) => !a.error && !a.overloaded && !a.powerDrained && !a.integrityFailed);
+      const ok = (xs) => xs.filter((a) => !a.error && !a.overloaded && !a.contaminated && !a.powerDrained && !a.integrityFailed);
       entry.verdict = verdicts[v] = visitVerdict(ok(of("baseline")), ok(of("candidate")), noise?.[v] ?? null, { display: Boolean(meta.display) });
     }
     summary.visitSummary.push(entry);
@@ -714,13 +727,26 @@ const audioQueueBrief = (q) => (!q || q.unavailable ? "" : `, audio skips ${q.ov
 function logRun(log, tag, a) {
   if (a.error) return log(`${tag}: ${a.error}`);
   const s = a.summary;
-  log(`${tag}: lost ${s.lostMs} ms, <95 % ${s.pctBelow95} %, <90 % ${s.pctBelow90} %, worst 1 s ${s.worstSecond} %, hitches >50 ${s.hitches50} >100 ${s.hitches100}, p99 ${s.presentP99} ms, new frames ${s.newFramesPerSec ?? "–"}/s, rendered ${s.renderedPerGuestSec ?? "–"}/guest s${renderStarvedBrief(s)}, ${s.loads} loads +${s.loadExcessMs} ms, underruns ${s.underruns}, audio ${s.audioLatencyMs ?? "–"} ms (mixer ${s.audioMixerMs ?? "–"}), load1 ${a.load1.median}${a.regionsDoneBeforeLoad === false ? ", LOADED BEFORE REGIONS DONE" : a.regionsDoneBeforeLoad ? ", regions done before load" : ""}${audioQueueBrief(a.audioQueue)}${a.overloaded ? " OVERLOADED" : ""}${a.powerDrained ? ` POWER (charge fell or under ${MIN_BATTERY_PERCENT} %)` : ""}${integrityBrief(a.integrity)}`);
+  log(`${tag}: lost ${s.lostMs} ms, <95 % ${s.pctBelow95} %, <90 % ${s.pctBelow90} %, worst 1 s ${s.worstSecond} %, hitches >50 ${s.hitches50} >100 ${s.hitches100}, p99 ${s.presentP99} ms, new frames ${s.newFramesPerSec ?? "–"}/s, rendered ${s.renderedPerGuestSec ?? "–"}/guest s${renderStarvedBrief(s)}, ${s.loads} loads +${s.loadExcessMs} ms, underruns ${s.underruns}, audio ${s.audioLatencyMs ?? "–"} ms (mixer ${s.audioMixerMs ?? "–"}), load1 ${a.load1.median}${a.regionsDoneBeforeLoad === false ? ", LOADED BEFORE REGIONS DONE" : a.regionsDoneBeforeLoad ? ", regions done before load" : ""}${audioQueueBrief(a.audioQueue)}${a.overloaded ? " OVERLOADED" : ""}${a.contaminated ? ` CONTAMINATED (GPU: ${a.gpuForeignBy} at ${a.gpuForeignMax} %)` : ""}${a.powerDrained ? ` POWER (charge fell or under ${MIN_BATTERY_PERCENT} %)` : ""}${integrityBrief(a.integrity)}`);
   for (const d of a.worst.slice(0, 3)) log(`   drop ${d.label} @${round(d.guestStart, 1)} gs: ${d.durationMs} ms, lost ${d.lostMs} ms, min ${d.minSpeed} %, cause ${d.cause}, ${d.jitBlocks} new blocks (${d.defers} deferred), causes ${JSON.stringify(d.causesMs)}`);
 }
 
 // A visit is judged against its gate's limit (on the bench, computed per gate
 // by lib/bench-load.mjs and kept in raw.gate), else --max-load.
 export const visitLimit = (raw, maxLoad) => raw?.gate?.limit ?? loadLimit(maxLoad);
+// GPU samples every this many 1 s drains (nvidia-smi pmon takes ~1 s)
+export const GPU_SAMPLE_EVERY = 5;
+// CONTAMINATED: another user's process on the GPU during the visit
+// (lib/bench-load.mjs gpuContaminated); left out like an overloaded run.
+// { contaminated, gpuForeignMax, gpuForeignBy } from raw.gpu; false without samples.
+export async function visitGpu(raw) {
+  const s = Array.isArray(raw?.gpu) ? raw.gpu : [];
+  if (!s.length) return { contaminated: false, gpuForeignMax: null, gpuForeignBy: null, gpuTotalMax: null };
+  const { gpuContaminated } = await import("../lib/bench-load.mjs");
+  const top = s.reduce((m, x) => (Number.isFinite(x[1]) && x[1] > (m?.[1] ?? -1) ? x : m), null);
+  const totals = s.map((x) => x[3]).filter(Number.isFinite);
+  return { contaminated: gpuContaminated(s.map((x) => x[1])), gpuForeignMax: top?.[1] ?? null, gpuForeignBy: top?.[2] ?? null, gpuTotalMax: totals.length ? Math.max(...totals) : null };
+}
 
 async function analyzeDir(dir, native, log, noiseFile = null, { attribute = false } = {}) {
   const meta = JSON.parse(readFileSync(path.join(dir, "summary.json"), "utf8"));
@@ -731,6 +757,7 @@ async function analyzeDir(dir, native, log, noiseFile = null, { attribute = fals
     const raw = JSON.parse(gunzipSync(readFileSync(path.join(dir, f))));
     const analysis = analyzeVisit(raw, { native });
     analysis.overloaded = analysis.load1?.median > visitLimit(raw, meta.maxLoad);
+    Object.assign(analysis, await visitGpu(raw));
     analysis.powerDrained = visitPowerDrained(raw);
     analyses.push({ side, run: Number(run), visit: Number(visit), analysis });
     writeFileSync(path.join(dir, f.replace(/^raw-/, "").replace(/\.json\.gz$/, ".json")), JSON.stringify(analysis) + "\n");
@@ -760,7 +787,7 @@ async function analyzeDir(dir, native, log, noiseFile = null, { attribute = fals
 export function attributionAcross(analyses) {
   const groups = new Map();
   for (const { side, visit, analysis: a } of analyses) {
-    if (!a?.attribution || a.error || a.overloaded || a.powerDrained) continue;
+    if (!a?.attribution || a.error || a.overloaded || a.contaminated || a.powerDrained) continue;
     const key = `${side}|${visit}`;
     if (!groups.has(key)) groups.set(key, { side, visit, runs: 0, seconds: 0, dips: [], hitches: [], beats: [] });
     const g = groups.get(key);
@@ -818,7 +845,7 @@ async function falsePositives(sources, { noiseFile, draws, log }) {
       const [, s, run, visit] = f.match(/^(\w+)-(\d+)-v(\d+)/);
       if (side && s !== side) continue;
       const analysis = JSON.parse(readFileSync(path.join(dir, f), "utf8"));
-      if (analysis.error || analysis.overloaded || analysis.powerDrained || analysis.integrityFailed || !analysis.phases?.[0] || analysis.summary?.dropLostMs === undefined) continue;
+      if (analysis.error || analysis.overloaded || analysis.contaminated || analysis.powerDrained || analysis.integrityFailed || !analysis.phases?.[0] || analysis.summary?.dropLostMs === undefined) continue;
       pool.push({ id: `${dir}:${s}:${run}`, visit: Number(visit), analysis });
     }
   }
@@ -960,6 +987,7 @@ async function main() {
                 writeFileSync(path.join(outDir, `raw-${tag}.json.gz`), gzipSync(JSON.stringify(raw)));
                 const analysis = analyzeVisit(raw, { native });
                 analysis.overloaded = analysis.load1?.median > visitLimit(raw, o.maxLoad);
+                Object.assign(analysis, await visitGpu(raw));
                 analysis.powerDrained = visitPowerDrained(raw);
                 analysis.batch = batch;
                 // unplugged (or plugged in) during the visit: not a measure, the run is played again

@@ -142,7 +142,8 @@ test("the probes read integrity around what they measure and act on it", async (
   assert.match(drops, /raw\.integrityStart = await readIntegrity\(page, \{ expected: o\.integrityExpected \}\);/);
   assert.match(drops, /raw\.integrityEnd = await readIntegrity\(page, \{ expected: o\.integrityExpected \}\);/);
   assert.match(drops, /integrityExpected: treeHasIntegrity\(sides\[name\]\.root\)/);
-  assert.match(drops, /!a\.error && !a\.overloaded && !a\.powerDrained && !a\.integrityFailed/);
+  // a GPU-contaminated run (another user on the bench GPU) is left out too (#445)
+  assert.match(drops, /!a\.error && !a\.overloaded && !a\.contaminated && !a\.powerDrained && !a\.integrityFailed/);
   const gates = await readFile(new URL("../harness/probes/replay-gates.mjs", import.meta.url), "utf8");
   assert.match(gates, /const integrityExpected = treeHasIntegrity\(root\);/);
   assert.match(gates, /v\.integrity = integrityOf\(integrityStart, await readIntegrity\(session\.page, \{ expected: integrityExpected \}\), \{ postload: true \}\)/);
