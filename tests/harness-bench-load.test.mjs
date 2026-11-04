@@ -164,3 +164,35 @@ test("bench gate: the GPU gate only for a run on the GPU (headed or video=wgpu);
   assert.match(perf, /\(o\.benchGpuGate && \[gpuStart, gpuEnd\]\.some/, "a headless window keeps gpu but is not judged on it");
 });
 
+
+test("gpuContaminated: another user's process on the GPU during a visit (median, or two samples in a row, over GPU_FOREIGN_MAX)", async () => {
+  const { gpuContaminated, GPU_FOREIGN_MAX } = await import("../harness/lib/bench-load.mjs");
+  assert.equal(GPU_FOREIGN_MAX, 20);
+  // the vLLM that started mid-run (2026-11-04): 0 % before, 84 % from the middle on
+  assert.equal(gpuContaminated([0, 0, 0, 84, 84, 84]), true);
+  // one sample over (a scan's instant) is not enough; two in a row are
+  assert.equal(gpuContaminated([0, 30, 0, 0, 0]), false);
+  assert.equal(gpuContaminated([0, 30, 31, 0, 0]), true);
+  assert.equal(gpuContaminated([50, 50, 10]), true);
+  // nvidia-smi missing: no sample, never contaminated
+  assert.equal(gpuContaminated([null, null]), false);
+  assert.equal(gpuContaminated([]), false);
+});
+
+test("drop-meter: a GPU-contaminated visit is marked and left out like an overloaded one", async () => {
+  const { visitGpu } = await import("../harness/probes/drop-meter.mjs");
+  assert.deepEqual(await visitGpu({ gpu: [[1, 0, null], [2, 84, "VLLM::EngineCor"], [3, 85, "VLLM::EngineCor"]] }), { contaminated: true, gpuForeignMax: 85, gpuForeignBy: "VLLM::EngineCor" });
+  assert.deepEqual(await visitGpu({ gpu: [[1, 0, null], [2, 5, "x"]] }), { contaminated: false, gpuForeignMax: 5, gpuForeignBy: "x" });
+  assert.deepEqual(await visitGpu({}), { contaminated: false, gpuForeignMax: null, gpuForeignBy: null });
+  // every place an overloaded run is left out leaves a contaminated one out too
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(new URL("../harness/probes/drop-meter.mjs", import.meta.url), "utf8");
+  const overloadedFilters = src.match(/\.overloaded \|\|/g)?.length ?? 0;
+  const both = src.match(/\.overloaded \|\| [a-z.]*contaminated/g)?.length ?? 0;
+  assert.ok(overloadedFilters >= 3 && both === overloadedFilters, `${both} of ${overloadedFilters} filters`);
+  assert.match(src, /!a\.analysis\.overloaded && !a\.analysis\.contaminated/);
+  assert.match(src, /!a\.overloaded && !a\.contaminated/);
+  assert.match(src, /CONTAMINATED \(GPU: /);
+  // sampled on the bench only, when the visit uses the GPU
+  assert.match(src, /process\.env\.SPARK_LANE_CPUS \? await import\("\.\.\/lib\/bench-load\.mjs"\)/);
+});
