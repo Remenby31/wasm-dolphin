@@ -296,7 +296,7 @@ async function main() {
   const { values, positionals } = parseArgs({ args: rest, allowPositionals: true, options: {
     pid: { type: "string" }, kind: { type: "string" }, lanes: { type: "string", default: "auto" }, name: { type: "string", default: "" },
     eta: { type: "boolean", default: false }, json: { type: "boolean", default: false }, after: { type: "string" }, "as-judge": { type: "boolean", default: false },
-    cores: { type: "string", multiple: true, default: [] }, "cores-out": { type: "string" }
+    cores: { type: "string", multiple: true, default: [] }, "cores-out": { type: "string" }, "give-up": { type: "string", default: "1800" }
   } });
   if (cmd === "list") {
     // A running ticket of an older harness has no grantedAt: its lane lock's
@@ -327,9 +327,12 @@ async function main() {
   // pair's race-perf options (for its estimated duration).
   const estMin = estimateMin(values.kind, positionals);
   const ready = values.cores.length ? coresReady(lanesCpus(values.cores), { exclude: pid, out: values["cores-out"] }) : null;
-  const lane = await waitTurn({ pid, kind: values.kind, lanes: values.lanes, name: values.name, estMin, ready, log: (m) => console.error(`[spark-queue] ${m}`) });
+  // --give-up: how long a busy lane is asked again (spark-run --queue-wait)
+  const giveUpSec = Number(values["give-up"]);
+  if (!Number.isInteger(giveUpSec) || giveUpSec < 60 || giveUpSec > 86400) throw new Error(`--give-up ${values["give-up"]}: whole seconds, 60 to 86400`);
+  const lane = await waitTurn({ pid, kind: values.kind, lanes: values.lanes, name: values.name, estMin, ready, giveUpSec, log: (m) => console.error(`[spark-queue] ${m}`) });
   if (lane === null) {
-    console.error("[spark-queue] the lane's cores stayed busy for 30 min: no turn");
+    console.error(`[spark-queue] the lane's cores stayed busy for ${giveUpSec} s: no turn`);
     process.exitCode = 3;
     return;
   }
