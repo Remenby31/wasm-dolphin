@@ -163,8 +163,8 @@ export class AudioPcmProducer {
   // both FIFOs, the bounds, what was asked) and the mixer's fills and skips
   // during it, to find which pulls loop a FIFO (a fill) and why. At most
   // PULL_LOG_MAX kept (the oldest dropped). Arrays: PULL_FIELDS order.
-  traceStart({ everyMs = 100, max = 6000, pulls = false } = {}) {
-    this.trace = { everyMs, max, samples: [], lost: 0, nextAt: 0, asked: 0, got: 0, pulls: 0, maxPull: 0, empty: 0, pullLog: pulls ? [] : null, pullLost: 0, lastRefillAt: null };
+  traceStart({ everyMs = 100, max = 6000, pulls = false, pullMax = PULL_LOG_MAX } = {}) {
+    this.trace = { everyMs, max, samples: [], lost: 0, nextAt: 0, asked: 0, got: 0, pulls: 0, maxPull: 0, empty: 0, pullLog: pulls ? [] : null, pullLost: 0, pullMax: Math.max(1, pullMax | 0), lastRefillAt: null };
     return { started: true, everyMs, max, ...(pulls ? { pulls: true, pullFields: PULL_FIELDS } : {}) };
   }
 
@@ -343,7 +343,7 @@ export class AudioPcmProducer {
         log.push([Math.round((performance.timeOrigin + started) * 10) / 10, attempt === 0 ? gapMs : 0, fill, target, q?.dma ?? null, q?.streaming ?? null,
           Number.isFinite(bounds?.maxFrames) ? bounds.maxFrames : null, bounds?.minFrames ?? null, requested, mixed,
           after ? after[0] - before[0] : null, after ? after[1] - before[1] : null]);
-        if (log.length > PULL_LOG_MAX) { log.shift(); this.trace.pullLost += 1; }
+        if (log.length > this.trace.pullMax) { log.shift(); this.trace.pullLost += 1; }
       }
       this.recordMix(requested, mixed, performance.now() - started);
       if (this.trace) {
