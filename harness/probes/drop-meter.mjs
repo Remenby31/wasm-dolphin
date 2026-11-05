@@ -195,7 +195,7 @@ async function playVisit(o, server, profileDir, shotDir, visit) {
     raw.sampler = await workerRequest(page, "validationDropSampler", { action: "start", everyMs: o.sampleMs }, 5000);
     // --audio-trace: the AudioWorklet producer's 100 ms trace (ring target
     // and fill, mixer queue, skips, fills, pulls), drained at the end
-    if (o.audioTrace) raw.audioTraceStart = await workerRequest(page, "validationAudioTrace", { action: "start", everyMs: 100 }, 5000).catch((e) => ({ error: String(e?.message ?? e) }));
+    if (o.audioTrace) raw.audioTraceStart = await workerRequest(page, "validationAudioTrace", { action: "start", everyMs: 100, pulls: Boolean(o.audioPulls) }, 5000).catch((e) => ({ error: String(e?.message ?? e) }));
     // An older tree (a baseline before the sampler) still gives the
     // timeline: speeds, presents, drops, without their causes.
     const sampling = Boolean(raw.sampler?.started);
@@ -869,7 +869,7 @@ async function main() {
       "false-positives": { type: "string", multiple: true }, draws: { type: "string", default: "2000" },
       config: { type: "string", default: "product" }, query: { type: "string" }, "baseline-query": { type: "string" }, "sample-ms": { type: "string", default: "50" },
       native: { type: "string" }, analyze: { type: "string" }, attribute: { type: "boolean", default: false }, trace: { type: "string" }, state: { type: "string" }, "state-delay-ms": { type: "string", default: "0" }, browser: { type: "string", default: "chrome" }, shots: { type: "boolean", default: false },
-      "region-counters": { type: "boolean", default: false }, "audio-trace": { type: "boolean", default: false }, "pc-window": { type: "string" }, "integrity-allow": { type: "string" },
+      "region-counters": { type: "boolean", default: false }, "audio-trace": { type: "boolean", default: false }, "audio-pulls": { type: "boolean", default: false }, "pc-window": { type: "string" }, "integrity-allow": { type: "string" },
       "max-load": { type: "string" }, "load-wait": { type: "string", default: "300" }, "lock-wait": { type: "string", default: "14400" }, "calm-wait": { type: "string" }, "no-lock": { type: "boolean", default: false },
       port: { type: "string", default: process.env.HARNESS_PORT }, out: { type: "string" }
     }
@@ -915,7 +915,7 @@ async function main() {
     state: values.state ? path.resolve(values.state) : null, stateDelayMs: num(values, "state-delay-ms", { min: 0, int: true }),
     // --browser firefox: headless Firefox (lib/browser.mjs launchFirefox)
     browser: values.browser,
-    regionCounters: values["region-counters"], audioTrace: values["audio-trace"], display: values.display || values.pipeline, pipeline: values.pipeline, pcWindow: values["pc-window"] ? values["pc-window"].split("-").map(Number) : null,
+    regionCounters: values["region-counters"], audioTrace: values["audio-trace"] || values["audio-pulls"], audioPulls: values["audio-pulls"], display: values.display || values.pipeline, pipeline: values.pipeline, pcWindow: values["pc-window"] ? values["pc-window"].split("-").map(Number) : null,
     maxLoad: values["max-load"] ? num(values, "max-load", { min: 0.1 }) : defaultMaxLoad(), loadWait: num(values, "load-wait", { min: 0 }),
     integrityAllow: parseIntegrityAllow(values["integrity-allow"])
   };

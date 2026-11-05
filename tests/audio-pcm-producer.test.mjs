@@ -532,3 +532,49 @@ test("?audioringlow: the ring level under which the per-FIFO cap lifts (default 
   assert.match(src("upstream-worker-adapter.js"), /ringLowMs: Number\(ringLowMs\) \|\| null,/);
   assert.match(src("upstream-discio-worker.js"), /ringLowMs: Number\(payload\.ringLowMs\) \|\| null,/);
 });
+
+test("trace pulls (opt-in): each pull's state before it and the mixer's fills and skips during it", () => {
+  const ring = createAudioPcmRing();
+  const f = fixture();
+  let fills = 0, skips = 0, dma = 4, streaming = 8;
+  f.core.audioQueuedFifoMs = (which) => (which === 0 ? dma : streaming);
+  f.core.audioQueueEvents = (which) => (which === 1 ? fills : skips);
+  const mix = f.core.mixAudio;
+  // the mixer loops the shorter FIFO when a pull takes more than it holds
+  f.core.mixAudio = (frames) => { if (frames > Math.min(dma, streaming) * 48) fills += 1; return mix(frames); };
+  f.producer.install(ring.sab, { muted: false, rateControl: true });
+  // off by default: no pulls array
+  assert.equal(f.producer.traceStart({ everyMs: 100 }).pulls, undefined);
+  consumeAudioPcm(ring, new Float32Array(1), new Float32Array(1));
+  f.producer.refill(1);
+  assert.equal(f.producer.traceDrain({ stop: true }).pulls, undefined);
+  // on: one row per pull, PULL_FIELDS order
+  const started = f.producer.traceStart({ everyMs: 100, pulls: true });
+  assert.equal(started.pulls, true);
+  assert.deepEqual(started.pullFields, ["t", "gapMs", "fill", "target", "dmaMs", "streamingMs", "maxFrames", "minFrames", "requested", "mixed", "fills", "skips"]);
+  // an empty ring under RING_LOW_MS: the cap is lifted, the pull takes more than the 4 ms FIFO -> a fill
+  Atomics.store(ring.header, AUDIO_PCM_HEADER.READ_INDEX, Atomics.load(ring.header, AUDIO_PCM_HEADER.WRITE_INDEX));
+  f.producer.refill(1);
+  const d = f.producer.traceDrain();
+  assert.equal(d.pulls.length, 1);
+  const row = Object.fromEntries(d.pullFields.map((k, i) => [k, d.pulls[0][i]]));
+  assert.equal(row.fill, 0);
+  assert.equal(row.dmaMs, 4);
+  assert.equal(row.streamingMs, 8);
+  assert.equal(row.maxFrames, null, "cap lifted (Infinity) under RING_LOW_MS");
+  assert.ok(row.requested > 4 * 48);
+  assert.equal(row.fills, 1);
+  assert.equal(row.skips, 0);
+  // drained: emptied, still on
+  assert.equal(f.producer.traceDrain().pulls.length, 0);
+});
+
+test("plumbing: drop-meter --audio-pulls asks the worker for the per-pull log, the worker passes it to the producer", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const read = (p) => readFile(new URL(p, import.meta.url), "utf8");
+  const [dm, worker] = await Promise.all([read("../harness/probes/drop-meter.mjs"), read("../src/upstream-discio-worker.js")]);
+  assert.match(dm, /"audio-pulls": \{ type: "boolean", default: false \}/);
+  assert.match(dm, /audioTrace: values\["audio-trace"\] \|\| values\["audio-pulls"\], audioPulls: values\["audio-pulls"\]/);
+  assert.match(dm, /\{ action: "start", everyMs: 100, pulls: Boolean\(o\.audioPulls\) \}/);
+  assert.match(worker, /traceStart\(\{ everyMs: Number\(payload\.everyMs\) \|\| 100, pulls: payload\.pulls === true \}\)/);
+});

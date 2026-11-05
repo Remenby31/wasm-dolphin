@@ -2454,7 +2454,7 @@ async function handleMessage(type, payload) {
     case "validationAudioTrace":
       // the AudioWorklet producer's 100 ms trace (audio-pcm-producer.js)
       if (!harnessEnabled) return { error: "harness hooks are off" };
-      if (payload?.action === "start") return workletAudioProducer.traceStart({ everyMs: Number(payload.everyMs) || 100 });
+      if (payload?.action === "start") return workletAudioProducer.traceStart({ everyMs: Number(payload.everyMs) || 100, pulls: payload.pulls === true });
       if (payload?.action === "drain" || payload?.action === "stop") return workletAudioProducer.traceDrain({ stop: payload.action === "stop" });
       return { error: `validationAudioTrace: unknown action ${payload?.action}` };
     case "validationFlickerWatch":

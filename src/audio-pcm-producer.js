@@ -50,6 +50,9 @@ export const RING_LOW_MS = 20;
 export const RING_LOW_MIN_MS = 2;
 export const RING_LOW_MAX_MS = 40;
 export const RATE_SLEW_PPM = 100;
+// the per-pull log (traceStart({ pulls: true })): one array per pull
+export const PULL_FIELDS = Object.freeze(["t", "gapMs", "fill", "target", "dmaMs", "streamingMs", "maxFrames", "minFrames", "requested", "mixed", "fills", "skips"]);
+export const PULL_LOG_MAX = 40000;
 
 
 function atomicMax(header, index, value) {
@@ -156,17 +159,22 @@ export class AudioPcmProducer {
   // overflow skips and underrun fills (patch 0212), and the frames pulled
   // since the previous sample (asked, returned, the largest single pull).
   // Off unless started; at most `max` samples kept (the oldest dropped).
-  traceStart({ everyMs = 100, max = 6000 } = {}) {
-    this.trace = { everyMs, max, samples: [], lost: 0, nextAt: 0, asked: 0, got: 0, pulls: 0, maxPull: 0, empty: 0 };
-    return { started: true, everyMs, max };
+  // pulls (harness, opt-in): every pull's state just before it (ring fill,
+  // both FIFOs, the bounds, what was asked) and the mixer's fills and skips
+  // during it, to find which pulls loop a FIFO (a fill) and why. At most
+  // PULL_LOG_MAX kept (the oldest dropped). Arrays: PULL_FIELDS order.
+  traceStart({ everyMs = 100, max = 6000, pulls = false } = {}) {
+    this.trace = { everyMs, max, samples: [], lost: 0, nextAt: 0, asked: 0, got: 0, pulls: 0, maxPull: 0, empty: 0, pullLog: pulls ? [] : null, pullLost: 0, lastRefillAt: null };
+    return { started: true, everyMs, max, ...(pulls ? { pulls: true, pullFields: PULL_FIELDS } : {}) };
   }
 
   traceDrain({ stop = false } = {}) {
     const t = this.trace;
     if (!t) return { samples: [], lost: 0, active: false };
-    const out = { samples: t.samples, lost: t.lost, everyMs: t.everyMs, active: !stop };
+    const out = { samples: t.samples, lost: t.lost, everyMs: t.everyMs, active: !stop, ...(t.pullLog ? { pullFields: PULL_FIELDS, pulls: t.pullLog, pullLost: t.pullLost } : {}) };
     t.samples = [];
     t.lost = 0;
+    if (t.pullLog) { t.pullLog = []; t.pullLost = 0; }
     if (stop) this.trace = null;
     return out;
   }
@@ -311,6 +319,10 @@ export class AudioPcmProducer {
     const core = this.api();
     if (!core?.mixAudio || !core?.audioBuffer || !core?.heapU8) return unknown();
     let wrote = 0;
+    const log = this.trace?.pullLog;
+    const nowMs = log ? performance.now() : 0;
+    const gapMs = log && this.trace.lastRefillAt != null ? Math.round((nowMs - this.trace.lastRefillAt) * 10) / 10 : null;
+    if (log) this.trace.lastRefillAt = nowMs;
     for (let attempt = 0; attempt < maxMixes; attempt += 1) {
       const fill = audioPcmAvailableFrames(ring.header);
       const free = audioPcmFreeFrames(ring.header);
@@ -321,8 +333,18 @@ export class AudioPcmProducer {
       const maxFrames = Math.max(1, core.audioBufferFrames?.() || 4096);
       const requested = Math.min(maxFrames, want, free);
       if (target - fill < requested) Atomics.add(ring.header, AUDIO_PCM_HEADER.PRODUCER_SURPLUS_FRAMES, requested - Math.max(0, target - fill));
+      const events = log ? core.audioQueueEvents : null;
+      const before = typeof events === "function" ? [events(1), events(0)] : null;
+      const q = log ? this.mixerQueues(core) : null;
       const started = performance.now();
       const mixed = Math.max(0, Math.min(requested, core.mixAudio(requested) | 0));
+      if (log) {
+        const after = before ? [events(1), events(0)] : null;
+        log.push([Math.round((performance.timeOrigin + started) * 10) / 10, attempt === 0 ? gapMs : 0, fill, target, q?.dma ?? null, q?.streaming ?? null,
+          Number.isFinite(bounds?.maxFrames) ? bounds.maxFrames : null, bounds?.minFrames ?? null, requested, mixed,
+          after ? after[0] - before[0] : null, after ? after[1] - before[1] : null]);
+        if (log.length > PULL_LOG_MAX) { log.shift(); this.trace.pullLost += 1; }
+      }
       this.recordMix(requested, mixed, performance.now() - started);
       if (this.trace) {
         this.trace.asked += requested;
