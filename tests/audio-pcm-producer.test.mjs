@@ -578,3 +578,49 @@ test("plumbing: drop-meter --audio-pulls asks the worker for the per-pull log, t
   assert.match(dm, /\{ action: "start", everyMs: 100, pulls: Boolean\(o\.audioPulls\) \}/);
   assert.match(worker, /traceStart\(\{ everyMs: Number\(payload\.everyMs\) \|\| 100, pulls: payload\.pulls === true \}\)/);
 });
+
+test("trace pulls: at most pullMax rows (the oldest dropped, counted lost); 40000 by default", async () => {
+  const { PULL_LOG_MAX } = await import("../src/audio-pcm-producer.js");
+  assert.equal(PULL_LOG_MAX, 40000);
+  const ring = createAudioPcmRing();
+  const f = fixture();
+  f.core.audioQueuedFifoMs = () => 8;
+  f.core.audioQueueEvents = () => 0;
+  f.producer.install(ring.sab, { muted: false, rateControl: true });
+  consumeAudioPcm(ring, new Float32Array(1), new Float32Array(1));
+  f.producer.traceStart({ everyMs: 100, pulls: true, pullMax: 3 });
+  for (let i = 0; i < 5; i += 1) {
+    Atomics.store(ring.header, AUDIO_PCM_HEADER.READ_INDEX, Atomics.load(ring.header, AUDIO_PCM_HEADER.WRITE_INDEX));
+    f.producer.refill(1);
+  }
+  const d = f.producer.traceDrain();
+  assert.equal(d.pulls.length, 3, "capped");
+  assert.equal(d.pullLost, 2, "the 2 oldest dropped and counted");
+  const t = d.pulls.map((p) => p[0]);
+  assert.deepEqual(t, [...t].sort((a, b) => a - b), "the newest kept, in order");
+});
+
+test("trace pulls off: a refill never reads the mixer's events (no call to the core, no allocation for the log)", () => {
+  const ring = createAudioPcmRing();
+  const f = fixture();
+  let calls = 0;
+  f.core.audioQueuedFifoMs = () => 8;
+  f.core.audioQueueEvents = () => { calls += 1; return 0; };
+  f.producer.install(ring.sab, { muted: false, rateControl: true });
+  consumeAudioPcm(ring, new Float32Array(1), new Float32Array(1));
+  // no trace at all
+  Atomics.store(ring.header, AUDIO_PCM_HEADER.READ_INDEX, Atomics.load(ring.header, AUDIO_PCM_HEADER.WRITE_INDEX));
+  f.producer.refill(2);
+  assert.equal(calls, 0);
+  // a trace without pulls: the 100 ms samples only (traceTick reads the events, refill does not)
+  f.producer.traceStart({ everyMs: 100 });
+  Atomics.store(ring.header, AUDIO_PCM_HEADER.READ_INDEX, Atomics.load(ring.header, AUDIO_PCM_HEADER.WRITE_INDEX));
+  f.producer.refill(2);
+  assert.equal(calls, 0);
+  assert.equal(f.producer.trace.pullLog, null);
+  // on: read before and after each pull
+  f.producer.traceStart({ everyMs: 100, pulls: true });
+  Atomics.store(ring.header, AUDIO_PCM_HEADER.READ_INDEX, Atomics.load(ring.header, AUDIO_PCM_HEADER.WRITE_INDEX));
+  f.producer.refill(1);
+  assert.equal(calls, 4, "fills and skips, before and after the one pull");
+});
