@@ -60,7 +60,7 @@ function program() {
 
 // The core's side of region chaining (patch 0102): region_chain(state) picks
 // the next region's table index in `table`, 0 to return to the dispatcher.
-const noChain = () => ({ region_chain: () => 0, table: new WebAssembly.Table({ element: "anyfunc", initial: 1 }) });
+const noChain = () => ({ region_chain: () => 0, region_diag: () => 0, table: new WebAssembly.Table({ element: "anyfunc", initial: 1 }) });
 
 async function instantiate(region, { onBump = () => {}, memory = new WebAssembly.Memory({ initial: 1, maximum: 1, shared: true }), chain = noChain() } = {}) {
   const { instance } = await WebAssembly.instantiate(region.bytes, {
@@ -248,8 +248,8 @@ test("aot region: an exit tail-calls the region region_chain picks, in the core'
     return budget-- > 0 ? owner.get(pc) ?? 0 : 0;
   };
   const opts = { helpers: HELPERS, pcOffset: PC, memoryPages: 1, chain: true };
-  const r1 = await instantiate(assembleRegion([A], opts), { memory, chain: { region_chain, table } });
-  const r2 = await instantiate(assembleRegion([B], opts), { memory, chain: { region_chain, table } });
+  const r1 = await instantiate(assembleRegion([A], opts), { memory, chain: { region_chain, region_diag: () => 0, table } });
+  const r2 = await instantiate(assembleRegion([B], opts), { memory, chain: { region_chain, region_diag: () => 0, table } });
   table.set(1, r1.f);
   table.set(2, r2.f);
   // A(0x1000) -> stub -> region 2: B -> dispatch miss -> stub -> region 1:
@@ -279,7 +279,7 @@ test("aot region: without chain (a core before 0102) the module imports neither 
   const opts = { helpers: HELPERS, pcOffset: PC, memoryPages: 1 };
   const names = (o) => WebAssembly.Module.imports(new WebAssembly.Module(assembleRegion(program(), o).bytes)).map((i) => i.name);
   assert.deepEqual(names(opts), ["memory", "bump"]);
-  assert.deepEqual(names({ ...opts, chain: true }), ["memory", "bump", "region_chain", "table"]);
+  assert.deepEqual(names({ ...opts, chain: true }), ["memory", "bump", "region_chain", "region_diag", "table"]);
   // both expose the fragments for the warm-up
   for (const o of [opts, { ...opts, chain: true }]) {
     assert.deepEqual(WebAssembly.Module.exports(new WebAssembly.Module(assembleRegion(program(), o).bytes)).map((e) => e.name), ["f", "fragments"]);
@@ -466,7 +466,7 @@ test("aot region: a chained module with heap sites and names is patched and runs
   const memory = new WebAssembly.Memory({ initial: 1, maximum: 1, shared: true });
   const u32 = new Uint32Array(memory.buffer);
   const asked = [];
-  const chain = { region_chain: (state) => { asked.push(u32[(state + PC) / 4]); return 0; }, table: new WebAssembly.Table({ element: "anyfunc", initial: 1 }) };
+  const chain = { region_chain: (state) => { asked.push(u32[(state + PC) / 4]); return 0; }, region_diag: () => 0, table: new WebAssembly.Table({ element: "anyfunc", initial: 1 }) };
   const bytes = patchRegionHeap(region.bytes, { ramBase: 2048, l1Base: 4096 });
   u32[(2048 + 16) / 4] = 2055;
   const { instance } = await WebAssembly.instantiate(bytes, { env: { memory, bump: () => {}, read_u32: () => 0, ...chain } });
