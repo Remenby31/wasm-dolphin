@@ -357,8 +357,17 @@ export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memo
   // Functions: helpers (imports), region_chain (import, with `chain`), the
   // exported dispatcher, the internal one (`dispatch` relocs), the exit stub,
   // then the fragments.
-  const CHAIN = helperNames.length, DISPATCHER = CHAIN + (chain ? 1 : 0), INNER = DISPATCHER + 1, STUB = INNER + 1, FIRST = STUB + 1;
-  const LOCAL_FUNCTIONS = 3 + fragments.length;
+  // DIAG (never merged, diag/region-path-count): with `chain`, an import
+  // env.region_diag(kind) after region_chain, and counting trampolines: one
+  // per fragment in front of the internal dispatcher (kind 1: pc is an entry
+  // of that same fragment, 2: of another fragment of this module, 3: of no
+  // fragment here, so on to the exit stub and the core), one in front of the
+  // exit stub for jumps and calls to a pc no fragment here holds (kind 4),
+  // and MODCHK(state) (1 when state.pc is an entry of this module).
+  const DIAG_IMPORT = chain ? helperNames.length + 1 : -1;
+  const CHAIN = helperNames.length, DISPATCHER = CHAIN + (chain ? 2 : 0), INNER = DISPATCHER + 1, STUB = INNER + 1, FIRST = STUB + 1;
+  const TRAMP = (i) => FIRST + fragments.length + i, STATIC_T = FIRST + 2 * fragments.length, MODCHK = STATIC_T + 1;
+  const LOCAL_FUNCTIONS = 3 + fragments.length + (chain ? fragments.length + 2 : 0);
 
   // Entries -> fragment function index.
   const entryOwner = new Map();
@@ -411,11 +420,11 @@ export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memo
       }
       let index;
       if (r.kind === "import") index = helperIndex.get(r.name);
-      else if (r.kind === "jump") index = entryOwner.get(r.targetPc >>> 0) ?? STUB;
-      else if (r.kind === "dispatch") index = INNER;
+      else if (r.kind === "jump") index = entryOwner.get(r.targetPc >>> 0) ?? (chain ? STATIC_T : STUB);
+      else if (r.kind === "dispatch") index = chain ? TRAMP(fi) : INNER;
       // 0142: a guest call as a wasm call, to the fragment holding the
       // callee here, else the exit stub (which chains on to its region).
-      else if (r.kind === "call") index = entryOwner.get(r.targetPc >>> 0) ?? STUB;
+      else if (r.kind === "call") index = entryOwner.get(r.targetPc >>> 0) ?? (chain ? STATIC_T : STUB);
       else throw new Error(`region: unknown reloc kind ${r.kind}`);
       code.set(paddedUleb(index), r.offset);
     }
@@ -439,13 +448,14 @@ export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memo
   section(out, 1, types);
 
   const imports = [];
-  uleb(imports, helperNames.length + 1 + (chain ? 2 : 0));
+  uleb(imports, helperNames.length + 1 + (chain ? 3 : 0));
   name(imports, "env"); name(imports, "memory");
   imports.push(0x02, sharedMemory ? 0x03 : 0x01);
   uleb(imports, memoryMinPages); uleb(imports, memoryPages);
   helperNames.forEach((n, i) => { name(imports, "env"); name(imports, n); imports.push(0x00); uleb(imports, helperType[i]); });
   if (chain) {
     name(imports, "env"); name(imports, "region_chain"); imports.push(0x00); uleb(imports, TYPE_STATE);
+    name(imports, "env"); name(imports, "region_diag"); imports.push(0x00); uleb(imports, TYPE_STATE);
     // Table 0: the core's function table, where the next region's dispatcher
     // is (any size).
     name(imports, "env"); name(imports, "table"); imports.push(0x01, 0x70, 0x00, 0x00);
@@ -495,6 +505,32 @@ export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memo
   uleb(code, stub.length); append(stub);
   const bodyAt = [];
   for (const b of bodies) { uleb(code, b.length); bodyAt.push(code.length); append(b); }
+  if (chain) {
+    const pcLoad = (out) => { out.push(OP.localGet, 0, OP.i32Load, 2); uleb(out, pcOffset); out.push(OP.localSet, 1); };
+    const diagCall = (out) => { out.push(OP.call); uleb(out, DIAG_IMPORT); out.push(0x1a); }; // call region_diag; drop
+    fragments.forEach((f, i) => {
+      const own = f.entries?.length ? f.entries : [f.entry];
+      const t = [0x01, 0x01, VAL.i32];
+      pcLoad(t);
+      t.push(OP.i32Const, 0);
+      for (const pc of own) { t.push(OP.localGet, 1, OP.i32Const); sleb(t, pc | 0); t.push(OP.i32Eq, 0x72); }
+      // kind = own ? 1 : (MODCHK(state) ? 2 : 3)
+      t.push(OP.if, VAL.i32, OP.i32Const, 1, 0x05, OP.localGet, 0, OP.call); uleb(t, MODCHK);
+      t.push(OP.if, VAL.i32, OP.i32Const, 2, 0x05, OP.i32Const, 3, OP.end, OP.end);
+      diagCall(t);
+      t.push(OP.localGet, 0, OP.returnCall); uleb(t, INNER); t.push(OP.end);
+      uleb(code, t.length); append(t);
+    });
+    const st = [0x00, OP.i32Const, 4];
+    diagCall(st);
+    st.push(OP.localGet, 0, OP.returnCall); uleb(st, STUB); st.push(OP.end);
+    uleb(code, st.length); append(st);
+    const mc = [0x01, 0x01, VAL.i32];
+    pcLoad(mc);
+    for (const [pc] of sortedEntries) { mc.push(OP.localGet, 1, OP.i32Const); sleb(mc, pc | 0); mc.push(OP.i32Eq, OP.if, 0x40, OP.i32Const, 1, OP.return, OP.end); }
+    mc.push(OP.i32Const, 0, OP.end);
+    uleb(code, mc.length); append(mc);
+  }
   // Custom section "metadata.code.branch_hint" (wasm branch hinting, before
   // the code section): per fragment, the `if` opcodes the core marked and
   // whether their true arm is likely (a fast path) or not (a halt, the

@@ -2535,6 +2535,15 @@ async function handleMessage(type, payload) {
       return harnessGeometryCacheStats();
     case "validationReadJitRegionStats":
       return harnessJitRegionStats(payload);
+    // DIAG (never merged, diag/region-path-count): region exits by path.
+    case "validationReadRegionDiag": {
+      if (!harnessEnabled) return { error: "harness hooks are off" };
+      const f = moduleInstance?._DolphinWeb_RegionDiagStats;
+      if (!f) return { error: "core has no DolphinWeb_RegionDiagStats" };
+      const ptr = f(Number.isInteger(payload?.reset) ? payload.reset : -1) >>> 0;
+      const v = Array.from(new Float64Array(moduleInstance.HEAPU8.buffer, ptr, 8));
+      return { sameFragment: v[1], sameModule: v[2], indirectOut: v[3], staticOut: v[4] };
+    }
     case "validationReadRegionLedgerStale":
       return harnessRegionLedgerStale();
     case "validationReadAxHleStats":

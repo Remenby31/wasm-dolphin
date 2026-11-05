@@ -1,0 +1,50 @@
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -250,6 +250,8 @@ EM_JS(int, DolphinWeb_CachedInterpreterCompileWasmBlock,
+           // Region chaining (patch 0102): a region's exit stub asks the core
+           // for the next region and tail-calls it through the core's table.
+           region_chain: wasmTable.get(_DolphinWeb_RegionChainHelper()),
++          // DIAG (never merged): the region modules' path counters.
++          region_diag: wasmTable.get(_DolphinWeb_RegionDiagHelper()),
+           table: wasmTable
+         }
+       });
+@@ -10877,6 +10879,37 @@ extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_RegionChainHelper()
+   return static_cast<int>(reinterpret_cast<std::uintptr_t>(&RegionChainNext));
+ }
+ 
++// DIAG (never merged, diag/region-path-count): region exits by path, counted
++// by the region modules' trampolines through env.region_diag(kind) (1: an
++// indirect jump to an entry of the same fragment, 2: of another fragment of
++// the module, 3: of no fragment of the module, so on to RegionChainNext; 4:
++// a jump or call to a pc no fragment of the module holds, so on to
++// RegionChainNext). CPU thread only; read as f64 by the harness.
++namespace
++{
++alignas(8) double s_region_diag[8] = {};
++int RegionDiagCount(int kind)
++{
++  if (kind > 0 && kind < 8)
++    s_region_diag[kind] += 1;
++  return 0;
++}
++}  // namespace
++
++extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_RegionDiagHelper()
++{
++  return static_cast<int>(reinterpret_cast<std::uintptr_t>(&RegionDiagCount));
++}
++
++// reset >= 0 zeroes (racy, a diag), else reads; the counters' address.
++extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_RegionDiagStats(int reset)
++{
++  if (reset >= 0)
++    for (double& v : s_region_diag)
++      v = 0;
++  return static_cast<u32>(reinterpret_cast<std::uintptr_t>(s_region_diag));
++}
++
+ // ?regionchain=0 turns region chaining off (every exit returns to the
+ // dispatcher, as before 0102); on by default. Any thread.
+ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_JitSetRegionChaining(int enabled)
