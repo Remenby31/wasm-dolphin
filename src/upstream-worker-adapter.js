@@ -1,6 +1,7 @@
 import { AUDIO_PCM_MAX_RATE_PPM } from "./audio-pcm-ring.js";
 import { DEFAULT_UPSTREAM_CORE_SHA256 } from "./default-core.js";
 import { widenU32Counter } from "./u32-counter.js";
+import { viLockMode } from "./wgpu-vi-phase-lock.js";
 import { wgpuMappedStagingSlotCountOf, wgpuMappedStagingSlotMibOf } from "./wgpu-replay-diagnostics.js";
 import {
   DEFAULT_UPSTREAM_CORE_URL,
@@ -118,7 +119,7 @@ export class UpstreamWorkerAdapter {
     presentVsync = true,
     presentGamePace = false,
     presentPaceStats = false,
-    viLock = false,
+    viLock = "auto",
     coreLog = false,
     memcardSlotB = false,
     internalResolution = 1,
@@ -265,7 +266,7 @@ export class UpstreamWorkerAdapter {
     this.presentVsync = presentVsync !== false;
     this.presentGamePace = presentGamePace === true;
     this.presentPaceStats = presentPaceStats === true;
-    this.viLock = viLock === true;
+    this.viLock = viLockMode(viLock);
     this.coreLog = Boolean(coreLog);
     this.memcardSlotB = Boolean(memcardSlotB);
     this.internalResolution = Number(internalResolution) || 1;

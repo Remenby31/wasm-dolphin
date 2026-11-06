@@ -141,7 +141,20 @@ export function stableRefresh(times, { jitter = REFRESH_JITTER } = {}) {
   return { refreshMs: R, why: null };
 }
 
-export function createViPhaseLock({ maxPpm = MAX_PPM, slewPpmPerSec = SLEW_PPM_PER_SEC, target = TARGET_PHASE, errAlpha = ERR_ALPHA, writeStep = WRITE_STEP_PPM } = {}) {
+// The switch: ?vilock=1 forces the lock ("on", at 1:1 and 2:1), ?vilock=0
+// turns it off, else the default ("auto"): on at 1:1 only. At 1:1 (a game at
+// ~60 fps on a ~60 Hz screen) the parcours A/B (20 valid pairs, Mac) showed
+// no more audio skips in the race (median 0, worse 4 / better 5) and +10.45
+// points of smoothness p5 (20/20 pairs). At 2:1 (120 Hz, ProMotion) there
+// is no lock-against-base measure yet: off by default there, forced with
+// ?vilock=1.
+export function viLockMode(v) {
+  return v === true || v === "on" ? "on" : v === "auto" ? "auto" : "off";
+}
+// The largest frames-per-refresh ratio the lock takes in each mode.
+export const MAX_RATIO = Object.freeze({ on: 2, auto: 1 });
+
+export function createViPhaseLock({ maxPpm = MAX_PPM, slewPpmPerSec = SLEW_PPM_PER_SEC, target = TARGET_PHASE, errAlpha = ERR_ALPHA, writeStep = WRITE_STEP_PPM, maxRatio = MAX_RATIO.on } = {}) {
   // the error the output's P term sees (smoothed), and the trim written
   // (held until the controller's moved by writeStep)
   let errSmooth = null;
@@ -204,6 +217,8 @@ export function createViPhaseLock({ maxPpm = MAX_PPM, slewPpmPerSec = SLEW_PPM_P
     const ratio = frameMs / refreshMs;
     const m = Math.round(ratio);
     if (m < 1 || m > 2 || (!stats.on && Math.abs(ratio - m) > m * RATIO_TOLERANCE)) return { why: "no integer ratio", refreshMs, frameMs, ratio };
+    // the default (auto) stops at 1:1: 2:1 only with ?vilock=1
+    if (m > maxRatio) return { why: "2:1 only with ?vilock=1", refreshMs, frameMs, ratio };
     // the arrivals' phase in the refresh (circular mean, last second)
     let sx = 0, sy = 0;
     for (const t of a.filter((t) => t >= now - 1000)) {

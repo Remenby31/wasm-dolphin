@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createViPhaseLock, MAX_PPM, stableRefresh, WRITE_STEP_PPM } from "../src/wgpu-vi-phase-lock.js";
+import { createViPhaseLock, MAX_PPM, MAX_RATIO, stableRefresh, viLockMode, WRITE_STEP_PPM } from "../src/wgpu-vi-phase-lock.js";
 import { createVsyncQueue } from "../src/wgpu-vsync-queue.js";
 
 const NTSC_VI_MS = 1000 / 59.94;
@@ -12,10 +12,10 @@ const NTSC_VI_MS = 1000 / 59.94;
 // asks (or 1 without it), each arrival moved by jitter(n) ms, through the
 // presenter's real queue. Returns the frames shown/dropped/repeated after the
 // first `settleSec`, and the lock.
-function play({ hz = 60, viMs = NTSC_VI_MS, fields = 1, seconds = 120, settleSec = 20, jitter = (n) => ((n * 7919) % 5) - 2, tickJitter = () => 0, lock = true, arrivalOffsetMs = 3, cbLateMs = 0, stall = null }) {
+function play({ hz = 60, viMs = NTSC_VI_MS, fields = 1, seconds = 120, settleSec = 20, jitter = (n) => ((n * 7919) % 5) - 2, tickJitter = () => 0, lock = true, arrivalOffsetMs = 3, cbLateMs = 0, stall = null, maxRatio }) {
   const R = 1000 / hz;
   const q = createVsyncQueue({ queueSize: 2, createTexture: () => ({}) });
-  const vi = lock ? createViPhaseLock() : null;
+  const vi = lock ? createViPhaseLock(maxRatio === undefined ? {} : { maxRatio }) : null;
   let factor = 1;
   let nextArrival = arrivalOffsetMs, n = 0, tick = 0, lastUpdate = 0;
   // the lock's phase after it was first taken, and the frames dropped or
@@ -93,6 +93,30 @@ test("30 fps on 60 Hz (2:1) locks too; 120 Hz with 60 fps (2:1) too", () => {
   const b = play({ hz: 120 });
   assert.ok(b.stats.on, JSON.stringify(b.stats));
   assert.equal(b.dropped, 0);
+});
+
+test("the default (auto, MAX_RATIO.auto): locks at 1:1, never at 2:1 (30 fps on 60 Hz, 60 fps on 120 Hz); ?vilock=1 (on) takes 2:1", () => {
+  assert.equal(MAX_RATIO.auto, 1);
+  assert.equal(MAX_RATIO.on, 2);
+  const one = play({ maxRatio: MAX_RATIO.auto });
+  assert.ok(one.stats.on && one.stats.locks >= 1, JSON.stringify(one.stats));
+  assert.equal(one.dropped, 0);
+  for (const twoToOne of [{ fields: 2 }, { hz: 120 }]) {
+    const auto = play({ ...twoToOne, maxRatio: MAX_RATIO.auto });
+    assert.equal(auto.stats.on, false, JSON.stringify(auto.stats));
+    assert.equal(auto.stats.locks, 0);
+    assert.equal(auto.stats.why, "2:1 only with ?vilock=1");
+    assert.equal(auto.stats.ppm, 0, "the speed stays the base");
+    const on = play({ ...twoToOne, maxRatio: MAX_RATIO.on });
+    assert.ok(on.stats.on, JSON.stringify(on.stats));
+  }
+});
+
+test("the switch: ?vilock=1 on, ?vilock=0 off, else auto (viLockMode)", () => {
+  assert.equal(viLockMode("on"), "on");
+  assert.equal(viLockMode(true), "on");
+  assert.equal(viLockMode("auto"), "auto");
+  for (const v of ["off", false, undefined, null, "1", "yes"]) assert.equal(viLockMode(v), "off", String(v));
 });
 
 test("not lockable: PAL 50 on 60 Hz, 60 fps on 144 Hz: the speed stays the base", () => {

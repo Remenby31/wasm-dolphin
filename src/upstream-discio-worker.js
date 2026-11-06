@@ -144,7 +144,7 @@ import { createWgpuSparseUboCopyForward } from "./wgpu-sparse-ubo-copy-forward.j
 import { createBindGroupCache } from "./wgpu-bind-group-cache.js";
 import { createVsyncQueue, vsyncLateMs } from "./wgpu-vsync-queue.js";
 import { createGamePacer, createRefreshHistogram, refreshOf } from "./wgpu-game-pacer.js";
-import { createViPhaseLock } from "./wgpu-vi-phase-lock.js";
+import { createViPhaseLock, MAX_RATIO, viLockMode } from "./wgpu-vi-phase-lock.js";
 import {
   WGPU_MAPPED_DRAIN_FORCE_REASONS,
   createWgpuMappedDrainCoalescer
@@ -2919,7 +2919,7 @@ async function loadCore({
   presentVsync = true,
   presentGamePace = false,
   presentPaceStats = false,
-  viLock = false,
+  viLock = "off",
   coreLog = false,
   memcardSlotB = false,
   internalResolution = 1,
@@ -3444,15 +3444,17 @@ async function loadCore({
   setWgpuDisplayFilter(displayFilter ?? {});
   wgpuPresentGamePace = presentGamePace === true;
   wgpuPresentPaceStats = presentPaceStats === true || wgpuPresentGamePace;
-  // ?vilock=1: only on the WebGPU video path with the vsync presenter (its
-  // rAF measures the refresh) and at the normal speed (an unlimited or other
-  // speed is the user's). Asked for where it cannot run, its status says why
-  // (the software renderer used to report "starting" for ever).
-  wgpuViLockUnavailable = viLock !== true ? null
+  // The VI phase lock (on by default at 1:1, ?vilock=1 forces it at 2:1
+  // too, ?vilock=0 off): only on the WebGPU video path with the vsync
+  // presenter (its rAF measures the refresh) and at the normal speed (an
+  // unlimited or other speed is the user's). Where it cannot run, its status
+  // says why (the software renderer used to report "starting" for ever).
+  const viLockAs = viLockMode(viLock);
+  wgpuViLockUnavailable = viLockAs === "off" ? null
     : !hardwareVideoBackend ? "not available on this video path"
     : !wgpuPresentVsync ? "not available with this presenter"
     : Number(emulationSpeed) !== 1 ? "not at this speed" : null;
-  wgpuViLock = viLock === true && !wgpuViLockUnavailable ? createViPhaseLock() : null;
+  wgpuViLock = viLockAs !== "off" && !wgpuViLockUnavailable ? createViPhaseLock({ maxRatio: MAX_RATIO[viLockAs] }) : null;
   wgpuGamePacer.reset({ arrival: true });
   wgpuRefreshHistogram.reset();
   releaseWgpuReadback();
@@ -13310,17 +13312,17 @@ function wgpuVsyncRefreshMs() {
 // the refresh histogram (frames on screen for 1, 2, 3, 4+ refreshes, shown in
 // the HUD) reads the same with the switch on or off.
 let wgpuPresentGamePace = false;
-// ?vilock=1 (src/wgpu-vi-phase-lock.js): the VI locked in phase on the
-// refresh; fed the rAF frame times and the frames' arrivals, it trims the
+// The VI phase lock (src/wgpu-vi-phase-lock.js; default on at 1:1, ?vilock=1
+// forces it, ?vilock=0 off): the VI locked in phase on the refresh; fed the rAF frame times and the frames' arrivals, it trims the
 // core's throttle rate (patch 0212: +/- at most 0.2 % of the configured
 // speed; the emulated time is unchanged) every 500 ms, from the rAF tick or,
 // without rAF (hidden), from the next arrival. A core without the trim: no
 // lock, and why.
 let wgpuViLock = null;
-// why ?vilock=1 was not honoured (null: not asked, or running)
+// why the lock is not running (null: turned off, or running)
 let wgpuViLockUnavailable = null;
 // The VI phase lock's status for the audio queue telemetry: its stats when
-// it runs, off with the reason when ?vilock=1 could not run, null when not asked.
+// it runs, off with the reason when it could not run, null when turned off (?vilock=0).
 function viLockStatus() {
   if (wgpuViLock) return { ...wgpuViLock.stats };
   if (wgpuViLockUnavailable) return { on: false, ppm: 0, locks: 0, lost: 0, why: wgpuViLockUnavailable, driftPpm: null, refreshMs: null, frameMs: null, ratio: null, phase: null };
