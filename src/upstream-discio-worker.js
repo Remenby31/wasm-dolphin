@@ -582,8 +582,9 @@ function harnessJitRegionStats({ sampleEvery, pcs } = {}) {
 function harnessRegionCallStats() {
   const f = moduleInstance?._DolphinWeb_RegionCallStats;
   if (!f) return null;
-  const [calls, , elsewhere, passedUp, capped, depthMax] = new Uint32Array(moduleInstance.HEAPU8.buffer, f(-1) >>> 0, 6);
-  return { calls, elsewhere, passedUp, capped, depthMax };
+  const [calls, headPasses, elsewhere, passedUp, capped, depthMax] = new Uint32Array(moduleInstance.HEAPU8.buffer, f(-1) >>> 0, 6);
+  // DIAG 0291 (never merged): passes through the fragments' loop head.
+  return { calls, headPasses, elsewhere, passedUp, capped, depthMax };
 }
 // Installs in the CPU thread's throttle sleeps (patch 0107): how many, their
 // host time, the worst lateness past a sleep's deadline they caused (the
