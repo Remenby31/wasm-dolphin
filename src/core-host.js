@@ -2000,11 +2000,12 @@ export function requestedPacing(search = window.location.search) {
     // the game's period without pacing. Off: none of it runs.
     presentGamePace: presentPaceMode(params) === "game",
     presentPaceStats: presentPaceMode(params) !== "off",
-    // ?vilock=1 (src/wgpu-vi-phase-lock.js): the emulated VI locked in phase
-    // on the screen's refresh (the speed nudged by at most 0.2 %), so the
-    // 59.94/60 Hz drift no longer crosses a BeginFrame every ~16.7 s. Off by
-    // default until measured.
-    viLock: params.get("vilock") === "1"
+    // The VI phase lock (src/wgpu-vi-phase-lock.js): the emulated VI locked in
+    // phase on the screen's refresh (the speed nudged by at most 0.2 %), so
+    // the 59.94/60 Hz drift no longer crosses a BeginFrame every ~16.7 s. On
+    // by default at 1:1 only ("auto"); ?vilock=1 forces it (2:1 too),
+    // ?vilock=0 turns it off.
+    viLock: params.get("vilock") === "1" ? "on" : params.get("vilock") === "0" ? "off" : "auto"
   };
 }
 

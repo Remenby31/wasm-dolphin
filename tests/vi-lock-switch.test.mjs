@@ -4,20 +4,22 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-// ?vilock=1 (src/wgpu-vi-phase-lock.js, patch 0212): off by default, every hop
-// from the page's URL to the core's throttle checked (an option the adapter
-// forgot to carry was silently dropped before: ?aotsample, ?wasmengine).
-test("vilock: off by default, ?vilock=1 only", async () => {
+// The VI phase lock (src/wgpu-vi-phase-lock.js, patch 0212): on by default at
+// 1:1 only ("auto"), ?vilock=1 forces it ("on", 2:1 too), ?vilock=0 turns it
+// off; every hop from the page's URL to the core's throttle checked (an option
+// the adapter forgot to carry was silently dropped before: ?aotsample, ?wasmengine).
+test("vilock: auto by default, ?vilock=1 on, ?vilock=0 off", async () => {
   const { requestedPacing } = await import("../src/core-host.js");
-  assert.equal(requestedPacing("").viLock, false);
-  assert.equal(requestedPacing("?vilock=1").viLock, true);
-  for (const other of ["?vilock=0", "?vilock=true", "?vilock=on", "?vilock="]) assert.equal(requestedPacing(other).viLock, false, other);
+  assert.equal(requestedPacing("").viLock, "auto");
+  assert.equal(requestedPacing("?vilock=1").viLock, "on");
+  assert.equal(requestedPacing("?vilock=0").viLock, "off");
+  for (const other of ["?vilock=true", "?vilock=on", "?vilock=", "?vilock=2"]) assert.equal(requestedPacing(other).viLock, "auto", other);
 });
 
 test("vilock reaches the worker's init message through the adapter", async (t) => {
   const { requestedPacing } = await import("../src/core-host.js");
   const { UpstreamWorkerAdapter } = await import("../src/upstream-worker-adapter.js");
-  for (const [query, expected] of [["?vilock=1", true], ["", false]]) {
+  for (const [query, expected] of [["?vilock=1", "on"], ["?vilock=0", "off"], ["", "auto"]]) {
     const adapter = new UpstreamWorkerAdapter(requestedPacing(query));
     let posted = null;
     adapter.worker = {
@@ -46,8 +48,10 @@ test("vilock: host, worker and patch 0212 (a trim of the throttle's wall rate on
   // the lock only on the vsync presenter at the normal speed, and only through the core's trim
   // only on the WebGPU path with the vsync presenter at speed 1; asked for
   // elsewhere, the status says why (the software renderer said "starting")
-  assert.match(worker, /wgpuViLockUnavailable = viLock !== true \? null\n\s+: !hardwareVideoBackend \? "not available on this video path"\n\s+: !wgpuPresentVsync \? "not available with this presenter"\n\s+: Number\(emulationSpeed\) !== 1 \? "not at this speed" : null;/);
-  assert.match(worker, /wgpuViLock = viLock === true && !wgpuViLockUnavailable \? createViPhaseLock\(\) : null;/);
+  assert.match(worker, /const viLockAs = viLockMode\(viLock\);\n\s+wgpuViLockUnavailable = viLockAs === "off" \? null\n\s+: !hardwareVideoBackend \? "not available on this video path"\n\s+: !wgpuPresentVsync \? "not available with this presenter"\n\s+: Number\(emulationSpeed\) !== 1 \? "not at this speed" : null;/);
+  assert.match(worker, /wgpuViLock = viLockAs !== "off" && !wgpuViLockUnavailable \? createViPhaseLock\(\{ maxRatio: MAX_RATIO\[viLockAs\] \}\) : null;/);
+  // a worker started without the field (not through the adapter): off
+  assert.match(worker, /\n  viLock = "off",\n/);
   assert.match(worker, /if \(wgpuViLockUnavailable\) return \{ on: false, ppm: 0, locks: 0, lost: 0, why: wgpuViLockUnavailable,/);
   assert.equal(worker.match(/phaseLock: viLockStatus\(\)/g)?.length, 3, "every audio-queue report goes through viLockStatus");
   assert.doesNotMatch(worker, /phaseLock: wgpuViLock \?/);
