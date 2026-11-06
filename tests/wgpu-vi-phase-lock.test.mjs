@@ -232,12 +232,12 @@ test("a 60.05 Hz panel (1835 ppm) locks; one miscounted tick does not cost the l
 
 // A screen and a game whose rates change at `changeAt` (ms): the lock's
 // state each update, from a closed loop (the arrivals follow the lock's speed).
-function drive({ seconds = 60, changeAt = 20_000, hzBefore = 60, hzAfter = 60, viBefore = NTSC_VI_MS, viAfter = NTSC_VI_MS, tickJitter = () => 0, maxRatio }) {
+function drive({ seconds = 60, changeAt = 20_000, hzBefore = 60, hzAfter = 60, viBefore = NTSC_VI_MS, viAfter = NTSC_VI_MS, tickJitter = () => 0, maxRatio, slow = null }) {
   const vi = createViPhaseLock(maxRatio === undefined ? {} : { maxRatio });
   let factor = 1, next = 3, n = 0, t = 0.37 * (1000 / hzBefore), lastUpdate = 0, k = 0;
   const trace = [];
   while (t < seconds * 1000) {
-    const viMs = t < changeAt ? viBefore : viAfter;
+    const viMs = slow && t >= slow.from && t < slow.to ? slow.viMs : t < changeAt ? viBefore : viAfter;
     while (next <= t) {
       vi.arrival(next + (((n * 7919) % 5) - 2) * 0.5);
       n++;
@@ -278,12 +278,22 @@ test("locked at 1:1, then the game falls to 50 or 45 fps (ratio 1.2, 1.33): rele
       const label = `${mode} ${name}`;
       assert.ok(trace.filter((x) => x.t < 40_000).at(-1).on, `${label}: locked before`);
       const released = trace.find((x) => x.t > 40_000 && !x.on);
-      assert.ok(released && released.t - 40_000 <= 5_000, `${label}: released ${JSON.stringify(released)}`);
+      assert.ok(released && released.t - 40_000 <= 10_000, `${label}: released ${JSON.stringify(released)}`);
       assert.equal(released.why, "no integer ratio", label);
       const after = trace.filter((x) => x.t >= released.t + 3_000);
       assert.ok(after.length && after.every((x) => !x.on && x.ppm === 0), `${label}: ${JSON.stringify(after.slice(0, 3))}`);
       assert.equal(vi.stats.locks, 1, label);
     }
+  }
+});
+
+test("a short slowdown while locked (1-2 s at 80-85 % speed, a load): held through it, not released (the ratio reads off for the arrival window)", () => {
+  for (const [ms, viMs] of [[1000, NTSC_VI_MS / 0.8], [2000, NTSC_VI_MS / 0.85]]) {
+    const { vi, trace } = drive({ seconds: 70, changeAt: 1e9, slow: { from: 40_000, to: 40_000 + ms, viMs } });
+    assert.ok(trace.filter((x) => x.t < 40_000).at(-1).on, "locked before");
+    assert.ok(trace.some((x) => x.t > 40_000 && x.why === "ratio off"), `${ms} ms: the ratio read off ${JSON.stringify(trace.filter((x) => x.t > 40_000).slice(0, 8))}`);
+    assert.equal(vi.stats.lost, 0, `${ms} ms: ${JSON.stringify(vi.stats)}`);
+    assert.ok(vi.stats.on, `${ms} ms: still on at the end`);
   }
 });
 

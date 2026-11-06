@@ -58,8 +58,14 @@ export const RATIO_TOLERANCE = 0.0019;
 // or 45 fps on a 60 Hz screen (ratio 1.2, 1.33) rounds to 1:1 too, and with
 // no ratio check the lock held on and the trim wandered from -2000 to +1738
 // ppm (review of #449, a weak machine on WebGPU); dropped past it, the speed
-// back to the base.
+// back to the base. Not at once: a 1 s stall (a load, the race's entry) reads
+// in the ratio for the whole ARRIVAL_WINDOW_MS (speeds of 50-90 % gave 1-5.5 %
+// for 1-3 s in 14 of 8,716 locked seconds of the parcours series), so the
+// ratio must stay off for RATIO_OFF_MS (leaky, like OUT_OF_REACH_MS); until
+// then the controller holds its output and its integral (the phase means
+// nothing while the frames' period is off).
 export const RATIO_TOLERANCE_LOCKED = 0.01;
+export const RATIO_OFF_MS = 5000;
 // Once locked, the frames' period measured over a window at a moving speed
 // wobbles (+/-700 ppm): the lock is kept on the PI's own output instead, and
 // dropped when that output has been held at the bound for OUT_OF_REACH_MS
@@ -186,6 +192,8 @@ export function createViPhaseLock({ maxPpm = MAX_PPM, slewPpmPerSec = SLEW_PPM_P
   let baseSince = null;
   // the leaky count of time the output spent at the bound (ms)
   let saturatedMs = 0;
+  // the leaky count of time the locked ratio spent off RATIO_TOLERANCE_LOCKED (ms)
+  let ratioOffMs = 0;
   const stats = { on: false, ppm: 0, locks: 0, lost: 0, why: "starting", driftPpm: null, refreshMs: null, frameMs: null, ratio: null, phase: null };
 
   function tick(frameTime, now = frameTime) {
@@ -225,7 +233,8 @@ export function createViPhaseLock({ maxPpm = MAX_PPM, slewPpmPerSec = SLEW_PPM_P
     const frameMs = (sxy / sxx) * speed;
     const ratio = frameMs / refreshMs;
     const m = Math.round(ratio);
-    if (m < 1 || m > 2 || Math.abs(ratio - m) > m * (stats.on ? RATIO_TOLERANCE_LOCKED : RATIO_TOLERANCE)) return { why: "no integer ratio", refreshMs, frameMs, ratio };
+    if (stats.on && (m < 1 || m > 2 || Math.abs(ratio - m) > m * RATIO_TOLERANCE_LOCKED)) return { why: "ratio off", refreshMs, frameMs, ratio };
+    if (m < 1 || m > 2 || (!stats.on && Math.abs(ratio - m) > m * RATIO_TOLERANCE)) return { why: "no integer ratio", refreshMs, frameMs, ratio };
     // the default (auto) stops at 1:1: 2:1 only with ?vilock=1
     if (m > maxRatio) return { why: "2:1 only with ?vilock=1", refreshMs, frameMs, ratio };
     // the arrivals' phase in the refresh (circular mean, last second)
@@ -261,8 +270,18 @@ export function createViPhaseLock({ maxPpm = MAX_PPM, slewPpmPerSec = SLEW_PPM_P
     }
     // locked, the output held at the bound OUT_OF_REACH_MS (leaky): out of reach
     if (s.why === null && stats.on && saturatedMs >= OUT_OF_REACH_MS) s.why = "drift out of reach";
+    // locked, the ratio off: held for up to RATIO_OFF_MS (leaky), then let go
+    let holding = false;
+    if (stats.on && s.why === "ratio off") {
+      ratioOffMs += dt * 1000;
+      if (ratioOffMs < RATIO_OFF_MS) holding = true;
+      else s.why = "no integer ratio";
+    } else if (s.why === null) ratioOffMs = Math.max(0, ratioOffMs - dt * 500);
     let want = 0;
-    if (s.why === null) {
+    if (holding) {
+      // the output and the integral as they are; the phase is not used
+      want = ppm;
+    } else if (s.why === null) {
       // late in the refresh (phase above the target): a little faster
       let err = s.phase - target;
       if (err > 0.5) err -= 1;
@@ -298,6 +317,7 @@ export function createViPhaseLock({ maxPpm = MAX_PPM, slewPpmPerSec = SLEW_PPM_P
       if (stats.on) stats.lost += 1;
       stats.on = false;
       saturatedMs = 0;
+      ratioOffMs = 0;
       prevErr = null;
       errSmooth = null;
       if (s.why === "drift out of reach") entryStreak = 0;
