@@ -1,7 +1,9 @@
 // Copyright 2026 wasm-dolphin contributors
 // SPDX-License-Identifier: MIT
 //
-// ?vilock=1: the emulated VI locked in phase on the screen's refresh.
+// The VI phase lock: the emulated VI locked in phase on the screen's refresh.
+// On by default at 1:1 ("auto"), ?vilock=1 forces it (2:1 too), ?vilock=0
+// turns it off (viLockMode below).
 //
 // An NTSC game makes 59.94 frames a second; most screens refresh at 60 Hz.
 // Free-running, the frames' arrival slides one refresh every ~16.7 s, and
@@ -51,6 +53,13 @@ export const WRITE_STEP_PPM = 25;
 // term some room under the bound; kept up to the bound itself (the ratio's
 // estimate wobbles: no flapping), dropped past it (the phase would slide)
 export const RATIO_TOLERANCE = 0.0019;
+// Once locked, the ratio is still checked, against a bound far wider than its
+// wobble (+/-700 ppm) and than the trim (2000 ppm): a game that falls to 50
+// or 45 fps on a 60 Hz screen (ratio 1.2, 1.33) rounds to 1:1 too, and with
+// no ratio check the lock held on and the trim wandered from -2000 to +1738
+// ppm (review of #449, a weak machine on WebGPU); dropped past it, the speed
+// back to the base.
+export const RATIO_TOLERANCE_LOCKED = 0.01;
 // Once locked, the frames' period measured over a window at a moving speed
 // wobbles (+/-700 ppm): the lock is kept on the PI's own output instead, and
 // dropped when that output has been held at the bound for OUT_OF_REACH_MS
@@ -216,7 +225,7 @@ export function createViPhaseLock({ maxPpm = MAX_PPM, slewPpmPerSec = SLEW_PPM_P
     const frameMs = (sxy / sxx) * speed;
     const ratio = frameMs / refreshMs;
     const m = Math.round(ratio);
-    if (m < 1 || m > 2 || (!stats.on && Math.abs(ratio - m) > m * RATIO_TOLERANCE)) return { why: "no integer ratio", refreshMs, frameMs, ratio };
+    if (m < 1 || m > 2 || Math.abs(ratio - m) > m * (stats.on ? RATIO_TOLERANCE_LOCKED : RATIO_TOLERANCE)) return { why: "no integer ratio", refreshMs, frameMs, ratio };
     // the default (auto) stops at 1:1: 2:1 only with ?vilock=1
     if (m > maxRatio) return { why: "2:1 only with ?vilock=1", refreshMs, frameMs, ratio };
     // the arrivals' phase in the refresh (circular mean, last second)

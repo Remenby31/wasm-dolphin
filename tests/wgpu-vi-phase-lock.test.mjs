@@ -232,8 +232,8 @@ test("a 60.05 Hz panel (1835 ppm) locks; one miscounted tick does not cost the l
 
 // A screen and a game whose rates change at `changeAt` (ms): the lock's
 // state each update, from a closed loop (the arrivals follow the lock's speed).
-function drive({ seconds = 60, changeAt = 20_000, hzBefore = 60, hzAfter = 60, viBefore = NTSC_VI_MS, viAfter = NTSC_VI_MS, tickJitter = () => 0 }) {
-  const vi = createViPhaseLock();
+function drive({ seconds = 60, changeAt = 20_000, hzBefore = 60, hzAfter = 60, viBefore = NTSC_VI_MS, viAfter = NTSC_VI_MS, tickJitter = () => 0, maxRatio }) {
+  const vi = createViPhaseLock(maxRatio === undefined ? {} : { maxRatio });
   let factor = 1, next = 3, n = 0, t = 0.37 * (1000 / hzBefore), lastUpdate = 0, k = 0;
   const trace = [];
   while (t < seconds * 1000) {
@@ -269,6 +269,39 @@ test("out of reach after the lock (screen 60 -> 60.08 Hz, a game slowed 0.3 %): 
     assert.equal(vi.stats.on, false, name);
     assert.equal(vi.stats.locks, 1, name);
   }
+});
+
+test("locked at 1:1, then the game falls to 50 or 45 fps (ratio 1.2, 1.33): released, the speed back to the base, not taken again", () => {
+  for (const mode of ["auto", "on"]) {
+    for (const [name, viAfter] of [["50 fps", 20], ["45 fps", 1000 / 45]]) {
+      const { vi, trace } = drive({ seconds: 70, changeAt: 40_000, viAfter, maxRatio: MAX_RATIO[mode] });
+      const label = `${mode} ${name}`;
+      assert.ok(trace.filter((x) => x.t < 40_000).at(-1).on, `${label}: locked before`);
+      const released = trace.find((x) => x.t > 40_000 && !x.on);
+      assert.ok(released && released.t - 40_000 <= 5_000, `${label}: released ${JSON.stringify(released)}`);
+      assert.equal(released.why, "no integer ratio", label);
+      const after = trace.filter((x) => x.t >= released.t + 3_000);
+      assert.ok(after.length && after.every((x) => !x.on && x.ppm === 0), `${label}: ${JSON.stringify(after.slice(0, 3))}`);
+      assert.equal(vi.stats.locks, 1, label);
+    }
+  }
+});
+
+test("auto never takes a ratio near 2 (1.98, 2.02), and lets go when the screen goes 60 -> 120 Hz mid-session", () => {
+  for (const ratio of [1.98, 2.02]) {
+    const r = play({ viMs: (1000 / 60) * ratio, maxRatio: MAX_RATIO.auto });
+    assert.equal(r.stats.on, false, `${ratio}: ${JSON.stringify(r.stats)}`);
+    assert.equal(r.stats.locks, 0, String(ratio));
+    assert.equal(r.stats.ppm, 0, String(ratio));
+  }
+  const { vi, trace } = drive({ seconds: 60, changeAt: 30_000, hzAfter: 120, maxRatio: MAX_RATIO.auto });
+  assert.ok(trace.filter((x) => x.t < 30_000).at(-1).on, "locked at 60 Hz");
+  const released = trace.find((x) => x.t > 30_000 && !x.on);
+  assert.ok(released && released.t - 30_000 <= 5_000, JSON.stringify(released));
+  const after = trace.filter((x) => x.t >= released.t + 3_000);
+  assert.ok(after.length && after.every((x) => !x.on && x.ppm === 0), JSON.stringify(after.slice(0, 3)));
+  assert.equal(vi.stats.why, "2:1 only with ?vilock=1");
+  assert.equal(vi.stats.locks, 1);
 });
 
 test("a 120 Hz screen with +/-1.5 ms of rAF jitter: the jitter check has hysteresis, no flapping", () => {
