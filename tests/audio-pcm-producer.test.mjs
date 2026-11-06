@@ -14,6 +14,7 @@ import {
 import {
   AUDIO_PCM_TARGET_FRAMES,
   AudioPcmProducer,
+  postSkipQueues,
 } from "../src/audio-pcm-producer.js";
 
 function fixture() {
@@ -424,7 +425,7 @@ test("plumbing: ?audiorate and ?audioratemax reach the producer", async () => {
   assert.equal(audio.match(/rateMaxPpm: this\.workletRateMaxPpm/g).length, 3);
   assert.match(adapter, /rateMaxPpm: Number\(rateMaxPpm\) \|\| AUDIO_PCM_MAX_RATE_PPM,/);
   assert.match(worker, /rateMaxPpm: Number\(payload\.rateMaxPpm\) \|\| undefined,/);
-  assert.match(adapter, /async configureAudioWorklet\(\{ enabled, muted, sab, targetFrames, rateControl = false, rateMaxPpm = AUDIO_PCM_MAX_RATE_PPM, ringLowMs = null \}\)/);
+  assert.match(adapter, /async configureAudioWorklet\(\{ enabled, muted, sab, targetFrames, rateControl = false, rateMaxPpm = AUDIO_PCM_MAX_RATE_PPM, ringLowMs = null, postSkip = false \}\)/);
   assert.match(adapter, /rateControl: Boolean\(rateControl\),/);
   assert.match(worker, /rateControl: Boolean\(payload\.rateControl\),\n\s+rateMaxPpm: Number\(payload\.rateMaxPpm\) \|\| undefined,/);
   assert.doesNotMatch(worker, /mixerCapMs/);
@@ -639,4 +640,84 @@ test("trace pulls off: a refill never reads the mixer's events (no call to the c
   Atomics.store(ring.header, AUDIO_PCM_HEADER.READ_INDEX, Atomics.load(ring.header, AUDIO_PCM_HEADER.WRITE_INDEX));
   f.producer.refill(1);
   assert.equal(calls, 4, "fills and skips, before and after the one pull");
+});
+
+// A mixer with the overflow skip of Mixer.cpp (MixerFifo::Dequeue): a FIFO
+// over the ceiling jumps back to about half of it (22 ms at 40) at its next
+// granule; a pull longer than what is left empties it into a gap fill.
+function skippingMixer(f, { dma, streaming, ceiling = 40, afterSkip = 22 }) {
+  const fifo = { dma, streaming };
+  const counts = { skips: 0, fills: 0, pulls: [] };
+  f.core.audioQueuedFifoMs = (which) => (which === 0 ? fifo.dma : fifo.streaming);
+  const mix = f.core.mixAudio;
+  f.core.mixAudio = (frames) => {
+    counts.pulls.push(frames);
+    for (const k of ["dma", "streaming"]) {
+      if (fifo[k] > ceiling) { fifo[k] = afterSkip; counts.skips += 1; }
+      const take = frames / 48;
+      if (take > fifo[k]) { counts.fills += 1; fifo[k] = afterSkip / 2; } else fifo[k] -= take;
+    }
+    return mix(frames);
+  };
+  return counts;
+}
+
+function primedRing(f, opts) {
+  const ring = createAudioPcmRing();
+  f.producer.install(ring.sab, { muted: false, rateControl: true, ...opts });
+  consumeAudioPcm(ring, new Float32Array(1), new Float32Array(1));
+  writeAudioPcm(ring, new Int16Array(30 * 48 * 2), 30 * 48, 2); // 30 ms: the per-FIFO cap applies
+  return ring;
+}
+
+test("?audiopostskip: a pull after an overflow is sized on the FIFO's depth after the skip, so the skip has no twin fill", () => {
+  // off (default): the drain is sized on 55 ms (min 47 ms), the skip leaves 22: a fill in both FIFOs
+  const off = fixture();
+  const offCounts = skippingMixer(off, { dma: 55, streaming: 53 });
+  primedRing(off);
+  assert.equal(off.producer.postSkipCeilingMs, null);
+  off.producer.refill(1);
+  assert.equal(offCounts.skips, 2);
+  assert.equal(offCounts.fills, 2, "the twin fills");
+  // on: both counted at 20 ms (half the ceiling): the pull stays under what the skip leaves
+  const on = fixture();
+  const onCounts = skippingMixer(on, { dma: 55, streaming: 53 });
+  primedRing(on, { postSkipCeilingMs: 40 });
+  assert.equal(on.producer.postSkipCeilingMs, 40);
+  const b = on.producer.mixerBounds(on.core, 30 * 48);
+  assert.equal(b.minFrames, (20 - 8) * 48);
+  assert.equal(b.maxFrames, (20 - 4) * 48);
+  on.producer.refill(1);
+  assert.equal(onCounts.skips, 2, "the skip itself stays");
+  assert.equal(onCounts.fills, 0, "no twin fill");
+  assert.ok(onCounts.pulls[0] <= 22 * 48);
+  assert.equal(on.producer.telemetry().postSkipCeilingMs, 40);
+});
+
+test("?audiopostskip: FIFOs under the ceiling keep their bounds; one over it counts as half the ceiling; out of range is off", () => {
+  // under the ceiling: identical to off
+  const q = { lo: 30, hi: 38, dma: 30, streaming: 38 };
+  assert.deepEqual(postSkipQueues(q, 40), q);
+  // one over: it becomes 20, the other stays (lo and hi recomputed)
+  assert.deepEqual(postSkipQueues({ lo: 30, hi: 45, dma: 45, streaming: 30 }, 40), { lo: 20, hi: 30, dma: 20, streaming: 30 });
+  // a FIFO at 0 (not playing) stays out of lo
+  assert.deepEqual(postSkipQueues({ lo: 50, hi: 50, dma: 50, streaming: 0 }, 40), { lo: 20, hi: 20, dma: 20, streaming: 0 });
+  // a core without 0216 (one value for both)
+  assert.deepEqual(postSkipQueues({ lo: 50, hi: 50, dma: null, streaming: null }, 40), { lo: 20, hi: 20, dma: null, streaming: null });
+  const f = fixture();
+  for (const bad of [0, 15, 201, "x", null]) {
+    f.producer.install(createAudioPcmRing().sab, { muted: false, rateControl: true, postSkipCeilingMs: bad });
+    assert.equal(f.producer.postSkipCeilingMs, null, String(bad));
+  }
+});
+
+test("?audiopostskip: plumbing page query -> transport bridge -> adapter -> worker -> producer, with the ceiling the core runs with", async () => {
+  const { readFileSync } = await import("node:fs");
+  const src = (p) => readFileSync(new URL(`../src/${p}`, import.meta.url), "utf8");
+  assert.match(src("audio.js"), /this\.workletPostSkip = params\.get\("audiopostskip"\) === "1";/);
+  assert.equal(src("audio.js").match(/postSkip: this\.workletPostSkip/g)?.length, 3, "every bridge call passes it");
+  assert.match(src("upstream-worker-adapter.js"), /postSkip: Boolean\(postSkip\),/);
+  const worker = src("upstream-discio-worker.js");
+  assert.match(worker, /postSkipCeilingMs: payload\.postSkip \? mixerAudioBufferMs : null,/);
+  assert.match(worker, /mixerAudioBufferMs = Number\(audioBufferMs\) > 0 && typeof api\.setAudioBufferMs === "function" \? Number\(audioBufferMs\) : 80;/);
 });

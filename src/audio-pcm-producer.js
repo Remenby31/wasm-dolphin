@@ -47,6 +47,15 @@ export const RING_LOW_MS = 20;
 // rest, fills that stay as latency; 2026-11-04, the race entry). With the
 // switch, the uncapped pull refills the ring to that level only, the rest
 // under the cap. Without it, 20 ms and a refill to the target as before.
+// ?audiopostskip=1 (a test switch): the pull sized after the mixer's overflow
+// skip. A FIFO over AudioBufferSize jumps back to about half of it at its
+// next granule (Mixer.cpp, MixerFifo::Dequeue: head - (size/2 + 1)); a pull
+// sized on its depth before the jump (the drain down to MIXER_LOW_MS, 100 of
+// 107 such pulls on 2026-11-06) then empties it into a gap fill, the skip's
+// twin. With the switch a FIFO over the ceiling counts as half of it (under
+// the real 21-24 ms at 40 ms) for both bounds; the skip itself stays.
+export const POST_SKIP_MIN_MS = 16;
+export const POST_SKIP_MAX_MS = 200;
 export const RING_LOW_MIN_MS = 2;
 export const RING_LOW_MAX_MS = 40;
 export const RATE_SLEW_PPM = 100;
@@ -87,7 +96,7 @@ export class AudioPcmProducer {
   // targetFrames: the ring's fill the producer keeps (the AudioWorklet
   // path's latency, before the mixer's own queue); 120 ms by default, the
   // page passes ?audiolead. Playback starts at half of it (at most 50 ms).
-  install(sab, { muted = true, targetFrames = AUDIO_PCM_TARGET_FRAMES, rateControl = false, rateMaxPpm = AUDIO_PCM_MAX_RATE_PPM, ringLowMs = null } = {}) {
+  install(sab, { muted = true, targetFrames = AUDIO_PCM_TARGET_FRAMES, rateControl = false, rateMaxPpm = AUDIO_PCM_MAX_RATE_PPM, ringLowMs = null, postSkipCeilingMs = null } = {}) {
     this.requestedTransport = "worklet";
     try {
       const ring = validateAudioPcmRing(openAudioPcmRing(sab));
@@ -110,6 +119,9 @@ export class AudioPcmProducer {
       // ?audioringlow: null keeps RING_LOW_MS and the refill to the target
       const low = Number(ringLowMs);
       this.ringLowMs = Number.isFinite(low) && low >= RING_LOW_MIN_MS && low <= RING_LOW_MAX_MS ? low : null;
+      // ?audiopostskip: the mixer's AudioBufferSize (ms), null off
+      const ceiling = Number(postSkipCeilingMs);
+      this.postSkipCeilingMs = Number.isFinite(ceiling) && ceiling >= POST_SKIP_MIN_MS && ceiling <= POST_SKIP_MAX_MS ? ceiling : null;
       this.ratePpm = 0;
       this.excessMs = null;
       Atomics.store(ring.header, AUDIO_PCM_HEADER.RATE_PPM, 0);
@@ -293,8 +305,9 @@ export class AudioPcmProducer {
   // null without rate control or without the mixer's queue (0186).
   mixerBounds(core, fill) {
     if (!this.rateControl) return null;
-    const q = this.mixerQueues(core);
-    if (!q) return null;
+    const raw = this.mixerQueues(core);
+    if (!raw) return null;
+    const q = this.postSkipCeilingMs == null ? raw : postSkipQueues(raw, this.postSkipCeilingMs);
     return {
       // never more than the shorter FIFO holds while the ring has slack (a
       // pull drains both at the same rate: more empties it into a gap fill).
@@ -390,7 +403,21 @@ export class AudioPcmProducer {
       ratePpm: this.ratePpm ?? 0,
       rateMaxPpm: this.rateMaxPpm ?? null,
       ringLowMs: this.ringLowMs ?? RING_LOW_MS,
+      postSkipCeilingMs: this.postSkipCeilingMs ?? null,
       workletRing: this.ring ? snapshotAudioPcmRing(this.ring) : null,
     };
   }
+}
+
+// ?audiopostskip: the mixer's queues as they will be once a FIFO over the
+// ceiling has skipped (half the ceiling), lo and hi again from them.
+export function postSkipQueues(q, ceilingMs) {
+  const after = (v) => (v != null && v > ceilingMs ? ceilingMs / 2 : v);
+  if (q.dma == null || q.streaming == null) {
+    const one = after(q.hi);
+    return { ...q, lo: Math.min(after(q.lo), one), hi: one };
+  }
+  const dma = after(q.dma), streaming = after(q.streaming);
+  const fed = [dma, streaming].filter((v) => v > 0);
+  return { lo: fed.length ? Math.min(...fed) : 0, hi: Math.max(dma, streaming), dma, streaming };
 }

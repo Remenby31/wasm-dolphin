@@ -218,6 +218,9 @@ const streamCapture = new StreamCapture();
 let wgpuDiagnosticQuiet = false;
 let wgpuDiagnosticLogFilter = installWgpuDiagnosticLogFilter({ enabled: false });
 let mounted = false;
+// the mixer's AudioBufferSize the core runs with (ms): ?audiobuffer when the
+// core took it, else Dolphin's 80; ?audiopostskip sizes pulls on it
+let mixerAudioBufferMs = 80;
 let inputMask = 0;
 let workerOwnsCanvas = false;
 let renderCanvas = null;
@@ -2869,6 +2872,7 @@ async function handleMessage(type, payload) {
         rateControl: Boolean(payload.rateControl),
         rateMaxPpm: Number(payload.rateMaxPpm) || undefined,
         ringLowMs: Number(payload.ringLowMs) || null,
+        postSkipCeilingMs: payload.postSkip ? mixerAudioBufferMs : null,
       });
       if (result.active) api?.setAudioMuted?.(payload.muted ? 1 : 0);
       return result;
@@ -3726,6 +3730,7 @@ async function loadCore({
   // ?audiobuffer: the mixer's queue (0: Dolphin's default, 80 ms); a core
   // without the setter keeps its default
   if (Number(audioBufferMs) > 0) api.setAudioBufferMs?.(Number(audioBufferMs));
+  mixerAudioBufferMs = Number(audioBufferMs) > 0 && typeof api.setAudioBufferMs === "function" ? Number(audioBufferMs) : 80;
   api.setPresentationScale?.(Number(presentationScale));
   api.setFastSoftwareRaster?.(Math.min(3, Math.max(0, Number(fastSoftwareRaster) || 0)));
   api.setSoftwareTevHotCaseMode?.(softwareTevHotCaseMode);
