@@ -1,0 +1,17 @@
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -15448,6 +15448,13 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+   code.insert(code.end(), {0x02, 0x40});  // block $D
+   for (u32 i = 0; i < n; ++i)
+     code.insert(code.end(), {0x02, 0x40});  // block $b(n-1-i)
++  // DIAG 0291 (never merged): passes through the loop's head (entries and
++  // every way back), in region_call_stats[1] while the harness counts.
++  load_field(call_stats_on_offset);
++  out->relocs.push_back({static_cast<u32>(code.size()), 4, 0});  // counting: unlikely
++  code.insert(code.end(), {0x04, 0x40});  // if
++  count(1);
++  code.push_back(0x0b);  // end
+   if (has_fpu)
+   {
+     // 0157: FP off and pc at a block holding an FPU op: return 1 there.
