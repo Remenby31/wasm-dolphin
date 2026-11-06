@@ -232,12 +232,12 @@ test("a 60.05 Hz panel (1835 ppm) locks; one miscounted tick does not cost the l
 
 // A screen and a game whose rates change at `changeAt` (ms): the lock's
 // state each update, from a closed loop (the arrivals follow the lock's speed).
-function drive({ seconds = 60, changeAt = 20_000, hzBefore = 60, hzAfter = 60, viBefore = NTSC_VI_MS, viAfter = NTSC_VI_MS, tickJitter = () => 0, maxRatio, slow = null }) {
+function drive({ seconds = 60, changeAt = 20_000, hzBefore = 60, hzAfter = 60, viBefore = NTSC_VI_MS, viAfter = NTSC_VI_MS, tickJitter = () => 0, maxRatio, slow = null, viAt = null }) {
   const vi = createViPhaseLock(maxRatio === undefined ? {} : { maxRatio });
   let factor = 1, next = 3, n = 0, t = 0.37 * (1000 / hzBefore), lastUpdate = 0, k = 0;
   const trace = [];
   while (t < seconds * 1000) {
-    const viMs = slow && t >= slow.from && t < slow.to ? slow.viMs : t < changeAt ? viBefore : viAfter;
+    const viMs = viAt?.(t) ?? (slow && t >= slow.from && t < slow.to ? slow.viMs : t < changeAt ? viBefore : viAfter);
     while (next <= t) {
       vi.arrival(next + (((n * 7919) % 5) - 2) * 0.5);
       n++;
@@ -294,6 +294,22 @@ test("a short slowdown while locked (1-2 s at 80-85 % speed, a load): held throu
     assert.ok(trace.some((x) => x.t > 40_000 && x.why === "ratio off"), `${ms} ms: the ratio read off ${JSON.stringify(trace.filter((x) => x.t > 40_000).slice(0, 8))}`);
     assert.equal(vi.stats.lost, 0, `${ms} ms: ${JSON.stringify(vi.stats)}`);
     assert.ok(vi.stats.on, `${ms} ms: still on at the end`);
+  }
+});
+
+// a dip of `ms` at `speed` every `every` ms, from 30 s on
+const dips = (every, ms, speed) => (t) => (t >= 30_000 && (t - 30_000) % every < ms ? NTSC_VI_MS / speed : null);
+
+test("repeated dips while locked (1 s at 85 % every 8 s; 1 s at 50 % every 10 s): one lock, held through them, the trim bounded", () => {
+  for (const [name, viAt] of [["85 % / 8 s", dips(8_000, 1_000, 0.85)], ["50 % / 10 s", dips(10_000, 1_000, 0.5)]]) {
+    const { vi, trace } = drive({ seconds: 150, changeAt: 1e9, viAt });
+    const late = trace.filter((x) => x.t > 30_000);
+    assert.ok(late.some((x) => x.why === "ratio off"), `${name}: the dips were seen`);
+    assert.equal(vi.stats.locks, 1, `${name}: ${JSON.stringify(vi.stats)}`);
+    assert.equal(vi.stats.lost, 0, `${name}: ${JSON.stringify(vi.stats)}`);
+    const maxPpm = Math.max(...late.map((x) => Math.abs(x.ppm)));
+    console.log(`${name}: max |ppm| after 30 s ${maxPpm}`);
+    assert.ok(maxPpm <= 1600, `${name}: trim ${maxPpm}`);
   }
 });
 

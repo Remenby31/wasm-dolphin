@@ -66,6 +66,15 @@ export const RATIO_TOLERANCE = 0.0019;
 // nothing while the frames' period is off).
 export const RATIO_TOLERANCE_LOCKED = 0.01;
 export const RATIO_OFF_MS = 5000;
+// The count runs only while the last RECENT_MS of arrivals are off too
+// (irregular, or their own ratio past the bound), else it decays: the 3 s
+// window still holds a slowdown that is over, and a game with a 1 s dip every
+// 8 s read off half the time, the count reached the bound and the lock let go
+// and was taken again (6 locks, 5 lost, the trim at +/-2000 ppm, review of
+// #449). Locked, irregular frames (a 1 s stall at 50 %) are held the same way
+// instead of letting go at once (27 locks in 5 minutes of such stalls).
+export const RECENT_MS = 1000;
+const MIN_RECENT_ARRIVALS = 20;
 // Once locked, the frames' period measured over a window at a moving speed
 // wobbles (+/-700 ppm): the lock is kept on the PI's own output instead, and
 // dropped when that output has been held at the bound for OUT_OF_REACH_MS
@@ -212,18 +221,13 @@ export function createViPhaseLock({ maxPpm = MAX_PPM, slewPpmPerSec = SLEW_PPM_P
     while (arrivals.length && arrivals[0] < at - ARRIVAL_WINDOW_MS) arrivals.shift();
   }
 
-  /** Why no lock now (null: lockable), with the measures it needs. */
-  function assess(now, speed) {
-    if (lastTickAt === null || now - lastTickAt > NO_TICK_MS) return { why: "no rAF" };
-    const { refreshMs, why } = stableRefresh(times, { jitter: stats.on ? REFRESH_JITTER : REFRESH_JITTER_ENTER });
-    if (!refreshMs) return { why };
-    const a = arrivals.filter((t) => t >= now - ARRIVAL_WINDOW_MS);
-    if (a.length < MIN_ARRIVALS) return { why: "few frames", refreshMs };
+  // The frames' period at the base speed over arrivals `a`: a least-squares
+  // fit (their jitter averages out), with the speed taken out; irregular when
+  // more than IRREGULAR_SHARE of the gaps are over 1.5 times the median.
+  function period(a, speed) {
     const ag = a.slice(1).map((t, i) => t - a[i]);
     const p = median(ag);
-    if (ag.filter((g) => g > 1.5 * p).length > ag.length * IRREGULAR_SHARE) return { why: "frames irregular", refreshMs };
-    // the frames' period at the base speed: a least-squares fit of the
-    // arrivals (their jitter averages out), with the speed taken out
+    const irregular = ag.filter((g) => g > 1.5 * p).length > ag.length * IRREGULAR_SHARE;
     const n = a.length, mi = (n - 1) / 2, mt = a.reduce((x, y) => x + y, 0) / n;
     let sxy = 0, sxx = 0;
     for (let i = 0; i < n; i++) {
@@ -231,9 +235,30 @@ export function createViPhaseLock({ maxPpm = MAX_PPM, slewPpmPerSec = SLEW_PPM_P
       sxx += (i - mi) ** 2;
     }
     const frameMs = (sxy / sxx) * speed;
+    return { irregular, frameMs, ratio: (refreshMs) => frameMs / refreshMs };
+  }
+
+  /** Why no lock now (null: lockable), with the measures it needs. */
+  function assess(now, speed) {
+    if (lastTickAt === null || now - lastTickAt > NO_TICK_MS) return { why: "no rAF" };
+    const { refreshMs, why } = stableRefresh(times, { jitter: stats.on ? REFRESH_JITTER : REFRESH_JITTER_ENTER });
+    if (!refreshMs) return { why };
+    const a = arrivals.filter((t) => t >= now - ARRIVAL_WINDOW_MS);
+    if (a.length < MIN_ARRIVALS) return { why: "few frames", refreshMs };
+    const full = period(a, speed);
+    // locked, the last RECENT_MS judged on their own: is the slowdown still on?
+    const recentOff = () => {
+      const r = a.filter((t) => t >= now - RECENT_MS);
+      if (r.length < MIN_RECENT_ARRIVALS) return true;
+      const q = period(r, speed);
+      const mr = Math.round(q.ratio(refreshMs));
+      return q.irregular || mr < 1 || mr > 2 || Math.abs(q.ratio(refreshMs) - mr) > mr * RATIO_TOLERANCE_LOCKED;
+    };
+    if (full.irregular) return stats.on ? { why: "ratio off", recentOff: recentOff(), refreshMs } : { why: "frames irregular", refreshMs };
+    const frameMs = full.frameMs;
     const ratio = frameMs / refreshMs;
     const m = Math.round(ratio);
-    if (stats.on && (m < 1 || m > 2 || Math.abs(ratio - m) > m * RATIO_TOLERANCE_LOCKED)) return { why: "ratio off", refreshMs, frameMs, ratio };
+    if (stats.on && (m < 1 || m > 2 || Math.abs(ratio - m) > m * RATIO_TOLERANCE_LOCKED)) return { why: "ratio off", recentOff: recentOff(), refreshMs, frameMs, ratio };
     if (m < 1 || m > 2 || (!stats.on && Math.abs(ratio - m) > m * RATIO_TOLERANCE)) return { why: "no integer ratio", refreshMs, frameMs, ratio };
     // the default (auto) stops at 1:1: 2:1 only with ?vilock=1
     if (m > maxRatio) return { why: "2:1 only with ?vilock=1", refreshMs, frameMs, ratio };
@@ -273,7 +298,7 @@ export function createViPhaseLock({ maxPpm = MAX_PPM, slewPpmPerSec = SLEW_PPM_P
     // locked, the ratio off: held for up to RATIO_OFF_MS (leaky), then let go
     let holding = false;
     if (stats.on && s.why === "ratio off") {
-      ratioOffMs += dt * 1000;
+      ratioOffMs = s.recentOff ? ratioOffMs + dt * 1000 : Math.max(0, ratioOffMs - dt * 500);
       if (ratioOffMs < RATIO_OFF_MS) holding = true;
       else s.why = "no integer ratio";
     } else if (s.why === null) ratioOffMs = Math.max(0, ratioOffMs - dt * 500);
