@@ -1,0 +1,571 @@
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -419,11 +419,6 @@ constexpr u32 DOLPHIN_WEB_DISABLE_BLOCK_MERGE = 1u << 17; // §28bx adjacent-blo
+ constexpr u32 DOLPHIN_WEB_DISABLE_REGALLOC    = 1u << 20; // §28by GPR regalloc / dead-store-skip (default-off)
+ constexpr u32 DOLPHIN_WEB_DISABLE_SHORT_PREFIX = 1u << 21; // §28ca lower JIT min-prefix 4→2 (default-off)
+ constexpr u32 DOLPHIN_WEB_DISABLE_COMPILE_THROTTLE = 1u << 22; // §28ce cap JIT compiles/slice (default-off)
+-// §28cz fastmem bounds-check HOIST. ENABLE polarity (NOT a disable bit): the
+-// per-block range-check hoist is emitted ONLY when this bit is SET. Default
+-// mask 0 → feature OFF → byte-identical codegen to today. ?fastmemhoist=1 opts
+-// in. Scoped to 32-bit D-form int load/store (lwz/lwzu/stw/stwu, OPCD 32/33/36/37).
+-constexpr u32 DOLPHIN_WEB_ENABLE_FASTMEM_HOIST = 1u << 23;
+ // Inline exact FMA (TwoProduct + round-to-odd sum). Set: every FMA-family op
+ // calls the `fma` import (the interpreter's NI_madd_msub) instead.
+ constexpr u32 DOLPHIN_WEB_DISABLE_INLINE_FMA = 1u << 26;  // 24 and 25: clear-rect (WebGPU)
+@@ -478,13 +473,6 @@ inline bool DolphinWebHelperDisabled(u32 bit)
+   return (DolphinWebDisableMask() & bit) != 0;
+ }
+ 
+-// §28cz ENABLE-polarity gate (opposite of DolphinWebHelperDisabled): the
+-// fastmem-hoist feature is active only when its bit is SET in the mask.
+-inline bool DolphinWebFeatureEnabled(u32 bit)
+-{
+-  return (DolphinWebDisableMask() & bit) != 0;
+-}
+-
+ u32 s_wasm_block_compile_count = 0;
+ u32 s_wasm_block_merge_count = 0; // §28bx adjacent-block merges performed
+ u32 s_wasm_regalloc_dead_store_skip_count = 0; // §28by GPR dead-store skips (per emit, sum across blocks)
+@@ -521,26 +509,6 @@ u32 s_wasm_emit_state_load_f64_count = 0;   // FPR double-precision loads
+ u32 s_wasm_emit_state_store_f64_count = 0;  // FPR double-precision stores
+ u32 s_wasm_emit_state_load_i64_count = 0;   // PSI lower-half (paired-single) loads
+ u32 s_wasm_emit_state_store_i64_count = 0;  // PSI lower-half stores
+-// §28cy fastmem-hoist coverage audit (ZERO-RUNTIME-COST, compile-time-only static
+-// measurement — NO codegen change, NO emitted WASM). Per compiled block, count how
+-// many D-form integer guest memory accesses could be covered by a per-block
+-// bounds-check hoist: consecutive D-form int load/stores sharing the same base reg
+-// rA, where the run is terminated the moment any op writes that base reg (regsOut).
+-// A run is "hoistable" if it has >=2 covered accesses and base != 0. u64 because
+-// these accumulate across all blocks over a full session.
+-u64 s_fmh_total_dform_accesses = 0;  // all D-form int load/store accesses seen (OPCD 32-45)
+-u64 s_fmh_xform_accesses = 0;        // all X-form (excluded, OPCD-31 indexed) int load/store accesses
+-u64 s_fmh_hoistable_groups = 0;      // number of hoistable groups (>=2 covered, base!=0)
+-u64 s_fmh_covered_accesses = 0;      // sum of accesses inside hoistable groups
+-u64 s_fmh_blocks_with_hoist = 0;     // blocks that had >=1 hoistable group
+-// §28cz RUNTIME hoist-fire counters (compile-time tally, but they only advance
+-// when the ?fastmemhoist=1 enable bit is set so the A/B can confirm the path
+-// actually engaged). groups = range-checks emitted; fast = covered accesses that
+-// got the in-bounds-proven path emitted; slow = covered accesses still on the
+-// existing checked emitter (e.g. 8/16-bit members of a 32-bit-scoped group).
+-u64 s_fmh_fire_groups = 0;
+-u64 s_fmh_fire_fast = 0;
+-u64 s_fmh_fire_slow = 0;
+ // §28bz audit: §28bt re-dispatch chain depth. entry = outer for(;;) iterations,
+ // iter = continue-edges taken inside the redispatch branch. avg depth = 1 + iter/entry.
+ #if DOLPHIN_WEB_HOT_COUNTERS
+@@ -2493,34 +2461,8 @@ struct WasmGprRegCache
+ };
+ static thread_local WasmGprRegCache s_gpr_rc;  // per emitting thread (P4 translator)
+ 
+-// §28cz fastmem bounds-check hoist plan. Built per block (gated on the enable
+-// bit) BEFORE the emit loop by AnalyzeFastmemHoistPlan, which re-runs the exact
+-// s_fmh_ grouping logic and records, per CodeOp, whether the op is the first
+-// covered access of a hoistable group (→ emit the range check + flag.set) and
+-// whether it is any covered access (→ emit the if(flag) fast/slow split).
+-// Keyed by CodeOp* (stable for the lifetime of one BuildWasmCachedInterpreterBlock
+-// call — the same `ops` span is what the emit loop iterates). One i32 flag local
+-// (WASM_FMH_FLAG_LOCAL) is reused across groups: groups never nest and are
+-// emitted strictly in order, so each group recomputes the flag before its first
+-// access. Scoped to 32-bit D-form (lwz/lwzu/stw/stwu); other widths in a group
+-// still emit their existing checked path (counted as "slow").
+-constexpr u32 WASM_FMH_FLAG_LOCAL = 40;  // i32 scratch local appended after GPR locals 8..39
+-struct WasmFastmemHoistPlan
+-{
+-  bool active = false;
+-  // Per covered CodeOp: emit_check=this op leads its group (emit range check),
+-  // group base reg b, omin/omax (sign-extended SIMM16 min/max over the group).
+-  struct OpInfo
+-  {
+-    bool covered = false;     // op is inside a hoistable group
+-    bool emit_check = false;  // op is the first covered access → emit the flag recompute
+-    int base = 0;             // group base GPR (b)
+-    s32 omin = 0;
+-    s32 omax = 0;
+-  };
+-  std::unordered_map<const PPCAnalyst::CodeOp*, OpInfo> ops;
+-};
+-static thread_local WasmFastmemHoistPlan s_fmh_plan;
++// The f64 scratch locals (WasmFpScratchLocal) start after the GPR locals 8..39.
++constexpr u32 WASM_FP_SCRATCH_LOCAL_BASE = 40;
+ 
+ inline bool RegCacheGprIndex(u32 offset, u32* out_index)
+ {
+@@ -4082,98 +4024,6 @@ void EmitWriteU16MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layou
+   body.push_back(0x0b);
+ }
+ 
+-// §28cz Emit the once-per-group bounds-check that sets the flag local. After
+-// this runs, WASM_FMH_FLAG_LOCAL is 1 iff EVERY address in [base+omin, base+omax]
+-// (each masked to the low 30 bits, the same 0x3FFFFFFF RAM mask the checked path
+-// uses) is a valid maxsize-byte MEM1 access. CORRECTNESS: the `lo <= hi` term
+-// rejects the case where masking makes base+omin and base+omax straddle the
+-// 30-bit boundary — without it a wrapped pair could falsely look in-range. The
+-// `hi <= ram_size_real - maxsize` term is the same upper bound the per-access
+-// checked emitters use. Stack-neutral (produces no operand-stack value); uses
+-// scratch local 3 transiently to hold `hi`.
+-void EmitFmhRangeCheck(std::vector<u8>& body, const WasmStateLayout& layout, int base, s32 omin,
+-                       s32 omax, u32 maxsize)
+-{
+-  // lo = MEM1 view offset of gpr[base] + omin  -> leave on stack
+-  EmitGprOrZero(body, layout, static_cast<u32>(base));
+-  EmitI32Const(body, static_cast<u32>(omin));
+-  body.push_back(0x6a);  // i32.add
+-  EmitMem1ViewOffset(body);
+-  // hi = MEM1 view offset of gpr[base] + omax  -> local 3
+-  EmitGprOrZero(body, layout, static_cast<u32>(base));
+-  EmitI32Const(body, static_cast<u32>(omax));
+-  body.push_back(0x6a);  // i32.add
+-  EmitMem1ViewOffset(body);
+-  EmitLocalSet(body, 3);
+-  // (lo <= hi)
+-  EmitLocalGet(body, 3);
+-  body.push_back(0x4d);  // i32.le_u   (stack: lo, hi)
+-  // (hi <= ram_size_real - maxsize)
+-  EmitLocalGet(body, 3);
+-  EmitI32Const(body, layout.ram_size_real - maxsize);
+-  body.push_back(0x4d);  // i32.le_u
+-  body.push_back(0x71);  // i32.and  -> flag value
+-  EmitLocalSet(body, WASM_FMH_FLAG_LOCAL);
+-}
+-
+-// §28cz Flag-gated 32-bit LOAD. Leaves the big-endian loaded value on the stack
+-// (same as EmitReadU32MaybeDirect). then-arm = in-bounds-proven direct masked
+-// load (no per-access bounds check). else-arm = the EXISTING checked emitter, so
+-// any hoist miss (flag==0) degrades to the safe full path — never an unchecked
+-// OOB access. EA must already be in local 1.
+-void EmitFmhReadU32(std::vector<u8>& body, const WasmStateLayout& layout)
+-{
+-  EmitLocalGet(body, WASM_FMH_FLAG_LOCAL);
+-  HintNextIf(body, true);  // the group's range check passed
+-  body.push_back(0x04);  // if
+-  body.push_back(0x7f);  // (result i32)
+-  EmitLoadU32BigEndianFromRamAddress(body, layout);
+-  body.push_back(0x05);  // else
+-  EmitReadU32MaybeDirect(body, layout);
+-  body.push_back(0x0b);  // end
+-}
+-
+-// §28cz Flag-gated 32-bit STORE. Stores the value in local 2 to EA (local 1).
+-// then-arm = direct masked store; else-arm = existing checked emitter. Void.
+-void EmitFmhWriteU32(std::vector<u8>& body, const WasmStateLayout& layout)
+-{
+-  EmitLocalGet(body, WASM_FMH_FLAG_LOCAL);
+-  HintNextIf(body, true);  // the group's range check passed
+-  body.push_back(0x04);  // if
+-  body.push_back(0x40);  // (void)
+-  EmitStoreU32BigEndianToRamAddress(body, layout);
+-  body.push_back(0x05);  // else
+-  EmitWriteU32MaybeDirect(body, layout);
+-  body.push_back(0x0b);  // end
+-}
+-
+-// §28cz Look up the per-block plan for a 32-bit D-form op (lwz/lwzu/stw/stwu).
+-// Returns true if the op is a covered fast-path access. When it leads its group
+-// (emit_check), first emits the once-per-group range check (which must be placed
+-// BEFORE the op's EA setup and any GPR write — true for these handlers, called
+-// at the top of the case). Advances the fmhfire runtime counters. When this
+-// returns false, the caller emits its normal (checked) path unchanged.
+-bool EmitFmhTryRangeCheck(std::vector<u8>& body, const WasmStateLayout& layout,
+-                          const PPCAnalyst::CodeOp& op)
+-{
+-  if (!s_fmh_plan.active)
+-    return false;
+-  const auto it = s_fmh_plan.ops.find(&op);
+-  if (it == s_fmh_plan.ops.end() || !it->second.covered)
+-    return false;
+-  const WasmFastmemHoistPlan::OpInfo& info = it->second;
+-  if (info.emit_check)
+-  {
+-    // maxsize is the largest access in the group; 32-bit scope fixes it at 4 —
+-    // the group's omin/omax already bound every member's base+offset, and a
+-    // 4-byte high-end check is conservative for the (only) 32-bit fast members.
+-    EmitFmhRangeCheck(body, layout, info.base, info.omin, info.omax, sizeof(u32));
+-    s_fmh_fire_groups = SaturatingAddU64(s_fmh_fire_groups, 1);
+-  }
+-  s_fmh_fire_fast = SaturatingAddU64(s_fmh_fire_fast, 1);
+-  return true;
+-}
+-
+ void EmitImportedHaltCheck(std::vector<u8>& body)
+ {
+   HintNextIf(body, false);  // a helper rarely halts
+@@ -4289,11 +4139,10 @@ void EmitFctiwzImportCall(std::vector<u8>& body, const PPCAnalyst::CodeOp& op, u
+ // interpreter rounds them once (std::fma plus its single-precision tie fix),
+ // which plain WASM arithmetic cannot reproduce.
+ 
+-// Three f64 scratch locals appended after the GPR locals (and the fastmem
+-// flag local when that plan is active).
++// Three f64 scratch locals appended after the GPR locals.
+ u32 WasmFpScratchLocal(u32 n)
+ {
+-  return (s_fmh_plan.active ? WASM_FMH_FLAG_LOCAL + 1 : WASM_FMH_FLAG_LOCAL) + n;
++  return WASM_FP_SCRATCH_LOCAL_BASE + n;
+ }
+ 
+ // Patch 0141: four v128 scratch locals after the f64 ones and the three i32
+@@ -4302,7 +4151,7 @@ u32 WasmV128ScratchLocal(u32 n)
+ {
+   return WasmFpScratchLocal(16) + 3 + n;
+ }
+-static_assert(WASM_FMH_FLAG_LOCAL + 16 == WASM_FRAME_PC_LOCAL,
++static_assert(WASM_FP_SCRATCH_LOCAL_BASE + 16 == WASM_FRAME_PC_LOCAL,
+               "the frame's i32 locals follow the sixteen f64 scratch locals");
+ 
+ void EmitI64Const(std::vector<u8>& body, u64 value)
+@@ -7576,26 +7425,18 @@ bool EmitWasmSupportedIntegerInstruction(std::vector<u8>& body, const WasmStateL
+ 
+   case 32:  // lwz
+   {
+-    const bool fmh = EmitFmhTryRangeCheck(body, layout, op);  // §28cz
+     EmitSetEffectiveAddressLocal(body, layout, inst);
+     EmitStateStoreU32Prefix(body);
+-    if (fmh)
+-      EmitFmhReadU32(body, layout);
+-    else
+-      EmitReadU32MaybeDirect(body, layout);
++    EmitReadU32MaybeDirect(body, layout);
+     EmitStateStoreU32Suffix(body, GprOffset(layout, inst.RD));
+     return true;
+   }
+ 
+   case 33:  // lwzu
+   {
+-    const bool fmh = EmitFmhTryRangeCheck(body, layout, op);  // §28cz
+     EmitSetEffectiveAddressLocal(body, layout, inst);
+     EmitStateStoreU32Prefix(body);
+-    if (fmh)
+-      EmitFmhReadU32(body, layout);
+-    else
+-      EmitReadU32MaybeDirect(body, layout);
++    EmitReadU32MaybeDirect(body, layout);
+     EmitStateStoreU32Suffix(body, GprOffset(layout, inst.RD));
+     EmitStateStoreU32Prefix(body);
+     EmitLocalGet(body, 1);
+@@ -7622,28 +7463,19 @@ bool EmitWasmSupportedIntegerInstruction(std::vector<u8>& body, const WasmStateL
+ 
+   case 36:  // stw
+   {
+-    const bool fmh = EmitFmhTryRangeCheck(body, layout, op);  // §28cz
+     EmitSetEffectiveAddressLocal(body, layout, inst);
+     EmitStateLoadU32(body, GprOffset(layout, inst.RS));
+     EmitLocalSet(body, 2);
+-    if (fmh)
+-      EmitFmhWriteU32(body, layout);
+-    else
+-      EmitWriteU32MaybeDirect(body, layout);
++    EmitWriteU32MaybeDirect(body, layout);
+     return true;
+   }
+ 
+   case 37:  // stwu
+   {
+-    // §28cz Range check uses pre-update gpr[RA]; emit it BEFORE the RA write.
+-    const bool fmh = EmitFmhTryRangeCheck(body, layout, op);
+     EmitStateLoadU32(body, GprOffset(layout, inst.RS));
+     EmitLocalSet(body, 2);
+     EmitSetEffectiveAddressLocal(body, layout, inst);
+-    if (fmh)
+-      EmitFmhWriteU32(body, layout);
+-    else
+-      EmitWriteU32MaybeDirect(body, layout);
++    EmitWriteU32MaybeDirect(body, layout);
+     EmitStateStoreU32Prefix(body);
+     EmitLocalGet(body, 1);
+     EmitStateStoreU32Suffix(body, GprOffset(layout, inst.RA));
+@@ -8703,222 +8535,6 @@ bool IsPpcWasmDirectInstructionCandidate(const PPCAnalyst::CodeOp& op)
+   }
+ }
+ 
+-// §28cy ZERO-RUNTIME-COST static measurement. Analyzes the SAME ops span that gets
+-// compiled and tallies, into the file-scope s_fmh_* counters, how many guest memory
+-// accesses COULD be covered by a per-block bounds-check hoist. Compile-time only:
+-// emits NOTHING, changes NO codegen. See counter declarations (~CachedInterpreter.cpp:251).
+-//
+-// Classification (mirrors the emitter's real D-form vs X-form selection — see the
+-// per-op handlers ~5834-5951 (D-form, EmitSetEffectiveAddressLocal → EmitEffectiveAddress,
+-// EA = rA + sign_extend(SIMM16)) vs the OPCD-31 indexed handlers ~6037-6098 (X-form,
+-// EmitSetEffectiveAddressXLocal → EmitEffectiveAddressX, EA = rA + rB)):
+-//   - D-form int load/store: OPCD 32-45 with FL_LOADSTORE. (OPCD 46/47 lmw/stmw EXCLUDED.)
+-//   - X-form (excluded, runtime-index base): OPCD 31 with FL_LOADSTORE.
+-// A D-form op with rA==0 is an absolute address (EmitGprOrZero treats rA==0 as 0) and is
+-// NOT statically boundable, so it terminates/skips any group.
+-void AnalyzeFastmemHoistability(const std::span<const PPCAnalyst::CodeOp> ops)
+-{
+-  // Current open run of D-form accesses sharing the same base register.
+-  bool have_group = false;
+-  int group_base = 0;
+-  u32 group_count = 0;
+-
+-  const auto flush_group = [&]() {
+-    if (have_group && group_count >= 2 && group_base != 0)
+-    {
+-      s_fmh_hoistable_groups = SaturatingAddU64(s_fmh_hoistable_groups, 1);
+-      s_fmh_covered_accesses = SaturatingAddU64(s_fmh_covered_accesses, group_count);
+-      return true;  // this block had a hoistable group
+-    }
+-    return false;
+-  };
+-
+-  bool block_had_hoist = false;
+-  for (const PPCAnalyst::CodeOp& op : ops)
+-  {
+-    if (op.opinfo == nullptr)
+-      continue;
+-    const UGeckoInstruction inst = op.inst;
+-    const u32 opcd = inst.OPCD;
+-    const bool is_loadstore = (op.opinfo->flags & FL_LOADSTORE) != 0;
+-
+-    // X-form indexed int load/store: OPCD 31 + FL_LOADSTORE. Excluded (EA uses rB).
+-    if (opcd == 31 && is_loadstore)
+-    {
+-      s_fmh_xform_accesses = SaturatingAddU64(s_fmh_xform_accesses, 1);
+-      block_had_hoist |= flush_group();  // an excluded access breaks any open run
+-      have_group = false;
+-      continue;
+-    }
+-
+-    // D-form int load/store: OPCD 32-45 + FL_LOADSTORE. (46/47 lmw/stmw excluded.)
+-    const bool is_dform = (opcd >= 32 && opcd <= 45) && is_loadstore;
+-    if (is_dform)
+-    {
+-      s_fmh_total_dform_accesses = SaturatingAddU64(s_fmh_total_dform_accesses, 1);
+-      const int b = inst.RA;
+-      // rA==0 is an absolute address — not statically boundable. Breaks the run.
+-      if (b == 0)
+-      {
+-        block_had_hoist |= flush_group();
+-        have_group = false;
+-        continue;
+-      }
+-      // Extend the current run if it shares this base; otherwise start a new run.
+-      if (have_group && b == group_base)
+-      {
+-        ++group_count;
+-      }
+-      else
+-      {
+-        block_had_hoist |= flush_group();
+-        have_group = true;
+-        group_base = b;
+-        group_count = 1;
+-      }
+-      // A u-form access (lwzu/stwu/…) writes its own rA, so it terminates its own
+-      // base run AFTER itself. The generic regsOut check below handles this since
+-      // the base b is in this op's regsOut.
+-      if (op.regsOut[b])
+-      {
+-        block_had_hoist |= flush_group();
+-        have_group = false;
+-      }
+-      continue;
+-    }
+-
+-    // Any other op (ALU, u-form on another reg, branch, etc.) terminates the open
+-    // run the moment it writes the run's base register.
+-    if (have_group && op.regsOut[group_base])
+-    {
+-      block_had_hoist |= flush_group();
+-      have_group = false;
+-    }
+-  }
+-  block_had_hoist |= flush_group();
+-
+-  if (block_had_hoist)
+-    s_fmh_blocks_with_hoist = SaturatingAddU64(s_fmh_blocks_with_hoist, 1);
+-}
+-
+-// §28cz Build the per-block hoist PLAN consumed by the emitter. Uses the SAME
+-// grouping rules as AnalyzeFastmemHoistability (D-form OPCD 32-45 + FL_LOADSTORE;
+-// X-form OPCD-31 excluded and breaks runs; lmw/stmw 46/47 excluded; rA==0 breaks;
+-// consecutive same-base b; terminate when any op writes b incl. u-form's own rA;
+-// hoistable iff >=2 covered accesses and b!=0). For each hoistable group it
+-// records, per member CodeOp, that the op is covered; marks the FIRST member as
+-// emit_check (the range-check site); and stashes the group's base b plus
+-// omin/omax = min/max sign_extend(SIMM16) across the WHOLE group so the single
+-// range check bounds every member. Only populates the map when the enable bit is
+-// set. NOTE: omin/omax span all D-form members; the emitter applies the fast
+-// path only to the 32-bit members (lwz/lwzu/stw/stwu) — a superset bound is still
+-// sound. maxsize is fixed at 4 (32-bit scope) for the high-end check.
+-void AnalyzeFastmemHoistPlan(const std::span<const PPCAnalyst::CodeOp> ops)
+-{
+-  s_fmh_plan.ops.clear();
+-  s_fmh_plan.active = DolphinWebFeatureEnabled(DOLPHIN_WEB_ENABLE_FASTMEM_HOIST);
+-  if (!s_fmh_plan.active)
+-    return;
+-
+-  // Open run of D-form accesses sharing base group_base.
+-  bool have_group = false;
+-  int group_base = 0;
+-  std::vector<const PPCAnalyst::CodeOp*> group_members;
+-  s32 group_omin = 0;
+-  s32 group_omax = 0;
+-
+-  const auto flush_group = [&]() {
+-    if (have_group && group_members.size() >= 2 && group_base != 0)
+-    {
+-      bool first_covered = true;
+-      for (const PPCAnalyst::CodeOp* mp : group_members)
+-      {
+-        WasmFastmemHoistPlan::OpInfo info;
+-        info.covered = true;
+-        // emit_check on the FIRST 32-bit member only (lwz/lwzu/stw/stwu) — the
+-        // range check is only consumed by the fast path, which is 32-bit-scoped.
+-        const u32 mopcd = mp->inst.OPCD;
+-        const bool m_is_32 = (mopcd == 32 || mopcd == 33 || mopcd == 36 || mopcd == 37);
+-        if (first_covered && m_is_32)
+-        {
+-          info.emit_check = true;
+-          first_covered = false;
+-        }
+-        if (!m_is_32)
+-        {
+-          // §28cz Covered by a hoistable group but outside the 32-bit fast-path
+-          // scope (8/16-bit member): it stays on the existing checked emitter.
+-          s_fmh_fire_slow = SaturatingAddU64(s_fmh_fire_slow, 1);
+-        }
+-        info.base = group_base;
+-        info.omin = group_omin;
+-        info.omax = group_omax;
+-        s_fmh_plan.ops[mp] = info;
+-      }
+-    }
+-    group_members.clear();
+-  };
+-
+-  for (const PPCAnalyst::CodeOp& op : ops)
+-  {
+-    if (op.opinfo == nullptr)
+-      continue;
+-    const UGeckoInstruction inst = op.inst;
+-    const u32 opcd = inst.OPCD;
+-    const bool is_loadstore = (op.opinfo->flags & FL_LOADSTORE) != 0;
+-
+-    if (opcd == 31 && is_loadstore)  // X-form excluded; breaks any open run
+-    {
+-      flush_group();
+-      have_group = false;
+-      continue;
+-    }
+-
+-    const bool is_dform = (opcd >= 32 && opcd <= 45) && is_loadstore;
+-    if (is_dform)
+-    {
+-      const int b = inst.RA;
+-      const s32 off = static_cast<s32>(inst.SIMM_16);
+-      if (b == 0)  // absolute address — not statically boundable
+-      {
+-        flush_group();
+-        have_group = false;
+-        continue;
+-      }
+-      if (have_group && b == group_base)
+-      {
+-        group_members.push_back(&op);
+-        group_omin = std::min(group_omin, off);
+-        group_omax = std::max(group_omax, off);
+-      }
+-      else
+-      {
+-        flush_group();
+-        have_group = true;
+-        group_base = b;
+-        group_members.push_back(&op);
+-        group_omin = off;
+-        group_omax = off;
+-      }
+-      // u-form writes its own rA → terminates its base run AFTER itself.
+-      if (op.regsOut[b])
+-      {
+-        flush_group();
+-        have_group = false;
+-      }
+-      continue;
+-    }
+-
+-    // Any other op terminates the run the moment it writes the run's base reg.
+-    if (have_group && op.regsOut[group_base])
+-    {
+-      flush_group();
+-      have_group = false;
+-    }
+-  }
+-  flush_group();
+-}
+-
+ bool RegionInterpretsInline(const PPCAnalyst::CodeOp& op);
+ 
+ std::vector<u8> BuildWasmCachedInterpreterBlock(std::span<const PPCAnalyst::CodeOp> ops,
+@@ -8927,8 +8543,6 @@ std::vector<u8> BuildWasmCachedInterpreterBlock(std::span<const PPCAnalyst::Code
+                                                 bool allow_interpret_fallback = false,
+                                                 bool record_emit_failure = false)
+ {
+-  AnalyzeFastmemHoistability(ops);
+-  AnalyzeFastmemHoistPlan(ops);  // §28cz build the hoist plan (no-op unless enable bit set)
+   std::vector<u8> bytes = {0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00};
+ 
+   std::vector<u8> types;
+@@ -8991,19 +8605,12 @@ std::vector<u8> BuildWasmCachedInterpreterBlock(std::span<const PPCAnalyst::Code
+   // indices 8..39 (WASM_GPR_LOCAL_BASE + GPR index), one per PowerPC GPR.
+   // Leading local-group count bumped 4 → 5. WASM locals are zero-initialised;
+   // the prologue below overwrites the referenced ones with their live values.
+-  // §28cz — when the fastmem-hoist plan is active for this block, append a 6th
+-  // group `0x01, 0x7f` (one i32 at index WASM_FMH_FLAG_LOCAL=40, the per-group
+-  // range-check flag) and bump the leading group count 5 → 6. When the plan is
+-  // inactive the locals section is byte-identical to today (no extra local).
+   // A last group of sixteen f64 locals follows: WasmFpScratchLocal(0..15).
+   // Patch 0141: then three i32 (a fragment's frame locals, 0135; unused in a
+   // block) and four v128 (WasmV128ScratchLocal(0..3)), at the same indices
+   // in blocks and fragments, whose blocks share the function's locals.
+-  std::vector<u8> body = s_fmh_plan.active
+-      ? std::vector<u8>{0x09, 0x03, 0x7f, 0x02, 0x7e, 0x01, 0x7c, 0x01, 0x7f, 0x20, 0x7f, 0x01, 0x7f,
+-                        0x10, 0x7c, 0x03, 0x7f, 0x04, 0x7b}
+-      : std::vector<u8>{0x08, 0x03, 0x7f, 0x02, 0x7e, 0x01, 0x7c, 0x01, 0x7f, 0x20, 0x7f, 0x10, 0x7c,
+-                        0x03, 0x7f, 0x04, 0x7b};
++  std::vector<u8> body = {0x08, 0x03, 0x7f, 0x02, 0x7e, 0x01, 0x7c, 0x01, 0x7f, 0x20, 0x7f, 0x10, 0x7c,
++                          0x03, 0x7f, 0x04, 0x7b};
+ 
+   // §28cx C1: set up the GPR register cache for this block, then eagerly load
+   // every GPR the block reads or writes into its local. Eager (not lazy) load
+@@ -9092,8 +8699,6 @@ std::vector<u8> BuildWasmCachedInterpreterBlock(std::span<const PPCAnalyst::Code
+             s_wasm_emit_fail_sample_pcs[key] = op.address;
+         }
+         s_gpr_rc.active = false;  // §28cx C1: don't leak cache state on abort
+-        s_fmh_plan.active = false;  // §28cz: don't leak hoist plan on abort
+-        s_fmh_plan.ops.clear();
+         return {};
+       }
+       EmitInterpretCall(body, op, downcount, op.canEndBlock);
+@@ -9126,8 +8731,6 @@ std::vector<u8> BuildWasmCachedInterpreterBlock(std::span<const PPCAnalyst::Code
+   EmitSection(bytes, 10, code);
+ 
+   s_gpr_rc.active = false;  // §28cx C1: cache state is per-block; clear on exit
+-  s_fmh_plan.active = false;  // §28cz: hoist plan is per-block; clear on exit
+-  s_fmh_plan.ops.clear();
+   return bytes;
+ }
+ 
+@@ -14362,13 +13965,6 @@ extern "C" const char* GetPpcWasmHelperStats()
+         << " lwzux:" << s_fast_word_mem_lwzux_ops << " stwx:" << s_fast_word_mem_stwx_ops
+         << " stwux:" << s_fast_word_mem_stwux_ops;
+   }
+-  // §28cy fastmem-hoist coverage audit (compile-time-only static measurement).
+-  out << " fmhoist groups:" << s_fmh_hoistable_groups
+-      << " covered:" << s_fmh_covered_accesses << "/total:" << s_fmh_total_dform_accesses
+-      << " xform:" << s_fmh_xform_accesses << " blocks:" << s_fmh_blocks_with_hoist;
+-  // §28cz runtime fire counters (advance only when ?fastmemhoist=1).
+-  out << " fmhfire groups:" << s_fmh_fire_groups << " fast:" << s_fmh_fire_fast
+-      << " slow:" << s_fmh_fire_slow;
+   if (s_fast_byte_half_mem_ops != 0 || s_fast_multiword_mem_ops != 0)
+   {
+     out << " | fastmem8_16 ops:" << s_fast_byte_half_mem_ops
+@@ -15462,8 +15058,7 @@ struct FragmentBlock
+   bool msr_guard = false;
+ };
+ 
+-// Locals of a block body without the fastmem hoist (the only layout a
+-// fragment takes: its blocks share the function's locals).
++// Locals of a block body (a fragment's blocks share the function's locals).
+ // 0141: the frame's three i32 (56..58) and four v128 scratch locals follow.
+ constexpr std::array<u8, 17> WASM_BLOCK_LOCALS = {0x08, 0x03, 0x7f, 0x02, 0x7e, 0x01, 0x7c,
+                                                   0x01, 0x7f, 0x20, 0x7f, 0x10, 0x7c,

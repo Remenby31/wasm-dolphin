@@ -192,7 +192,6 @@ if (process.env.BLOCKMERGE) url.searchParams.set("blockmerge", process.env.BLOCK
 if (process.env.REGALLOC) url.searchParams.set("regalloc", process.env.REGALLOC);
 if (process.env.SHORTPREFIX) url.searchParams.set("shortprefix", process.env.SHORTPREFIX);
 if (process.env.SMEARCOMPILE) url.searchParams.set("smearcompile", process.env.SMEARCOMPILE);
-if (process.env.FASTMEMHOIST) url.searchParams.set("fastmemhoist", process.env.FASTMEMHOIST);
 if (process.env.OGLSAB) url.searchParams.set("oglsab", process.env.OGLSAB);
 if (process.env.GPUCOMPLETE) url.searchParams.set("gpucomplete", process.env.GPUCOMPLETE);
 if (process.env.INPUTLATENCY) url.searchParams.set("inputlatency", process.env.INPUTLATENCY);

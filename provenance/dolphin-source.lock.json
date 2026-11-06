@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "90cc2c5e86b5b03c7b2c668ee931f1abdde609e6d6959b9e5d13996f129392b9",
+  "patchSeriesSha256": "f18f49be63dfea291bc283c123d491c67addc10ad525b14f2243cccd961ed0b8",
   "patches": [
     {
       "order": 1,
@@ -1205,6 +1205,14 @@
     },
     {
       "order": 148,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0218-remove-fastmem-hoist.patch",
+      "size": 26347,
+      "sha256": "6265cb3d6e646957b2186355ac31d3678153611782e7f14f1b9a95274d577d9a"
+    },
+    {
+      "order": 149,
       "cwd": "Externals/SFML/SFML",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0001-sfml-emscripten-config.patch",
@@ -1212,7 +1220,7 @@
       "sha256": "f82197a21fe982ad83f6ee7bbf5a03839b1cebd4d64da3eab11263842bf61d89"
     },
     {
-      "order": 149,
+      "order": 150,
       "cwd": "Externals/xxhash/xxHash",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0002-xxhash-wasm-simd-scalar.patch",

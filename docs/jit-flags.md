@@ -19,7 +19,6 @@ correctness is established.
 | `smearcompile=0` | Disable default-on compile smearing and compile eagerly. |
 | `blockmerge=1` | Opt into adjacent-block merging. Default-off because it is correctness-sensitive. |
 | `shortprefix=1` | Compile shorter PPC prefixes. Default-off pending stronger correctness evidence. |
-| `fastmemhoist=1` | Hoist per-block fastmem bounds checks. Default-off because a bad proof could permit an out-of-bounds access. |
 | `disable=...` | Disable named JIT helper/optimization categories, or pass a decimal/hex mask, for bisection. |
 | `nojitcache=1` | Skip the browser-side compiled JIT cache/prewarm path for a cold-cache comparison. |
 | `jitoffthread=0` | **On by default** (user decision, 2026-10-19); `jitoffthread=0` turns it off and the CPU thread compiles misses in place. When on, the CPU thread does not compile a missed block first: it zeroes the key's byte in a shared ready table (`DolphinWeb_JitReadyBitsPtr()`, slot = first 16 SHA bits of the key), posts `dolphin-jit-compile-request {key, bytes, kind, readyPtr, readySlot}` once, and interprets the block. discio stores 1 in that byte once the compiler worker has compiled, warmed and retained the module, or failed; the block is then recompiled synchronously, which hits V8's per-process module cache for the same bytes (or raises the same engine error and is blacklisted). A retried block whose bytes changed compiles in place. The pthread never needs to receive a message (it does not return to its event loop). Needs the JIT cache (ignored with `nojitcache=1`); with `aotcompiler=0` the modules come back from discio unwarmed. |
@@ -32,8 +31,6 @@ correctness is established.
 - Block merge is default-off; enable it only with `blockmerge=1`.
 - Short-prefix compilation is default-off; enable it only with
   `shortprefix=1`.
-- Fastmem bounds-check hoisting is default-off; enable it only with
-  `fastmemhoist=1`.
 - Register allocation/GPR caching is default-on. `regalloc=0` is the immediate
   escape hatch.
 - Compile smearing is default-on. `smearcompile=0` restores eager compilation.
@@ -65,7 +62,7 @@ ignored. Current named categories include:
 ```text
 dcbxloop fastbranch fastfp fastinteger fastsystem wasmblock wasmcarry
 wasmaddc wasmsubfc wasmadde wasmsubfe wasmaddze blockredispatch blockmerge
-regalloc shortprefix smearcompile fastmemhoist inlinefma all
+regalloc shortprefix smearcompile inlinefma all
 ```
 
 Bits 0, 1 and 2 are unused since core patch 0196. The alias `fastmem` stands for
