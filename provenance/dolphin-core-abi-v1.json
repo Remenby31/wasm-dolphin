@@ -68,8 +68,8 @@
     {
       "path": "src/audio-pcm-producer.js",
       "hashMode": "lf-normalized",
-      "size": 19507,
-      "sha256": "e303d167a8868e4bab1b9e3fa90b7140ecd233125295fbf3828baa446bcf6bb4"
+      "size": 19769,
+      "sha256": "3e2e53711f8badd0067e05909db5660eb065f0a2910d3215bbc88398869d6a28"
     },
     {
       "path": "src/audio-worklet-processor.js",

@@ -210,6 +210,22 @@ test("trace: off until started, one sample per period with the pulls since the l
   assert.equal(f.producer.trace, null);
 });
 
+test("trace: a sample says whether playback has started (a fill of 0 before it is the prefill, not a hole)", () => {
+  const ring = createAudioPcmRing();
+  const f = fixture();
+  f.producer.install(ring.sab, { muted: false });
+  consumeAudioPcm(ring, new Float32Array(1), new Float32Array(1));
+  f.producer.traceStart({ everyMs: 100 });
+  f.producer.traceTick(0); // before any refill: prefill, empty ring
+  f.producer.refill(1);
+  f.producer.traceTick(100);
+  const [before, after] = f.producer.traceDrain().samples;
+  assert.equal(before.fill, 0);
+  assert.equal(before.playing, false, "the empty ring before playback starts");
+  assert.ok(after.fill > 0);
+  assert.equal(after.playing, true, "running once the ring reached its start");
+});
+
 test("trace: a pull's frames, its size and an empty mix land in the next sample", () => {
   const ring = createAudioPcmRing();
   const f = fixture();

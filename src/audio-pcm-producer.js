@@ -205,6 +205,9 @@ export class AudioPcmProducer {
       surplus: ring ? Atomics.load(ring.header, AUDIO_PCM_HEADER.PRODUCER_SURPLUS_FRAMES) >>> 0 : null,
       resampled: ring ? Atomics.load(ring.header, AUDIO_PCM_HEADER.RESAMPLED_FRAMES) >>> 0 : null,
       resampleExtra: ring ? Atomics.load(ring.header, AUDIO_PCM_HEADER.RESAMPLE_EXTRA_FRAMES) >>> 0 : null,
+      // playback started (the ring RUNNING): before it the worklet plays
+      // silence by design (prefill), so a fill of 0 there is not a hole
+      playing: ring ? (Atomics.load(ring.header, AUDIO_PCM_HEADER.STATE) | 0) === AUDIO_PCM_STATE_RUNNING : false,
       muted: this.muted,
     });
     t.asked = t.got = t.pulls = t.maxPull = t.empty = 0;
