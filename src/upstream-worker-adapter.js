@@ -1,6 +1,9 @@
+import { AUDIO_PCM_MAX_RATE_PPM } from "./audio-pcm-ring.js";
+import { DEFAULT_UPSTREAM_CORE_SHA256 } from "./default-core.js";
 import { widenU32Counter } from "./u32-counter.js";
+import { viLockMode } from "./wgpu-vi-phase-lock.js";
+import { wgpuMappedStagingSlotCountOf, wgpuMappedStagingSlotMibOf } from "./wgpu-replay-diagnostics.js";
 import {
-  DEFAULT_UPSTREAM_CORE_SHA256,
   DEFAULT_UPSTREAM_CORE_URL,
   isOneWayWorkerRequestType,
   verifyUpstreamCoreWasm
@@ -50,6 +53,10 @@ export function describeUserDataStatus(status) {
 }
 
 // "Saved" only when the slot holds the new state and OPFS holds it too.
+// A slot save or load the player waits on: answered within this, or an
+// error message (above the worker's 60 s limit, src/core-control.js).
+export const SLOT_REQUEST_TIMEOUT_MS = 70000;
+
 export function describeSlotSave(slot, response) {
   if (!response?.saved) return `Save slot ${slot} failed`;
   if (response.persisted?.persistent) return `Saved slot ${slot}`;
@@ -74,6 +81,7 @@ export class UpstreamWorkerAdapter {
     onStatus = () => {},
     canvas = null,
     transferCanvas = null,
+    replacePresenterCanvas = null,
     visibleCanvas = null,
     videoBackend = "Software Renderer",
     cpuThread = false,
@@ -85,8 +93,10 @@ export class UpstreamWorkerAdapter {
     ppcWasmJitWarmupFrames = 60,
     ppcProfile = false,
     gpuSpinMicros = -1,
+    codeSpaceMiB = null,
     cpuOverclock = 1,
     emulationSpeed = 1,
+    audioBufferMs = 0,
     presentationScale = 1,
     presentationQueueSize = 2,
     presenterBackend = "webgl",
@@ -98,12 +108,35 @@ export class UpstreamWorkerAdapter {
     softwareTevHotCaseMode = 0,
     xfbFastPaths = 0,
     correctTimeDrift = false,
+    rushPresentation = false,
+    syncOnSkipIdle = false,
+    dupXfbRearmsThrottle = false,
+    smoothEarly = true,
+    sleepMarginUs = 0,
+    sleepStepUs = 0,
+    sleepK = 750,
+    sleepSpinUs = 150,
+    presentVsync = true,
+    presentGamePace = false,
+    presentPaceStats = false,
+    viLock = "auto",
     coreLog = false,
     memcardSlotB = false,
+    internalResolution = 1,
+    maxAnisotropy = -1,
+    widescreen = false,
+    displayFilter = null,
     efbAccess = false,
+    xfbNoDecode = false,
     fifoLog = false,
     efbCopyRam = false,
+    efbNoDefer = false,
     wgpuMask = "",
+    wgpuFallback = false,
+    dstAlphaTwoPass = true,
+    discReadahead = true,
+    discPrefetch = false,
+    webglSoftware = false,
     savesMode = "",
     efbDiag = false,
     jitVerbose = false,
@@ -115,8 +148,14 @@ export class UpstreamWorkerAdapter {
     aotCompiler = true,
     aotFirstLaunch = false,
     regionChain = true,
+    aotAssembler = null,
     fusedMadd = true,
+    aotSampleMs = undefined,
+    wasmEngine = undefined,
+    regionCap = null,
     onAotProgress = () => {},
+    onGpuDeviceLost = () => {},
+    onScaleCeiling = () => {},
     collectMetrics = false,
     legacyOneWayAck = false,
     wgpuReplayDiagnostics = false,
@@ -128,6 +167,7 @@ export class UpstreamWorkerAdapter {
     wgpuPowerPreference = "high-performance",
     wgpuAtomicPassReplay = true,
     wgpuDiagnosticQuiet = false,
+    stallLog = false,
     wgpuProducerProfile = false,
     wgpuDrawProfile = false,
     wgpuTailGate = false,
@@ -137,17 +177,21 @@ export class UpstreamWorkerAdapter {
     wgpuVpDiag = false,
     wgpuUniformFast = false,
     wgpuUboPack = false,
+    wgpuBindGroupCache = false,
     wgpuSparseUbo = false,
     wgpuGeometryPack = false,
     wgpuGeometryRange = false,
+    wgpuGeometryCacheMode = 0,
     wgpuUploadArenaMiB = 32,
     wgpuUploadTransport = "queue",
     wgpuMappedStagingSlotCount = 3,
+    wgpuMappedStagingSlotMib = 16,
     wgpuMappedStageFast = false,
     wgpuMappedStageTimingStride = 1,
     wgpuMappedDrainCoalescing = false,
     wgpuRendererWorkerProbe = "off",
     wgpuVisualCadence = false,
+    wgpuSessionRecover = false,
     wgpuPipelinePrewarm = true,
     gpuCompletionDiagnostics = false,
     wgpuDirtyRangeProjection = false,
@@ -177,6 +221,7 @@ export class UpstreamWorkerAdapter {
     this.onStatus = onStatus;
     this.canvas = canvas;
     this.transferCanvasFn = typeof transferCanvas === "function" ? transferCanvas : null;
+    this.replacePresenterCanvasFn = typeof replacePresenterCanvas === "function" ? replacePresenterCanvas : null;
     this.workerCanvas = Boolean(canvas) || Boolean(this.transferCanvasFn);
     this.visibleCanvas = visibleCanvas;
     this.detachedOglContext = null;
@@ -195,8 +240,10 @@ export class UpstreamWorkerAdapter {
     this.ppcWasmJitWarmupFrames = ppcWasmJitWarmupFrames;
     this.ppcProfile = Boolean(ppcProfile);
     this.gpuSpinMicros = Number.isInteger(gpuSpinMicros) ? gpuSpinMicros : -1;
+    this.codeSpaceMiB = Number.isInteger(codeSpaceMiB) ? codeSpaceMiB : null;
     this.cpuOverclock = cpuOverclock;
     this.emulationSpeed = emulationSpeed;
+    this.audioBufferMs = Number.isInteger(audioBufferMs) ? audioBufferMs : 0;
     this.presentationScale = presentationScale;
     this.presentationQueueSize = presentationQueueSize;
     this.presenterBackend = presenterBackend;
@@ -208,12 +255,35 @@ export class UpstreamWorkerAdapter {
     this.softwareTevHotCaseMode = (Number(softwareTevHotCaseMode) || 0) & 3;
     this.xfbFastPaths = (Number(xfbFastPaths) || 0) & 3;
     this.correctTimeDrift = Boolean(correctTimeDrift);
+    this.rushPresentation = rushPresentation === true;
+    this.syncOnSkipIdle = syncOnSkipIdle === true;
+    this.dupXfbRearmsThrottle = dupXfbRearmsThrottle === true;
+    this.smoothEarly = smoothEarly !== false;
+    this.sleepMarginUs = Number.isInteger(sleepMarginUs) && sleepMarginUs >= 0 && sleepMarginUs <= 8000 ? sleepMarginUs : 0;
+    this.sleepStepUs = Number.isInteger(sleepStepUs) && sleepStepUs >= 0 && sleepStepUs <= 4000 ? sleepStepUs : 0;
+    this.sleepK = Number.isInteger(sleepK) && sleepK >= 0 && sleepK <= 950 ? (sleepK === 0 ? 0 : Math.max(500, sleepK)) : 750;
+    this.sleepSpinUs = Number.isInteger(sleepSpinUs) && sleepSpinUs >= 50 && sleepSpinUs <= 2000 ? sleepSpinUs : 150;
+    this.presentVsync = presentVsync !== false;
+    this.presentGamePace = presentGamePace === true;
+    this.presentPaceStats = presentPaceStats === true;
+    this.viLock = viLockMode(viLock);
     this.coreLog = Boolean(coreLog);
     this.memcardSlotB = Boolean(memcardSlotB);
+    this.internalResolution = Number(internalResolution) || 1;
+    this.maxAnisotropy = Number.isInteger(maxAnisotropy) ? maxAnisotropy : -1;
+    this.widescreen = widescreen === true;
+    this.displayFilter = displayFilter && typeof displayFilter === "object" ? { ...displayFilter } : null;
     this.efbAccess = Boolean(efbAccess);
+    this.xfbNoDecode = Boolean(xfbNoDecode);
     this.fifoLog = Boolean(fifoLog);
     this.efbCopyRam = Boolean(efbCopyRam);
+    this.efbNoDefer = Boolean(efbNoDefer);
     this.wgpuMask = String(wgpuMask || "");
+    this.wgpuFallback = Boolean(wgpuFallback);
+    this.dstAlphaTwoPass = dstAlphaTwoPass !== false;
+    this.discReadahead = discReadahead !== false;
+    this.discPrefetch = discPrefetch === true;
+    this.webglSoftware = Boolean(webglSoftware);
     this.savesMode = String(savesMode || "");
     this.userData = null;
     this.efbDiag = Boolean(efbDiag);
@@ -226,8 +296,19 @@ export class UpstreamWorkerAdapter {
     this.aotCompiler = aotCompiler !== false;
     this.aotFirstLaunch = aotFirstLaunch === true;
     this.regionChain = regionChain !== false;
+    this.aotAssembler = typeof aotAssembler === "boolean" ? aotAssembler : null; // null: the worker's default
     this.fusedMadd = fusedMadd !== false;
+    // The page's ?aotsample= and wasm engine (src/wasm-engine.js): the worker
+    // cannot read the page's URL, so they reach it only in this message.
+    this.aotSampleMs = aotSampleMs;
+    this.wasmEngine = wasmEngine;
+    this.regionCap = regionCap; // ?regioncap=N|0 (#215), null: by engine
     this.onAotProgress = onAotProgress;
+    // { internalResolution, reason, detail }: the worker's WebGPU device was
+    // lost at that scale (patch 0168 follow-up, core-host falls back to 1x).
+    this.onGpuDeviceLost = onGpuDeviceLost;
+    // { ceiling, reason }: the worker's adapter's internal resolution ceiling.
+    this.onScaleCeiling = onScaleCeiling;
     this.collectMetrics = Boolean(collectMetrics);
     this.legacyOneWayAck = Boolean(legacyOneWayAck);
     this.wgpuReplayDiagnostics = Boolean(wgpuReplayDiagnostics);
@@ -243,6 +324,7 @@ export class UpstreamWorkerAdapter {
       : "high-performance";
     this.wgpuAtomicPassReplay = Boolean(wgpuAtomicPassReplay);
     this.wgpuDiagnosticQuiet = Boolean(wgpuDiagnosticQuiet);
+    this.stallLog = Boolean(stallLog);
     this.wgpuProducerProfile = this.collectMetrics && Boolean(wgpuProducerProfile);
     this.wgpuDrawProfile = Boolean(wgpuDrawProfile);
     this.wgpuTailGate = Boolean(wgpuTailGate);
@@ -252,12 +334,15 @@ export class UpstreamWorkerAdapter {
     this.wgpuVpDiag = Boolean(wgpuVpDiag);
     this.wgpuUniformFast = Boolean(wgpuUniformFast);
     this.wgpuUboPack = Boolean(wgpuUboPack);
+    this.wgpuBindGroupCache = wgpuBindGroupCache === true;
     this.wgpuSparseUbo = Boolean(wgpuSparseUbo);
     this.wgpuGeometryPack = Boolean(wgpuGeometryPack);
     this.wgpuGeometryRange = this.wgpuGeometryPack && Boolean(wgpuGeometryRange);
+    this.wgpuGeometryCacheMode = this.wgpuGeometryPack ? Number(wgpuGeometryCacheMode) & 3 : 0;
     this.wgpuUploadArenaMiB = Number(wgpuUploadArenaMiB) === 64 ? 64 : 32;
     this.wgpuUploadTransport = wgpuUploadTransport === "mapped" ? "mapped" : "queue";
-    this.wgpuMappedStagingSlotCount = Number(wgpuMappedStagingSlotCount) === 4 ? 4 : 3;
+    this.wgpuMappedStagingSlotCount = wgpuMappedStagingSlotCountOf(wgpuMappedStagingSlotCount);
+    this.wgpuMappedStagingSlotMib = wgpuMappedStagingSlotMibOf(wgpuMappedStagingSlotMib);
     this.wgpuMappedStageFast = Boolean(wgpuMappedStageFast);
     this.wgpuMappedStageTimingStride = Number(wgpuMappedStageTimingStride) === 64 ? 64 : 1;
     this.wgpuMappedDrainCoalescing = Boolean(wgpuMappedDrainCoalescing);
@@ -265,6 +350,8 @@ export class UpstreamWorkerAdapter {
       "canary", "inline-upload", "worker-upload", "null-drain"
     ]).has(wgpuRendererWorkerProbe) ? wgpuRendererWorkerProbe : "off";
     this.wgpuVisualCadence = Boolean(wgpuVisualCadence);
+    // ?wgpurecover=1: the worker pauses the core as soon as the device is lost.
+    this.wgpuSessionRecover = Boolean(wgpuSessionRecover);
     this.wgpuPipelinePrewarm = wgpuPipelinePrewarm !== false;
     this.gpuCompletionDiagnostics = Boolean(gpuCompletionDiagnostics);
     this.wgpuDirtyRangeProjection = Boolean(wgpuDirtyRangeProjection);
@@ -322,6 +409,18 @@ export class UpstreamWorkerAdapter {
     this.presentationIntervalHistogramBuckets = null;
     this.presentationFrameLag = 0;
     this.presentationQueueAgeMs = 0;
+    // Patch 0208: null without frame tags (an older core or worker, software).
+    this.newFramesPerSec = null;
+    this.newFramesProducedPerSec = null;
+    this.newFramesShown = null;
+    this.framesOutOfOrder = null;
+    this.stalePresents = null;
+    // Occupancy shares of the last window, 0..1; null when unavailable.
+    this.cpuThreadBusy = null;
+    this.gpuThreadBusy = null;
+    this.replayBusy = null;
+    // XFB copies per second of the last window (any renderer); null when unavailable.
+    this.xfbCopiesPerSec = null;
     this.visualChangeFps = 0;
     this.visualFrameHash = 0;
     this.visualSampleSource = "none";
@@ -422,8 +521,10 @@ export class UpstreamWorkerAdapter {
       ppcWasmJitWarmupFrames: this.ppcWasmJitWarmupFrames,
       ppcProfile: this.ppcProfile,
       gpuSpinMicros: this.gpuSpinMicros,
+      codeSpaceMiB: this.codeSpaceMiB,
       cpuOverclock: this.cpuOverclock,
       emulationSpeed: this.emulationSpeed,
+      audioBufferMs: this.audioBufferMs,
       presentationScale: this.presentationScale,
       presentationQueueSize: this.presentationQueueSize,
       presenterBackend: this.presenterBackend,
@@ -435,12 +536,35 @@ export class UpstreamWorkerAdapter {
       softwareTevHotCaseMode: this.softwareTevHotCaseMode,
       xfbFastPaths: this.xfbFastPaths,
       correctTimeDrift: this.correctTimeDrift,
+      rushPresentation: this.rushPresentation,
+      syncOnSkipIdle: this.syncOnSkipIdle,
+      dupXfbRearmsThrottle: this.dupXfbRearmsThrottle,
+      smoothEarly: this.smoothEarly,
+      sleepMarginUs: this.sleepMarginUs,
+      sleepStepUs: this.sleepStepUs,
+      sleepK: this.sleepK,
+      sleepSpinUs: this.sleepSpinUs,
+      presentVsync: this.presentVsync,
+      presentGamePace: this.presentGamePace,
+      presentPaceStats: this.presentPaceStats,
+      viLock: this.viLock,
       coreLog: this.coreLog,
       memcardSlotB: this.memcardSlotB,
+      internalResolution: this.internalResolution,
+      maxAnisotropy: this.maxAnisotropy,
+      widescreen: this.widescreen,
+      displayFilter: this.displayFilter,
       efbAccess: this.efbAccess,
+      xfbNoDecode: this.xfbNoDecode,
       fifoLog: this.fifoLog,
       efbCopyRam: this.efbCopyRam,
+      efbNoDefer: this.efbNoDefer,
       wgpuMask: this.wgpuMask,
+      wgpuFallback: this.wgpuFallback,
+      dstAlphaTwoPass: this.dstAlphaTwoPass,
+      discReadahead: this.discReadahead,
+      discPrefetch: this.discPrefetch,
+      webglSoftware: this.webglSoftware,
       savesMode: this.savesMode,
       efbDiag: this.efbDiag,
       jitVerbose: this.jitVerbose,
@@ -452,7 +576,11 @@ export class UpstreamWorkerAdapter {
       aotCompiler: this.aotCompiler,
       aotFirstLaunch: this.aotFirstLaunch,
       regionChain: this.regionChain,
+      aotAssembler: this.aotAssembler,
       fusedMadd: this.fusedMadd,
+      aotSampleMs: this.aotSampleMs,
+      wasmEngine: this.wasmEngine,
+      regionCap: this.regionCap,
       collectMetrics: this.collectMetrics,
       legacyOneWayAck: this.legacyOneWayAck,
       coreSelection: this.coreSelectionTelemetry(window.location.href),
@@ -465,6 +593,7 @@ export class UpstreamWorkerAdapter {
       wgpuPowerPreference: this.wgpuPowerPreference,
       wgpuAtomicPassReplay: this.wgpuAtomicPassReplay,
       wgpuDiagnosticQuiet: this.wgpuDiagnosticQuiet,
+      stallLog: this.stallLog,
       wgpuProducerProfile: this.wgpuProducerProfile,
       wgpuDrawProfile: this.wgpuDrawProfile,
       wgpuTailGate: this.wgpuTailGate,
@@ -474,17 +603,21 @@ export class UpstreamWorkerAdapter {
       wgpuVpDiag: this.wgpuVpDiag,
       wgpuUniformFast: this.wgpuUniformFast,
       wgpuUboPack: this.wgpuUboPack,
+      wgpuBindGroupCache: this.wgpuBindGroupCache,
       wgpuSparseUbo: this.wgpuSparseUbo,
       wgpuGeometryPack: this.wgpuGeometryPack,
       wgpuGeometryRange: this.wgpuGeometryRange,
+      wgpuGeometryCacheMode: this.wgpuGeometryCacheMode,
       wgpuUploadArenaMiB: this.wgpuUploadArenaMiB,
       wgpuUploadTransport: this.wgpuUploadTransport,
       wgpuMappedStagingSlotCount: this.wgpuMappedStagingSlotCount,
+      wgpuMappedStagingSlotMib: this.wgpuMappedStagingSlotMib,
       wgpuMappedStageFast: this.wgpuMappedStageFast,
       wgpuMappedStageTimingStride: this.wgpuMappedStageTimingStride,
       wgpuMappedDrainCoalescing: this.wgpuMappedDrainCoalescing,
       wgpuRendererWorkerProbe: this.wgpuRendererWorkerProbe,
       wgpuVisualCadence: this.wgpuVisualCadence,
+      wgpuSessionRecover: this.wgpuSessionRecover,
       wgpuPipelinePrewarm: this.wgpuPipelinePrewarm,
       gpuCompletionDiagnostics: this.gpuCompletionDiagnostics,
       wgpuDirtyRangeProjection: this.wgpuDirtyRangeProjection,
@@ -545,6 +678,8 @@ export class UpstreamWorkerAdapter {
     }
     this.applyMetadata(response);
     this.loaded = true;
+    // A display box measured while the load ran (sent with the load before).
+    if (this.displayFilter) this.request("setDisplayFilter", this.displayFilter).catch(() => {});
     this.userData = response.userData ?? null;
     const saveWarning = describeUserDataStatus(this.userData);
     if (saveWarning) this.onStatus(saveWarning);
@@ -598,6 +733,7 @@ export class UpstreamWorkerAdapter {
       rootEntryCount: response.rootEntryCount,
       rootEntries: response.rootEntries ?? [],
       bootProbe: response.bootProbe ?? null,
+      needs: response.needs ?? { boundingBox: false },
       fullCore: Boolean(response.fullCore),
       coreBoot: response.coreBoot ?? null,
       coreState: response.coreState,
@@ -823,6 +959,28 @@ export class UpstreamWorkerAdapter {
     return this.request("mixAudio", { frames });
   }
 
+  // Patch 0168: internal resolution and anisotropy while a game runs.
+  // Patch 0178: widescreen too.
+  async setEnhancements({ internalResolution = 1, maxAnisotropy = -1, widescreen = this.widescreen } = {}) {
+    this.internalResolution = Number(internalResolution) || 1;
+    this.maxAnisotropy = Number.isInteger(maxAnisotropy) ? maxAnisotropy : -1;
+    this.widescreen = widescreen === true;
+    if (!this.loaded) return { applied: false, reason: "core-not-loaded" };
+    return this.request("setEnhancements", {
+      internalResolution: this.internalResolution,
+      maxAnisotropy: this.maxAnisotropy,
+      widescreen: this.widescreen
+    });
+  }
+
+  // Display filter (src/wgpu-display-filter.js): sharpness, fit, display
+  // box; merged into what the next boot gets, and sent to a running worker.
+  async setDisplayFilter(filter = {}) {
+    this.displayFilter = { ...(this.displayFilter ?? {}), ...filter };
+    if (!this.loaded) return { applied: false, reason: "core-not-loaded" };
+    return this.request("setDisplayFilter", this.displayFilter);
+  }
+
   setAudioMuted(muted) {
     if (!this.loaded) {
       return;
@@ -831,12 +989,16 @@ export class UpstreamWorkerAdapter {
     this.post("setAudioMuted", { muted: Boolean(muted) });
   }
 
-  async configureAudioWorklet({ enabled, muted, sab }) {
+  async configureAudioWorklet({ enabled, muted, sab, targetFrames, rateControl = false, rateMaxPpm = AUDIO_PCM_MAX_RATE_PPM, ringLowMs = null }) {
     if (!this.loaded) return { active: false, reason: "core-not-loaded" };
     const response = await this.request("configureAudioWorklet", {
       enabled: Boolean(enabled),
       muted: Boolean(muted),
       sab: sab ?? null,
+      targetFrames: Number(targetFrames) || 0,
+      rateControl: Boolean(rateControl),
+      rateMaxPpm: Number(rateMaxPpm) || AUDIO_PCM_MAX_RATE_PPM,
+      ringLowMs: Number(ringLowMs) || null,
     });
     if (enabled && !response.active) {
       this.onStatus(`AudioWorklet producer unavailable; using legacy audio: ${response.reason || "unknown"}`);
@@ -935,11 +1097,24 @@ export class UpstreamWorkerAdapter {
       .catch((error) => this.onStatus(error.message));
   }
 
+  // A request the player waits on: past `ms` it fails with a message
+  // instead of leaving them without an answer (the worker's own limit is
+  // 60 s, src/core-control.js).
+  requestWithin(type, payload, ms, what) {
+    let timer = null;
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(
+        `${what}: the emulator did not answer within ${Math.round(ms / 1000)} s. The game keeps running; try again.`
+      )), ms);
+    });
+    return Promise.race([this.request(type, payload), timeout]).finally(() => clearTimeout(timer));
+  }
+
   saveState(slot) {
     if (!this.loaded) {
       return;
     }
-    this.request("saveState", { slot })
+    this.requestWithin("saveState", { slot }, SLOT_REQUEST_TIMEOUT_MS, `Save slot ${slot}`)
       .then((response) => this.onStatus(describeSlotSave(slot, response)))
       .catch((error) => this.onStatus(error.message));
   }
@@ -948,10 +1123,13 @@ export class UpstreamWorkerAdapter {
     if (!this.loaded) {
       return;
     }
-    this.request("loadState", { slot })
+    this.requestWithin("loadState", { slot }, SLOT_REQUEST_TIMEOUT_MS, `Load slot ${slot}`)
       .then((response) => {
         this.applyFrame(response);
-        this.onStatus(`Loaded slot ${slot}`);
+        // a load the core could not apply says so, never "Loaded"
+        this.onStatus(response?.loaded === false
+          ? `Load slot ${slot} failed: ${response.error || "the emulator could not apply it"}`
+          : `Loaded slot ${slot}`);
       })
       .catch((error) => this.onStatus(error.message));
   }
@@ -1016,6 +1194,24 @@ export class UpstreamWorkerAdapter {
         return response;
       })
       .catch((e) => ({ loaded: false, error: e.message }));
+  }
+
+  // The worker's WebGL presenter lost its context and the browser did not
+  // restore it: a new canvas for a 2D presenter (the old one keeps its dead
+  // WebGL context forever).
+  async replaceLostPresenterCanvas() {
+    if (!this.replacePresenterCanvasFn || !this.worker) return;
+    let canvas = null;
+    try {
+      canvas = this.replacePresenterCanvasFn();
+    } catch (error) {
+      this.onStatus(`Presenter canvas could not be replaced: ${error instanceof Error ? error.message : error}`);
+      return;
+    }
+    if (!canvas) return;
+    await this.request("replacePresenterCanvas", { canvas }, [canvas]).catch((error) => {
+      this.onStatus(`Presenter canvas replacement failed: ${error instanceof Error ? error.message : error}`);
+    });
   }
 
   request(type, payload = {}, transfer = []) {
@@ -1156,6 +1352,32 @@ export class UpstreamWorkerAdapter {
     }
     if (message?.type === "status") {
       this.onStatus(message.message);
+      return;
+    }
+    if (message?.type === "presenter-canvas-lost") {
+      // The worker may be gone by then (request throws): never unhandled.
+      this.replaceLostPresenterCanvas().catch((error) => {
+        this.onStatus(`Presenter canvas replacement failed: ${error instanceof Error ? error.message : error}`);
+      });
+      return;
+    }
+    if (message?.type === "wgpu-scale-ceiling") {
+      this.onScaleCeiling({ ceiling: Number(message.ceiling) || 1, reason: String(message.reason ?? "") });
+      return;
+    }
+    if (message?.type === "wgpu-device-lost") {
+      try {
+        this.onGpuDeviceLost({
+          internalResolution: Number(message.internalResolution) || 1,
+          reason: String(message.reason ?? "unknown"),
+          detail: String(message.detail ?? ""),
+          cause: message.cause === "renderer-error" ? "renderer-error" : "device-lost",
+          // ?wgpurecover=1: the worker's pause at the loss.
+          ...(message.pause ? { pause: message.pause } : {})
+        });
+      } catch (error) {
+        this.onStatus(`Device loss handler failed: ${error instanceof Error ? error.message : error}`);
+      }
       return;
     }
     if (message?.type === "direct-pad") {
@@ -1317,6 +1539,14 @@ export class UpstreamWorkerAdapter {
     }
     if (Number.isFinite(response.presentationQueueAgeMs)) {
       this.presentationQueueAgeMs = response.presentationQueueAgeMs;
+    }
+    // null is a value here (no frame tags), not a missing field.
+    for (const key of ["newFramesPerSec", "newFramesProducedPerSec", "newFramesShown", "framesOutOfOrder", "stalePresents"]) {
+      if (key in response) this[key] = Number.isFinite(response[key]) ? response[key] : null;
+    }
+    // Same for the occupancy shares and the XFB copy rate (src/occupancy-stats.js): null is a value.
+    for (const key of ["cpuThreadBusy", "gpuThreadBusy", "replayBusy", "xfbCopiesPerSec"]) {
+      if (key in response) this[key] = Number.isFinite(response[key]) ? response[key] : null;
     }
     if (Number.isFinite(response.visualChangeFps)) {
       this.visualChangeFps = response.visualChangeFps;

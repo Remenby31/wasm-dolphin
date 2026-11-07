@@ -1,0 +1,105 @@
+diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.h b/Source/Core/VideoBackends/WebGPU/WebGPUGfx.h
+--- a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.h
++++ b/Source/Core/VideoBackends/WebGPU/WebGPUGfx.h
+@@ -102,6 +102,9 @@
+   void SetViewport(float x, float y, float width, float height, float near_depth,
+                    float far_depth) override;
+   void SetTexture(u32 index, const AbstractTexture* texture) override;
++  // 0202: a WebGPUTexture going away: unbound from every stage, its
++  // consumer-side GPUTexture destroyed at the next pass end.
++  void RetireTexture(u32 bridge_id);
+   void SetSamplerState(u32 index, const SamplerState& state) override;
+   void Draw(u32 base_vertex, u32 num_vertices) override;
+   void DrawIndexed(u32 base_index, u32 num_indices, u32 base_vertex) override;
+@@ -176,6 +179,8 @@
+   bool EndPassIfOpen();
+   // 0201: destroys the bind groups evicted from m_bg1_cache (outside a pass).
+   void DestroyRetiredBindGroups();
++  // 0202: destroys the textures retired by RetireTexture (outside a pass).
++  void DestroyRetiredTextures();
+   void AbortRecordedPass();
+   void DiscardOrAbortPendingGeometryRange();
+   void ResetRecordedPassState();
+@@ -351,6 +356,11 @@
+   // only shrinks on a destroy): ~2,000 a second in a race, 135,000 after a
+   // minute, gigabytes of browser memory (WebKit malloc under Safari).
+   std::vector<u32> m_retired_bind_groups;
++  // 0202: textures whose WebGPUTexture was destroyed (the texture cache drops
++  // a texture unused for 64 frames, then 3 more in its pool), destroyed at
++  // the next pass end. Without it the consumer kept every texture ever
++  // created (~6 a second in a race).
++  std::vector<u32> m_retired_textures;
+ };
+ 
+ class WebGPUEFBInterface final : public EFBInterfaceBase
+diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp b/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp
+--- a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp
++++ b/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp
+@@ -1590,6 +1590,7 @@
+   // An aborted pass is a pass end too (EndPassIfOpen's failed geometry flush
+   // comes here): the retired groups go now, not at the next committed pass.
+   DestroyRetiredBindGroups();
++  DestroyRetiredTextures();
+ }
+ 
+ void WebGPUGfx::DiscardOrAbortPendingGeometryRange()
+@@ -1619,6 +1620,33 @@
+   m_retired_bind_groups.clear();
+ }
+ 
++// 0202: the consumer's OP_DESTROY tag for a texture.
++static constexpr u32 kDestroyTagTexture = 2;
++
++void WebGPUGfx::RetireTexture(u32 bridge_id)
++{
++  if (bridge_id == 0)
++    return;
++  // Unbound from every stage still holding it (as Vulkan's UnbindTexture):
++  // no later bind group may name a texture the consumer dropped.
++  for (u32& texture : m_tex_id)
++  {
++    if (texture == bridge_id)
++      texture = 0;
++  }
++  m_retired_textures.push_back(bridge_id);
++}
++
++void WebGPUGfx::DestroyRetiredTextures()
++{
++  // Between passes only, as DestroyRetiredBindGroups.
++  if (m_pass_open || m_retired_textures.empty())
++    return;
++  for (const u32 id : m_retired_textures)
++    m_cmd_stream.PushDestroy(kDestroyTagTexture, id);
++  m_retired_textures.clear();
++}
++
+ bool WebGPUGfx::EndPassIfOpen()
+ {
+   if (!m_pass_open)
+@@ -1637,6 +1665,7 @@
+   m_pass_open = false;
+   ResetRecordedPassState();
+   DestroyRetiredBindGroups();
++  DestroyRetiredTextures();
+   if (committed)
+   {
+     m_pending_clear = false;
+diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUTexture.cpp b/Source/Core/VideoBackends/WebGPU/WebGPUTexture.cpp
+--- a/Source/Core/VideoBackends/WebGPU/WebGPUTexture.cpp
++++ b/Source/Core/VideoBackends/WebGPU/WebGPUTexture.cpp
+@@ -106,7 +106,13 @@
+   return cs.PushUploadTexture(m_bridge_id, src, bytes_per_row, width, height, level, layer);
+ }
+ 
+-WebGPUTexture::~WebGPUTexture() = default;
++WebGPUTexture::~WebGPUTexture()
++{
++  // 0202: the consumer's GPUTexture goes too, at the next pass end. g_gfx is
++  // already null while the backend itself shuts down (unique_ptr::reset).
++  if (m_bridge_id != 0 && g_gfx)
++    static_cast<WebGPUGfx*>(g_gfx.get())->RetireTexture(m_bridge_id);
++}
+ 
+ void WebGPUTexture::CopyRectangleFromTexture(const AbstractTexture* src,
+                                              const MathUtil::Rectangle<int>& src_rect,

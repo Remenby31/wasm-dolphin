@@ -267,7 +267,7 @@ test("optimizer -> cache -> bootKeys -> loader: the first launch's modules come 
   });
   const first = make();
   await first.start();
-  assert.deepEqual(await first.status(), { state: "complete", fraction: 1 });
+  assert.deepEqual(await first.status(), { state: "complete", fraction: 1, regionsRefused: 0 });
 
   const next = make();
   const keys = await next.bootKeys();

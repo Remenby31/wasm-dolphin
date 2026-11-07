@@ -1,0 +1,65 @@
+diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.h b/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.h
+--- a/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.h
++++ b/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.h
+@@ -501,6 +501,9 @@
+   u32 AllocId() { return m_next_id++; }
+ 
+ private:
++  // Wakes the JS consumer parked on the write index (patch 0148).
++  void WakeParkedConsumer();
++
+   friend struct WebGPUCommandStreamTestPeer;
+ 
+   bool ProtocolV3Active() const;
+diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.cpp b/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.cpp
+--- a/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.cpp
++++ b/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.cpp
+@@ -56,6 +56,10 @@
+ // reading. Mirrors the Day-20 XFB-ring idea (no per-frame malloc).
+ static constexpr u32 kProtocolUploadWatermark = 1u << 0;
+ static constexpr u32 kProtocolNonDroppingBackpressure = 1u << 1;
++// Set by the JS consumer while it waits (Atomics.waitAsync) on the write
++// index of an empty ring; cleared when it wakes. The producer wakes it only
++// then, so publishing stays notify-free while the consumer is draining.
++static constexpr u32 kProtocolConsumerParked = 1u << 31;
+ static constexpr u32 kConsumerStateFailed = 2;
+ static constexpr u32 kOwnershipTraceVersion = 1;
+ static constexpr u32 kOwnershipTraceCapacity = 131072;
+@@ -598,8 +602,10 @@
+       DolphinWeb::WebGpuProducerProfile::Phase::RingPublish);
+   m_slots[w % m_capacity] = rec;
+   // Release: the slot write above must be visible to the consumer
+-  // before it observes the bumped write index.
+-  m_header->write.store(w + 1, std::memory_order_release);
++  // before it observes the bumped write index. Sequentially consistent
++  // for WakeParkedConsumer (store write, then load the parked bit).
++  m_header->write.store(w + 1, std::memory_order_seq_cst);
++  WakeParkedConsumer();
+   TraceCommand(rec);
+   return true;
+ }
+@@ -633,10 +639,23 @@
+       DolphinWeb::WebGpuProducerProfile::Phase::RingPublish);
+   for (u32 i = 0; i < count; ++i)
+     m_slots[(w + i) % m_capacity] = records[i];
+-  m_header->write.store(w + count, std::memory_order_release);
++  m_header->write.store(w + count, std::memory_order_seq_cst);
++  WakeParkedConsumer();
+   return true;
+ }
+ 
++// The consumer parks by setting kProtocolConsumerParked, then waiting on the
++// write index for the value it last saw; the producer stores the write index,
++// then reads the bit. Both sides are sequentially consistent, so either the
++// producer sees the bit and notifies, or the consumer's wait sees the new
++// write index and returns at once: no wakeup is lost.
++void WebGPUCommandStream::WakeParkedConsumer()
++{
++  if ((m_header->protocol_flags.load(std::memory_order_seq_cst) & kProtocolConsumerParked) == 0)
++    return;
++  emscripten_futex_wake(reinterpret_cast<volatile void*>(&m_header->write), INT_MAX);
++}
++
+ bool WebGPUCommandStream::StagePassRecord(const CmdRecord& rec)
+ {
+   if (!m_pass_staging || m_pass_poisoned)

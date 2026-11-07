@@ -68,7 +68,7 @@ receiver), `src/upstream-discio-worker.js` (master cache + IDB), and
   remain in IDB indefinitely. A "build fingerprint" key + bulk-clear
   on mismatch would tidy this up, but isn't load-bearing.
 - **LRU eviction.** Hard cap at `DOLPHIN_JIT_CACHE_MAX = 8192`. Past
-  that, new entries are dropped silently. For a typical Melee session
+  that, new entries are dropped silently. For a typical session
   this is well above what the JIT ever compiles, so it's only relevant
   for long-running sessions across many games.
 

@@ -240,11 +240,18 @@ export function requestedWgpuUniformFast(search = globalThis.location?.search ??
   return new URLSearchParams(search).get("wgpuuniformfast") === "1";
 }
 
+// The WebGPU replay drained in budgets of this many ms (whole render passes,
+// never split): 4 by default since 2026-10-29. After an early state load it
+// keeps the long drains off the worker that also runs the presenter and the
+// region translator: Spark 120 Hz 18 -> 36 images/s, Mac cold post-load visits
+// 8/8 better (lost 1.4-2.4 s -> 0.3-1.2 s), 0 underruns against 26; picture
+// byte-identical in cpu=single. ?wgpureplayms=0: the unbudgeted 16K replay.
+export const DEFAULT_WGPU_REPLAY_BUDGET_MS = 4;
 export function requestedWgpuReplayBudgetMs(
   search = globalThis.location?.search ?? ""
 ) {
   const value = new URLSearchParams(search).get("wgpureplayms");
-  return value === "4" ? 4 : value === "6" ? 6 : 0;
+  return value === "0" ? 0 : value === "4" ? 4 : value === "6" ? 6 : DEFAULT_WGPU_REPLAY_BUDGET_MS;
 }
 
 export function requestedWgpuPowerPreference(
@@ -284,7 +291,9 @@ export function createWgpuReplayBudgetGate({
   }
 
   function check({ processed = 0, passDepth = 0, force = false } = {}) {
-    if (budget === 0 || (!force && (processed <= 0 || processed < nextCheck))) {
+    // processed 0 never yields, forced or not: every drain moves the ring by
+    // at least one record.
+    if (budget === 0 || processed <= 0 || (!force && processed < nextCheck)) {
       return { checked: false, shouldYield: false, reason: null, elapsedMs: 0 };
     }
     while (nextCheck <= processed) nextCheck += interval;
@@ -364,16 +373,101 @@ export function requestedWgpuGeometryRange(
   return Boolean(enabledByDefault);
 }
 
+// The geometry content cache (patch 0204) by default: on under V8 since
+// 2026-10-31 (Spark drop-meter, 6 pairs: no regression, the race's display
+// excess 2,042 -> 1,626 ms) and under JavaScriptCore (Safari on the Mac, a
+// race driven live: speed 101-102 % as without it, 81-91 % of the geometry
+// bytes hit, a third fewer bytes staged per frame); off under SpiderMonkey,
+// which has no pair yet.
+export function defaultWgpuGeometryCacheMode(engine) {
+  return engine === "v8" || engine === "jsc" ? 1 : 0;
+}
+
+// ?wgpugeomcache=1 forces the cache on, =0 off, =2 on with the sampled byte
+// comparison of hits (diagnostics); any other value, an empty one
+// (?wgpugeomcache=) included, keeps the engine's default. The core's mode:
+// bit 0 on, bit 1 the comparison.
+export function requestedWgpuGeometryCacheMode(
+  search = globalThis.location?.search ?? "",
+  fallback = 0
+) {
+  const value = new URLSearchParams(search).get("wgpugeomcache");
+  return value === "1" ? 1 : value === "2" ? 3 : value === "0" ? 0 : fallback;
+}
+
+// The mode the page sends the worker: needs the pack, never with
+// ?wgpuloadfence=1 (the fence drops uploads already published, the cache's
+// included, and its entries would then name missing bytes).
+export function wgpuGeometryCacheModeFor({ search = "", engine, pack, loadFence }) {
+  return pack && !loadFence ? requestedWgpuGeometryCacheMode(search, defaultWgpuGeometryCacheMode(engine)) : 0;
+}
+
 export function requestedWgpuUploadArenaMiB(
   search = globalThis.location?.search ?? ""
 ) {
   return new URLSearchParams(search).get("wgpuuploadmb") === "64" ? 64 : 32;
 }
 
-export function requestedWgpuMappedStagingSlotCount(
-  search = globalThis.location?.search ?? ""
+// Mapped staging slots (16 MiB each): 3 by default, 4 to 8 when asked for.
+// The page, the adapter and the worker all read the count through this one
+// function, so a value one layer accepts is never dropped back to 3 by
+// another.
+export const WGPU_MAPPED_STAGING_SLOT_COUNT_MAX = 8;
+export function wgpuMappedStagingSlotCountOf(value) {
+  const n = typeof value === "string" ? (/^[3-9]$/.test(value) ? Number(value) : 0) : Number(value);
+  return Number.isInteger(n) && n >= 3 && n <= WGPU_MAPPED_STAGING_SLOT_COUNT_MAX ? n : 3;
+}
+
+// JavaScriptCore's staging: more, smaller slots. getMappedRange costs ~0.45 ms
+// per mapped MiB on an iPhone, so a 16 MiB slot cost ~8 ms a remap (47 % of
+// the replay thread in race). The iPhone A/B of 2026-11-01 (race): 4 MiB x 8
+// took new frames from 2 to 42 a second (median) at the same game speed, and
+// slot waits from 199 (16 MiB x 4) to 20.
+export const JSC_STAGING_SLOT_MIB = 4;
+export const JSC_STAGING_SLOT_COUNT = 8;
+
+// The engine's own slot count. Under JavaScriptCore, 16 MiB slots used to
+// wait for a free one 610-870 times per 55 s of race with 3 slots, 330-390
+// with 4; small slots fill faster, so JSC keeps more of them.
+export function defaultWgpuMappedStagingSlotCount(engine) {
+  return engine === "jsc" ? JSC_STAGING_SLOT_COUNT : 3;
+}
+
+// Mapped staging slot size in MiB: 16 by default. getMappedRange costs
+// ~0.45 ms per MiB of slot on an iPhone (16 MiB: 7.7 ms a remap, ~58 remaps
+// a second), so a smaller slot remaps cheaper; an upload larger than the
+// slot takes the queue (writeWgpuUploadThroughQueue). The page, the adapter and
+// the worker all read it through this one function.
+export const WGPU_MAPPED_STAGING_SLOT_MIB_VALUES = Object.freeze([2, 4, 8, 16]);
+export function wgpuMappedStagingSlotMibOf(value) {
+  const n = Number(value);
+  return WGPU_MAPPED_STAGING_SLOT_MIB_VALUES.includes(n) ? n : 16;
+}
+// The engine's own slot size: JSC's above, 16 MiB elsewhere (V8 and
+// SpiderMonkey default to the queue transport; mapped there keeps 16).
+export function defaultWgpuMappedStagingSlotMib(engine) {
+  return engine === "jsc" ? JSC_STAGING_SLOT_MIB : 16;
+}
+// ?wgpustagingslotmib=2|4|8|16 forces it, else the engine's default.
+export function requestedWgpuMappedStagingSlotMib(
+  search = globalThis.location?.search ?? "",
+  fallback = 16
 ) {
-  return new URLSearchParams(search).get("wgpustagingslots") === "4" ? 4 : 3;
+  const value = new URLSearchParams(search).get("wgpustagingslotmib");
+  return value !== null && WGPU_MAPPED_STAGING_SLOT_MIB_VALUES.includes(Number(value))
+    ? Number(value)
+    : wgpuMappedStagingSlotMibOf(fallback);
+}
+
+// ?wgpustagingslots=3..8 forces it, else the engine's default.
+export function requestedWgpuMappedStagingSlotCount(
+  search = globalThis.location?.search ?? "",
+  fallback = 3
+) {
+  // A value outside 3..8 falls back to the engine's default, as
+  // ?wgpuuploadtransport does (it gave 3 before, even where the default is 4).
+  const value = new URLSearchParams(search).get("wgpustagingslots");
+  return value !== null && /^[3-8]$/.test(value) ? Number(value) : wgpuMappedStagingSlotCountOf(fallback);
 }
 
 export function requestedWgpuMappedStageTimingStride(
@@ -382,6 +476,16 @@ export function requestedWgpuMappedStageTimingStride(
   return new URLSearchParams(search).get("wgpumappedtiming") === "64" ? 64 : 1;
 }
 
+// Dense UBO packets (patch 0029) by default: on under V8 since 2026-10-31
+// (Spark, 7 pairs: speed capped at 100 % both ways, replay worker -21 %,
+// uploads -45 % per frame); off elsewhere until JSC has its own pair (UBO
+// bytes +7-9 %, which Safari's transports may not want).
+export function defaultWgpuUboPack(engine) {
+  return engine === "v8";
+}
+
+// ?wgpuubopack=1|0 forces it on or off, else the engine's default. Never
+// with ?wgpuubocache=1 (the worker forces the legacy slices then).
 export function requestedWgpuUboPack(
   search = globalThis.location?.search ?? "",
   enabledByDefault = false
@@ -392,12 +496,24 @@ export function requestedWgpuUboPack(
   return Boolean(enabledByDefault);
 }
 
+// The engine's own default: mapped staging under JavaScriptCore. Safari's
+// GPUQueue.writeBuffer copies every write into the page's process and gives
+// it back only at a garbage collection: the command ring's 50-75 k writes a
+// second (130-170 MiB/s) grew Safari's WebContent by ~140 MiB/s, to 7-8 GiB
+// within a minute (an iPhone kills the tab at 1.5-2 GiB). Mapped staging
+// reuses a few mapped buffers and copies on the GPU (research/deep-ios-host.md).
+export function defaultWgpuUploadTransport(engine) {
+  return engine === "jsc" ? "mapped" : "queue";
+}
+
+// ?wgpuuploadtransport=mapped|queue forces it, else the engine's default.
 export function requestedWgpuUploadTransport(
-  search = globalThis.location?.search ?? ""
+  search = globalThis.location?.search ?? "",
+  fallback = "queue"
 ) {
-  return new URLSearchParams(search).get("wgpuuploadtransport") === "mapped"
-    ? "mapped"
-    : "queue";
+  const value = new URLSearchParams(search).get("wgpuuploadtransport");
+  if (value === "mapped" || value === "queue") return value;
+  return fallback === "mapped" ? "mapped" : "queue";
 }
 
 export function requestedWgpuMappedStageFast(

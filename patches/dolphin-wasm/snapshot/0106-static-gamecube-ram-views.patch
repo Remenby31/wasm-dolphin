@@ -1,0 +1,170 @@
+diff --git a/Source/Core/Core/HW/DSP.cpp b/Source/Core/Core/HW/DSP.cpp
+index ae46113e79..9064a69e3b 100644
+--- a/Source/Core/Core/HW/DSP.cpp
++++ b/Source/Core/Core/HW/DSP.cpp
+@@ -23,6 +23,7 @@
+ 
+ #include "Core/HW/DSP.h"
+ 
++#include <cstring>
+ #include <memory>
+ 
+ #include "AudioCommon/AudioCommon.h"
+@@ -135,7 +136,19 @@ void DSPManager::Reinit(bool hle)
+     m_aram.wii_mode = false;
+     m_aram.size = ARAM_SIZE;
+     m_aram.mask = ARAM_MASK;
++#ifdef __EMSCRIPTEN__
++    // A static array, as the RAM views (patch 0106, Memmap.cpp): a fixed
++    // address and no mmap that zeroes and dirties 16 MiB at boot.
++    // Zero at instantiation; cleared again only when a previous boot used it.
++    alignas(65536) static u8 s_static_aram[ARAM_SIZE];
++    static bool s_static_aram_used = false;
++    if (s_static_aram_used)
++      std::memset(s_static_aram, 0, sizeof(s_static_aram));
++    s_static_aram_used = true;
++    m_aram.ptr = s_static_aram;
++#else
+     m_aram.ptr = static_cast<u8*>(Common::AllocateMemoryPages(m_aram.size));
++#endif
+   }
+ 
+   m_audio_dma = {};
+@@ -153,7 +166,9 @@ void DSPManager::Shutdown()
+ {
+   if (!m_aram.wii_mode)
+   {
++#ifndef __EMSCRIPTEN__
+     Common::FreeMemoryPages(m_aram.ptr, m_aram.size);
++#endif
+     m_aram.ptr = nullptr;
+   }
+ 
+diff --git a/Source/Core/Core/HW/Memmap.cpp b/Source/Core/Core/HW/Memmap.cpp
+index e6d8fd56a5..0b774293dc 100644
+--- a/Source/Core/Core/HW/Memmap.cpp
++++ b/Source/Core/Core/HW/Memmap.cpp
+@@ -85,6 +85,37 @@ void MemoryManager::InitMMIO(Core::System& system)
+   }
+ }
+ 
++#ifdef __EMSCRIPTEN__
++namespace
++{
++// GameCube RAM views at addresses fixed when the core is linked (patch 0106),
++// instead of MemArena views. Under Emscripten a MemArena view is a MEMFS
++// mmap: a second, JS-side copy of the whole segment (64 MiB here), and an
++// address taken by memalign on the main thread, where it depends on what
++// other threads allocated at boot. Code generated for one address (block JIT
++// cache, regions) then missed on the next launch. In .bss: zero at
++// instantiation, the same address on every launch, no copy.
++alignas(65536) u8 s_static_ram[0x02000000];
++alignas(65536) u8 s_static_l1_cache[0x00040000];
++alignas(65536) u8 s_static_fake_vmem[0x02000000];
++// Zero until a boot used them: the first boot's Clear() would only touch
++// (and dirty) 64 MiB of zeroes.
++bool s_static_views_used = false;
++
++// The static array for a GameCube region of this size, or null.
++u8* StaticView(u8** out_pointer, u8* const* ram, u8* const* l1, u8* const* fake_vmem, u32 size)
++{
++  if (out_pointer == ram && size == sizeof(s_static_ram))
++    return s_static_ram;
++  if (out_pointer == l1 && size == sizeof(s_static_l1_cache))
++    return s_static_l1_cache;
++  if (out_pointer == fake_vmem && size == sizeof(s_static_fake_vmem))
++    return s_static_fake_vmem;
++  return nullptr;
++}
++}  // namespace
++#endif
++
+ void MemoryManager::Init()
+ {
+   const auto get_mem1_size = [] {
+@@ -135,7 +166,23 @@ void MemoryManager::Init()
+     region.active = true;
+     mem_size += region.size;
+   }
+-  m_arena.GrabSHMSegment(mem_size, "dolphin-emu");
++#ifdef __EMSCRIPTEN__
++  // GameCube with the retail RAM size: the static views (patch 0106). Wii,
++  // or a RAM size override, keep MemArena.
++  m_static_views = !wii;
++  for (const PhysicalMemoryRegion& region : m_physical_regions)
++  {
++    if (region.active &&
++        !StaticView(region.out_pointer, &m_ram, &m_l1_cache, &m_fake_vmem, region.size))
++    {
++      m_static_views = false;
++    }
++  }
++#else
++  m_static_views = false;
++#endif
++  if (!m_static_views)
++    m_arena.GrabSHMSegment(mem_size, "dolphin-emu");
+ 
+   m_physical_page_mappings.fill(nullptr);
+ 
+@@ -145,7 +192,13 @@ void MemoryManager::Init()
+     if (!region.active)
+       continue;
+ 
+-    *region.out_pointer = (u8*)m_arena.CreateView(region.shm_position, region.size);
++#ifdef __EMSCRIPTEN__
++    if (m_static_views)
++      *region.out_pointer =
++          StaticView(region.out_pointer, &m_ram, &m_l1_cache, &m_fake_vmem, region.size);
++    else
++#endif
++      *region.out_pointer = (u8*)m_arena.CreateView(region.shm_position, region.size);
+ 
+     if (!*region.out_pointer)
+     {
+@@ -165,7 +218,15 @@ void MemoryManager::Init()
+   m_physical_page_mappings_base = reinterpret_cast<u8*>(m_physical_page_mappings.data());
+   m_logical_page_mappings_base = reinterpret_cast<u8*>(m_logical_page_mappings.data());
+ 
++#ifdef __EMSCRIPTEN__
++  const bool already_zero = m_static_views && !s_static_views_used;
++  if (m_static_views)
++    s_static_views_used = true;
++  if (!already_zero)
++    Clear();
++#else
+   Clear();
++#endif
+ 
+   INFO_LOG_FMT(MEMMAP, "Memory system initialized. RAM at {}", fmt::ptr(m_ram));
+   m_is_initialized = true;
+@@ -551,10 +612,13 @@ void MemoryManager::Shutdown()
+     if (!region.active)
+       continue;
+ 
+-    m_arena.ReleaseView(*region.out_pointer, region.size);
++    if (!m_static_views)
++      m_arena.ReleaseView(*region.out_pointer, region.size);
+     *region.out_pointer = nullptr;
+   }
+-  m_arena.ReleaseSHMSegment();
++  if (!m_static_views)
++    m_arena.ReleaseSHMSegment();
++  m_static_views = false;
+   m_mmio_mapping.reset();
+   INFO_LOG_FMT(MEMMAP, "Memory system shut down.");
+ }
+diff --git a/Source/Core/Core/HW/Memmap.h b/Source/Core/Core/HW/Memmap.h
+index baa910cc70..1817564872 100644
+--- a/Source/Core/Core/HW/Memmap.h
++++ b/Source/Core/Core/HW/Memmap.h
+@@ -217,6 +217,9 @@ private:
+   // STATE_TO_SAVE
+   // Save the Init(), Shutdown() state
+   bool m_is_initialized = false;
++  // Web build (patch 0106): the GameCube views are static arrays, not MemArena
++  // views (Memmap.cpp); nothing to release then.
++  bool m_static_views = false;
+   // END STATE_TO_SAVE
+ 
+   // MMIO mapping object.

@@ -1,0 +1,172 @@
+diff --git a/Source/Core/AudioCommon/Mixer.cpp b/Source/Core/AudioCommon/Mixer.cpp
+index 1229d8f..d53d698 100644
+--- a/Source/Core/AudioCommon/Mixer.cpp
++++ b/Source/Core/AudioCommon/Mixer.cpp
+@@ -17,6 +17,9 @@
+ #include "Core/Config/MainSettings.h"
+ #include "Core/Core.h"
+ #include "Core/System.h"
++#ifdef __EMSCRIPTEN__
++#include "Core/WasmThrottleRate.h"
++#endif
+ 
+ static u32 DPL2QualityToFrameBlockSize(AudioCommon::DPL2Quality quality)
+ {
+@@ -73,6 +76,14 @@ void Mixer::MixerFifo::Mix(s16* samples, std::size_t num_samples)
+   const double emulation_speed = m_mixer->m_config_emulation_speed;
+   if (!m_mixer->m_config_audio_preserve_pitch && 0 < emulation_speed && emulation_speed != 1.0)
+     in_sample_rate *= emulation_speed;
++#ifdef __EMSCRIPTEN__
++  // Patch 0212: the throttle's rate trim (Core/WasmThrottleRate.h) the CPU
++  // thread applied, followed here: the samples come that much faster, they
++  // are consumed that much faster (else the queue gains ~32 a second at
++  // +1000 ppm and overflows into a skip every ~20 s).
++  in_sample_rate *= DolphinWeb::ThrottleRate::Factor(
++      DolphinWeb::ThrottleRate::g_applied_ppm.load(std::memory_order_relaxed));
++#endif
+ 
+   const double base = static_cast<double>(1 << GRANULE_FRAC_BITS);
+   const u32 index_jump = std::lround(base * in_sample_rate / out_sample_rate);
+@@ -539,6 +550,12 @@ bool Mixer::MixerFifo::Dequeue(Granule* granule)
+   // Checks to see if the queue has gotten too long.
+   if (granule_queue_size < ((head - tail) & GRANULE_QUEUE_MASK))
+   {
++#ifdef __EMSCRIPTEN__
++    // the game's own FIFOs only: the others (Wii Remote speaker, portal, GBA)
++    // are dequeued while never fed
++    if (this == &m_mixer->m_dma_mixer || this == &m_mixer->m_streaming_mixer)
++      DolphinWeb::ThrottleRate::g_audio_overflow_skips.fetch_add(1, std::memory_order_relaxed);
++#endif
+     // Jump the playhead to half the queue size behind the head.
+     const std::size_t gap = (granule_queue_size >> 1) + 1;
+     tail = (head - gap) & GRANULE_QUEUE_MASK;
+@@ -552,6 +569,10 @@ bool Mixer::MixerFifo::Dequeue(Granule* granule)
+     const bool is_running = Core::GetState(Core::System::GetInstance()) == Core::State::Running;
+     if (m_mixer->m_config_fill_audio_gaps && is_running)
+     {
++#ifdef __EMSCRIPTEN__
++      if (this == &m_mixer->m_dma_mixer || this == &m_mixer->m_streaming_mixer)
++        DolphinWeb::ThrottleRate::g_audio_underrun_fills.fetch_add(1, std::memory_order_relaxed);
++#endif
+       // Jump the playhead to half the queue size behind the head.
+       // This provides smoother audio playback than suddenly stopping.
+       const std::size_t gap = std::max<std::size_t>(2, granule_queue_size >> 1) - 1;
+diff --git a/Source/Core/Core/CoreTiming.cpp b/Source/Core/Core/CoreTiming.cpp
+index 6b6c998..d5d5c25 100644
+--- a/Source/Core/Core/CoreTiming.cpp
++++ b/Source/Core/Core/CoreTiming.cpp
+@@ -25,6 +25,7 @@
+ #ifdef __EMSCRIPTEN__
+ #include "Core/WasmHeadroom.h"
+ #include "Core/WasmPresentCadence.h"
++#include "Core/WasmThrottleRate.h"
+ #endif
+ #include "Core/HW/Memmap.h"
+ #include "Core/HW/ProcessorInterface.h"
+@@ -163,6 +164,27 @@ extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_ThrottleSleepCascade()
+          (DolphinWeb::g_sleep_spin_us.load(std::memory_order_relaxed) << 16);
+ }
+ 
++// Patch 0212 (Core/WasmThrottleRate.h): the requested trim, bounded.
++extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_SetThrottleRatePpm(int ppm)
++{
++  namespace TR = DolphinWeb::ThrottleRate;
++  TR::g_requested_ppm.store(std::clamp(ppm, -TR::MAX_PPM, TR::MAX_PPM), std::memory_order_relaxed);
++}
++
++// The trim the throttle runs with now (applied by the CPU thread), in ppm.
++extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_ThrottleRatePpm()
++{
++  return DolphinWeb::ThrottleRate::g_applied_ppm.load(std::memory_order_relaxed);
++}
++
++// The mixer's queue events since boot: 0 overflow skips, 1 underrun fills.
++extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_AudioQueueEvents(int which)
++{
++  namespace TR = DolphinWeb::ThrottleRate;
++  return (which == 0 ? TR::g_audio_overflow_skips : TR::g_audio_underrun_fills)
++      .load(std::memory_order_relaxed);
++}
++
+ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_SetDupXfbRearmsThrottle(int on)
+ {
+   DolphinWeb::g_dup_xfb_rearms_throttle.store(on != 0, std::memory_order_relaxed);
+@@ -779,6 +801,15 @@ void CoreTimingManager::Throttle(const s64 target_cycle)
+     return;
+   }
+ 
++#ifdef __EMSCRIPTEN__
++  // Patch 0212: a new trim requested since the last Throttle, applied here.
++  if (DolphinWeb::ThrottleRate::g_requested_ppm.load(std::memory_order_relaxed) !=
++      DolphinWeb::ThrottleRate::g_applied_ppm.load(std::memory_order_relaxed))
++  {
++    UpdateSpeedLimit(target_cycle, m_emulation_speed);
++  }
++#endif
++
+   // Push throttle reference values forward by exact seconds.
+   // This avoids drifting from cumulative rounding errors.
+   {
+@@ -819,8 +850,17 @@ void CoreTimingManager::UpdateSpeedLimit(s64 cycle, double new_speed)
+ {
+   m_emulation_speed = new_speed;
+ 
++#ifdef __EMSCRIPTEN__
++  // Patch 0212: the throttle's rate trim on top of the speed (1.0 at 0 ppm).
++  const int rate_ppm = DolphinWeb::ThrottleRate::g_requested_ppm.load(std::memory_order_relaxed);
++  DolphinWeb::ThrottleRate::g_applied_ppm.store(rate_ppm, std::memory_order_relaxed);
++  const u32 new_clock_per_sec =
++      std::lround(m_system.GetSystemTimers().GetTicksPerSecond() * new_speed *
++                  DolphinWeb::ThrottleRate::Factor(rate_ppm));
++#else
+   const u32 new_clock_per_sec =
+       std::lround(m_system.GetSystemTimers().GetTicksPerSecond() * new_speed);
++#endif
+ 
+   const bool was_limited = m_throttle_adj_clock_per_sec != 0;
+   if (was_limited)
+diff --git a/Source/Core/Core/WasmThrottleRate.h b/Source/Core/Core/WasmThrottleRate.h
+new file mode 100644
+index 0000000..f864f86
+--- /dev/null
++++ b/Source/Core/Core/WasmThrottleRate.h
+@@ -0,0 +1,39 @@
++// Copyright 2026 wasm-dolphin contributors
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++// Patch 0212 (?vilock=1, src/wgpu-vi-phase-lock.js): the throttle's rate
++// trimmed by up to +/-2000 ppm of the configured speed, so the emulated VI can
++// be held in phase with the screen's refresh (59.94 on 60 Hz: +1001 ppm).
++// The worker writes the requested trim; the CPU thread applies it at its next
++// Throttle through UpdateSpeedLimit (a rebase at the current cycle, no jump)
++// and publishes the applied value, which the mixer's resampler follows so the
++// audio queue does not drift (the sound is +1.7 cents at +1000 ppm). The
++// emulated time, the configured speed and Config::MAIN_EMULATION_SPEED are
++// untouched. Plain values read where they are used, nothing published with
++// them: relaxed is enough. At 0 ppm the factor is exactly 1.0.
++// Header-only (C++17 inline variables): one definition for CoreTiming.cpp and
++// Mixer.cpp.
++
++#pragma once
++
++#include <atomic>
++#include <cstdint>
++
++namespace DolphinWeb::ThrottleRate
++{
++constexpr int MAX_PPM = 2000;
++inline std::atomic<int> g_requested_ppm{0};
++inline std::atomic<int> g_applied_ppm{0};
++// The mixer's granule queues, the DMA and streaming FIFOs only (the game's
++// sound; the others are dequeued while never fed): a jump of the playhead back
++// to half the queue because it overflowed (an audible skip), and a gap filled
++// because it ran empty, since boot. A FIFO's first fill can count one
++// overflow at boot: read them as deltas.
++inline std::atomic<uint32_t> g_audio_overflow_skips{0};
++inline std::atomic<uint32_t> g_audio_underrun_fills{0};
++
++inline double Factor(int ppm)
++{
++  return ppm == 0 ? 1.0 : 1.0 + static_cast<double>(ppm) * 1e-6;
++}
++}  // namespace DolphinWeb::ThrottleRate

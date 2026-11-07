@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
+import { DEFAULT_UPSTREAM_CORE_SHA256, requestedUpstreamCoreBuild } from "../src/default-core.js";
 import {
-  DEFAULT_UPSTREAM_CORE_SHA256,
   DEFAULT_UPSTREAM_CORE_URL,
   buildWorkerErrorReply,
   isStrictOneWayWorkerRequest,
@@ -11,17 +11,16 @@ import {
   requestedLegacyOneWayAck,
   requestedSoftwareTevHotCaseMode,
   requestedXfbFastPaths,
-  requestedUpstreamCoreBuild,
   sanitizeDiscFileName,
   sha256Hex,
   workerFsDiscPath
 } from "../src/upstream-worker-protocol.js";
 
 test("upstream worker sanitizes disc names for WORKERFS paths", () => {
-  assert.equal(sanitizeDiscFileName("Super Smash Bros. Melee.iso"), "Super Smash Bros. Melee.iso");
-  assert.equal(sanitizeDiscFileName("../GALE01.gcm"), ".._GALE01.gcm");
+  assert.equal(sanitizeDiscFileName("Smoke Test Disc.iso"), "Smoke Test Disc.iso");
+  assert.equal(sanitizeDiscFileName("../GXXE01.gcm"), ".._GXXE01.gcm");
   assert.equal(sanitizeDiscFileName(""), "disc.iso");
-  assert.equal(workerFsDiscPath("GALE01.gcm"), "/workerfs/GALE01.gcm");
+  assert.equal(workerFsDiscPath("GXXE01.gcm"), "/workerfs/GXXE01.gcm");
 });
 
 test("upstream core selection is content-addressed and defaults to the pinned baseline", () => {

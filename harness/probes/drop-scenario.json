@@ -1,0 +1,22 @@
+{
+ "about": "Boot to a race of the local commercial disc, on the controller's defaults (harness/probes/drop-meter.mjs). Guest seconds since boot; Enter = Start, KeyX = A. The cold visit answers the prompt that creates the save file.",
+ "steps": [
+  { "at": 0, "mark": "boot", "label": "boot" },
+  { "at": 0.5, "click": [400, 500] },
+  { "at": 25, "tap": "Enter", "label": "title" },
+  { "at": 28, "tap": "KeyX" },
+  { "at": 30, "tap": "KeyX", "only": "cold" },
+  { "at": 32, "tap": "KeyX", "only": "cold" },
+  { "at": 34, "tap": "KeyX", "label": "menus" },
+  { "at": 36, "tap": "KeyX" },
+  { "at": 38, "tap": "KeyX" },
+  { "at": 40, "tap": "KeyX" },
+  { "at": 42, "tap": "KeyX" },
+  { "at": 44, "tap": "KeyX" },
+  { "at": 46, "tap": "KeyX" },
+  { "at": 48, "tap": "KeyX" },
+  { "at": 50, "tap": "KeyX", "label": "race-load" },
+  { "at": 57, "down": "KeyX", "label": "race" }
+ ],
+ "end": 90
+}

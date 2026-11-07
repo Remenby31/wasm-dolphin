@@ -11,7 +11,7 @@ PowerPC commonly emits `adde rD, rA, rB` (or `addic`, `subfic`, etc.) with
 `rD == rA` (or `rB`). After the result store, the re-read of `RA`/`RB`
 picks up the post-store value instead of the original, producing a wrong
 carry bit. The corrupted CA then cascades through subsequent
-`adde`/`subfe`/`addze` chains and breaks Melee's 3D rendering pipeline at
+`adde`/`subfe`/`addze` chains and breaks the game's 3D rendering pipeline at
 the moment the JIT compiles its first hot block (~frame 700, JIT engagement
 threshold). Symptoms in the broken state: `prim:1540 draw:250 verts:0 rast:0`
 — draw calls fire but vertex/raster state is corrupt, screen freezes at

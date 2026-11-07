@@ -13,7 +13,7 @@
 // which is why the earlier A/B tables were misleading.
 //
 // Usage:
-//   node tools/perf-ab.mjs --filter "Metroid Prime (USA)" \
+//   node tools/perf-ab.mjs --filter "<title substring>" \
 //     --a "" --b "DISABLE=0x800000" --pairs 5 [--duration 40]
 //
 // --a and --b are space-separated ENV assignments applied to boot-matrix. The
@@ -77,8 +77,8 @@ function parseArgs(argv) {
 const args = parseArgs(process.argv.slice(2));
 
 // Git Bash (MSYS) rewrites a leading-slash argument into a Windows path before
-// node ever sees it, so `--save-state /__mkdd-race.sav` silently arrived as
-// "C:/Program Files/Git/__mkdd-race.sav". The page then fetched that string and
+// node ever sees it, so `--save-state /__race.sav` silently arrived as
+// "C:/Program Files/Git/__race.sav". The page then fetched that string and
 // reported "Failed to fetch", which looked like a server or COEP problem and
 // was neither. Accept a bare name and build the URL here.
 let saveStateUrl = "";
@@ -86,7 +86,7 @@ if (args.saveState) {
   if (/^[A-Za-z]:[\/]/.test(args.saveState)) {
     throw new Error(
       `--save-state looks like a local path (${args.saveState}). Pass just the ` +
-      `served name, e.g. --save-state __mkdd-race.sav (no leading slash: Git ` +
+      `served name, e.g. --save-state __race.sav (no leading slash: Git ` +
       `Bash rewrites it into a Windows path).`
     );
   }

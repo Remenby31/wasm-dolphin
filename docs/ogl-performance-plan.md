@@ -52,7 +52,7 @@ Three independent walls. Each needs its own day. They are NOT a single bug.
 
 ### Wall 1 — JIT mis-emits opcodes that corrupt 3D rendering
 - With `wasmjit=1` (or `forcejit=1` on OGL), starting at frame ~700 (JIT
-  engagement threshold), Melee's 3D rendering paths break. Symptoms vary
+  engagement threshold), the game's 3D rendering paths break. Symptoms vary
   by mode:
   - Software: gameSpeed crashes to 14%, pixel-write opcodes mis-emit
     (dotted "skip every other pixel" pattern on title screen)
@@ -61,8 +61,8 @@ Three independent walls. Each needs its own day. They are NOT a single bug.
     distinct canvas hashes captured.
 - We landed two partial fixes during the bisection (both reverted because
   they regressed):
-  - `FastMeleeIdlePollLoop` partial-state-commit on `guard_failed=true`
-  - `MELEE_IDLE_POLL_LOOP_MAX_BATCH=256` coalescing CoreTiming events
+  - idle-poll fast loop partial-state-commit on `guard_failed=true`
+  - an idle-poll-loop batch of 256 coalescing CoreTiming events
 - One non-reverted fix: bumped JIT block emitter's WASM memory page count
   16384→24576 to match the bumped 1.5 GiB heap. That killed a `LinkError`
   but didn't fix the rendering-corruption layer.
@@ -101,9 +101,9 @@ Three independent walls. Each needs its own day. They are NOT a single bug.
 Goal: stop speculating, start measuring.
 
 1. **Per-helper disable URL flags**. ✅ Implemented as `?disable=<category,...>`.
-   Categories: `meleeloop`, `meleecall`, `osinterrupt`, `dcbxloop`, `fastbranch`,
+   Categories: `idlepollloop`, `statuscall`, `osinterrupt`, `dcbxloop`, `fastbranch`,
    `fastfp`, `fastinteger`, `fastsystem`, `wasmblock`. Also accepts hex/decimal
-   raw mask and aliases `fastinputpoll`→meleecall, `fastmem`→fastsystem,
+   raw mask and aliases `fastinputpoll`→statuscall, `fastmem`→fastsystem,
    `all`→0x1ff. URL→adapter→worker→`_SetCachedInterpreterDisableMask` atomic;
    gates live in every `TryWrite*` in `CachedInterpreter.cpp`. Validator env
    var: `DISABLE=...`. **No rebuild needed between bisection runs.**
@@ -124,8 +124,8 @@ Goal: stop speculating, start measuring.
 - Regression sweep `VIDEO=software/WASMJIT=0/FASTSW=1` (120s): 96 distinct
   canvas hashes, avgGameSpeed 100.16%, no regression vs the documented
   playable baseline.
-- Wiring smoke `DISABLE=meleeloop` (60s): 53 distinct hashes, avgGameSpeed
-  99.22%, helper stats no longer report `meleeloop attempts:N` (was 8 in
+- Wiring smoke `DISABLE=idlepollloop` (60s): 53 distinct hashes, avgGameSpeed
+  99.22%, helper stats no longer report idle-loop `attempts:N` (was 8 in
   baseline) → gate is firing.
 
 **Open Day-2 polish item:** Playwright validator's `page.on("console")` only
@@ -260,7 +260,7 @@ Goal: if Day 3 hits a Chrome/Emscripten wall, make readback 2× faster.
   (BindBackbuffer → RenderXFBToScreen → PresentBackbuffer)
 - `Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp` —
   WASM JIT block compiler; all `TryWrite*` / `TryEmit*` fast-paths;
-  `FastMeleeIdlePollLoop`, `FastMeleeInputStatusInline`, etc.
+  the idle-poll fast loop, the inline input-status helper, etc.
 - `Source/Core/Core/CMakeLists.txt` — `target_link_options` for
   `dolphin_web_core` (memory size, exports list)
 
@@ -312,7 +312,7 @@ Goal: if Day 3 hits a Chrome/Emscripten wall, make readback 2× faster.
   progress.
 - Don't increase `INITIAL_MEMORY` above 2 GiB — Firefox has a per-worker
   cap there.
-- Don't bisect via `MELEE_IDLE_POLL_LOOP_MAX_BATCH` — already tried, too
+- Don't bisect via the idle-poll-loop batch size — already tried, too
   aggressive at small values, broke gameSpeed.
 - Don't commit the 14K-line full `git diff HEAD` from `vendor/dolphin`
   as a patch — already tried, useless as a versioned artifact. The

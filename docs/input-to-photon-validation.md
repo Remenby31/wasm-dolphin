@@ -4,9 +4,8 @@
 photodiode, oscilloscope, or high-speed camera. It does not make the browser
 capable of timestamping a physical photon.
 
-The current dirty-run browser-boundary evidence is packaged in
-[Melee input-marker and GPU-completion evidence](perf-results/melee-input-gpu-latency-2026-07-10.md).
-It validates the telemetry path but does not replace external-sensor
+The dirty-run browser-boundary evidence (input markers and GPU completion)
+validates the telemetry path but does not replace external-sensor
 input-to-photon qualification.
 
 The optical marker has three deliberate properties:

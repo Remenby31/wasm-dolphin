@@ -21,6 +21,8 @@ import { readFileSync } from "node:fs";
 import { orderedRegions } from "../../src/aot-plan.js";
 import { REGION_HEAP_NAMES, assembleRegion, groupRegions } from "../../src/aot-region-module.js";
 import { PRODUCTION_DISABLE_MASK, makeRng, randomProgram, randomState } from "./jit-oracle.mjs";
+import { checkBranchHintSection } from "./branch-hints.mjs";
+
 
 // Signatures of the block module's import types (BuildWasmCachedInterpreterBlock).
 const T1 = { params: ["i32", "i32"], results: ["i32"] };
@@ -30,8 +32,7 @@ const FMA = { params: ["f64", "f64", "f64", "i32"], results: ["f64"] };
 export const HELPER_SIGNATURES = {
   read_u32: T1, write_u32: T2, read_u8: T1, write_u8: T2, read_u16: T1, write_u16: T2,
   lfs: T3, stfs: T3, lfd: T3, fmr: T3, system: T3, fp: T3, fctiwz: T3, interpret: T3,
-  fastcheck_gpfifo: T2, fast_os_interrupt_call: T3, fast_melee_input_status_call: T1,
-  fast_melee_status_call: T3, fast_melee_service_poll_call: T3, fma: FMA
+  fastcheck_gpfifo: T2, fma: FMA
 };
 
 export const STOP = 0x80002000; // return address of the call under test: no code there
@@ -104,6 +105,7 @@ export async function loadAotCore(coreDir = new URL("../../cores/dolphin/", impo
         if (kind === 0) return { offset, kind: "import", name: helperNames[value] };
         if (kind === 1) return { offset, kind: "jump", targetPc: value };
         if (kind === 3) return { offset, kind: "heap", name: REGION_HEAP_NAMES[value & 1], form: value & 2 ? "offset" : "const" };
+        if (kind === 5) return { offset, kind: "call", targetPc: value }; // a guest call as a wasm call (0142)
         if (kind === 4) return { offset, kind: "hint", likely: value === 1 }; // branch hint (0131)
         return { offset, kind: "dispatch" };
       });
@@ -254,7 +256,9 @@ const diffState = (a, b) => {
 // Returns { trap } when the interpreter cannot run it on the test CPU,
 // { error } when a region refused its own entry, else { equal, got,
 // reference, difference }.
-export function compareCall(core, regionAt, start) {
+// strictCycles: compare downcount also when the run ended in an exception
+// (0183: the exception a mtmsr lets in is taken inside the region).
+export function compareCall(core, regionAt, start, { strictCycles = false } = {}) {
   const run = (useRegions, stopAt) => {
     let regionRuns = 0, regionCycles = 0, interpCycles = 0;
     const done = (end) => ({ end, regionRuns, regionCycles, interpCycles });
@@ -263,7 +267,9 @@ export function compareCall(core, regionAt, start) {
       if (pc === STOP) return done("stop");
       const before = core.downcount();
       if (before <= stopAt) return done("budget");
-      const handle = useRegions ? regionAt.get(pc) : undefined;
+      // TryRunRegion enters no region in real mode (MSR.IR or DR clear): the
+      // block path runs there (0075), so a mtmsr that clears them is left to it.
+      const handle = useRegions && (core.state()[37] & 0x30) === 0x30 ? regionAt.get(pc) : undefined;
       if (handle === undefined) {
         const raised = core.interpretOne();
         interpCycles += before - core.downcount();
@@ -290,6 +296,18 @@ export function compareCall(core, regionAt, start) {
           const raised = core.interpretOne();
           interpCycles += before - core.downcount();
           if (raised) return done("exception");
+          continue;
+        }
+        // 0157: with MSR.FP clear a fragment leaves (1) at the start of a
+        // block holding an FPU op, the frame written back: the block path
+        // raises FP unavailable there. At its entry it ran nothing.
+        if ((core.state()[37] & 0x2000) === 0) {
+          if (core.pc() === pc && core.downcount() === before) {
+            regionRuns -= 1;
+            const raised = core.interpretOne();
+            interpCycles += before - core.downcount();
+            if (raised) return done("exception");
+          }
           continue;
         }
         throw new Error(`region refused its own entry ${pc.toString(16)}`);
@@ -332,7 +350,7 @@ export function compareCall(core, regionAt, start) {
   if (Buffer.compare(ram, expectedRam) !== 0) ramAt = ram.findIndex((b, i) => b !== expectedRam[i]);
   const stateDiff = diffState(core.state(), state);
   // Exits through an exception leave downcount to the CPU loop.
-  const cyclesDiffer = got.end !== "exception" && core.downcount() !== downcount;
+  const cyclesDiffer = (strictCycles || got.end !== "exception") && core.downcount() !== downcount;
   const equal = got.end === reference.end && !stateDiff && ramAt < 0 && !cyclesDiffer;
   return { equal, got, reference, difference: equal ? null : { end: got.end, reference: reference.end, state: stateDiff,
     ram: ramAt < 0 ? null : (0x80000000 + ramAt) >>> 0, downcount: cyclesDiffer ? { interp: core.downcount(), region: downcount } : null } };
@@ -395,10 +413,10 @@ export function bigEndian(words) {
 // One program at ORACLE_CODE, translated as a region while `translateState`
 // is loaded (its MSR decides which FPU ops the translator takes), then run
 // from `state` by the interpreter alone and by the region (compareCall).
-export function compareRegionProgram(core, words, state, { translateState = state, mask = PRODUCTION_DISABLE_MASK, budget = 400000 } = {}) {
+export function compareRegionProgram(core, words, state, { translateState = state, mask = PRODUCTION_DISABLE_MASK, budget = 400000, ranges = [[ORACLE_CODE, ORACLE_CODE + 4 * words.length]] } = {}) {
   core.load(ORACLE_CODE, bigEndian(words));
   core.loadState(translateState, ORACLE_CODE);
-  const fragment = core.translate(ORACLE_CODE, { mask, ranges: [[ORACLE_CODE, ORACLE_CODE + 4 * words.length]] });
+  const fragment = core.translate(ORACLE_CODE, { mask, ranges });
   if (!fragment) return { translated: false };
   const { bytes } = assembleRegion([fragment], { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages });
   const handle = core.compile(bytes);
@@ -413,11 +431,11 @@ export function compareRegionProgram(core, words, state, { translateState = stat
   return { translated: true, fragment, ...result };
 }
 
-export function runOracleProgramsAsRegions(core, { seed, count, length, mask }) {
+export function runOracleProgramsAsRegions(core, { seed, count, length, mask, names = null }) {
   const r = makeRng(seed);
-  const tally = { programs: 0, translated: 0, compared: 0, equal: 0, trap: 0, ends: {}, regionRuns: 0, hintsDropped: 0, mismatches: [] };
+  const tally = { programs: 0, translated: 0, compared: 0, equal: 0, trap: 0, ends: {}, regionRuns: 0, hintsDropped: 0, hintsChecked: 0, hintSectionErrors: [], mismatches: [] };
   for (let n = 0; n < count; n++) {
-    const words = randomProgram(r, length);
+    const words = randomProgram(r, length, { names });
     const state = randomState(r);
     const smallBudget = 1 + r.below(60);
     tally.programs += 1;
@@ -427,6 +445,10 @@ export function runOracleProgramsAsRegions(core, { seed, count, length, mask }) 
     tally.translated += 1;
     const { bytes, hintsDropped } = assembleRegion([fragment], { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages });
     tally.hintsDropped += hintsDropped ?? 0; // 0131: a core hint off an `if`
+    // The branch_hint section as V8 reads it: any broken rule drops it all.
+    const hintCheck = checkBranchHintSection(bytes);
+    tally.hintSectionErrors.push(...hintCheck.errors.slice(0, 2));
+    tally.hintsChecked += hintCheck.hints;
     const handle = core.compile(bytes);
     if (handle <= 0) throw new Error(`core rejected a region module (${handle})`);
     const regionAt = new Map(fragment.entries.map((pc) => [pc >>> 0, handle]));

@@ -8,7 +8,7 @@
 //     --scene race|heavy --steps steps.json [--sec 90] [--plateau FROM-TO]
 //     [--config rec | --query "..."] [--runs 3]
 //     [--max-load L] [--load-wait 300] [--lock-wait 1800 | --no-lock] [--out dir]
-//     [--visits N [--counters [--counter-events frontend]]]
+//     [--visits N [--counters [--counter-events frontend]] [--region-chain]]
 //
 // The player's very first launch with the region recompiler: each run opens
 // a new, empty Chrome profile (no seed: aot-warm-launch needs a seeded one),
@@ -38,6 +38,12 @@
 // last region was installed (host ms from t0 and guest seconds from boot).
 // --counters adds the emulated CPU thread's host instructions and cycles per
 // guest cycle over the scene's window (lib/perf-counters.mjs, Linux).
+// --region-chain turns the region counters on (counters only, no host-time
+// sampling) for the same window and records the region chaining (patch
+// 0102: chained, outOfTime, noRegion, refused, the top exit targets): how
+// region-to-region transitions go once #167 splits hot and cold. The
+// counters cost the same on both sides of a pair, not nothing: compare a
+// --region-chain run only with another.
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -46,8 +52,8 @@ import { parseArgs } from "node:util";
 
 import { bootIso, ensureServer, launchChrome, readTimeline, REPO_ROOT, workerRequest } from "../lib/browser.mjs";
 import { calmLock, loadGaveUp } from "../lib/env.mjs";
-import { decodeRegionStats } from "../lib/jit-region-stats.mjs";
-import { checkPerfAccess, counterEvents, cyclesPerGuestCycle, instructionsPerGuestCycle, perfCounters } from "../lib/perf-counters.mjs";
+import { decodeRegionStats, regionShares } from "../lib/jit-region-stats.mjs";
+import { checkPerfAccess, counterEvents, counterSanity, cyclesPerGuestCycle, instructionsPerGuestCycle, perfCounters } from "../lib/perf-counters.mjs";
 import { consistentHeadroomRead, decodeHeadroomStats } from "../lib/headroom.mjs";
 import { PRESETS, SCENE_NATIVE_FRAMES_PER_VI, VI_PER_SECOND } from "../lib/matrix.mjs";
 import { claim } from "../lib/ownership.mjs";
@@ -79,7 +85,25 @@ async function readXfb(page, reset = -1) {
   const r = await workerRequest(page, "validationReadHeadroomStats", { reset }, 5000).catch((e) => ({ error: String(e.message || e) }));
   if (r?.error || !r?.bytes) return { error: r?.error ?? "no reply" };
   const s = consistentHeadroomRead(decodeHeadroomStats(r.bytes), decodeHeadroomStats(r.again));
-  return s.error ? s : { xfb: s.xfbCopies, on: s.on };
+  return s.error ? s : { xfb: s.xfbCopies, on: s.on, windowUs: s.windowUs };
+}
+
+// Zero the XFB counter and wait until the core applied it (at its next
+// Throttle, once per VI): the window went back under its value before the
+// reset. "on" proves nothing since the engine keeps these counters on in
+// product (occupancy stats).
+export async function resetXfb(read, { timeoutMs = 2000, stepMs = 50, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
+  const before = await read(-1);
+  if (before.error) return before;
+  const r = await read(0);
+  if (r.error) return r;
+  for (let waited = 0; waited <= timeoutMs; waited += stepMs) {
+    const x = await read(-1);
+    if (x.error) return x;
+    if (x.on && (!before.on || x.windowUs < before.windowUs)) return { applied: true };
+    await sleep(stepMs);
+  }
+  return { error: `XFB counter reset not applied within ${timeoutMs} ms` };
 }
 
 // One visit's region facts from what the drain read (pure: tested). events:
@@ -100,6 +124,14 @@ export function visitRegions(events, regions, { t0, ticksAtBoot, ticksPerSecond 
     lastInstallMs: last ? last.t - t0 : null,
     lastInstallGuestSec: last && Number.isFinite(last.ticks) && ticksPerSecond > 0 ? round((last.ticks - ticksAtBoot) / ticksPerSecond, 2) : null
   };
+}
+
+// The region chaining counters of a stats reply, or why there are none.
+export function regionChainOf(reply) {
+  if (!reply || reply.error) return { error: reply?.error ?? "no reply" };
+  const c = reply.regionChain;
+  if (!c) return { error: "engine without region chaining counters (0102)" };
+  return { enabled: c.enabled, chained: c.chained, outOfTime: c.outOfTime, noRegion: c.noRegion, refused: c.refused, exitTargets: c.exitTargets ?? [], breakEntries: c.breakEntries ?? [] };
 }
 
 // The local profile's size on disk after a visit, or null when there is none.
@@ -123,7 +155,7 @@ async function measureRun(o, server, loadGate) {
       if (visit.regionFacts) visit.churn = churnOf(visit.regionFacts);
       visit.profileBytes = profileBytes(visit.profileFiles);
       record.visits.push(visit);
-      console.log(`[ramp] visit ${v}: ${visit.error ?? `profile ${visit.profileBytes ?? "NONE"} bytes, compiled ${visit.regionFacts?.compiled ?? "-"}, from cache ${visit.regionFacts?.fromCache ?? "-"}, installed ${visit.regionFacts?.installedAtEnd ?? "-"}, last install at ${visit.regionFacts?.lastInstallMs ?? "-"} ms, churn ${visit.churn ?? "-"}${visit.cyclesPerGuestCycle ? `, ${round(visit.cyclesPerGuestCycle, 3)} cycles per guest cycle` : ""}`}`);
+      console.log(`[ramp] visit ${v}: ${visit.error ?? `profile ${visit.profileBytes ?? "NONE"} bytes${visit.regionChain && !visit.regionChain.error ? `, chained ${visit.regionChain.chained}, noRegion ${visit.regionChain.noRegion}` : ""}, compiled ${visit.regionFacts?.compiled ?? "-"}, from cache ${visit.regionFacts?.fromCache ?? "-"}, installed ${visit.regionFacts?.installedAtEnd ?? "-"}, last install at ${visit.regionFacts?.lastInstallMs ?? "-"} ms, churn ${visit.churn ?? "-"}${visit.cyclesPerGuestCycle ? `, ${round(visit.cyclesPerGuestCycle, 3)} cycles per guest cycle` : ""}`}`);
       if (visit.error) break;
     }
     return record;
@@ -147,6 +179,8 @@ export function summarizeVisits(records, visits) {
       withoutProfile: rows.filter((x) => x.profileBytes == null).length, installedAtEnd: med((x) => x.regionFacts?.installedAtEnd),
       lastInstallMs: med((x) => x.regionFacts?.lastInstallMs), lastInstallGuestSec: med((x) => x.regionFacts?.lastInstallGuestSec),
       plateauSpeed: med((x) => x.ramp?.plateauSpeed),
+      regionCycleShare: med((x) => x.regionShares?.regionCycleShare), regionStops: med((x) => x.regionShares?.regionStops),
+      chained: med((x) => x.regionChain?.chained), noRegion: med((x) => x.regionChain?.noRegion), outOfTime: med((x) => x.regionChain?.outOfTime),
       instructionsPerGuestCycle: med((x) => x.instructionsPerGuestCycle), cyclesPerGuestCycle: med((x) => x.cyclesPerGuestCycle)
     });
   }
@@ -163,7 +197,7 @@ async function measureVisit(o, server, profileDir) {
     const t0 = Date.now();
     await bootIso(page, { url: `${server.base}?${o.query}`, iso: o.iso, timeoutMs: 120000 });
     record.bootMs = Date.now() - t0;
-    const xfbOn = await readXfb(page, 0);
+    const xfbOn = await resetXfb((reset) => readXfb(page, reset));
     record.xfbCounter = xfbOn.error ?? "on";
     const chunks = [], regions = [], loads = [], frames = [], aotEvents = [];
     const ticksNow = async () => Number((await workerRequest(page, "validationReadCoreProgress", {}, 5000).catch(() => null))?.coreTicks ?? NaN);
@@ -180,7 +214,7 @@ async function measureVisit(o, server, profileDir) {
         }
         if (!xfbOn.error) {
           const x = await readXfb(page);
-          if (!x.error && x.on) frames.push({ t: Date.now(), xfb: x.xfb });
+          if (!x.error) frames.push({ t: Date.now(), xfb: x.xfb });
         }
         loads.push(os.loadavg()[0]);
         await page.waitForTimeout(1000);
@@ -192,11 +226,22 @@ async function measureVisit(o, server, profileDir) {
     const session = { profileDir };
     if (o.counters) await o.counters("start", session);
     const sceneTicks = o.counters ? await ticksNow() : NaN;
+    // sampleEvery 0: counters on and reset, no host-time sampling.
+    const chainOn = o.regionChain ? await workerRequest(page, "validationReadJitRegionStats", { sampleEvery: 0 }, 10000).catch((e) => ({ error: String(e.message || e) })) : null;
     await page.waitForTimeout(o.sec * 1000);
     if (o.counters) {
       const c = await o.counters("end", session);
       const w = { counters: c, guestTicks: (await ticksNow()) - sceneTicks };
-      Object.assign(record, { counters: c, guestTicks: w.guestTicks, instructionsPerGuestCycle: instructionsPerGuestCycle(w), cyclesPerGuestCycle: cyclesPerGuestCycle(w) });
+      const why = counterSanity(w);
+      Object.assign(record, { counters: c, guestTicks: w.guestTicks, ...(why ? { countersRejected: why, instructionsPerGuestCycle: null, cyclesPerGuestCycle: null } : { instructionsPerGuestCycle: instructionsPerGuestCycle(w), cyclesPerGuestCycle: cyclesPerGuestCycle(w) }) });
+      if (why) console.warn(`[ramp] counters rejected, ${why}`);
+    }
+    if (chainOn) {
+      const reply = chainOn.error ? chainOn : await workerRequest(page, "validationReadJitRegionStats", {}, 10000).catch((e) => ({ error: String(e.message || e) }));
+      record.regionChain = regionChainOf(reply);
+      // The same window's region share of guest cycles (outside idle skip),
+      // calls, non-entry calls and stops; counters only, so no time shares.
+      record.regionShares = reply?.bytes && !reply.error ? regionShares(decodeRegionStats(reply.bytes)) : null;
     }
     draining = false;
     await drain;
@@ -242,7 +287,7 @@ async function main() {
       iso: { type: "string" }, scene: { type: "string" }, steps: { type: "string" }, sec: { type: "string", default: "90" }, plateau: { type: "string" },
       config: { type: "string", default: "rec" }, query: { type: "string" }, runs: { type: "string", default: "3" },
       "max-load": { type: "string" }, "load-wait": { type: "string", default: "300" }, "lock-wait": { type: "string", default: "1800" }, "calm-wait": { type: "string" }, "no-lock": { type: "boolean", default: false },
-      visits: { type: "string", default: "1" }, counters: { type: "boolean", default: false }, "counter-events": { type: "string" },
+      visits: { type: "string", default: "1" }, counters: { type: "boolean", default: false }, "counter-events": { type: "string" }, "region-chain": { type: "boolean", default: false },
       port: { type: "string", default: process.env.HARNESS_PORT }, out: { type: "string" }
     }
   });
@@ -262,7 +307,7 @@ async function main() {
     iso, steps, query: base.toString(), plateau, nativeFps: SCENE_NATIVE_FRAMES_PER_VI[scene.state].framesPerVi * VI_PER_SECOND, sec: num(values, "sec", { min: 10 }), runs: num(values, "runs", { min: 1, int: true }),
     maxLoad: values["max-load"] ? num(values, "max-load", { min: 0.1 }) : Math.max(2, os.cpus().length / 4),
     loadWait: num(values, "load-wait", { min: 0 }), port: num(values, "port", { min: 1, int: true }),
-    visits: num(values, "visits", { min: 1, int: true })
+    visits: num(values, "visits", { min: 1, int: true }), regionChain: values["region-chain"]
   };
   // The profile is written every minute: a shorter visit may leave none.
   if (o.visits > 1 && o.sec < 70) throw new Error(`--visits: --sec ${o.sec} is under 70 s (the profile is written every minute)`);
@@ -273,7 +318,7 @@ async function main() {
   // --no-lock: a plumbing check; kpi-report ignores it (locked: false).
   const lock = await calmLock({
     maxLoad: o.maxLoad, calmWait, log: (m) => log(`before the lock: ${m}`),
-    acquire: values["no-lock"] ? null : () => acquirePerfLock({ name: `harness first-launch-ramp (${REPO_ROOT})`, waitSec: lockWait, log })
+    acquire: values["no-lock"] ? null : () => acquirePerfLock({ requireMains: true, name: `harness first-launch-ramp (${REPO_ROOT})`, waitSec: lockWait, log })
   });
   const outDir = probeOutDir("first-launch-ramp", iso, values.out);
   const server = await ensureServer({ port: o.port, root: REPO_ROOT });

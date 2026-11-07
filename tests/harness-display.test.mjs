@@ -22,6 +22,8 @@ test("display: a steady 30 fps game is not judder; dropped pictures are counted"
   const s = displayStats(mergeTimeline([chunk(Array.from({ length: 121 }, (_, i) => (i % 2 ? 0 : 2)))]));
   assert.equal(s.supported, true);
   assert.equal(Math.round(s.vsyncMs * 10) / 10, 16.7);
+  // the BeginFrame cadence's spread, for a real screen's rAF (spark-run --headed)
+  assert.ok(s.vsyncP05 <= s.vsyncMs && s.vsyncMs <= s.vsyncP95);
   assert.equal(s.displayedPerSecond, 30.5);
   assert.equal(s.submittedPerSecond, 61);
   assert.equal(s.dropped, 61);

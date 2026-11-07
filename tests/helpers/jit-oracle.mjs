@@ -16,7 +16,9 @@
 
 import { readFileSync } from "node:fs";
 
-export const PRODUCTION_DISABLE_MASK = (1 << 17) | (1 << 21); // blockmerge, shortprefix off
+// blockmerge, shortprefix off; the enable bits 27 (0183), 16 (0189) and 18 (0187) on, as core-host sets them
+// by default (since #322 for 27; ?regionmtmsr=0, ?regionfragments=0 and ?regionchaincache=0 are the exceptions).
+export const PRODUCTION_DISABLE_MASK = (1 << 16) | (1 << 17) | (1 << 18) | (1 << 21) | (1 << 27);
 export const SHORT_PREFIX_MASK = 1 << 17; // lets a 2-op block (inst + blr) compile
 export const REGALLOC_OFF = 1 << 20;
 
@@ -46,6 +48,9 @@ export async function loadOracleCore(coreDir = new URL("../../cores/dolphin/", i
     setFprf: (on) => module._DolphinWeb_SetFprfForTest(on ? 1 : 0),
     // Patch 0129: the FMA emitter's relaxed_madd mode (returns the previous one).
     setFusedMadd: (on) => module._DolphinWeb_SetFusedMadd(on ? 1 : 0),
+    // Patch 0159: compile the oracle's blocks as if MSR.FP were set, run them
+    // with the input MSR.
+    compileWithFp: (on) => module._DolphinWeb_JitOracleCompileWithFpForTest(on ? 1 : 0),
     // Region modules (P4): pc, npc and downcount offsets in PowerPCState, version.
     stateLayout() {
       const ptr = module._malloc(16);

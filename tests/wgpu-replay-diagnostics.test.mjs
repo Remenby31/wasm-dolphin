@@ -24,7 +24,9 @@ import {
   requestedWgpuGeometryPack,
   requestedWgpuGeometryRange,
   requestedWgpuMappedStagingSlotCount,
+  defaultWgpuMappedStagingSlotCount,
   requestedWgpuUploadArenaMiB,
+  defaultWgpuUploadTransport,
   requestedWgpuUploadTransport,
   requestedWgpuMappedStageFast,
   requestedWgpuMappedStageTimingStride,
@@ -34,16 +36,41 @@ import {
   requestedWgpuUboMetrics,
   requestedWgpuUniformFast,
   selectAtomicReplayLimit,
-  summarizeWgpuReplayRange
+  summarizeWgpuReplayRange,
+  wgpuMappedStagingSlotCountOf,
+  wgpuMappedStagingSlotMibOf,
+  requestedWgpuMappedStagingSlotMib,
+  defaultWgpuMappedStagingSlotMib,
+  JSC_STAGING_SLOT_COUNT,
+  JSC_STAGING_SLOT_MIB
 } from "../src/wgpu-replay-diagnostics.js";
 
-test("mapped staging slot count is strict and defaults to three", () => {
+test("mapped staging slots: 4 by default under JavaScriptCore, 3 elsewhere; the parameter wins", () => {
+  assert.equal(defaultWgpuMappedStagingSlotCount("jsc"), JSC_STAGING_SLOT_COUNT);
+  assert.equal(defaultWgpuMappedStagingSlotCount("v8"), 3);
+  assert.equal(defaultWgpuMappedStagingSlotCount(undefined), 3);
+  assert.equal(requestedWgpuMappedStagingSlotCount("", 4), 4);
+  assert.equal(requestedWgpuMappedStagingSlotCount("?wgpustagingslots=3", 4), 3);
+  assert.equal(requestedWgpuMappedStagingSlotCount("?wgpustagingslots=6", 4), 6);
+  assert.equal(requestedWgpuMappedStagingSlotCount("?wgpustagingslots=junk", 4), 4);
+  assert.equal(requestedWgpuMappedStagingSlotCount("?wgpustagingslots=9", 4), 4);
+  assert.equal(requestedWgpuMappedStagingSlotCount("?wgpustagingslots=3", 4), 3);
+});
+
+test("mapped staging slot count is strict, 3 to 8, and defaults to three", () => {
   assert.equal(requestedWgpuMappedStagingSlotCount(""), 3);
   assert.equal(requestedWgpuMappedStagingSlotCount("?wgpustagingslots=3"), 3);
   assert.equal(requestedWgpuMappedStagingSlotCount("?wgpustagingslots=4"), 4);
+  assert.equal(requestedWgpuMappedStagingSlotCount("?wgpustagingslots=6"), 6);
+  assert.equal(requestedWgpuMappedStagingSlotCount("?wgpustagingslots=8"), 8);
+  assert.equal(requestedWgpuMappedStagingSlotCount("?wgpustagingslots=9"), 3);
+  assert.equal(requestedWgpuMappedStagingSlotCount("?wgpustagingslots=2"), 3);
   assert.equal(requestedWgpuMappedStagingSlotCount("?wgpustagingslots=04"), 3);
-  assert.equal(requestedWgpuMappedStagingSlotCount("?wgpustagingslots=6"), 3);
+  assert.equal(requestedWgpuMappedStagingSlotCount("?wgpustagingslots=4.5"), 3);
   assert.equal(requestedWgpuMappedStagingSlotCount("?wgpustagingslots=garbage"), 3);
+  // The adapter and the worker get a number: the same rule.
+  for (const n of [3, 4, 5, 6, 7, 8]) assert.equal(wgpuMappedStagingSlotCountOf(n), n);
+  for (const v of [undefined, null, 0, 2, 9, 4.5, NaN, "x"]) assert.equal(wgpuMappedStagingSlotCountOf(v), 3);
 });
 
 test("mapped staging timing stride is strict and preserves exact timing by default", () => {
@@ -625,7 +652,9 @@ test("host-to-worker plumbing keeps the classifier query-gated and reportable", 
   assert.match(host, /requestedWgpuProducerProfile\(window\.location\.search\)/);
   assert.match(host, /requestedWgpuStateCache\(window\.location\.search\)/);
   assert.match(host, /requestedWgpuUboCache\(window\.location\.search\)/);
-  assert.match(host, /requestedWgpuGeometryPack\(window\.location\.search\)/);
+  // on by default since 2026-10-29 (=0 turns each off)
+  assert.match(host, /requestedWgpuGeometryPack\(window\.location\.search, true\)/);
+  assert.match(host, /requestedWgpuGeometryRange\(window\.location\.search, true\)/);
   assert.match(host, /requestedWgpuReplayBudgetMs\(window\.location\.search\)/);
   assert.match(host, /requestedWgpuPowerPreference\(window\.location\.search\)/);
   assert.match(adapter, /wgpuReplayDiagnostics: this\.wgpuReplayDiagnostics/);
@@ -741,7 +770,13 @@ test("WGPU upload arena accepts only the independent 64 MiB screening arm", () =
   assert.equal(requestedWgpuUploadArenaMiB("?wgpuuploadmb=128"), 32);
 });
 
-test("mapped upload transport is opt-in and queue remains the reference", () => {
+test("upload transport: mapped by default under JSC only, ?wgpuuploadtransport forces either", () => {
+  assert.equal(defaultWgpuUploadTransport("jsc"), "mapped");
+  for (const engine of ["v8", "spidermonkey", "unknown", undefined]) assert.equal(defaultWgpuUploadTransport(engine), "queue", String(engine));
+  assert.equal(requestedWgpuUploadTransport("", "mapped"), "mapped");
+  assert.equal(requestedWgpuUploadTransport("?wgpuuploadtransport=queue", "mapped"), "queue");
+  assert.equal(requestedWgpuUploadTransport("?wgpuuploadtransport=bogus", "mapped"), "mapped");
+  assert.equal(requestedWgpuUploadTransport("?wgpuuploadtransport=mapped", "queue"), "mapped");
   assert.equal(requestedWgpuUploadTransport(""), "queue");
   assert.equal(requestedWgpuUploadTransport("?wgpuuploadtransport=queue"), "queue");
   assert.equal(requestedWgpuUploadTransport("?wgpuuploadtransport=mapped"), "mapped");
@@ -783,11 +818,13 @@ test("renderer worker probes are explicit diagnostic modes", () => {
 });
 
 test("WGPU replay budget accepts only literal 4 ms and 6 ms screening arms", () => {
-  assert.equal(requestedWgpuReplayBudgetMs(""), 0);
+  // 4 ms by default since 2026-10-29; ?wgpureplayms=0 is the unbudgeted replay
+  assert.equal(requestedWgpuReplayBudgetMs(""), 4);
+  assert.equal(requestedWgpuReplayBudgetMs("?wgpureplayms=0"), 0);
   assert.equal(requestedWgpuReplayBudgetMs("?wgpureplayms=4"), 4);
   assert.equal(requestedWgpuReplayBudgetMs("?wgpureplayms=6"), 6);
-  assert.equal(requestedWgpuReplayBudgetMs("?wgpureplayms=04"), 0);
-  assert.equal(requestedWgpuReplayBudgetMs("?wgpureplayms=8"), 0);
+  assert.equal(requestedWgpuReplayBudgetMs("?wgpureplayms=04"), 4, "not an exact value: the default");
+  assert.equal(requestedWgpuReplayBudgetMs("?wgpureplayms=8"), 4);
 });
 
 test("WGPU power preference is high-performance unless low is explicit", () => {
@@ -822,6 +859,33 @@ test("budget gate checks a pass boundary before starting a new atomic pass", () 
   assert.equal(beforeBegin.shouldYield, true);
   assert.equal(beforeBegin.reason, "time-budget");
   assert.equal(gate.snapshot().atomicOverrunCompleted, false);
+});
+
+test("budget gate never yields before the drain moved the ring", () => {
+  let now = 100;
+  const gate = createWgpuReplayBudgetGate({ budgetMs: 4, now: () => now });
+  gate.beginDrain();
+  now = 110;
+  assert.equal(gate.check({ processed: 0, passDepth: 0, force: true }).shouldYield, false);
+  assert.equal(gate.check({ processed: 1, passDepth: 0, force: true }).shouldYield, true);
+});
+
+test("worker holds the budget between a canvas backbuffer pass and its PRESENT", async () => {
+  const worker = await readFile(
+    new URL("../src/upstream-discio-worker.js", import.meta.url),
+    "utf8"
+  );
+  assert.equal(
+    worker.match(/passDepth: protocolPassDepth \+ \(backbufferPresentPending \? 1 : 0\)/g)?.length,
+    2,
+    "both budget checks count the pending PRESENT as an open pass"
+  );
+  assert.match(worker, /lastBackbufferTexture = cur;\n\s+backbufferPresentPending = !wgpuPresentVsync;/);
+  assert.match(worker, /case WGPU_CMD_OP_SUBMIT_PRESENT:\n\s+backbufferPresentPending = false;/);
+  assert.match(worker, /protocolPassDepth === 0 && !backbufferPresentPending &&\n\s+processedBeforeRecord >= WGPU_REPLAY_WINDOW_RECORDS/,
+    "the record window does not cut before the PRESENT either");
+  assert.match(worker, /\} else \{\n\s+backbufferPresentPending = false;\n\s+webGpuExecStats\.beginFbN\+\+;/,
+    "a lost PRESENT ends the hold at the next non-backbuffer pass");
 });
 
 test("published atomic pass lookup rejects every incomplete pass suffix", () => {
@@ -889,3 +953,17 @@ function incrementingClock() {
   let value = 0;
   return () => ++value;
 }
+
+test("?wgpustagingslotmib takes 2, 4, 8 or 16 and falls back to the engine default", () => {
+  assert.equal(defaultWgpuMappedStagingSlotMib("jsc"), JSC_STAGING_SLOT_MIB);
+  assert.equal(defaultWgpuMappedStagingSlotMib("v8"), 16);
+  for (const n of [2, 4, 8, 16]) {
+    assert.equal(requestedWgpuMappedStagingSlotMib(`?wgpustagingslotmib=${n}`, 16), n);
+    assert.equal(wgpuMappedStagingSlotMibOf(n), n);
+  }
+  assert.equal(requestedWgpuMappedStagingSlotMib("", 4), 4);
+  for (const v of ["1", "3", "32", "junk", "4.5"]) {
+    assert.equal(requestedWgpuMappedStagingSlotMib(`?wgpustagingslotmib=${v}`, 8), 8);
+  }
+  for (const v of [undefined, null, 0, 3, 32, NaN, "x"]) assert.equal(wgpuMappedStagingSlotMibOf(v), 16);
+});

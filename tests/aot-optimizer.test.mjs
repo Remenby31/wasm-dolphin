@@ -39,14 +39,14 @@ function optimizer({ cache = fakeCache(), translator = fakeTranslator(), ...extr
 test("aot optimizer: first launch compiles every region, second launch is complete", async () => {
   const cache = fakeCache();
   const { o, events } = optimizer({ cache });
-  assert.deepEqual(await o.status(), { state: "none", fraction: 0 });
+  assert.deepEqual(await o.status(), { state: "none", fraction: 0, regionsRefused: 0 });
   await o.start();
   const fractions = events.filter(([t]) => t === "optimization-progress").map(([, d]) => d.fraction);
   assert.ok(fractions.every((f, i) => !i || f >= fractions[i - 1]), "progress is monotonic");
   assert.equal(fractions.at(-1), 1);
   assert.equal(events.at(-1)[0], "optimization-done");
   const again = optimizer({ cache });
-  assert.deepEqual(await again.o.status(), { state: "complete", fraction: 1 });
+  assert.deepEqual(await again.o.status(), { state: "complete", fraction: 1, regionsRefused: 0 });
 });
 
 test("aot optimizer: cancel keeps what was compiled and a restart resumes", async () => {
@@ -61,7 +61,7 @@ test("aot optimizer: cancel keeps what was compiled and a restart resumes", asyn
   const before = cache.persisted.size;
   const second = optimizer({ cache, translator });
   await second.o.start({ resume: true });
-  assert.deepEqual(await second.o.status(), { state: "complete", fraction: 1 });
+  assert.deepEqual(await second.o.status(), { state: "complete", fraction: 1, regionsRefused: 0 });
   const submitted = second.events.filter(([t]) => t === "optimization-progress")[0][1].done;
   assert.ok(submitted >= before - 1, "the restart starts from the persisted regions");
 });
@@ -125,7 +125,7 @@ test("aot optimizer: core slices (budget), waits before boot (not-ready), skips 
   assert.ok(sleeps >= 2, "not-ready waits before retrying");
   assert.ok([...cache.persisted.keys()].every((k) => /^region-v1:00000000:00000000:[0-9a-f]{64}$/.test(k)), "module keys");
   assert.equal(cache.persisted.size, o.regions.length - 1);
-  assert.deepEqual(await o.status(), { state: "complete", fraction: 1 });
+  assert.deepEqual(await o.status(), { state: "complete", fraction: 1, regionsRefused: 0 });
 });
 
 // A core with region chaining (patch 0102) gets chained modules under their
@@ -337,3 +337,131 @@ test("aot optimizer: a profile that fails to load is no profile (today's formati
   assert.ok(o.regions.every((u) => u.members.every((f) => !f.hotRanges)));
 });
 
+test("aot optimizer: budgetRefused in optimization-done counts this run's refusals only", async () => {
+  const base = fakeTranslator();
+  // Every translated function reports 2 frontier blocks left for lack of budget.
+  const translator = { translate: async (batch) => (await base.translate(batch)).map((r) => (r.fragment ? { ...r, budgetRefused: 2 } : r)) };
+  const { o, events } = optimizer({ translator });
+  await o.start({ resume: false });
+  const first = events.findLast(([t]) => t === "optimization-done")[1].budgetRefused;
+  assert.ok(first > 0);
+  await o.start({ resume: false });
+  assert.equal(events.findLast(([t]) => t === "optimization-done")[1].budgetRefused, first, "a second run does not add the first's");
+});
+
+test("aot optimizer: the module's leftover continuation budget goes back to the members refused for lack of it, never past it", async () => {
+  // Three refused members per module, each charged 100 by its first pass:
+  // the first two want 300 more each, the third is at its own cap
+  // (exhausted: it leaves the rounds). A member's share is what is left at
+  // its turn over the members still to come; the translator never goes past
+  // its limit.
+  const UNIT = 1000;
+  const calls = [];
+  const base = fakeTranslator();
+  const fragment = (pc) => ({ entry: pc, entries: [pc], code: Uint8Array.from([0x00, 0x41, 0x00, 0x0b]), relocs: [] });
+  const wants = [300, 300, 0];
+  let k = 0;
+  const translator = {
+    unitContinuationBytes: UNIT,
+    translate: async (batch) => (await base.translate(batch)).map((r, n) => {
+      if (!r.fragment || k >= wants.length) return r;
+      const want = wants[k++], entry = batch[n].entry;
+      if (!want) return { ...r, budgetCharged: 100, budgetRefused: 2 }; // capped: no resume
+      let got = 0;
+      return { ...r, budgetCharged: 100, budgetRefused: 3, resume: async (limit, elsewhere) => {
+        calls.push([entry, limit, elsewhere]);
+        const take = Math.min(limit, want - got);
+        got += take;
+        return { continuations: [fragment(entry + 0x10000)], budgetCharged: take, budgetRefused: got >= want ? 0 : 1 };
+      } };
+    })
+  };
+  const { o, events } = optimizer({ translator, maxFunctions: 100 });
+  await o.start({ resume: false });
+  const left = UNIT - 300;
+  assert.deepEqual(calls.slice(0, 2).map((c) => c[1]), [Math.floor(left / 2), left - 300], "the first an even share, the next what is left at its turn");
+  assert.equal(calls.length, 2, "the capped member never resumes; both others are done after one round");
+  assert.ok(calls[0][2] instanceof Set && calls[0][2].size > 0, "the entries the module holds are passed (no continuation starts there)");
+  assert.equal(events.findLast(([t]) => t === "optimization-done")[1].budgetRefused, 2, "only the capped member's refusals are left");
+});
+
+// A save state loaded early in a first launch: the modules covering the
+// guest PCs sampled after the load go first in what the run has left.
+test("aot optimizer: prioritize() moves the modules covering sampled PCs ahead, most hits first", async () => {
+  const translated = [];
+  const { o } = optimizer();
+  await o.status(); // the plan, and its modules
+  const units = o.regions;
+  assert.ok(units.length >= 5);
+  const pcIn = (u) => u.members[0].ranges[0][0];
+  const [last, beforeLast] = [units.at(-1), units.at(-2)];
+  // Before the run: nothing to move yet, kept and applied when it builds its work.
+  assert.equal(o.prioritize([[pcIn(beforeLast), 1], [pcIn(last), 5], [pcIn(last) + 4, 1], [0x81700000, 9]]), 0);
+  const realTranslate = o.translateUnit.bind(o);
+  o.translateUnit = async (unit) => { translated.push(unit); return realTranslate(unit); };
+  await o.start();
+  assert.deepEqual(translated.slice(0, 2), [last, beforeLast], "most hits first");
+  assert.deepEqual(translated.slice(2), units.slice(0, -2), "the others keep their order");
+});
+
+test("aot optimizer: prioritize() during a run reorders only what is left", async () => {
+  const translated = [];
+  const { o } = optimizer();
+  await o.status();
+  const units = o.regions;
+  const realTranslate = o.translateUnit.bind(o);
+  o.translateUnit = async (unit) => {
+    translated.push(unit);
+    // after the 2nd module: a load whose code is in the 1st (done) and the last
+    if (translated.length === 2) assert.equal(o.prioritize([[units[0].members[0].ranges[0][0], 3], [units.at(-1).members[0].ranges[0][0], 1]]), 1);
+    return realTranslate(unit);
+  };
+  await o.start();
+  assert.equal(translated.length, units.length, "every module once");
+  assert.deepEqual(translated.slice(0, 3), [units[0], units[1], units.at(-1)]);
+  assert.equal(o.prioritize([[units[0].members[0].ranges[0][0], 1]]), 0, "after the run: nothing to reorder");
+});
+
+test("aot optimizer: prioritize() with PCs outside every module changes nothing", async () => {
+  const { o } = optimizer();
+  await o.status();
+  assert.equal(o.prioritize([[0x81700000, 4], [0x80000000, 1]]), 0);
+  assert.equal(o.prioritize([]), 0);
+});
+
+// A load ~2 s into a first launch comes before the plan exists: the hits wait for it.
+test("aot optimizer: prioritize() before the plan is built applies once the run has it", async () => {
+  const probe = optimizer();
+  await probe.o.status();
+  const target = probe.o.regions.at(-1);
+  const pc = target.members[0].ranges[0][0];
+  const { o } = optimizer(); // no plan yet
+  assert.equal(o.regions, undefined);
+  assert.equal(o.prioritize([[pc, 3]]), 0);
+  const translated = [];
+  const realTranslate = o.translateUnit.bind(o);
+  o.translateUnit = async (unit) => { translated.push(unit.key); return realTranslate(unit); };
+  await o.start();
+  assert.equal(translated[0], target.key);
+});
+
+// Review of #278 (P2): a range found however far its start is behind the
+// PC (8 starts before, a long function was missed), and the priority ends
+// with the run it was for.
+test("aot optimizer: prioritize() finds a PC in a long range many starts back; hasWork and the priority end with the run", async () => {
+  const { o } = optimizer();
+  await o.status();
+  const units = o.regions;
+  // a long range in the first unit, with 20 short ones of other units starting inside it
+  const long = { ranges: [[0x80100000, 0x80110000]] };
+  units[0].members = [long, ...units[0].members];
+  for (let i = 0; i < 20; i += 1) units[1 + (i % (units.length - 1))].members.push({ ranges: [[0x80100100 + i * 0x100, 0x80100140 + i * 0x100]] });
+  o.prioritize([[0x80101f80, 4]]); // past all 20 short ranges' starts, inside the long one only
+  assert.deepEqual([...o.priorityScore().entries()].map(([u, n]) => [units.indexOf(u), n]), [[0, 4]]);
+  assert.equal(o.hasWork(), true, "before the run");
+  await o.start();
+  assert.equal(o.hasWork(), false, "the run went through its work");
+  assert.equal(o.priority, null);
+  o.markStale(units[2].key);
+  assert.equal(o.hasWork(), true, "a stale module is work again");
+});

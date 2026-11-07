@@ -125,7 +125,7 @@ test("writes explicit params when settings differ from playable defaults", () =>
   assert.equal(url.searchParams.get("fastsw"), "0");
 });
 
-test("builds the playable Melee preset href", () => {
+test("builds the playable preset href", () => {
   const href = buildPlayablePresetHref("http://localhost:5173/");
   const url = new URL(href);
 

@@ -62,7 +62,7 @@ session of recomputed cache, no behaviour regression.
   expected use case (one active build at a time).
 - LRU eviction across the cache-cap boundary (DOLPHIN_JIT_CACHE_MAX =
   8192). Still hard-cap dropping new entries when full. A real LRU
-  would track per-entry access time. Not load-bearing yet — Melee
+  would track per-entry access time. Not load-bearing yet — the reference game
   produces well under 8192 unique compile-blocks.
 
 ## Files touched

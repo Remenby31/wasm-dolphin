@@ -1,0 +1,43 @@
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -16926,6 +16926,16 @@ extern "C" EMSCRIPTEN_KEEPALIVE const char* DolphinWeb_JitOracleMessage()
+ // error. Exception paths are compared at the vector (message "exception:").
+ // disable_mask is the CachedInterpreter mask the run uses (production default:
+ // blockmerge|shortprefix disabled, 0x220000).
++// Patch 0159: the oracle compiles its blocks as if MSR.FP were set, then runs
++// them with the input MSR: a block the CPU thread compiled with the FPU on
++// and runs after the OS turned it off (lazy FPU switching) must still raise
++// FP unavailable, as the interpreter does.
++bool s_jit_oracle_compile_with_fp = false;
++extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_JitOracleCompileWithFpForTest(int on)
++{
++  s_jit_oracle_compile_with_fp = on != 0;
++}
++
+ extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_JitOracleRun(u32 word_count, u32 disable_mask)
+ {
+   auto& system = Core::System::GetInstance();
+@@ -16984,10 +16994,14 @@ extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_JitOracleRun(u32 word_count, u32
+   while (budget && ppc.pc != JIT_ORACLE_SENTINEL_VA &&
+          (ppc.pc - JIT_ORACLE_CODE_VA) < word_count * 4)
+   {
++    const u32 run_msr = ppc.msr.Hex;
++    if (s_jit_oracle_compile_with_fp)
++      ppc.msr.FP = 1;
+     PPCAnalyst::CodeBlock block;
+     const u32 next_pc = analyzer.Analyze(ppc.pc, &block, &buffer, buffer.size());
+     if (block.m_memory_exception || block.m_num_instructions == 0)
+     {
++      ppc.msr.Hex = run_msr;
+       result = -2;
+       break;
+     }
+@@ -17016,6 +17030,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_JitOracleRun(u32 word_count, u32
+           std::span<const PPCAnalyst::CodeOp>{buffer.data(), prefix}, layout, resume_pc,
+           !ends_with_branch, false, false);
+     }
++    ppc.msr.Hex = run_msr;
+     if (bytes.empty())
+     {
+       ++s_jit_oracle.stats[2];

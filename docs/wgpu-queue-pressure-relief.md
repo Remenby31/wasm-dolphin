@@ -5,7 +5,7 @@ and design record, not an available rendering mode.
 
 ## Problem statement
 
-Direct Kirby-versus-Link measurements isolate the recurring 1.7-second worker
+Direct reference-battle measurements isolate the recurring 1.7-second worker
 freeze to `GPUQueue.writeBuffer` after the WASM heap copy. The blocking write
 is small (roughly 1.5–12 KiB) and its producer role changes between UBO and
 packed geometry. This indicates cumulative browser/Dawn upload-staging

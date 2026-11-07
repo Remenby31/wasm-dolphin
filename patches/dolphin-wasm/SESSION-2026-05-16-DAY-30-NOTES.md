@@ -75,7 +75,7 @@ genuinely a user decision:
    option the user did *not* pick). Total coverage by construction,
    no transpiler; ~6k lines, the longest path.
 4. **Accept the hybrid as the shipping ceiling.** Days 18-21 already
-   deliver correct, smooth, GPU-presented Melee (57fps, 17.5ms, 0
+   deliver correct, smooth, GPU-presented game frames (57fps, 17.5ms, 0
    drops) with the CPU rasterising. The full WebGPU command bridge
    (Days 27-29, proven) + shader infra remain on the branch for if a
    transpiler path is revisited.
@@ -214,7 +214,7 @@ GPURenderPipeline via the bridge) so game content actually renders,
 `?video=wgpu` is mid-cutover (api_type=Vulkan): Software geometry now
 wrong by design, only ~19% shaders translate — **not usable**, as
 expected for this phase. `?video=webgpu` hybrid is **untouched and
-still ships Melee**. Checkpoint `c1c0576` is the clean restore point;
+still ships the reference game**. Checkpoint `c1c0576` is the clean restore point;
 the bridge machinery (Days 27-29) is all proven and committed.
 
 ## Files touched (project-tracked)

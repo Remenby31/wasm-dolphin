@@ -90,7 +90,7 @@ import { workerRequest } from "../lib/browser.mjs";
 import { emulatedWindow, ticksNow } from "../lib/emulated-window.mjs";
 import { chromeInfo } from "../lib/probe-out.mjs";
 import { decodeRegionStats } from "../lib/jit-region-stats.mjs";
-import { busiestThread, checkPerfAccess, counterEvents, cyclesPerGuestCycle, instructionsPerGuestCycle, perfCounters } from "../lib/perf-counters.mjs";
+import { busiestThread, checkPerfAccess, counterEvents, counterSanity, cyclesPerGuestCycle, instructionsPerGuestCycle, perfCounters } from "../lib/perf-counters.mjs";
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync, readdirSync, statSync } from "node:fs";
 
@@ -145,9 +145,12 @@ export async function waitRegionsQuiescent(read, { everyMs = 1000, stableReads =
     stable = p.pending === 0 && last && p.installed === last.installed ? stable + 1 : 0;
     // With a target (the seed's count), a stable count below it is not done:
     // the regions may still come (or never will: the timeout says so).
-    const reached = target == null || p.installed >= target;
+    // Dropped regions count as arrived: the guest overwrote their code
+    // (multi2-aa-5x5, 2026-10-28: 141 installed + 2 dropped of 143 on every
+    // arm since the state loads early, #325), not a refusal.
+    const reached = target == null || p.installed + (p.dropped ?? 0) >= target;
     if (stable >= stableReads - 1 && p.pending === 0 && reached) return { quiescent: true, ...p, ms: Date.now() - t0 };
-    if (Date.now() - t0 > timeoutMs) return { quiescent: false, why: p.pending ? `still ${p.pending} pending after ${timeoutMs} ms` : `${p.installed} installed, ${target} expected, after ${timeoutMs} ms`, ...p, ms: Date.now() - t0 };
+    if (Date.now() - t0 > timeoutMs) return { quiescent: false, why: p.pending ? `still ${p.pending} pending after ${timeoutMs} ms` : `${p.installed} installed + ${p.dropped ?? 0} dropped, ${target} expected, after ${timeoutMs} ms`, ...p, ms: Date.now() - t0 };
     last = p;
     await sleep(everyMs);
   }
@@ -203,10 +206,16 @@ async function measureEmulated(session, o, hook) {
   }
 }
 
+// After the n-th boot failure in a row: play the run again, or fail (more
+// than `max` replays in a row: the machine, not a hiccup).
+export const bootFailureStep = (n, max) => (n <= max ? "replay" : "fail");
+
 // Why a run must be discarded under --aot-seed (null: keep it): an arm
 // without all its seeded regions measures another codegen, and the barrier
 // it held up shifted the other arms too (multi-aba-emu-0087b, 2026-10-22).
-export function discardReason(arms, targets) {
+// sameTree: each arm's tree (arms with the same tree and the one query run
+// the same code); null skips the equality check.
+export function discardReason(arms, targets, sameTree = null) {
   const bad = arms.map((x, a) => {
     const g = x.regionGate;
     if (!g) return `no region gate on arm ${a}`;
@@ -214,11 +223,49 @@ export function discardReason(arms, targets) {
     const want = targets[a];
     // More than the seed is fine: a module the seed's first launch was still
     // finishing when it reported "done" (regions-0118, 2026-10-23: 143 of 142).
-    if (Number.isInteger(want) && !(g.installed >= want)) return `arm ${a} installed ${g.installed ?? "?"} of ${want} regions`;
+    // A dropped region arrived and the guest overwrote its code: not missing.
+    if (Number.isInteger(want) && !(g.installed + (g.dropped ?? 0) >= want)) return `arm ${a} installed ${g.installed ?? "?"} (+ ${g.dropped ?? 0} dropped) of ${want} regions`;
     if (!g.quiescent) return `arm ${a}: ${g.why ?? "regions not quiescent"}`;
     return null;
   }).filter(Boolean);
+  // Arms of one tree install nearly the same regions: how many the guest
+  // overwrote (dropped) varies with timing, two identical arms differing by
+  // up to 10 of 143 (multi2-aa-5x5-b: 138/128, 137/132, 137/136, 139/141;
+  // installed + dropped 143 on every arm). Within sameTreeTolerance they are
+  // kept (installedDelta records it per run); beyond, two codegens of one
+  // build: discarded. Arms of different trees may differ (a candidate that
+  // changes the regions): regionCountsDiffer says so, the run is kept.
+  if (!bad.length && sameTree) {
+    const counts = arms.map((x) => x.regionGate?.installed);
+    for (let a = 1; a < arms.length; a += 1) {
+      const b = sameTree.indexOf(sameTree[a]);
+      const limit = sameTreeTolerance(targets[a]);
+      if (b < a && Number.isInteger(counts[a]) && Number.isInteger(counts[b]) && Math.abs(counts[a] - counts[b]) > limit) bad.push(`installed regions differ between arms ${b} and ${a} of one tree beyond ${limit} (${counts[b]} / ${counts[a]})`);
+    }
+  }
   return bad.length ? bad.join("; ") : null;
+}
+
+// How far two arms of one tree may differ in installed regions: 3 % of the
+// seed's count, at least 2 (4 of 143).
+export const sameTreeTolerance = (seed) => Math.max(2, Math.floor(0.03 * (Number.isInteger(seed) ? seed : 0)));
+
+// The largest installed-count gap between arms of one tree (null: one arm per tree).
+export function installedDelta(arms, sameTree) {
+  const counts = arms.map((x) => x.regionGate?.installed);
+  let delta = null;
+  for (let a = 0; a < arms.length; a += 1) {
+    for (let b = 0; b < a; b += 1) {
+      if (sameTree[a] === sameTree[b] && Number.isInteger(counts[a]) && Number.isInteger(counts[b])) delta = Math.max(delta ?? 0, Math.abs(counts[a] - counts[b]));
+    }
+  }
+  return delta;
+}
+
+// Installed counts that differ between arms of different trees (kept runs).
+export function regionCountsDiffer(arms, sameTree) {
+  const counts = arms.map((x) => x.regionGate?.installed);
+  return counts.some((c, a) => counts.some((d, b) => sameTree[a] !== sameTree[b] && Number.isInteger(c) && Number.isInteger(d) && c !== d));
 }
 
 // The scene a savestate is, without the content hash spark-run adds to the
@@ -287,7 +334,7 @@ async function main() {
       hold: { type: "string", default: "KeyX" }, "max-load": { type: "string" },
       lock: { type: "string", multiple: true, default: [] }, "lock-wait": { type: "string", default: "14400" }, out: { type: "string" },
       counters: { type: "boolean", default: false }, "counter-events": { type: "string" }, "aot-seed": { type: "boolean", default: false }, "seed-sec": { type: "string", default: "600" },
-      "gate-sec": { type: "string", default: "120" }, "max-discards": { type: "string", default: "3" }, "isolated-boot": { type: "boolean", default: false }, "settle-sec": { type: "string", default: "10" },
+      "gate-sec": { type: "string", default: "120" }, "max-discards": { type: "string", default: "3" }, "max-boot-replays": { type: "string", default: "2" }, "isolated-boot": { type: "boolean", default: false }, "settle-sec": { type: "string", default: "10" },
       "perf-record": { type: "boolean", default: false }, "emulated-window": { type: "string" }, "emulated-warmup": { type: "string", default: "10" }, "emulated-poll-ms": { type: "string", default: "100" }
     }
   });
@@ -299,13 +346,15 @@ async function main() {
   const runs = num(values, "runs", { min: 1, int: true });
   if (runs % arms.length) throw new Error(`--runs ${runs}: a multiple of the ${arms.length} arms, so each arm visits each lane equally`);
   const o = {
+    // measure() loads the savestate only when told (a homebrew has none, #178).
+    state: path.resolve(values.state),
     query: `${values.query ?? PRESETS[values.config] ?? values.config}&metrics=1`,
     warmup: num(values, "warmup", { min: 0 }), secs: num(values, "secs", { min: 2, int: true }), hold: values.hold || null,
     maxLoad: values["max-load"] ? num(values, "max-load", { min: 0.1 }) : arms.length * Math.max(2, os.cpus().length / 4)
   };
   const port = num(values, "port", { min: 1, int: true });
   const releases = [];
-  for (const dir of values.lock) releases.push(await acquirePerfLock({ dir, name: `race-multi (${REPO_ROOT})`, waitSec: num(values, "lock-wait", { min: 0 }), log: (m) => console.log(`[race-multi] ${m}`) }));
+  for (const dir of values.lock) releases.push(await acquirePerfLock({ requireMains: true, dir, name: `race-multi (${REPO_ROOT})`, waitSec: num(values, "lock-wait", { min: 0 }), log: (m) => console.log(`[race-multi] ${m}`) }));
   const outDir = path.resolve(values.out ?? path.join(REPO_ROOT, "..", "measures", "harness", `race-multi-${Date.now()}-${randomBytes(3).toString("hex")}`));
   mkdirSync(outDir, { recursive: true });
   // --counter-events frontend|e1,e2: more PMU events on the same thread and window.
@@ -407,6 +456,11 @@ async function main() {
     // A discarded run is played again with the same rotation (r), so the
     // Latin square stays complete; at most --max-discards in all.
     const maxDiscards = num(values, "max-discards", { min: 0, int: true });
+    // A Chromium that never boots (a 60 s timeout under load, three jobs lost
+    // on 2026-10-23) sets its run aside and the run is played again, at most
+    // --max-boot-replays times in a row, then the job fails with the error.
+    const maxBootReplays = num(values, "max-boot-replays", { min: 0, int: true });
+    let bootFailures = 0;
     for (let r = 1; r <= runs; r += 1) {
       const sessions = [];
       const record = { run: r, attempt: discarded.filter((d) => d.run === r).length + 1, arms: [] };
@@ -419,43 +473,61 @@ async function main() {
         gates.clear();
         arrive = barrier(arms.length, (num(values, "gate-sec", { min: 1 }) + 60) * 1000);
         const runStart = Date.now();
-        for (const a of bootOrder(r, arms.length)) {
-          const lane = laneOf(a, r, lanes.length);
-          process.env.SPARK_CHROME_CPUS = lanes[lane];
-          const bootStart = Date.now();
-          let chromeArgs = [];
-          if (values["perf-record"]) {
-            // A jitdump per arm-run, outside the repository (hundreds of MB).
-            const dir = path.join(outDir, `perf-${r}-${a}`);
-            mkdirSync(path.join(dir, "jit"), { recursive: true });
-            chromeArgs = ["--no-sandbox", `--js-flags=--perf-prof --perf-prof-path=${path.join(dir, "jit")} --no-logfile-per-isolate --logfile=${path.join(dir, "jit", "v8.log")}`];
-            recordings.set(`${r}-${a}`, { dir });
+        let booting = null;
+        try {
+          for (const a of bootOrder(r, arms.length)) {
+            booting = a;
+            const lane = laneOf(a, r, lanes.length);
+            process.env.SPARK_CHROME_CPUS = lanes[lane];
+            const bootStart = Date.now();
+            let chromeArgs = [];
+            if (values["perf-record"]) {
+              // A jitdump per arm-run, outside the repository (hundreds of MB).
+              const dir = path.join(outDir, `perf-${r}-${a}`);
+              mkdirSync(path.join(dir, "jit"), { recursive: true });
+              chromeArgs = ["--no-sandbox", `--js-flags=--perf-prof --perf-prof-path=${path.join(dir, "jit")} --no-logfile-per-isolate --logfile=${path.join(dir, "jit", "v8.log")}`];
+              recordings.set(`${r}-${a}`, { dir });
+            }
+            sessions[a] = await openSession({ chromeArgs, base: servers[a].base, server: servers[a], query: o.query, iso: path.resolve(values.iso), routes: { [STATE_ROUTE]: path.resolve(values.state) }, seedProfile: seeds[a] ?? null });
+            sessions[a].seedOf = a;
+            sessions[a].recordKey = `${r}-${a}`;
+            record.arms[a] = { arm: a, lane, cpus: lanes[lane], bootRank: bootOrder(r, arms.length).indexOf(a), boot: { startMs: bootStart - runStart, ms: Date.now() - bootStart }, url: sessions[a].url, served: servers[a].identity, core: sessions[a].core };
+            if (values["isolated-boot"]) {
+              // Settled, then paused: the next arm boots with this one idle.
+              record.arms[a].boot.settle = values["aot-seed"]
+                ? await waitRegionsQuiescent(() => regionPipeline(sessions[a].page), { target: seedRegions.get(a) ?? null, timeoutMs: num(values, "gate-sec", { min: 1 }) * 1000 })
+                : (await new Promise((res) => setTimeout(res, num(values, "settle-sec", { min: 0 }) * 1000)), { sec: num(values, "settle-sec", { min: 0 }) });
+              const paused = await workerRequest(sessions[a].page, "pause", {}, 30000);
+              record.arms[a].boot.paused = !paused?.error;
+              if (paused?.error) console.warn(`[race-multi] run ${r} arm ${a}: pause failed (${paused.error})`);
+            }
           }
-          sessions[a] = await openSession({ chromeArgs, base: servers[a].base, server: servers[a], query: o.query, iso: path.resolve(values.iso), routes: { [STATE_ROUTE]: path.resolve(values.state) }, seedProfile: seeds[a] ?? null });
-          sessions[a].seedOf = a;
-          sessions[a].recordKey = `${r}-${a}`;
-          record.arms[a] = { arm: a, lane, cpus: lanes[lane], bootRank: bootOrder(r, arms.length).indexOf(a), boot: { startMs: bootStart - runStart, ms: Date.now() - bootStart }, url: sessions[a].url, served: servers[a].identity, core: sessions[a].core };
-          if (values["isolated-boot"]) {
-            // Settled, then paused: the next arm boots with this one idle.
-            record.arms[a].boot.settle = values["aot-seed"]
-              ? await waitRegionsQuiescent(() => regionPipeline(sessions[a].page), { target: seedRegions.get(a) ?? null, timeoutMs: num(values, "gate-sec", { min: 1 }) * 1000 })
-              : (await new Promise((res) => setTimeout(res, num(values, "settle-sec", { min: 0 }) * 1000)), { sec: num(values, "settle-sec", { min: 0 }) });
-            const paused = await workerRequest(sessions[a].page, "pause", {}, 30000);
-            record.arms[a].boot.paused = !paused?.error;
-            if (paused?.error) console.warn(`[race-multi] run ${r} arm ${a}: pause failed (${paused.error})`);
-          }
+        } catch (error) {
+          record.bootFailed = { arm: booting, error: String(error?.message || error).split("\n")[0].slice(0, 300) };
         }
-        if (values["isolated-boot"]) {
+        if (!record.bootFailed && values["isolated-boot"]) {
           // Every arm booted alone: all go on together.
           const resumed = await Promise.all(sessions.map((s) => workerRequest(s.page, "resume", {}, 30000)));
           resumed.forEach((x, a) => { record.arms[a].boot.resumed = !x?.error; });
         }
         // The windows together.
-        const results = await Promise.allSettled(sessions.map((s) => (o.emulatedWindow ? measureEmulated(s, o, o.onWindow) : measure(s, o))));
+        const results = record.bootFailed ? [] : await Promise.allSettled(sessions.map((s) => (o.emulatedWindow ? measureEmulated(s, o, o.onWindow) : measure(s, o))));
         results.forEach((res, a) => { if (res.status === "fulfilled") record.arms[a].cold = res.value; else record.arms[a].error = String(res.reason?.message ?? res.reason).slice(0, 300); });
       } finally {
         for (const s of sessions) await s?.close().catch(() => {});
       }
+      if (record.bootFailed) {
+        const step = bootFailureStep(bootFailures + 1, maxBootReplays);
+        const why = `boot failed on arm ${record.bootFailed.arm}: ${record.bootFailed.error}`;
+        discarded.push({ run: r, attempt: record.attempt, why, boot: true });
+        writeFileSync(path.join(outDir, `run${r}-discarded-${record.attempt}.json`), JSON.stringify(record, null, 1) + "\n");
+        console.log(`[race-multi] run ${r} set aside: ${why} (${step === "replay" ? "played again" : `${bootFailures + 1} in a row, more than --max-boot-replays ${maxBootReplays}: stopping`})`);
+        if (step === "fail") throw new Error(`race-multi: ${why}, ${bootFailures + 1} boot failures in a row`);
+        bootFailures += 1;
+        r -= 1;
+        continue;
+      }
+      bootFailures = 0;
       record.arms.forEach((x, a) => {
         if (!x.cold) return;
         const e = emu.get(sessions[a]);
@@ -467,21 +539,28 @@ async function main() {
         // One name for the analysis: per tick when the ticks are known, else from the speed.
         x.cold.instructionsPerGuestCycle = x.cold.instructionsPerGuestTick ?? instructionsPerGuestCycle(x.cold);
         x.cold.cyclesPerGuestCycle = cyclesPerGuestCycle(x.cold);
+        // Counters that cannot be the CPU thread's: kept, never analysed.
+        const why = x.cold.counters ? counterSanity(x.cold) : null;
+        if (why) { Object.assign(x.cold, { countersRejected: why, instructionsPerGuestCycle: null, cyclesPerGuestCycle: null }); console.warn(`[race-multi] run ${r} arm ${a}: counters rejected, ${why}`); }
       });
       record.arms.forEach((x, a) => { x.regionGate = gates.get(sessions[a]) ?? null; });
       if (values["aot-seed"]) {
         const counts = record.arms.map((x) => x.regionGate?.installed);
         record.regionCountsEqual = counts.every((c) => Number.isInteger(c) && c === counts[0]);
-        console.log(`[race-multi] run ${r} regions installed per arm: ${counts.join(" / ")}${record.regionCountsEqual ? "" : " (NOT EQUAL)"}; layoutRefused ${record.arms.map((x) => x.regionGate?.layoutRefused ?? "-").join(" / ")}; heapPatched ${record.arms.map((x) => x.regionGate?.heapPatched ?? "-").join(" / ")}; boot rank ${record.arms.map((x) => x.bootRank).join(" / ")}; quiescent ${record.arms.map((x) => (x.regionGate?.quiescent ? `${x.regionGate.ms} ms` : x.regionGate?.why ?? "?")).join(" / ")}`);
+        record.regionCountsDiffer = regionCountsDiffer(record.arms, arms);
+        record.installedDelta = installedDelta(record.arms, arms);
+        console.log(`[race-multi] run ${r} regions installed per arm: ${counts.join(" / ")}${record.regionCountsEqual ? "" : " (NOT EQUAL)"}; dropped ${record.arms.map((x) => x.regionGate?.dropped ?? "-").join(" / ")}; refused ${record.arms.map((x) => x.regionGate?.refused ?? "-").join(" / ")}; layoutRefused ${record.arms.map((x) => x.regionGate?.layoutRefused ?? "-").join(" / ")}; heapPatched ${record.arms.map((x) => x.regionGate?.heapPatched ?? "-").join(" / ")}; boot rank ${record.arms.map((x) => x.bootRank).join(" / ")}; quiescent ${record.arms.map((x) => (x.regionGate?.quiescent ? `${x.regionGate.ms} ms` : x.regionGate?.why ?? "?")).join(" / ")}`);
       }
       console.log(`[race-multi] run ${r}: ${record.arms.map((x) => `arm${x.arm}@lane${x.lane} ${x.error ?? `${x.cold.speed} %${x.cold.instructionsPerGuestCycle ? ` ${round(x.cold.instructionsPerGuestCycle, 3)} insn/guest cycle` : ""}${x.cold.overloaded ? " OVERLOADED" : ""}`}`).join(" | ")}`);
-      const why = values["aot-seed"] ? discardReason(record.arms, record.arms.map((_, a) => seedRegions.get(a) ?? null)) : null;
+      const why = values["aot-seed"] ? discardReason(record.arms, record.arms.map((_, a) => seedRegions.get(a) ?? null), arms) : null;
       if (why) {
         record.discarded = why;
         discarded.push({ run: r, attempt: record.attempt, why });
         writeFileSync(path.join(outDir, `run${r}-discarded-${record.attempt}.json`), JSON.stringify(record, null, 1) + "\n");
-        console.log(`[race-multi] run ${r} discarded: ${why}${discarded.length <= maxDiscards ? " (played again)" : ` (more than --max-discards ${maxDiscards}: stopping)`}`);
-        if (discarded.length > maxDiscards) break;
+        // Boot failures have their own cap (bootFailureStep).
+        const regionDiscards = discarded.filter((d) => !d.boot).length;
+        console.log(`[race-multi] run ${r} discarded: ${why}${regionDiscards <= maxDiscards ? " (played again)" : ` (more than --max-discards ${maxDiscards}: stopping)`}`);
+        if (regionDiscards > maxDiscards) break;
         r -= 1;
         continue;
       }
@@ -536,6 +615,10 @@ async function main() {
     // --aot-seed: installed regions per run and arm, and whether every run had them equal.
     regionCounts: values["aot-seed"] ? records.map((r) => r.arms.map((x) => x.regionGate?.installed ?? null)) : null,
     regionCountsEqual: values["aot-seed"] ? records.every((r) => r.regionCountsEqual) : null,
+    // Arms of different trees with different installed counts (runs kept).
+    regionCountsDiffer: values["aot-seed"] ? records.some((r) => r.regionCountsDiffer) : null,
+    // Per run, the installed-count gap between arms of one tree (kept within sameTreeTolerance).
+    installedDelta: values["aot-seed"] ? records.map((r) => r.installedDelta ?? null) : null,
     // Runs discarded (and played again) for an arm without all its regions.
     discarded,
     effects, counterEffects, cycleEffects, eventStats, withheld: full ? null : records.length < runs ? `${runs - records.length} run(s) missing after ${discarded.length} discarded: the Latin square is incomplete` : `${records.length - good.length} run(s) with a failed or overloaded arm: the Latin square is incomplete`

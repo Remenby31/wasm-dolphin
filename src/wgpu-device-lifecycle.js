@@ -31,3 +31,46 @@ export function handleWgpuDeviceLoss({
   postStatus(`WebGPU device lost: ${detail}`);
   return { handled: true, detail };
 }
+
+// Every scope the worker's markWgpuReplayFatal is called with, but the
+// device loss (posted by its own handler), and the reason the page gets.
+// Each one leaves the command ring FAILED for good: the game would go on
+// blind with a frozen picture. The page hears of it on the device-loss path
+// (`wgpu-device-lost`), with cause "renderer-error": the same scale again.
+export const WGPU_FATAL_PAGE_REASONS = Object.freeze({
+  "submit-error": "submit-error",
+  "staging-seal": "staging-seal",
+  "staging-capacity": "staging-capacity",
+  "staging-copy": "staging-copy",
+  "staging-remap": "staging-remap",
+  "destroy-order": "destroy-order",
+  "semantic-capture-ack": "semantic-capture-ack",
+  "webgpu-command-ring-ownership": "ring-ownership",
+  "webgpu-command-ring-attach": "ring-attach",
+});
+
+export function wgpuFatalPageReason(scope) {
+  return WGPU_FATAL_PAGE_REASONS[scope] ?? String(scope || "unknown");
+}
+
+// One `wgpu-device-lost` message per renderer session (per device), the
+// first cause wins: a device lost after a replay error, or the reverse,
+// does not restart the page twice. cause: "device-lost" (the GPU went: the
+// page restarts lower, memory may be why) or "renderer-error" (a replay
+// error on a live device: the page restarts at the same scale, the scale
+// is not why).
+export function createWgpuFatalReporter(post = noop) {
+  let reported = null;
+  return {
+    get reported() { return reported; },
+    reset() { reported = null; },
+    // extra: fields the message carries as well (the worker's pause under
+    // ?wgpurecover=1).
+    report({ internalResolution = 1, reason = "unknown", detail = "", cause = "device-lost", ...extra } = {}) {
+      if (reported) return false;
+      reported = { internalResolution, reason: String(reason), detail: String(detail ?? ""), cause: cause === "renderer-error" ? cause : "device-lost" };
+      post({ type: "wgpu-device-lost", ...reported, ...extra });
+      return true;
+    },
+  };
+}

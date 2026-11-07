@@ -20,12 +20,12 @@
   "productionChanged": false,
   "scenes": [
     {
-      "game": "Melee",
-      "scene": "Great Bay battle",
+      "game": "fighting game",
+      "scene": "reference battle",
       "gameplay": true,
-      "probe": ".omx/full-speed/current-bench/results/exit-coverage-melee-B1",
-      "control": ".omx/full-speed/current-bench/results/exit-coverage-melee-A1",
-      "analysis": "exit-coverage-melee-B1-analysis.json",
+      "probe": ".omx/full-speed/current-bench/results/exit-coverage-battle-B1",
+      "control": ".omx/full-speed/current-bench/results/exit-coverage-battle-A1",
+      "analysis": "exit-coverage-battle-B1-analysis.json",
       "ratios": {
         "strictCachedPerSampleAttemptPercent": 8.772129116539285,
         "strictCachedPerSampleHitPercent": 8.772201777325492,
@@ -136,12 +136,12 @@
       }
     },
     {
-      "game": "Mario Kart Wii",
-      "scene": "Luigi Circuit race, repaired minimap checkpoint",
+      "game": "Wii racing game",
+      "scene": "race, repaired minimap checkpoint",
       "gameplay": true,
-      "probe": ".omx/full-speed/current-bench/results-mkw-settled/exit-coverage-mkw-B1",
-      "control": ".omx/full-speed/current-bench/results-mkw-settled/exit-coverage-mkw-A1-r2",
-      "analysis": "exit-coverage-mkw-B1-analysis.json",
+      "probe": ".omx/full-speed/current-bench/results-race-settled/exit-coverage-race-B1",
+      "control": ".omx/full-speed/current-bench/results-race-settled/exit-coverage-race-A1-r2",
+      "analysis": "exit-coverage-race-B1-analysis.json",
       "ratios": {
         "strictCachedPerSampleAttemptPercent": 8.57171245577664,
         "strictCachedPerSampleHitPercent": 8.571731594723886,
@@ -252,11 +252,11 @@
       }
     },
     {
-      "game": "Super Mario Sunshine",
+      "game": "3D platformer",
       "scene": "Animated beach file-select menu with memory-card modal",
       "gameplay": false,
-      "probe": ".omx/full-speed/sunshine-exit-coverage/results/sunshine-B1",
-      "analysis": "sunshine-B1-analysis.json",
+      "probe": ".omx/full-speed/platformer-exit-coverage/results/platformer-B1",
+      "analysis": "platformer-B1-analysis.json",
       "ratios": {
         "strictCachedPerSampleAttemptPercent": 8.813074847301861,
         "strictCachedPerSampleHitPercent": 8.813096526616157,
@@ -384,7 +384,7 @@
     ]
   },
   "excluded": {
-    "directory": ".omx/full-speed/current-bench/results-mkw-settled/exit-coverage-mkw-A1",
+    "directory": ".omx/full-speed/current-bench/results-race-settled/exit-coverage-race-A1",
     "reason": "Terminal exit1: scene gate expired before measurement. Review file arrived about7seconds after timeout. No performance result accepted."
   },
   "method": "Exact disabled controls, currentf2 worker, fresh browsers, identical0x5555 process affinity;20emulated seconds warmup and30emulated seconds observation. Snapshot publication at CPU safepoints, raw reads whilepaused outside timing. One common configured random seed across the three workloads.",
@@ -395,7 +395,7 @@
     "One control/probe pair per gameplay scene does not establish a precise stable overhead percentage.",
     "The Other terminal class includes conditional/indirect exits and other operations; it is not a proven linkable cohort.",
     "Independent seed/cadence replication has not been performed.",
-    "Sunshine evidence covers its menu only. Full-speed gameplay across all games remains unverified.",
-    "The repaired MKW map checkpoint does not resolve general GPU save-state readback."
+    "The platformer evidence covers its menu only. Full-speed gameplay across all games remains unverified.",
+    "The repaired race map checkpoint does not resolve general GPU save-state readback."
   ]
 }

@@ -69,8 +69,8 @@ Inside `class GLContextEmscripten`, after `EMSCRIPTEN_WEBGL_CONTEXT_HANDLE m_con
   // proxy machinery with). For these contexts emscripten_webgl_commit_frame
   // returns -3 (INVALID_TARGET) because explicitSwapControl isn't on the
   // registered context. Rely on the OffscreenCanvas auto-mirror at task
-  // boundary instead. Without this gate, PE_FINISH never fires → Melee CPU
-  // stays in FastMeleeIdlePollLoop forever.
+  // boundary instead. Without this gate, PE_FINISH never fires → the game's CPU
+  // stays in the idle-poll fast loop forever.
   bool m_context_created_via_direct_js = false;
 ```
 
@@ -100,8 +100,8 @@ In `Swap()`, replace the unconditional commit_frame call with:
   // returns -3 INVALID_TARGET because explicitSwapControl isn't on the
   // registered context. Without this gate the swap "fails" every frame,
   // Renderer::Present aborts, GXSetDrawDone never reaches the GPU thread,
-  // PE_FINISH never raises, and Melee's CPU stays in FastMeleeIdlePollLoop
-  // forever.
+  // PE_FINISH never raises, and the game's CPU stays in the idle-poll fast
+  // loop forever.
   const int commit_result =
       m_context_created_via_direct_js ? 0 : emscripten_webgl_commit_frame();
 ```

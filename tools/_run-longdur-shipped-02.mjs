@@ -1,6 +1,5 @@
 // Comp-play match-length realism check — run 2 (repeatability).
-process.env.ROM = process.env.ROM ||
-  "F:/Emulation/super-smash-bros.-melee-usa-en-ja-rev-2.nkit_202203/Super Smash Bros. Melee (USA) (En,Ja) (Rev 2).nkit.iso";
+if (!process.env.ROM) throw new Error("set ROM to the disc image to run");
 process.env.SAVE_STATE_URL = "/__battle.sav";
 process.env.SAVE_STATE_AT = "35";
 process.env.VIDEO = "software";

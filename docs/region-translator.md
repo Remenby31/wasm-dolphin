@@ -147,7 +147,7 @@ The three P1s and the trivial P2s are fixed in #43; the rest is tracked here.
 - [ ] **Budget escapes**: the first module of a slice and the fallback compile are never refused by the slice budget. Bound both (defer a module whose estimate alone exceeds the slice target to a slice with nothing else).
 - [ ] **Boot window on a first launch**: the 3 s window starts at the first install, which on a first launch (regions from the optimisation, minutes in) falls in the middle of play. Open it only for installs that come from the cache before the first image.
 - [ ] **Hand-over before boot races**: `retain` does not receive the bytes, so the region's byte key is registered by an async digest that may land after the pthread barrier. Pass the bytes (or the key) to `retain` and await it before the barrier.
-- [ ] **Modules kept for the session**: every region Module stays alive in discio's map (127 MB of wire bytes for MKDD) for the whole session. Release a region's Module once installed on every pthread, or cap by bytes.
+- [ ] **Modules kept for the session**: every region Module stays alive in discio's map (127 MB of wire bytes for a GameCube racing game) for the whole session. Release a region's Module once installed on every pthread, or cap by bytes.
 
 Order after #43 (Main, 2026-10-20): TTFF aot=1 vs off on main; the late ready signal; the FP analyses; the dispatch share (22 % of host time).
 - [ ] **Orphan request after a late mark** (review of #58, P3): when discio marks an old request after a cache clear but before the re-post, the region installs synchronously with the in-flight key still set, and the re-post's answer later leaves a stale 1 in the slot; a block sharing it compiles cold once. Same family as "Cold compile counted as Ready".
@@ -448,7 +448,10 @@ region code whose outcome it knows:
 
 The hints travel as reloc kind 4 (offset of the `if`, 1 when likely) and
 patch nothing. The assembler counts a hint that does not land on an `if`
-(`hintsDropped`, 0 on every oracle program). The assembler writes them as a `metadata.code.branch_hint`
+(`hintsDropped`, 0 on every oracle program), and a second hint on the same
+`if`. V8 drops the whole section, silently, on any broken rule (offsets
+strictly increasing, size 1, nothing left over): the tests read every
+oracle module's section with those rules (`tests/helpers/branch-hints.mjs`). The assembler writes them as a `metadata.code.branch_hint`
 custom section (wasm branch hinting, on by default in V8) before the code
 section. TurboFan then lays the cold arms out of line, away from the hot
 path. An engine that doesn't know the section ignores it.
@@ -480,3 +483,114 @@ end body₀  end body₁ …  end body(N-1)  end($D) return_call dispatch  end($
 - **Unchanged.** The per-block tail (pc, downcount, its exits) and the entries.
 
 Compiler version 25.
+
+## Frame in locals (patch 0135, was 0128, 2026-10-23)
+
+A fragment block used to end with `pc ← npc` through the state, then a
+load, subtract, store and reload of downcount: 2 loads and 3 stores per
+block. A fragment now keeps pc (56), npc (57) and downcount (58) in locals:
+- Its blocks write npc to the local.
+- The block tail is `pc = npc ; downcount -= cycles ; br_if (downcount <= 0) $X`.
+- pc, npc and downcount are written back before every return and every
+  tail call. Running out of downcount branches to one shared exit `$X`
+  around the loop, which writes them back once: the first version wrote them
+  back in every block's tail and lost 0.9 % of cycles on the race (front
+  end). `$X` is only reached by those `br_if`, all hinted unlikely (0131), so
+  V8 lays it out of line: it defers a block only when all its predecessors
+  are unlikely edges. An exiting block (sc, rfi…), a jump out and the
+  dispatch write them back themselves.
+
+Every helper call that takes the state stores downcount before it and
+reloads it after: an exception takes the cycles spent, and a memory helper
+reaching MMIO reads the time (`CoreTiming::GetTicks` reads downcount) or
+schedules an event, which may lower it. `fma` takes no state: nothing
+around it. A helper
+other than the memory and FPU ones (`system`, the HLE calls) also gets pc
+and npc stored before it and npc reloaded after it. A helper that halts
+leaves its own pc, npc and downcount in the state, and the fragment
+returns 2 without writing them back: memory and FPU helpers never halt
+in a region (no DSI without the MMU, under which no region is installed,
+0090/0091; MSR.FP is never clear in one, 0121), and the MMU mode is fixed at
+boot. The downcount check's branch hint (0131) sits on its `br_if`.
+Compiler version 27.
+
+## Guest calls as wasm calls (patch 0142, 2026-10-24)
+
+A guest return (`blr`) used to leave the fragment through the region
+dispatcher's binary search, then a `return_call` into the caller's fragment
+and its head `br_table`. When the caller sat in another module, it went
+through `region_chain` and a `call_indirect` too. None of those jumps is
+predicted by the host's return stack. On the race scene returns and computed
+branches are 19 % of block transitions and 31 % of their time
+(research/deep-return-prediction.md, option R1; the native Dolphin "BLR
+optimization").
+
+- **Call.** A block ending in `bl` to a function outside the fragment writes
+  its frame back, then makes a wasm `call` (reloc kind 5) to the callee's
+  fragment in the module, else to the exit stub, which chains on to the
+  callee's region. On return:
+  - code 3 with `state.pc` at the call's continuation: the caller goes on
+    there (a direct `br` to that block, or its head);
+  - any other code, or another pc: passed up. 0 always means "continue at
+    `state.pc`", so a return elsewhere (LR rewritten, a `longjmp`) unwinds to
+    the dispatcher, as before.
+- **Return.** A block ending in a taken `bclr` marks its way to the
+  fragment's head (a local). When the head finds no block of the fragment
+  for that pc and a call made by a region is pending (depth > 0), the
+  fragment writes its frame back and returns 3. A return inside the
+  fragment (a self-recursion, whose calls are local jumps) stays there; other
+  exits (bctr) go to the dispatcher as before.
+- **Depth.** `PowerPCState::region_call_depth` counts these calls; at 64 a
+  call is a `return_call` as before (a Chrome worker holds ~960 frames of a
+  fragment's locals in Liftoff). `TryRunRegion` sets it to 0 before every
+  run: no unwind path can leave it high.
+- **Exits, and why no state generation is checked.** 3 comes only from a
+  `bclr` block reached with no exit in between. Everything that invalidates
+  code or changes the mode (sc, rfi, mtmsr, isync after icbi, a halting
+  helper, events and exceptions when downcount runs out) returns 0 or 2, and
+  every call passes it up: no caller goes on after its code may have changed.
+  `TryRunRegion` already takes any code but 1 as "ran"; the test export maps 3
+  to 0.
+- **Counters** (`DolphinWeb_RegionCallStats`, in race-perf's region stats as
+  `regionCalls`): calls past the cap and returns elsewhere count always, on
+  their cold paths; calls, the depth reached and returns passed up to the
+  CPU loop (counted by `TryRunRegion`) only while the harness samples. Off, a
+  call costs one state load and a hinted branch.
+
+Compiler version 31 (first numbered 0139, compiler version 29).
+
+## Icache flash invalidate re-checks every region (patch 0145, 2026-10-24)
+
+`mtspr HID0` with ICFI flash-invalidates the instruction cache: Dolphin
+clears its whole block cache (`JitInterface::ClearSafe`). Regions were left
+verified, so a game that rewrote code and only flash-invalidated kept running
+stale regions. `ClearSafe` now calls `DolphinWeb_UnverifyRegions`
+(`UnverifyAllRegions`, as a state load): each region is hashed against its
+plan at its next entry and dropped if its code changed. The `mtspr` is not a
+region op, so the region leaves before it and its callers pass that up
+(0142). No compiler version: the generated code is the same.
+
+## Hashed region dispatch (2026-10-24)
+
+A host profile of the heavy scene (product path, wgpu) put 10 % of the CPU
+thread in the region dispatchers `r<id>_dispatch` and `r<id>_inner`. Each was
+a binary search over the module's entries, up to 4,721 of them, so about 12
+compares whose branches the host mispredicts.
+
+- **Lookup.** slot = hash(pc) into a table of the next power of two of twice
+  the entries. Then one `br_table` (a jump table) goes to that slot's
+  compares, at most a few, against the full pc. A pc that is not an entry,
+  whatever its slot, still returns 1 from `f` or leaves through the exit
+  stub. Up to 4 entries, the dispatcher stays a row of compares.
+- **Hash.** It is `(pc >>> 2) & mask`, or `imul(pc >>> 2, M) >>> (32 - bits)`
+  with M from `DISPATCH_HASH_MULS`. The first one with the fewest compares in
+  its fullest slot, then in all, wins. It depends on the entries alone, so a
+  module's bytes depend only on its members.
+- **Key.** `dispatch:2;` in the module's cache key (`REGION_DISPATCH`), so a
+  module cached with the binary search is assembled again.
+- **Cost.** Over the whole disc, the 143 modules grow from 140.25 to 142.13 MB
+  (+1.3 %); formation is unchanged. A dispatch costs 16–17 ns instead of
+  26–30 ns in V8 at 1,400–2,400 entries (JS call included). In JSC it costs
+  13 / 20 / 22 ns instead of 24 / 32 / 50 ns at 1,400 / 2,400 / 4,800 entries,
+  from the 5th pass on, so the large `br_table` does not hold back tier-up.
+  Only the first pass, before V8 tiers up (Liftoff), is 1.2–1.4× slower.

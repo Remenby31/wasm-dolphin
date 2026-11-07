@@ -527,7 +527,7 @@ sourceContractTest("opt-in UBO cache is exact, two-entry MRU, serial-bounded, an
   assert.doesNotMatch(gfxSource.slice(passResetStart, passResetEnd), /ResetUboSliceCache/,
     "successful pass boundaries must retain serial-live cross-pass entries");
   assert.match(gfxSource,
-    /void WebGPUGfx::AbortRecordedPass\(\)[\s\S]*?InvalidateUboSlices\(\)/);
+    /void WebGPUGfx::AbortRecordedPass\((?:GfxAbortSite site)?\)[\s\S]*?InvalidateUboSlices\(\)/);
   assert.match(gfxSource,
     /s_ubo_cache_epoch\.fetch_add\(1, std::memory_order_release\)/);
   const utilityStart = gfxSource.indexOf("void WebGPUGfx::UploadUtilityUniforms");
@@ -546,7 +546,7 @@ sourceContractTest("opt-in UBO cache is exact, two-entry MRU, serial-bounded, an
   // the NEXT draw's binding 0 to utility constants. OnScreenUI uploads its
   // viewport uniform before iterating its draw lists, so an empty list uploaded
   // without drawing and left the flag set -- and the next GX draw read ImGui
-  // data as pixel constants. That is the Super Mario Sunshine white
+  // data as pixel constants. That is a platformer's white
   // file-select background. The domain is now chosen from the bound pipeline's
   // declared usage instead, so zero utility draws cannot redirect anything.
   assert.equal(
@@ -602,22 +602,22 @@ sourceContractTest("opt-in geometry packing uses one transactional upload and a 
   assert.match(vertexSource, /m_geometry_offset = packet_offset \+ packet_bytes/);
   assert.match(vertexSource, /EnsureLegacyBuffers\(\)/);
   assert.match(gfxSource, /EMSCRIPTEN_KEEPALIVE void SetWebGpuGeometryPackEnabled\(int enabled\)/);
+  // 0203: a skipped draw (no pipeline, no indices, no pass) is skipped alone;
+  // its bytes stay in the pending range, read by no draw. It no longer aborts
+  // the pass and every draw already recorded in it.
+  assert.doesNotMatch(gfxSource, /DiscardOrAbortPendingGeometryRange/);
   assert.match(
     gfxSource,
-    /DiscardOrAbortPendingGeometryRange\(\)[\s\S]*?if \(m_pass_open\)[\s\S]*?AbortRecordedPass\(\);[\s\S]*?else[\s\S]*?DiscardPendingGeometryRange\(\)/
+    /if \(m_cur_pipeline_id == 0\)\n\s+\{\n(?:\s+s_draw_skipped_no_pipeline\.fetch_add\(1, std::memory_order_relaxed\);\n)?\s+\/\/ 0203: only this draw is skipped[\s\S]*?\n\s+return;\n\s+\}/
   );
   assert.match(
     gfxSource,
-    /if \(m_cur_pipeline_id == 0\)[\s\S]*?DiscardOrAbortPendingGeometryRange\(\)/
-  );
-  assert.match(
-    gfxSource,
-    /if \(m_cur_pipeline_id == 0 \|\| num_indices == 0\)[\s\S]*?DiscardOrAbortPendingGeometryRange\(\)/
+    /if \(m_cur_pipeline_id == 0 \|\| num_indices == 0\)\n\s+\{\n(?:\s+if \(m_cur_pipeline_id == 0\)\n\s+s_draw_skipped_no_pipeline\.fetch_add\(1, std::memory_order_relaxed\);\n)?\s+\/\/ 0203: only this draw is skipped[\s\S]*?\n\s+return;\n\s+\}/
   );
   assert.match(gfxSource, /void InvalidateGeometryUploadPack\(\)/);
   assert.match(
     gfxSource,
-    /void WebGPUGfx::AbortRecordedPass\(\)[\s\S]*?m_cmd_stream\.AbortPass\(\);[\s\S]*?InvalidateGeometryUploadPack\(\)/
+    /void WebGPUGfx::AbortRecordedPass\((?:GfxAbortSite site)?\)[\s\S]*?m_cmd_stream\.AbortPass\(\);[\s\S]*?InvalidateGeometryUploadPack\(\)/
   );
   assert.match(
     gfxSource,
@@ -625,6 +625,17 @@ sourceContractTest("opt-in geometry packing uses one transactional upload and a 
   );
   assert.match(gfxSource, /s_geometry_upload_pack_epoch\.fetch_add\(1, std::memory_order_release\)/);
   assert.match(coreCmake, /'_SetWebGpuGeometryPackEnabled'/);
-  assert.match(worker, /case "loadState":[\s\S]*?setWebGpuGeometryPackEnabled[\s\S]*?api\?\.loadState[\s\S]*?setWebGpuGeometryPackEnabled/);
-  assert.match(worker, /api\.loadStateFile\(path\)[\s\S]*?setTimeout\(r, 1200\)[\s\S]*?setWebGpuGeometryPackEnabled/);
+  // The placement epoch moves once, before the load; moving it again after
+  // the load gave up a pass of post-load draws. Only a load fence (which may
+  // discard the fresh buffer's create) moves it again after a file load.
+  const slotLoad = worker.slice(worker.indexOf('case "loadState": {'), worker.indexOf('case "validationSetCorePaused"'));
+  assert.match(slotLoad, /setWebGpuGeometryPackEnabled[\s\S]*?api\?\.loadState\(/);
+  assert.doesNotMatch(slotLoad.slice(slotLoad.indexOf("api?.loadState(")), /setWebGpuGeometryPackEnabled|setWebGpuGeometryRangeEnabled/);
+  const fileLoad = worker.slice(worker.indexOf("const loadFenceArmed = wgpuLoadFenceActive;"), worker.indexOf('verifyWgpuProducerProfileActivation("save-state reload")'));
+  assert.match(fileLoad, /setWebGpuGeometryPackEnabled[\s\S]*?api\.loadStateFile\(path\)/);
+  const afterFile = fileLoad.slice(fileLoad.indexOf("api.loadStateFile(path)"));
+  assert.match(afterFile, /setTimeout\(r, 1200\)[\s\S]*?if \(loadFenceArmed\) \{\n\s+api\?\.setWebGpuGeometryPackEnabled\?\.\(wgpuGeometryPackEnabled \? 1 : 0\);\n\s+api\?\.setWebGpuGeometryRangeEnabled\?\.\(wgpuGeometryRangeEnabled \? 1 : 0\);\n\s+\}/);
+  assert.equal((afterFile.match(/setWebGpuGeometryPackEnabled/g) ?? []).length, 1, "after a file load, only under the fence");
+  // the fence is read as armed for this load, before the epoch moves
+  assert.ok(worker.indexOf("wgpuLoadFenceActive = wgpuLoadEpochFence &&") < worker.indexOf("const loadFenceArmed = wgpuLoadFenceActive;"));
 });

@@ -15,9 +15,11 @@ test("mapped staging slot count is explicit and flows through validation", async
     readSource("../tools/perf-regression-gate.mjs"),
     readSource("../tools/menu-progress-validate.mjs"),
   ]);
-  assert.match(host, /requestedWgpuMappedStagingSlotCount\(\s*window\.location\.search\s*\)/);
+  assert.match(host, /requestedWgpuMappedStagingSlotCount\(\s*window\.location\.search,\s*defaultWgpuMappedStagingSlotCount\(this\.wasmEngine\)\s*\)/);
   assert.match(host, /wgpuMappedStagingSlotCount: this\.wgpuMappedStagingSlotCount/);
-  assert.match(adapter, /this\.wgpuMappedStagingSlotCount = Number\(wgpuMappedStagingSlotCount\) === 4 \? 4 : 3/);
+  assert.match(adapter, /this\.wgpuMappedStagingSlotCount = wgpuMappedStagingSlotCountOf\(wgpuMappedStagingSlotCount\)/);
+  assert.match(worker, /wgpuMappedStagingSlotCount = wgpuMappedStagingSlotCountOf\(requestedWgpuMappedStagingSlotCount\)/);
+  assert.match(gate, /wgpuMappedStagingSlotCountOf\(String\(requestedMappedStagingSlots\)\)/);
   assert.match(adapter, /wgpuMappedStagingSlotCount: this\.wgpuMappedStagingSlotCount/);
   assert.match(worker, /wgpuMappedStagingSlotCount: payload\.wgpuMappedStagingSlotCount/);
   assert.match(worker, /slotCount: wgpuMappedStagingSlotCount/);
@@ -55,7 +57,7 @@ test("upload transport flows from URL parsing through the worker load payload", 
     readSource("../src/upstream-worker-adapter.js"),
     readSource("../src/upstream-discio-worker.js"),
   ]);
-  assert.match(host, /requestedWgpuUploadTransport\(window\.location\.search\)/);
+  assert.match(host, /requestedWgpuUploadTransport\(\s*window\.location\.search,\s*defaultWgpuUploadTransport\(this\.wasmEngine\)\s*\)/);
   assert.match(host, /wgpuUploadTransport: this\.wgpuUploadTransport/);
   assert.match(adapter, /wgpuUploadTransport === "mapped" \? "mapped" : "queue"/);
   assert.match(adapter, /wgpuUploadTransport: this\.wgpuUploadTransport/);
@@ -136,7 +138,7 @@ test("mapped drain coalescing is opt-in, bounded, and generation-fenced", async 
 test("mapped uploads are copied into a bounded pool and queue writes stay isolated", async () => {
   const worker = await readSource("../src/upstream-discio-worker.js");
   assert.match(worker, /WGPU_MAPPED_STAGING_SLOT_COUNT = 3/);
-  assert.match(worker, /WGPU_MAPPED_STAGING_SLOT_BYTES = 16 \* 1024 \* 1024/);
+  assert.match(worker, /let wgpuMappedStagingSlotBytes = 16 \* 1024 \* 1024/);
   assert.match(worker, /if \(wgpuUploadTransport === "mapped"\) \{[\s\S]*?\.stageBuffer\(\{/);
   assert.match(worker, /if \(wgpuUploadTransport === "mapped"\) \{[\s\S]*?\.stageTexture\(\{/);
   assert.match(worker, /\} else \{[\s\S]*?q\.writeBuffer\(/);
@@ -174,4 +176,133 @@ test("performance validation fails closed when the mapped arm executes queue tra
   assert.match(gate, /WGPU upload transport mismatch: requested=/);
   assert.match(gate, /observedWgpu\?\.uploadTransport/);
   assert.match(gate, /evaluateWgpuRuntimeConfigEvidence/);
+});
+
+// A count the page accepts must reach the worker's load payload unchanged:
+// before, the adapter dropped every value but 4 back to 3.
+test("?wgpustagingslots=6 reaches the worker's load payload through the adapter", async (t) => {
+  const { UpstreamWorkerAdapter } = await import("../src/upstream-worker-adapter.js");
+  const { requestedWgpuMappedStagingSlotCount } = await import("../src/wgpu-replay-diagnostics.js");
+  const adapter = new UpstreamWorkerAdapter({ wgpuMappedStagingSlotCount: requestedWgpuMappedStagingSlotCount("?wgpustagingslots=6") });
+  let posted = null;
+  adapter.worker = {
+    postMessage(message) {
+      posted = message;
+      queueMicrotask(() => adapter.handleMessage({ id: message.id, ok: true }));
+    }
+  };
+  const originalWindow = globalThis.window;
+  globalThis.window = { location: { href: "http://127.0.0.1:8080/?wgpustagingslots=6", search: "?wgpustagingslots=6" } };
+  t.after(() => {
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+  });
+  await adapter.load();
+  assert.equal(posted.payload.wgpuMappedStagingSlotCount, 6);
+});
+
+// The stall loggers are opt-in: ?stalllog=1 is read once by the host, which
+// gates [main-stall], and must reach the worker's load payload through the
+// adapter (which rebuilds that payload field by field) to gate [signal-stall].
+test("?stalllog=1 gates both stall loggers and flows through the worker load payload", async () => {
+  const [host, adapter, worker] = await Promise.all([
+    readSource("../src/core-host.js"),
+    readSource("../src/upstream-worker-adapter.js"),
+    readSource("../src/upstream-discio-worker.js"),
+  ]);
+  assert.match(host, /this\.stallLog = new URLSearchParams\(window\.location\.search\)\.get\("stalllog"\) === "1"/);
+  assert.match(host, /stallLog: this\.stallLog/);
+  assert.match(host, /if \(this\.stallLog && !this\._mainStallFirstLogged/);
+  assert.match(host, /if \(this\.stallLog && \(isNewWorst \|\| this\._mainStallCount % 5 === 0\)\)/);
+  // main-profiler reads the counters: they stay unconditional.
+  assert.match(host, /if \(loopMs > 20\) \{\s*this\._mainStallCount = /);
+  assert.match(adapter, /stallLog = false,/);
+  assert.match(adapter, /this\.stallLog = Boolean\(stallLog\)/);
+  assert.match(adapter, /stallLog: this\.stallLog/);
+  assert.match(worker, /stallLog: payload\.stallLog/);
+  assert.match(worker, /stallLog: requestedStallLog = false/);
+  assert.match(worker, /stallLogEnabled = Boolean\(requestedStallLog\)/);
+  assert.match(worker, /if \(stallLogEnabled && \(isNewWorst \|\| signalStallCount % 5 === 0\)\)/);
+});
+
+for (const [search, expected] of [["?stalllog=1", true], ["", false]]) {
+  test(`stallLog=${expected} reaches the worker's load payload through the adapter`, async (t) => {
+    const { UpstreamWorkerAdapter } = await import("../src/upstream-worker-adapter.js");
+    const adapter = new UpstreamWorkerAdapter(
+      new URLSearchParams(search).get("stalllog") === "1" ? { stallLog: true } : {}
+    );
+    let posted = null;
+    adapter.worker = {
+      postMessage(message) {
+        posted = message;
+        queueMicrotask(() => adapter.handleMessage({ id: message.id, ok: true }));
+      }
+    };
+    const originalWindow = globalThis.window;
+    globalThis.window = { location: { href: `http://127.0.0.1:8080/${search}`, search } };
+    t.after(() => {
+      if (originalWindow === undefined) delete globalThis.window;
+      else globalThis.window = originalWindow;
+    });
+    await adapter.load();
+    assert.equal(posted.payload.stallLog, expected);
+  });
+}
+
+test("mapped staging slot size flows from the page to the pool and the artifacts", async () => {
+  const [host, adapter, worker, gate, harness] = await Promise.all([
+    readSource("../src/core-host.js"),
+    readSource("../src/upstream-worker-adapter.js"),
+    readSource("../src/upstream-discio-worker.js"),
+    readSource("../tools/perf-regression-gate.mjs"),
+    readSource("../tools/menu-progress-validate.mjs"),
+  ]);
+  assert.match(host, /requestedWgpuMappedStagingSlotMib\(\s*window\.location\.search,\s*defaultWgpuMappedStagingSlotMib\(this\.wasmEngine\)\s*\)/);
+  assert.match(host, /wgpuMappedStagingSlotMib: this\.wgpuMappedStagingSlotMib/);
+  assert.match(adapter, /this\.wgpuMappedStagingSlotMib = wgpuMappedStagingSlotMibOf\(wgpuMappedStagingSlotMib\)/);
+  assert.match(adapter, /wgpuMappedStagingSlotMib: this\.wgpuMappedStagingSlotMib/);
+  assert.match(worker, /wgpuMappedStagingSlotMib: payload\.wgpuMappedStagingSlotMib/);
+  assert.match(worker, /wgpuMappedStagingSlotMibOf\(requestedWgpuMappedStagingSlotMib\) \* 1024 \* 1024/);
+  assert.match(worker, /slotSize: wgpuMappedStagingSlotBytes/);
+  assert.match(worker, /slotBytes: wgpuMappedStagingSlotBytes/);
+  assert.match(gate, /"wgpustagingslotmib"/);
+  assert.match(gate, /WGPU mapped staging slot-size mismatch/);
+  assert.match(harness, /\["WGPUSTAGINGSLOTMIB", "wgpustagingslotmib"\]/);
+});
+
+test("?wgpustagingslotmib=4 reaches the worker's load payload through the adapter", async (t) => {
+  const { UpstreamWorkerAdapter } = await import("../src/upstream-worker-adapter.js");
+  const { requestedWgpuMappedStagingSlotMib } = await import("../src/wgpu-replay-diagnostics.js");
+  const adapter = new UpstreamWorkerAdapter({ wgpuMappedStagingSlotMib: requestedWgpuMappedStagingSlotMib("?wgpustagingslotmib=4") });
+  let posted = null;
+  adapter.worker = {
+    postMessage(message) {
+      posted = message;
+      queueMicrotask(() => adapter.handleMessage({ id: message.id, ok: true }));
+    }
+  };
+  const originalWindow = globalThis.window;
+  globalThis.window = { location: { href: "http://127.0.0.1:8080/?wgpustagingslotmib=4", search: "?wgpustagingslotmib=4" } };
+  t.after(() => {
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+  });
+  await adapter.load();
+  assert.equal(posted.payload.wgpuMappedStagingSlotMib, 4);
+});
+
+test("both upload paths take the queue through writeWgpuUploadThroughQueue and are counted", async () => {
+  const worker = await readSource("../src/upstream-discio-worker.js");
+  const calls = worker.match(/queueWgpuUploadReason\(stageReason, Boolean\(pass\)\);\s*if \(queueReason &&\s*writeWgpuUploadThroughQueue\(\{\s*submitPending: submitPendingForQueueUpload,/g) ?? [];
+  assert.equal(calls.length, 2);
+  assert.equal((worker.match(/noteQueueWgpuUpload\(queueReason, uploadBytes\)/g) ?? []).length, 2);
+  // Sparse and compute UBO staging keep their own shadow state: never the queue.
+  assert.match(worker, /const queueReason = stageAccepted \|\| !viaPool/);
+  // Inside a pass only the staged batch is submitted, never the render encoder.
+  assert.match(worker, /if \(enc && !pass\) submitEnc\("staging-oversize"\);\s*else flushMappedUploadsOnly\("staging-oversize"\);/);
+  assert.match(worker, /stagingOversize: webGpuCausalStats\.mappedStagingOversizeCount/);
+  assert.match(worker, /stagingPassCapacityQueue: webGpuCausalStats\.mappedStagingPassCapacityQueueCount/);
+  // Per-pass bytes are a metric: nothing per pass without ?metrics=1.
+  assert.match(worker, /if \(causalMetricsEnabled\) \{\s*recordWgpuPassUploadBytes\(passUploadBytes\);\s*passUploadBytes = 0;\s*\}/);
+  assert.match(worker, /if \(causalMetricsEnabled && pass && replayRecordAccepted &&/);
 });

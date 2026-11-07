@@ -2,9 +2,9 @@
 
 The WebAssembly core now reuses linked targets for known block exits, reducing repeated cache lookups while retaining the original execution, timing, input-policy and invalidation checks. Patch `0066-cached-interpreter-static-exit-links.patch` enables the lean implementation by default under Emscripten. An explicit `DOLPHIN_WEB_STATIC_EXIT_LINKS=0` still disables it, and diagnostic counters default off.
 
-The first broad-link implementation had mixed Melee results and was not promoted. The lean version installs the thread-local context once per `ExecuteOneBlock` call and refreshes its completion, epoch and feature state at each actual block. It keeps the same link descriptors and base cache unlink behavior. No shared JIT-cache layout or new package dependency was introduced.
+The first broad-link implementation had mixed results on the fighting game and was not promoted. The lean version installs the thread-local context once per `ExecuteOneBlock` call and refreshes its completion, epoch and feature state at each actual block. It keeps the same link descriptors and base cache unlink behavior. No shared JIT-cache layout or new package dependency was introduced.
 
-Paired tests of this exact core showed Melee gains of **9.52% and 11.09%**, and Mario Kart Wii gains of **8.52% and 12.97%**. Candidate results were **46.19–47.27 core FPS** for the tested Melee battle and **34.27–35.36 core FPS** for the settled, idle-kart Wii fixture. These remain below full speed. See the [Melee measurements](melee-static-exit-links-lean-2026-09-07.json) and [Mario Kart Wii measurements](mkw-static-exit-links-lean-2026-09-07.json) for each arm's identity, timing, input, audio and GPU-completion evidence. The separate diagnostic build bypassed 82.233% of post-block lookups; that percentage is not an FPS gain.
+Paired tests of this exact core showed fighting-game gains of **9.52% and 11.09%**, and Wii racing-game gains of **8.52% and 12.97%**. Candidate results were **46.19–47.27 core FPS** for the tested battle and **34.27–35.36 core FPS** for the settled, idle-kart Wii fixture. These remain below full speed. The separate diagnostic build bypassed 82.233% of post-block lookups; that percentage is not an FPS gain.
 
 ## Reproduction and installation
 
@@ -26,7 +26,7 @@ The installed files were packaged using the standard build-info and candidate he
 
 `npm run check` and `npm run verify:provenance` passed after installation. The source lock also replayed and verified before the build. No native builds or tests overlapped the timed browser measurements.
 
-Melee battle and Wii fixture screenshots, input isolation, JIT policy, audio counters and GPU fences passed their bounded checks. Wii's course outline is visible using the separately repaired checkpoint, with no displaced left-side overlay apparent in the inspected boundaries. Sunshine passed only an animated file-select menu smoke check: 59.94 core FPS, approximately 29.89 submitted presentations per second. This is not Sunshine gameplay coverage or proof that all games run at full speed.
+Battle and Wii fixture screenshots, input isolation, JIT policy, audio counters and GPU fences passed their bounded checks. Wii's course outline is visible using the separately repaired checkpoint, with no displaced left-side overlay apparent in the inspected boundaries. A 3D platformer passed only an animated file-select menu smoke check: 59.94 core FPS, approximately 29.89 submitted presentations per second. This is not gameplay coverage for that title or proof that all games run at full speed.
 
 General GPU save-state readback remains unresolved, as do wider gameplay coverage and sustained native cadence across all games. The Wii fixture restores one previously blank map image; it does not repair the other lost cached images. See [the viewport and minimap investigation](../webgpu-viewport-fix.md). The Windows in-place link failure was recovered for this build; the build wrapper itself was not changed.
 
@@ -40,15 +40,15 @@ with more pairs, against main's current core `286e7287`:
 
 | workload | A median | B median | median delta | positive | two-tailed sign |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Mario Kart Wii (race state) | 1680.9 | 2034.1 | **+22.28%** | 8/8 | p = 0.0078 |
-| Melee (Great Bay battle) | 1760.7 | 1969.4 | **+11.65%** | 6/6 | p = 0.0312 |
+| Wii racing game (race state) | 1680.9 | 2034.1 | **+22.28%** | 8/8 | p = 0.0078 |
+| fighting game (reference battle) | 1760.7 | 1969.4 | **+11.65%** | 6/6 | p = 0.0312 |
 
-In emulated frames: Mario Kart Wii 28.0 -> 33.9 fps, Melee 29.3 -> 32.8 fps.
-Neither arm's spread overlaps the other's on either title -- Mario Kart Wii's
+In emulated frames: Wii racing game 28.0 -> 33.9 fps, fighting game 29.3 -> 32.8 fps.
+Neither arm's spread overlaps the other's on either title -- the Wii racing game's
 control tops out at 1687 against a treatment floor of 1975 -- which is a
 cleaner separation than anything else measured on this fixture.
 
-Melee reproduces the original 9.5-11.1% closely. Mario Kart Wii comes out well
+The fighting game reproduces the original 9.5-11.1% closely. The Wii racing game comes out well
 above the original 8.5-13.0%, which is expected rather than suspicious: main
 has since gained the renderer work from PR #21, so the control is a different
 core from the one the first measurement used.

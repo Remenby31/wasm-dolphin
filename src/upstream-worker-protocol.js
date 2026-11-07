@@ -1,7 +1,5 @@
 export const DEFAULT_UPSTREAM_CORE_URL = "./cores/dolphin/dolphin-core-upstream.js";
-// The default core's hash lives in a data file that CI rewrites with each core (docs/repro-build.md).
-import coreLock from "../cores/dolphin/core.lock.json" with { type: "json" };
-export const DEFAULT_UPSTREAM_CORE_SHA256 = coreLock.sha256;
+// The default core's hash: src/default-core.js (page modules only).
 export const DISCIO_UPSTREAM_CORE_URL = "./cores/dolphin/dolphin-upstream.js";
 export const WORKERFS_MOUNT_DIR = "/workerfs";
 export const XFB_FAST_PATH_FLAGS = Object.freeze({
@@ -22,7 +20,7 @@ export const ONE_WAY_WORKER_REQUEST_TYPES = Object.freeze([
 
 const ONE_WAY_WORKER_REQUEST_TYPE_SET = new Set(ONE_WAY_WORKER_REQUEST_TYPES);
 
-const SHA256_PATTERN = /^[0-9a-f]{64}$/;
+export const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 
 export function requestedLegacyOneWayAck(search = globalThis.location?.search ?? "") {
   return new URLSearchParams(search).get("legacyonewayack") === "1";
@@ -89,27 +87,6 @@ export function buildWorkerErrorReply(message, error) {
 
 export function estimateWorkerMessageJsonBytes(message) {
   return new TextEncoder().encode(JSON.stringify(message)).byteLength;
-}
-
-export function requestedUpstreamCoreBuild(search = globalThis.location?.search ?? "") {
-  const requested = new URLSearchParams(search).get("coreid")?.toLowerCase().replace(/^sha256:/, "") ?? "";
-  if (!requested) {
-    return {
-      coreId: `sha256:${DEFAULT_UPSTREAM_CORE_SHA256}`,
-      sha256: DEFAULT_UPSTREAM_CORE_SHA256,
-      coreUrl: DEFAULT_UPSTREAM_CORE_URL,
-      candidate: false
-    };
-  }
-  if (!SHA256_PATTERN.test(requested)) {
-    throw new Error("coreid must be a SHA-256 content hash");
-  }
-  return {
-    coreId: `sha256:${requested}`,
-    sha256: requested,
-    coreUrl: `./build/core-candidates/${requested}/dolphin-core-upstream.js`,
-    candidate: true
-  };
 }
 
 export async function sha256Hex(bytes) {

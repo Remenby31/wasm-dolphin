@@ -1320,6 +1320,144 @@ EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_HarnessViRingCapacity() { return H
 EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_HarnessViRingHead() { return s_harness_vi_head.load(std::memory_order_acquire); }
 EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_HarnessLoadGeneration() { return s_harness_load_generation.load(std::memory_order_acquire); }
 
+// Patch 0214 (harness pipeline diag): one entry per VI swap the video thread
+// runs (VideoBackendBase.cpp, HarnessRecordedViSwap), read by
+// src/harness-swap-ring.js: the VI output it shows, when the video thread
+// pulled it (host ms, the VI ring's clock), the FIFO chunks it still had to
+// replay to reach what the game wrote before that VI (patch 0211's target),
+// the FIFO distance at the VI in bytes, and flags (bit 0: a new picture, not a
+// duplicate; bit 1: patch 0211 held the last picture for a late copy). A value
+// the core does not know (single core, a deterministic GPU thread) is
+// UINT32_MAX, read as null, never as 0. Same seqlock as the VI ring.
+// Written only with the harness hooks on AND the swap ring asked for
+// (validationEnableHarness { pipeline: true }): otherwise the CPU thread reads
+// one more flag per VI output under the harness, and nothing at all without it.
+struct DolphinWebHarnessSwapEntry
+{
+  std::atomic<std::uint32_t> seq;
+  std::uint32_t vi_since_boot;
+  double host_ms;
+  std::uint32_t behind_chunks;
+  std::uint32_t fifo_bytes;
+  std::uint32_t flags;
+  std::uint32_t pad;
+};
+static_assert(sizeof(DolphinWebHarnessSwapEntry) == 32, "harness swap entry layout is read from JS");
+
+constexpr std::uint32_t HARNESS_SWAP_RING_CAPACITY = 8192;  // as the VI ring
+// Allocated at the first enable, never in the core's static data: static data
+// added ahead of other globals moves the addresses the region translator
+// embeds (tests/regshape-x64.test.mjs), and a core without the harness never
+// pays for the ring's 256 KiB.
+static std::atomic<DolphinWebHarnessSwapEntry*> s_harness_swap_ring{nullptr};
+static std::atomic<std::uint32_t> s_harness_swap_head{0};
+static std::atomic<int> s_harness_swaps_enabled{0};
+
+// The worker's thread only (validationEnableHarness, the core's load).
+// Allocated once, at the first enable, and never freed nor reallocated: a
+// later enable (after a disable) reuses it, so the address the worker reads
+// (DolphinWeb_HarnessSwapRing) never goes stale.
+// Ordering: the ring pointer is stored, then the flag is stored with release;
+// the writer (DolphinWeb_HarnessRecordSwap, video thread) loads the flag with
+// acquire (DolphinWeb_HarnessSwapsEnabled) before it loads the ring: a writer
+// that sees the flag sees the ring, and nothing is written before the flag.
+EMSCRIPTEN_KEEPALIVE void DolphinWeb_HarnessSwapsEnable(int enabled)
+{
+  if (enabled && !s_harness_swap_ring.load(std::memory_order_acquire))
+    s_harness_swap_ring.store(new DolphinWebHarnessSwapEntry[HARNESS_SWAP_RING_CAPACITY](),
+                              std::memory_order_release);
+  // release: pairs with the acquire load in DolphinWeb_HarnessSwapsEnabled
+  s_harness_swaps_enabled.store(enabled ? 1 : 0, std::memory_order_release);
+}
+// Read on the CPU thread at each VI output, only under the harness hooks.
+EMSCRIPTEN_KEEPALIVE int DolphinWeb_HarnessSwapsEnabled()
+{
+  // acquire: pairs with the release store in DolphinWeb_HarnessSwapsEnable
+  return s_harness_enabled.load(std::memory_order_relaxed) &&
+         s_harness_swaps_enabled.load(std::memory_order_acquire);
+}
+// The video thread (one writer: swaps run on one thread at a time).
+EMSCRIPTEN_KEEPALIVE void DolphinWeb_HarnessRecordSwap(std::uint32_t vi_since_boot, double host_ms,
+                                                       std::uint32_t behind_chunks,
+                                                       std::uint32_t fifo_bytes, std::uint32_t flags)
+{
+  if (!DolphinWeb_HarnessSwapsEnabled())
+    return;
+  DolphinWebHarnessSwapEntry* ring = s_harness_swap_ring.load(std::memory_order_acquire);
+  if (!ring)
+    return;
+  const std::uint32_t head = s_harness_swap_head.load(std::memory_order_relaxed);
+  DolphinWebHarnessSwapEntry& e = ring[head % HARNESS_SWAP_RING_CAPACITY];
+  e.seq.store(2 * head + 1, std::memory_order_relaxed);  // odd: being written
+  std::atomic_thread_fence(std::memory_order_release);
+  e.vi_since_boot = vi_since_boot;
+  e.host_ms = host_ms;
+  e.behind_chunks = behind_chunks;
+  e.fifo_bytes = fifo_bytes;
+  e.flags = flags;
+  e.seq.store(2 * head + 2, std::memory_order_release);  // even: entry `head` complete
+  s_harness_swap_head.store(head + 1, std::memory_order_release);
+}
+// null until the swap ring was first enabled.
+EMSCRIPTEN_KEEPALIVE DolphinWebHarnessSwapEntry* DolphinWeb_HarnessSwapRing() { return s_harness_swap_ring.load(std::memory_order_acquire); }
+EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_HarnessSwapRingCapacity() { return HARNESS_SWAP_RING_CAPACITY; }
+EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_HarnessSwapRingHead() { return s_harness_swap_head.load(std::memory_order_acquire); }
+
+// Patch 0164 (harness only): the video thread's blocking EFB copies to RAM.
+// Per kind (0: a sync point flushing deferred copies, 1: an immediate copy,
+// DeferEFBCopies=False), at word 1 + 16 * kind: flushes, copies, FIFO work
+// waiting at the start, FIFO work waiting at the end, total wait (us), wait
+// with FIFO work at the end (us), longest wait (us), then a histogram of
+// waits (<= 0.5, 1, 2, 4, 8, 16, 33 ms, more). Word 0: the layout version.
+static constexpr std::uint32_t EFB_SYNC_WORDS = 33;
+static std::array<std::atomic<std::uint32_t>, EFB_SYNC_WORDS> s_efb_sync{};
+
+void DolphinWeb_RecordEfbSync(int kind, unsigned wait_us, int fifo_behind_start,
+                              int fifo_behind_end, unsigned copies)
+{
+  if (!s_harness_enabled.load(std::memory_order_relaxed) || kind < 0 || kind > 1)
+    return;
+  static constexpr unsigned BOUNDS_US[7] = {500, 1000, 2000, 4000, 8000, 16000, 33000};
+  const std::size_t base = 1 + 16 * static_cast<std::size_t>(kind);
+  s_efb_sync[0].store(1, std::memory_order_relaxed);
+  s_efb_sync[base + 0].fetch_add(1, std::memory_order_relaxed);
+  s_efb_sync[base + 1].fetch_add(copies, std::memory_order_relaxed);
+  if (fifo_behind_start)
+    s_efb_sync[base + 2].fetch_add(1, std::memory_order_relaxed);
+  if (fifo_behind_end)
+  {
+    s_efb_sync[base + 3].fetch_add(1, std::memory_order_relaxed);
+    s_efb_sync[base + 5].fetch_add(wait_us, std::memory_order_relaxed);
+  }
+  s_efb_sync[base + 4].fetch_add(wait_us, std::memory_order_relaxed);
+  std::uint32_t max = s_efb_sync[base + 6].load(std::memory_order_relaxed);
+  while (wait_us > max &&
+         !s_efb_sync[base + 6].compare_exchange_weak(max, wait_us, std::memory_order_relaxed))
+  {
+  }
+  std::size_t bucket = 7;
+  for (std::size_t i = 0; i < 7; ++i)
+  {
+    if (wait_us <= BOUNDS_US[i])
+    {
+      bucket = i;
+      break;
+    }
+  }
+  s_efb_sync[base + 7 + bucket].fetch_add(1, std::memory_order_relaxed);
+}
+
+EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_HarnessEfbSyncWords() { return EFB_SYNC_WORDS; }
+EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_HarnessEfbSyncWord(std::uint32_t index)
+{
+  return index < EFB_SYNC_WORDS ? s_efb_sync[index].load(std::memory_order_relaxed) : 0;
+}
+EMSCRIPTEN_KEEPALIVE void DolphinWeb_HarnessEfbSyncReset()
+{
+  for (std::size_t i = 1; i < EFB_SYNC_WORDS; ++i)
+    s_efb_sync[i].store(0, std::memory_order_relaxed);
+}
+
 // Harness: record the next `frames` frames of the GPU FIFO into a FIFO log
 // at `path` (FifoPlayer's .dff format), so a homebrew's frames can be
 // replayed on every backend without its CPU side. State: 0 idle,
@@ -1786,6 +1924,18 @@ int GetDiscNumber()
 {
   const std::optional<std::uint8_t> disc_number = s_disc ? s_disc->GetDiscNumber() : std::nullopt;
   return disc_number ? static_cast<int>(*disc_number) : -1;
+}
+
+// The mounted disc's revision (0 when it has none), -1 without a disc: with
+// GetGameId, what selects the disc's GameSettings INIs (GetGameIniFilenames).
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int GetRevision()
+{
+  if (!s_disc)
+    return -1;
+  return static_cast<int>(s_disc->GetRevision().value_or(0));
 }
 
 const char* GetApploaderDate()

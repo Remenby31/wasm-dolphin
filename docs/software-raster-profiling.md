@@ -102,7 +102,7 @@ mandatory before selecting or implementing any TEV specialization. Patch
 change TEV output or select a fast path.
 
 The instrumentation itself selects no specialization. Collect at least three
-same-save, no-input Kirby-versus-Link runs and require a stable dominant case
+same-save, no-input reference-battle runs and require a stable dominant case
 before adding behavior. Run `fastsw=0` and `fastsw=1` separately because those
 modes deliberately produce different pixel work and XFB identities. A later
 candidate still requires exact texture-byte, EFB, and XFB parity; a matching
@@ -133,8 +133,7 @@ Three headed pairs moved mean unique cadence from 12.843 to 13.763 FPS
 (+7.16%) and sampled stale ratio from 80.057% to 77.614%; all three paired
 visual deltas were positive. This is provisionally retained diagnostic
 evidence, not a clean-tree performance qualification. Rollback is to revert
-patch `0016`; there is no URL flag for this exact-output specialization. See
-[the next-program evidence](perf-results/melee-next-program-2026-07-10.md).
+patch `0016`; there is no URL flag for this exact-output specialization.
 
 ## Validated I4 dispatch and decoder parity
 
@@ -176,7 +175,7 @@ runs are complete. Rollback is patch `0017`; no URL flag is introduced.
 ## Exact TEV hot cases: parity proven, throughput result non-promotable
 
 Two headed `fastsw=1`, `metrics=1`, `ppcprof=1` captures loaded the exact
-Kirby-versus-Link save directly and used independent sparse-case seeds. Those
+reference-battle save directly and used independent sparse-case seeds. Those
 profile artifacts predate the post-load profile reset, so the figures below
 subtract each run's `save-state-loaded` helper snapshot from its final
 cumulative counters. The three cases were present in both endpoint top-eight
@@ -221,11 +220,6 @@ EFB/XFB parity. `swtevfast` therefore remains default-off. This is a
 machine-specific throughput result, not a claimed unique-visual-FPS gain or a
 default-safe optimization.
 
-See [the final optimization evidence](perf-results/melee-final-optimization-evidence-2026-07-10.md)
-for the clean comparison and
-[the TEV/CoreTiming report](perf-results/melee-tev-core-timing-evidence-2026-07-10.md)
-for exact tuple selection, shadow counters, and the rejected dirty precursor.
-
 `sampledStaleFrameRatio` is based on the existing sparse visual hash, so it is
 a classification of sampled output, not a cryptographic equality check.
 `fifoConsumerObservedBacklogAge*` is the canonical JSON/CSV name for the age of
@@ -266,8 +260,7 @@ npm run compare:core-builds -- `
 
 The historical independent instrumentation builds matched exactly at WASM SHA-256
 `158dde37602442bf1dacf42328501082b46b47768b2455946fcb4c596fcdb5ea`.
-Three direct-save metrics-off/on pairs and activation evidence are packaged in
-[the software-raster phase result](perf-results/melee-software-raster-phases-2026-07-10.md).
+Three direct-save metrics-off/on pairs and activation evidence were recorded.
 
 Instrumentation rollback is one commit: remove snapshot patch
 `0009-software-raster-phase-profile.patch`, the bridge header/export, and the

@@ -16,7 +16,7 @@
 // make the core's bytes independent of that path. A commit after another
 // only recompiles what differs, instead of a fresh worktree per commit
 // (sources fetched again, every file compiled: ~7 min).
-//   node harness/remote/spark-build.mjs <commit> [--jobs 16]
+//   node harness/remote/spark-build.mjs <commit> [--jobs 10]
 import { spawnSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
@@ -86,7 +86,9 @@ try {
   }
   // --reset-vendor: the previous commit's patch series may differ; only the
   // files it changes are rewritten, so the rest keeps its objects.
-  run("nice", ["-n", "10", "node", "tools/build-core-repro.mjs", "--install", "--reset-vendor", "--ccache", ...(rest.length ? rest : ["--jobs", "16"])], work);
+  // On Salon's cpus only (10-19; 0-9 are Excalibur's since 2026-10-29), as
+  // many jobs as it has.
+  run("taskset", ["-c", "10-19", "nice", "-n", "10", "node", "tools/build-core-repro.mjs", "--install", "--reset-vendor", "--ccache", ...(rest.length ? rest : ["--jobs", "10"])], work);
   // The served tree, published whole (written aside, then renamed).
   const tmp = `${wt}.tmp-${process.pid}`;
   rmSync(tmp, { recursive: true, force: true });

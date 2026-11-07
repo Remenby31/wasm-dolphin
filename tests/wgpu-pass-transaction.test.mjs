@@ -147,13 +147,13 @@ sourceContractTest("producer source stages passes, publishes batches once, and r
   assert.match(batchBody, /m_slots\[\(w \+ i\) % m_capacity\] = records\[i\]/);
   assert.equal((batchBody.match(/m_header->write\.store/g) || []).length, 1);
   assert.match(stream, /m_pass_poisoned = true/);
-  assert.match(stream, /m_batch_abort_count/);
+  assert.match(stream, /m_batch_abort_count|CountBatchAbort\(/);
   assert.match(stream, /m_batch_oversize_count/);
   assert.match(stream, /m_upload_wait_timeouts/);
 
-  assert.match(gfx, /void WebGPUGfx::AbortRecordedPass\(\)/);
+  assert.match(gfx, /void WebGPUGfx::AbortRecordedPass\((?:GfxAbortSite site)?\)/);
   assert.match(gfx,
-    /void WebGPUGfx::AbortRecordedPass\(\)[\s\S]*?m_cmd_stream\.AbortPass\(\)[\s\S]*?ResetRecordedPassState\(\)/);
+    /void WebGPUGfx::AbortRecordedPass\((?:GfxAbortSite site)?\)[\s\S]*?m_cmd_stream\.AbortPass\(\)[\s\S]*?ResetRecordedPassState\(\)/);
   assert.match(gfx,
     /void WebGPUGfx::PresentBackbuffer\(\)[\s\S]*?if \(EndPassIfOpen\(\)[\s\S]*?PushSubmitPresent/);
 });

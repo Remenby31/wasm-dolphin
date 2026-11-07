@@ -3,9 +3,7 @@
 This is the current checkpoint after the evidence-driven browser performance
 program and its five-priority follow-up. For exact machines, fixtures, commits,
 raw paths, and attribution limits, use the
-[current performance audit](performance-audit-2026-07-10.md),
-[software evidence](perf-results/melee-performance-evidence-2026-07-10.md),
-[JIT diagnosis](perf-results/melee-jit-diagnostics-2026-07-10.md), and
+[current performance audit](performance-audit-2026-07-10.md) and
 [hardware-WGPU evidence](perf-results/wgpu-replay-and-latency-2026-07-10.md).
 
 ## Product direction
@@ -17,14 +15,14 @@ browser WebGPU:
 ?core=upstream&video=software&presenter=webgpu&cpu=dual&speed=1&wasmjit=1&jitwarmup=700&oc=1&pacing=tick&fastsw=1&metrics=1
 ```
 
-Melee is the only best-supported target. Near-100% game speed describes core
+One fighting game, used as the reference workload, is the only best-supported target. Near-100% game speed describes core
 timing, not 60 distinct visual frames per second. The true hardware renderer is
 `video=wgpu`; it now renders the fixed battle on the validation GPU, but remains
 slow, experimental, and not the recommended path.
 
 ## What the fixed-battle evidence established
 
-- Every current validation run loads the exact Kirby-versus-Link save directly.
+- Every current validation run loads the exact reference-battle save directly.
   It does not navigate menus or stop at character select.
 - The dominant visible limit on the recommended path is distinct software
   frame production. Prior repeated screens held about 100% game speed and 60

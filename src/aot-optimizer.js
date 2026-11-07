@@ -40,6 +40,10 @@ import { applyProfileHotRanges, orderedRegions, validatePlan, ANALYZER_VERSION }
 import { assembleRegion, claimEntries, groupRegions, regionModuleKey } from "./aot-region-module.js";
 
 export const PLAN_CACHE_DIR = "aot-plan";
+// Guest code past which a function may need continuation fragments (256
+// instructions): the large functions of a module share its continuation
+// budget (largeLeft, the translator).
+export const REGION_LARGE_FUNCTION_BYTES = 1024;
 const BATCH = 64;
 
 const functionWeight = (f) => f.ranges.reduce((n, [s, e]) => n + e - s, 0);
@@ -81,6 +85,9 @@ export class AotOptimizer extends EventTarget {
     this.maxNotReadyWaits = maxNotReadyWaits;
     this.maxAttempts = maxAttempts;
     this.attempts = null;
+    // Modules the engine refused to compile or link this session (status():
+    // regionsRefused), so a silent loss of regions shows up.
+    this.engineRejects = 0;
     this.planTask = null;
     this.sleep = sleep;
     this.plan = null;
@@ -96,7 +103,75 @@ export class AotOptimizer extends EventTarget {
     this.stale = new Set();
     this.restaled = new Set();
     this.uncounted = new Set(); // marked before the attempts were read
+    // The run's work, and how far it got: prioritize() reorders what is left.
+    this.todo = null;
+    this.cursor = 0;
+    this.priority = null; // { score: Map<unit, hits> } a run not yet started applies
+    this.finished = false; // the last run went through its work (hasWork)
   }
+
+  // A save state just loaded: the guest now runs code the plan's order may
+  // reach late (a first launch translates in static order, ~25 modules/s).
+  // `hits` ([[pc, samples]], guest PCs sampled since the load) move the
+  // modules whose members cover them ahead of the rest of this run's work,
+  // most hits first; the others keep their order. Kept until the plan exists
+  // (a load ~2 s into a first launch comes before it) and the run applies it.
+  // Returns how many modules moved now.
+  prioritize(hits) {
+    if (!hits?.length) return 0;
+    this.priority = { hits, score: null };
+    return this.applyPriority();
+  }
+
+  // The modules covering the hits, by hits: computed once the plan exists.
+  priorityScore() {
+    const p = this.priority;
+    if (!p || !this.regions?.length) return null;
+    if (p.score) return p.score;
+    // The members' ranges by start, once per plan (a load's rounds score again).
+    if (this.rangeIndex?.regions !== this.regions) {
+      const all = [];
+      for (const u of this.regions) for (const f of u.members) for (const [s, e] of f.ranges) all.push([s >>> 0, e >>> 0, u]);
+      all.sort((x, y) => x[0] - y[0]);
+      // Ranges may overlap (a block shared by two functions): any range that
+      // starts less than the longest one's length before pc may hold it.
+      this.rangeIndex = { regions: this.regions, starts: all, longest: all.reduce((m, [s, e]) => Math.max(m, e - s), 0) };
+    }
+    const { starts, longest } = this.rangeIndex;
+    const unitAt = (pc) => {
+      let lo = 0, hi = starts.length - 1, found = -1;
+      while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        if (starts[mid][0] <= pc) { found = mid; lo = mid + 1; } else hi = mid - 1;
+      }
+      for (let i = found; i >= 0 && pc - starts[i][0] < longest; i--) if (pc < starts[i][1]) return starts[i][2];
+      return null;
+    };
+    const score = new Map();
+    for (const [pc, n] of p.hits) {
+      const u = unitAt(pc >>> 0);
+      if (u) score.set(u, (score.get(u) ?? 0) + (n || 1));
+    }
+    p.score = score;
+    return score;
+  }
+
+  // Modules left to translate: before a run, during it, or marked stale.
+  hasWork() {
+    return !this.finished || this.stale.size > 0;
+  }
+
+  applyPriority() {
+    const score = this.priorityScore();
+    if (!score?.size || !this.todo) return 0;
+    const rest = this.todo.slice(this.cursor);
+    const hot = rest.filter((u) => score.has(u)).sort((x, y) => score.get(y) - score.get(x));
+    if (!hot.length) return 0;
+    const cold = rest.filter((u) => !score.has(u));
+    this.todo.splice(this.cursor, rest.length, ...hot, ...cold);
+    return hot.length;
+  }
+
 
   // A stored module the core refused: translated again, live, by the current
   // run or the next one. False when the key was already retranslated this
@@ -205,6 +280,7 @@ export class AotOptimizer extends EventTarget {
     await this.planStore?.saveGroups?.(this.discKey, savedGroups)?.catch?.(() => {});
     this.plan = plan;
     this.regions = units;
+    if (this.priority) this.priority.score = null; // new modules: scored again
     this.totalWeight = units.reduce((n, u) => n + u.weight, 0);
     return plan;
   }
@@ -249,7 +325,7 @@ export class AotOptimizer extends EventTarget {
     const tried = this.regions.some((u) => attempts.has(u.key));
     const p = this.progress(doneSet);
     const state = p.done >= p.total ? "complete" : p.done > 0 || tried ? "partial" : "none";
-    return { state, fraction: p.fraction };
+    return { state, fraction: p.fraction, regionsRefused: this.engineRejects };
   }
 
   // Module keys to load at boot, in compile order, that the cache holds: what
@@ -287,11 +363,22 @@ export class AotOptimizer extends EventTarget {
     const refused = [];
     let i = 0, waits = 0;
     let continuationBytesUsed = 0; // continuation fragments of this module so far (the translator caps them)
+    // The module's continuation budget is shared out by water-filling: each
+    // large member gets at most an even share of what is left (largeLeft:
+    // the large members from it to the end), so the first ones no longer
+    // take it all (members are smallest first on a first launch, the
+    // biggest last); then what is left goes back, evenly again, to the
+    // ones refused for lack of budget (their `resume`).
+    const large = unit.members.map((f) => (f.ranges ?? []).reduce((n, [s, e]) => n + e - s, 0) > REGION_LARGE_FUNCTION_BYTES);
+    const largeLeft = large.map((_, k) => large.slice(k).filter(Boolean).length);
+    const starved = [];
+    let unitRefused = 0;
     while (i < unit.members.length) {
       if (this.cancelled) return null;
       const slice = unit.members.slice(i, i + this.batchSize);
-      const batch = slice.map((f) => ({
-        module: unit.module, entry: f.entry, flags: f.flags ?? 0, hash: f.hash, ranges: f.ranges, extraEntries: f.extraEntries ?? [], ...(f.hotRanges ? { hotRanges: f.hotRanges } : {}), continuationBytesUsed
+      const batch = slice.map((f, k) => ({
+        module: unit.module, entry: f.entry, flags: f.flags ?? 0, hash: f.hash, ranges: f.ranges, extraEntries: f.extraEntries ?? [], ...(f.hotRanges ? { hotRanges: f.hotRanges } : {}), continuationBytesUsed,
+        largeLeft: largeLeft[i + k]
       }));
       const translated = await this.translator.translate(batch);
       if (this.cancelled) return null;
@@ -302,7 +389,8 @@ export class AotOptimizer extends EventTarget {
         if (n >= batch.length || (r.entry !== undefined && r.entry !== batch[n].entry)) throw new Error("translator results out of order");
         consumed++;
         continuationBytesUsed += r.budgetCharged ?? 0;
-        this.budgetRefused += r.budgetRefused ?? 0;
+        unitRefused += r.budgetRefused ?? 0;
+        if (r.resume) starved.push(r);
         if (r.fragment) fragments.push(r.fragment, ...(r.continuations ?? []));
         else refused.push({ entry: batch[n].entry, reason: r.reason ?? "untranslatable" });
       }
@@ -310,6 +398,36 @@ export class AotOptimizer extends EventTarget {
       if (wait && ++waits > this.maxNotReadyWaits) return { notReady: true };
       if (wait || !consumed) await this.sleep(wait ? this.notReadyDelayMs : 0);
     }
+    // Rounds: each member still refused gets an even share of what is left
+    // at its turn (never past it: the translator keeps no continuation past
+    // its limit), until none is refused or a round charges nothing; then one
+    // last pass offers each the whole of what is left (a next continuation
+    // bigger than every even share). A member at its own cap leaves the
+    // rounds; a continuation never starts at an entry the module holds.
+    const unitBytes = this.translator.unitContinuationBytes;
+    const claimed = new Set(fragments.flatMap((x) => x.entries.map((pc) => pc >>> 0)));
+    let waiting = starved.map((r) => ({ resume: r.resume, refused: r.budgetRefused ?? 0, exhausted: false }));
+    let whole = false;
+    while (waiting.length) {
+      let spent = 0;
+      for (const [k, w] of waiting.entries()) {
+        const left = unitBytes - continuationBytesUsed;
+        if (!(left > 0)) break;
+        if (this.cancelled) return null;
+        const more = await w.resume(whole ? left : Math.floor(left / (waiting.length - k)), claimed);
+        continuationBytesUsed += more.budgetCharged ?? 0;
+        spent += more.budgetCharged ?? 0;
+        unitRefused += (more.budgetRefused ?? 0) - w.refused;
+        w.refused = more.budgetRefused ?? 0;
+        w.exhausted = Boolean(more.exhausted);
+        for (const x of more.continuations ?? []) for (const pc of x.entries) claimed.add(pc >>> 0);
+        fragments.push(...(more.continuations ?? []));
+      }
+      waiting = waiting.filter((w) => w.refused > 0 && !w.exhausted);
+      if (!(unitBytes - continuationBytesUsed > 0) || whole) break;
+      if (!spent) whole = true;
+    }
+    this.budgetRefused += unitRefused;
     return { fragments, refused };
   }
 
@@ -334,6 +452,8 @@ export class AotOptimizer extends EventTarget {
     const t0 = this.now();
     const ms = () => Math.round(this.now() - t0);
     let compiled = 0, deferred = 0;
+    this.budgetRefused = 0; // per run: the done event reports this run's
+    this.finished = false;
     try {
       await this.getPlan();
       const session = await this.openSession();
@@ -348,6 +468,9 @@ export class AotOptimizer extends EventTarget {
       const refused = new Set();
       for (const u of this.regions) if (session.isBlacklisted?.(u.key)) { refused.add(u.key); doneSet.add(u.key); }
       const todo = this.regions.filter((u) => !doneSet.has(u.key));
+      this.todo = todo;
+      this.cursor = 0;
+      this.applyPriority();
       this.emit("optimization-start", { ...this.progress(doneSet), ms: 0, resumed: doneSet.size > 0 });
       this.emit("optimization-progress", { ...this.progress(doneSet), ms: ms() });
       // Modules marked stale while this run goes are appended to its work.
@@ -374,7 +497,8 @@ export class AotOptimizer extends EventTarget {
           let bytes = null;
           const fragments = claimEntries(result.fragments);
           try {
-            bytes = this.assemble(fragments);
+            // sync, or a promise (aot-assembler-worker.js: off this worker)
+            bytes = await this.assemble(fragments);
           } catch (error) {
             // Fragments of one unit translated across a stop and a new boot
             // (another heap layout): translated again later, not refused.
@@ -394,7 +518,10 @@ export class AotOptimizer extends EventTarget {
             }
             if (!out?.module) {
               const reason = out?.reason ?? "compile";
-              if (reason === "compile" || reason === "link") failure = `engine-reject: ${reason}`;
+              if (reason === "compile" || reason === "link") {
+                failure = `engine-reject: ${reason}`;
+                this.engineRejects++;
+              }
               else wait = reason;
               bytes = null;
             }
@@ -444,6 +571,7 @@ export class AotOptimizer extends EventTarget {
           }
           if (n >= todo.length || this.cancelled) break;
           const unit = todo[n];
+          this.cursor = n + 1;
           this.stale.delete(unit.key);
           const result = await this.translateUnit(unit);
           await finishing;
@@ -456,6 +584,11 @@ export class AotOptimizer extends EventTarget {
         }
       } finally {
         await finishing;
+        this.todo = null;
+      }
+      if (!this.cancelled) {
+        this.finished = true;
+        this.priority = null; // its hits were for this run's work
       }
       if (!this.cancelled) this.emit("optimization-done", { total: this.regions.length, refused: refused.size, compiled, deferred, budgetRefused: this.budgetRefused, ms: ms() });
     } catch (error) {

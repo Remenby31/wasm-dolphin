@@ -1,8 +1,8 @@
-import { detectAdapterFamily, readGameId, resolveRendererProfile } from "./game-profiles.js";
 import { AudioController } from "./audio.js";
 import { EmulatorHost } from "./core-host.js";
 import { startMainThreadProfiler } from "./main-profiler.js";
 import { createCausalTelemetry, deepMerge } from "./causal-telemetry.js";
+import { formatRefreshHistogram } from "./wgpu-game-pacer.js";
 import {
   CONTROL_LABELS,
   CORE_DEFAULT_PLUGGED,
@@ -33,7 +33,6 @@ const elements = {
   controlPanel: document.querySelector("#controlPanel"),
   volumeDial: document.querySelector("#volumeDial"),
   aspectSelect: document.querySelector("#aspectSelect"),
-  autoProfile: document.querySelector("#settingAutoProfile"),
   lcdTitle: document.querySelector("#lcdTitle"),
   lcdMeta: document.querySelector("#lcdMeta"),
   adapterStatus: document.querySelector("#adapterStatus"),
@@ -88,6 +87,7 @@ const elements = {
   hudUnderDrop: document.querySelector("#hudUnderDrop"),
   hudQueue: document.querySelector("#hudQueue"),
   hudJitCache: document.querySelector("#hudJitCache"),
+  hudRefresh: document.querySelector("#hudRefresh"),
   hudRunloop: document.querySelector("#hudRunloop"),
   hudWgx: document.querySelector("#hudWgx"),
   hudStatus: document.querySelector("#hudStatus"),
@@ -164,6 +164,8 @@ const host = new EmulatorHost({
 });
 audio.setSource((frames) => host.mixAudio(frames));
 audio.setTransportBridge((config) => host.configureAudioWorklet(config));
+// for the telemetry: the mixer's queue the core boots with (0: its 80 ms)
+audio.mixerBufferMs = host.audioBufferMs || 80;
 // §28cx: expose the host so the main-thread profiler can read the existing
 // >20ms stall counters (rAF loop vs worker→main message handler). LoAF's
 // 50ms floor is blind to the 33-50ms band that actually starves the audio
@@ -690,7 +692,14 @@ function wireAspectSelect() {
   let saved = null;
   try { saved = localStorage.getItem("wasmDolphinAspect"); } catch {}
   if (saved && [...select.options].some((o) => o.value === saved)) select.value = saved;
+  // Widescreen (patch 0178) draws 16:9: the screen follows the picture,
+  // at boot and when it is switched (core-host's "wgpuaspect").
+  if (host.enhancements?.widescreen) select.value = "16:9";
   apply(select.value);
+  window.addEventListener("wgpuaspect", (event) => {
+    select.value = `${event.detail.w}:${event.detail.h}`;
+    apply(select.value);
+  });
   select.addEventListener("change", () => {
     apply(select.value);
     try { localStorage.setItem("wasmDolphinAspect", select.value); } catch {}
@@ -820,6 +829,12 @@ function updateScreenHud(info) {
   const jitc = /\bjitc:(\d+)\/(\d+)/.exec(helper);
   elements.hudJitCache.textContent = jitc ? `${jitc[1]}/${jitc[2]}` : "0/0";
 
+  // ?presentvsync: refreshes each game frame stayed on screen, as shares of
+  // the frames (1/2/3/4+ refreshes), the refreshes beyond each frame's share
+  // (a repeat), the screen's rate and whether the game pace is on (the
+  // default; ?presentpace=off or =observe turn it off).
+  if (elements.hudRefresh) elements.hudRefresh.textContent = formatRefreshHistogram(helper);
+
   // §28cn per-slice CPU pthread profiler: avg/max/runOnlyMax wall time per
   // CoreTiming slice. max > 16000us = blew one 60Hz frame; runOnlyMax
   // separated from max so we can see whether the spike was compile-burst
@@ -843,46 +858,11 @@ function updateScreenHud(info) {
 }
 
 
-// Pick the renderer from measured per-game results before the core loads.
-//
-// The id is read straight from the disc file rather than from the mounted core,
-// because by the time the core can report it the backend is already fixed --
-// changing it then would mean a restart, and the file selection is gone.
-//
-// A hardware verdict holds only for the GPU family it was checked on, so the
-// adapter is identified first; elsewhere the game gets software.
-//
-// Only applies when the user has not chosen a renderer explicitly, either by
-// URL flag or in the settings panel. A measured default is a good guess, not a
-// reason to override someone who has already decided.
-//
-// The status line names neither the disc nor the measurement behind the
-// choice: it says which path was picked and why, in generic terms.
-async function applyGameProfile(file) {
-  if (!elements.autoProfile?.checked) return;
-  if (new URLSearchParams(window.location.search).has("video")) return;
-  let gameId = null;
-  try {
-    gameId = await readGameId(file);
-  } catch {
-    return;  // unreadable header is not a reason to fail the mount
-  }
-  if (!gameId) return;
-  const family = await detectAdapterFamily(navigator.gpu, host.wgpuPowerPreference);
-  const profile = resolveRendererProfile(gameId, family);
-  if (!profile) return;
-  const backend = profile.renderer === "hardware" ? "WebGPU-Real" : "Software Renderer";
-  if (host.applyVideoBackend(backend)) {
-    setStatus(profile.validated
-      ? `Auto per-game: ${profile.renderer} renderer`
-      : "Auto per-game: software renderer (hardware not validated on this GPU)");
-  }
-}
-
 async function mountFile(file) {
   try {
-    await applyGameProfile(file);
     const game = await host.mountFile(file);
+    // sound turned on before this disc fell back to legacy (no core yet)
+    await audio.retryWorkletTransport();
     // Auto-unmute on disc boot. AudioController defaults to muted because
     // the AudioContext can only be created after a user gesture; the disc
     // mount click is the user gesture, so unmute here so audio actually
@@ -1241,14 +1221,14 @@ function formatImageSizes(rawSize, dataSize) {
 
 async function runSmokeScenario() {
   const scenario = new URLSearchParams(window.location.search).get("smoke");
-  if (scenario !== "melee") {
+  if (scenario !== "disc") {
     return;
   }
 
   const header = new Uint8Array(0x3000);
-  header.set(new TextEncoder().encode("GALE01"), 0);
+  header.set(new TextEncoder().encode("GXXE01"), 0);
   header.set([0xc2, 0x33, 0x9f, 0x3d], 0x1c);
-  header.set(new TextEncoder().encode("Super Smash Bros. Melee"), 0x20);
+  header.set(new TextEncoder().encode("Smoke Test Disc"), 0x20);
   header.set([0x00, 0x00, 0x00, 0x01], 0x458);
   header.set(new TextEncoder().encode("2026/05/05"), 0x2440);
   writeU32BE(header, 0x420, 0x1000);
@@ -1271,7 +1251,7 @@ async function runSmokeScenario() {
   header.set(new TextEncoder().encode("opening.bnr"), 0x2818);
   header.set(new TextEncoder().encode("BNR1"), 0x2900);
 
-  const file = new File([header], "Super Smash Bros Melee.iso", {
+  const file = new File([header], "smoke-test-disc.iso", {
     type: "application/octet-stream"
   });
   await mountFile(file);

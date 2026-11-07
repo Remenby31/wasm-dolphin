@@ -117,7 +117,7 @@ async function main() {
   };
   const calmWait = values["calm-wait"] == null ? lockWait : num(values, "calm-wait", { min: 0 });
   const log = (m) => console.log(`[ax-hle] ${m}`);
-  const lock = await calmLock({ maxLoad: o.maxLoad, calmWait, log: (m) => log(`before the lock: ${m}`), acquire: () => acquirePerfLock({ name: `harness ax-hle (${REPO_ROOT})`, waitSec: lockWait, log }) });
+  const lock = await calmLock({ maxLoad: o.maxLoad, calmWait, log: (m) => log(`before the lock: ${m}`), acquire: () => acquirePerfLock({ requireMains: true, name: `harness ax-hle (${REPO_ROOT})`, waitSec: lockWait, log }) });
   const outDir = probeOutDir("ax-hle", o.iso, values.out);
   const server = await ensureServer({ port: o.port, root: REPO_ROOT });
   const records = [];

@@ -1,0 +1,96 @@
+// Copyright 2026 wasm-dolphin contributors
+// SPDX-License-Identifier: MIT
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import test from "node:test";
+
+// The VI phase lock (src/wgpu-vi-phase-lock.js, patch 0212): on by default at
+// 1:1 only ("auto"), ?vilock=1 forces it ("on", 2:1 too), ?vilock=0 turns it
+// off; every hop from the page's URL to the core's throttle checked (an option
+// the adapter forgot to carry was silently dropped before: ?aotsample, ?wasmengine).
+test("vilock: auto by default, ?vilock=1 on, ?vilock=0 off", async () => {
+  const { requestedPacing } = await import("../src/core-host.js");
+  assert.equal(requestedPacing("").viLock, "auto");
+  assert.equal(requestedPacing("?vilock=1").viLock, "on");
+  assert.equal(requestedPacing("?vilock=0").viLock, "off");
+  for (const other of ["?vilock=true", "?vilock=on", "?vilock=", "?vilock=2"]) assert.equal(requestedPacing(other).viLock, "auto", other);
+});
+
+test("vilock reaches the worker's init message through the adapter", async (t) => {
+  const { requestedPacing } = await import("../src/core-host.js");
+  const { UpstreamWorkerAdapter } = await import("../src/upstream-worker-adapter.js");
+  for (const [query, expected] of [["?vilock=1", "on"], ["?vilock=0", "off"], ["", "auto"]]) {
+    const adapter = new UpstreamWorkerAdapter(requestedPacing(query));
+    let posted = null;
+    adapter.worker = {
+      postMessage(message) {
+        posted = message;
+        queueMicrotask(() => adapter.handleMessage({ id: message.id, ok: true }));
+      }
+    };
+    const originalWindow = globalThis.window;
+    globalThis.window = { location: { href: `http://127.0.0.1:8080/${query}`, search: query } };
+    t.after(() => {
+      if (originalWindow === undefined) delete globalThis.window;
+      else globalThis.window = originalWindow;
+    });
+    await adapter.load();
+    assert.equal(posted.payload.viLock, expected, query || "default");
+  }
+});
+
+test("vilock: host, worker and patch 0212 (a trim of the throttle's wall rate only, exactly 1 at 0 ppm)", async () => {
+  const host = await readFile(new URL("../src/core-host.js", import.meta.url), "utf8");
+  const worker = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
+  const patch = await readFile(new URL("../patches/dolphin-wasm/snapshot/0212-throttle-rate-trim.patch", import.meta.url), "utf8");
+  assert.match(host, /\n {12}viLock: this\.pacing\.viLock,\n/);
+  assert.match(worker, /\n {8}viLock: payload\.viLock,\n/);
+  // the lock only on the vsync presenter at the normal speed, and only through the core's trim
+  // only on the WebGPU path with the vsync presenter at speed 1; asked for
+  // elsewhere, the status says why (the software renderer said "starting")
+  assert.match(worker, /const viLockAs = viLockMode\(viLock\);\n\s+wgpuViLockUnavailable = viLockAs === "off" \? null\n\s+: !hardwareVideoBackend \? "not available on this video path"\n\s+: !wgpuPresentVsync \? "not available with this presenter"\n\s+: Number\(emulationSpeed\) !== 1 \? "not at this speed" : null;/);
+  assert.match(worker, /wgpuViLock = viLockAs !== "off" && !wgpuViLockUnavailable \? createViPhaseLock\(\{ maxRatio: MAX_RATIO\[viLockAs\] \}\) : null;/);
+  // a worker started without the field (not through the adapter): off
+  assert.match(worker, /\n  viLock = "off",\n/);
+  assert.match(worker, /if \(wgpuViLockUnavailable\) return \{ on: false, ppm: 0, locks: 0, lost: 0, why: wgpuViLockUnavailable,/);
+  assert.equal(worker.match(/phaseLock: viLockStatus\(\)/g)?.length, 3, "every audio-queue report goes through viLockStatus");
+  assert.doesNotMatch(worker, /phaseLock: wgpuViLock \?/);
+  assert.match(worker, /module\._DolphinWeb_SetThrottleRatePpm\(Math\.round\(Number\(ppm\)\) \| 0\)/);
+  assert.match(worker, /if \(r\.changed\) api\.setThrottleRatePpm\(wgpuViLock\.stats\.ppm\);/);
+  assert.doesNotMatch(worker, /setEmulationSpeed\?\.\(r\.factor\)/, "never the pre-boot speed setter");
+  // the patch: the throttle, its header, and the mixer that follows the trim
+  assert.deepEqual([...patch.matchAll(/^\+\+\+ b\/(.+)$/gm)].map((m) => m[1]).sort(),
+    ["Source/Core/AudioCommon/Mixer.cpp", "Source/Core/Core/CoreTiming.cpp", "Source/Core/Core/WasmThrottleRate.h"]);
+  assert.match(patch, /\+constexpr int MAX_PPM = 2000;/);
+  assert.match(patch, /\+  return ppm == 0 \? 1\.0 : 1\.0 \+ static_cast<double>\(ppm\) \* 1e-6;/);
+  assert.match(patch, /\+inline std::atomic<int> g_requested_ppm\{0\};\n\+inline std::atomic<int> g_applied_ppm\{0\};/);
+  assert.match(patch, /TR::g_requested_ppm\.store\(std::clamp\(ppm, -TR::MAX_PPM, TR::MAX_PPM\), std::memory_order_relaxed\);/);
+  assert.match(patch, /\+\/\/ them: relaxed is enough\. At 0 ppm the factor is exactly 1\.0\./);
+  assert.doesNotMatch(patch, /memory_order_(acquire|release|seq_cst)/);
+  assert.match(patch, /\+    UpdateSpeedLimit\(target_cycle, m_emulation_speed\);/);
+  assert.match(patch, /new_speed \*\n\+                  DolphinWeb::ThrottleRate::Factor\(rate_ppm\)\);/);
+  // the mixer resamples at the trim the CPU thread applied (no drift of the queue), after the speed
+  assert.match(patch, /\+  in_sample_rate \*= DolphinWeb::ThrottleRate::Factor\(\n\+      DolphinWeb::ThrottleRate::g_applied_ppm\.load\(std::memory_order_relaxed\)\);/);
+  // the queue's overflow skips and underrun fills, counted and exported
+  // only the game's own FIFOs (DMA, streaming): the others are dequeued while never fed
+  assert.match(patch, /\+    if \(this == &m_mixer->m_dma_mixer \|\| this == &m_mixer->m_streaming_mixer\)\n\+      DolphinWeb::ThrottleRate::g_audio_overflow_skips\.fetch_add\(1, std::memory_order_relaxed\);/);
+  assert.match(patch, /\+      if \(this == &m_mixer->m_dma_mixer \|\| this == &m_mixer->m_streaming_mixer\)\n\+        DolphinWeb::ThrottleRate::g_audio_underrun_fills\.fetch_add\(1, std::memory_order_relaxed\);/);
+  assert.match(patch, /\+extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_AudioQueueEvents\(int which\)/);
+  assert.match(worker, /case "validationReadAudioQueue":/);
+  // the speed and the config are not touched (code lines: the comments name them)
+  assert.doesNotMatch(patch, /^\+(?!\s*\/\/).*(Config::SetCurrent|Config::SetBase|MAIN_EMULATION_SPEED)/m);
+  assert.doesNotMatch(patch, /^\+(?!\s*\/\/).*m_emulation_speed\s*=/m);
+  // at 0 ppm the factor is exactly 1 (the same double arithmetic as the patch)
+  const factor = (ppm) => (ppm === 0 ? 1.0 : 1.0 + ppm * 1e-6);
+  assert.equal(factor(0), 1);
+  const ticksPerSec = 486000000;
+  assert.equal(Math.round(ticksPerSec * 1 * factor(0)), ticksPerSec);
+  assert.equal(Math.round(ticksPerSec * 1 * factor(1001)), 486486486);
+});
+
+test("vilock: an --exact run (replay-gates G3) proves the lock was engaged in every candidate visit", async () => {
+  const gates = await readFile(new URL("../harness/probes/replay-gates.mjs", import.meta.url), "utf8");
+  assert.match(gates, /const aq = await workerRequest\(session\.page, "validationReadAudioQueue", \{\}, 10000\)\.catch\(\(\) => null\);/);
+  assert.match(gates, /const unlocked = summary\.phaseLock\.filter\(\(x\) => !\(x\.locks >= 1\) \|\| !Number\.isFinite\(x\.trimPpm\) \|\| x\.trimPpm === 0\);/);
+  assert.match(gates, /verdict\.failures\.push\(`\?vilock=1: the lock was never engaged/);
+});

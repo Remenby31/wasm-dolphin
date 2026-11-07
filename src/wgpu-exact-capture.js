@@ -99,6 +99,12 @@ export function createWgpuExactCapture() {
       return current ? current.boot : null;
     },
 
+    // The VI output since the last load the next present shows (null before
+    // a tag): what a capture's fromLoad index names.
+    currentLoad() {
+      return current ? current.load : null;
+    },
+
     // A savestate load finished: every waiting request belongs to the
     // replaced timeline, and nothing on screen is attributable any more.
     onLoad() {

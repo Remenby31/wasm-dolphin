@@ -275,7 +275,7 @@ test("mtmsr takes the exceptions held pending and FP exceptions it enables, as t
 });
 
 test("inline FMA keeps NI_madd_msub's single rounding, ties included", { skip }, () => {
-  // The Mario Strikers Charged inputs from Interpreter_FPUtils.h: the exact
+  // The FMA tie inputs from upstream Interpreter_FPUtils.h: the exact
   // product of two singles plus b ties at single precision; the interpreter
   // returns 0xbf55bf17, a double-rounding FMA 0xbf55bf18.
   const A = (op, t, a, b, c, xo) => ((op << 26) | (t << 21) | (a << 16) | (b << 11) | (c << 6) | (xo << 1)) >>> 0;

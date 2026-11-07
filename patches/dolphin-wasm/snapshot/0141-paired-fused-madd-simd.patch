@@ -1,0 +1,237 @@
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -5254,6 +5254,15 @@ u32 WasmFpScratchLocal(u32 n)
+   return (s_fmh_plan.active ? WASM_FMH_FLAG_LOCAL + 1 : WASM_FMH_FLAG_LOCAL) + n;
+ }
+ 
++// Patch 0141: four v128 scratch locals after the f64 ones and the three i32
++// of a fragment's frame (59..62 in a fragment, where the frame's are 56..58).
++u32 WasmV128ScratchLocal(u32 n)
++{
++  return WasmFpScratchLocal(16) + 3 + n;
++}
++static_assert(WASM_FMH_FLAG_LOCAL + 16 == WASM_FRAME_PC_LOCAL,
++              "the frame's i32 locals follow the sixteen f64 scratch locals");
++
+ void EmitI64Const(std::vector<u8>& body, u64 value)
+ {
+   body.push_back(0x42);
+@@ -5993,6 +6002,146 @@ void EmitStoreFprLaneFromLocal(std::vector<u8>& body, const WasmStateLayout& lay
+   EmitStateStoreF64Suffix(body, PsOffset(layout, fd, lane));
+ }
+ 
++// Patch 0141: ps_madd/msub/nmadd/nmsub/madds0/madds1 with fused relaxed_madd
++// (0129's mode), both lanes in f64x2 at once. Inside the MSR fast-path if:
++// emits `if (every lane passes) { store both lanes, FPRF } else helper end`.
++// A lane passes exactly where the scalar path (EmitFpArithLane with
++// EmitExactMulAddSub's fused branch) computes it inline without its tie fix:
++// a and frC zero or normal, then frC rounded to 25 bits (Force25Bit), then a
++// zero operand with b finite or the 2^995 / 2^-900 range, no single tie in
++// a * c + b (the scalar fix stays, inline, for the helper here: rare), and a
++// result that is zero or a normal single (no NaN, overflow or NI flush). The
++// rest, and any lane failing, calls the interpreter for the whole op, as the
++// scalar path does when one of its lanes fails.
++void EmitPairedFusedMulAddSub(std::vector<u8>& body, const WasmStateLayout& layout,
++                              const PPCAnalyst::CodeOp& op, bool sub, bool negate, u32 c_lane,
++                              bool splat_c, u32 downcount)
++{
++  const UGeckoInstruction inst = op.inst;
++  const u32 va = WasmV128ScratchLocal(0), vc = WasmV128ScratchLocal(1);
++  const u32 vb = WasmV128ScratchLocal(2), vr = WasmV128ScratchLocal(3);
++  const auto simd = [&](u32 code) {
++    body.push_back(0xfd);
++    EmitU32Leb(body, code);
++  };
++  constexpr u32 LOAD = 0x00, STORE = 0x0b, CONST = 0x0c, SHUFFLE = 0x0d, EXTRACT = 0x21,
++                EQ = 0x47, LT = 0x49, LE = 0x4b, GE = 0x4c, AND = 0x4e, ANDNOT = 0x4f, OR = 0x50,
++                DEMOTE = 0x5e, PROMOTE = 0x5f, ALL_TRUE = 0xc3, ADD_I64 = 0xce, EQ_I64 = 0xd6,
++                ABS = 0xec, NEG = 0xed, MUL = 0xf2, MADD = 0x107;
++  const auto load = [&](u32 offset) {
++    EmitLocalGet(body, 0);
++    simd(LOAD);
++    body.push_back(0x03);  // align 8 (state lanes are 8-aligned)
++    EmitU32Leb(body, offset);
++  };
++  const auto i64x2 = [&](u64 v) {
++    simd(CONST);
++    for (int k = 0; k < 2; ++k)
++      for (int i = 0; i < 8; ++i)
++        body.push_back(static_cast<u8>(v >> (8 * i)));
++  };
++  const auto f64x2 = [&](double v) { i64x2(std::bit_cast<u64>(v)); };
++  const auto get = [&](u32 l) { EmitLocalGet(body, l); };
++  const auto abs_of = [&](u32 l) {
++    get(l);
++    simd(ABS);
++  };
++  // |x| == 0, or 2^-1022 <= |x| < inf (EmitIsZeroOrNormalDouble per lane;
++  // NaN compares false).
++  const auto zero_or_normal = [&](u32 l) {
++    abs_of(l); f64x2(0.0); simd(EQ);
++    abs_of(l); f64x2(0x1p-1022); simd(GE);
++    abs_of(l); f64x2(std::numeric_limits<double>::infinity()); simd(LT);
++    simd(AND);
++    simd(OR);
++  };
++
++  load(PsOffset(layout, inst.FA, 0));
++  EmitLocalSet(body, va);
++  load(PsOffset(layout, inst.FC, 0));
++  if (splat_c)
++  {
++    // ps_madds0/1: frC's lane c_lane in both lanes.
++    body.push_back(0x22);  // local.tee
++    EmitU32Leb(body, vc);
++    get(vc);
++    simd(SHUFFLE);
++    for (int k = 0; k < 2; ++k)
++      for (u32 i = 0; i < 8; ++i)
++        body.push_back(static_cast<u8>(c_lane * 8 + i));
++  }
++  EmitLocalSet(body, vc);
++  load(PsOffset(layout, inst.FB, 0));
++  if (sub)
++    simd(NEG);
++  EmitLocalSet(body, vb);
++
++  // The mask, all-ones per passing lane: a and frC zero or normal before
++  // Force25Bit (a denormal frC rounds to zero there, its product does not).
++  zero_or_normal(va);
++  zero_or_normal(vc);
++  simd(AND);
++  // Force25Bit(c) = (c & ~0x7ffffff) + (c & 0x8000000), on the bits.
++  get(vc); i64x2(0xfffffffff8000000ull); simd(AND);
++  get(vc); i64x2(0x8000000ull); simd(AND);
++  simd(ADD_I64);
++  EmitLocalSet(body, vc);
++  // A zero a or frC with b finite, or the range of 0129's fused path.
++  get(va); f64x2(0.0); simd(EQ);
++  get(vc); f64x2(0.0); simd(EQ);
++  simd(OR);
++  abs_of(vb); f64x2(std::numeric_limits<double>::infinity()); simd(LT);
++  simd(AND);
++  abs_of(va); f64x2(0x1p995); simd(LE);
++  abs_of(vc); f64x2(0x1p995); simd(LE);
++  simd(AND);
++  abs_of(vb); f64x2(0x1p995); simd(LE);
++  simd(AND);
++  get(va); get(vc); simd(MUL); simd(ABS); f64x2(0x1p-900); simd(GE);
++  simd(AND);
++  simd(OR);
++  simd(AND);
++  // r = fma(a, c, b), rounded once.
++  get(va); get(vc); get(vb); simd(MADD);
++  body.push_back(0x22);  // local.tee
++  EmitU32Leb(body, vr);
++  // No single tie: the 29 bits below single precision are not exactly half.
++  i64x2(0x1fffffffull); simd(AND); i64x2(0x10000000ull); simd(EQ_I64);
++  simd(ANDNOT);
++  // r is zero or rounds to a normal single (EmitIsZeroOrNormalSingleResult).
++  abs_of(vr); f64x2(0.0); simd(EQ);
++  abs_of(vr); f64x2(0x1p-126); simd(GE);
++  abs_of(vr); i64x2(0x47effffff0000000ull); simd(LT);
++  simd(AND);
++  simd(OR);
++  simd(AND);
++  simd(ALL_TRUE);
++  HintNextIf(body, true);  // a lane leaves the fast path rarely
++  body.push_back(0x04);
++  body.push_back(0x40);
++  // ForceSingle both lanes, then nmadd/nmsub negate the rounded result.
++  EmitLocalGet(body, 0);
++  get(vr);
++  simd(DEMOTE);
++  simd(PROMOTE);
++  if (negate)
++    simd(NEG);
++  body.push_back(0x22);  // local.tee
++  EmitU32Leb(body, vr);
++  simd(STORE);
++  body.push_back(0x03);
++  EmitU32Leb(body, PsOffset(layout, inst.FD, 0));
++  const u32 r0 = WasmFpScratchLocal(0);
++  get(vr);
++  simd(EXTRACT);
++  body.push_back(0x00);
++  EmitLocalSet(body, r0);
++  EmitSetFprfZeroOrNormal(body, layout, r0, 0, op.wantsFPRF);
++  body.push_back(0x05);
++  EmitFpCall(body, op, downcount);
++  body.push_back(0x0b);
++}
++
+ // fadd/fsub/fmul/fdiv (63), their single forms (59), ps_add/ps_sub/ps_mul/
+ // ps_muls0/ps_muls1 (4). FMA-family subops go to the interpreter helper.
+ void EmitExactFpArithmetic(std::vector<u8>& body, const WasmStateLayout& layout,
+@@ -6058,6 +6207,17 @@ void EmitExactFpArithmetic(std::vector<u8>& body, const WasmStateLayout& layout,
+   body.push_back(0x40);
+   EmitI32Const(body, 1);
+   EmitLocalSet(body, 3);
++  if (paired && (kind == FpArithKind::MulAdd || kind == FpArithKind::MulSub) &&
++      s_fused_madd.load(std::memory_order_relaxed) &&
++      (DolphinWebDisableMask() & DOLPHIN_WEB_DISABLE_INLINE_FMA) == 0)
++  {
++    EmitPairedFusedMulAddSub(body, layout, op, kind == FpArithKind::MulSub, negate, c_lane0,
++                             c_lane0 == c_lane1, downcount);
++    body.push_back(0x05);
++    EmitFpCall(body, op, downcount);
++    body.push_back(0x0b);
++    return;
++  }
+   const u32 r0 = WasmFpScratchLocal(0), r1 = WasmFpScratchLocal(1), raw = WasmFpScratchLocal(2);
+   // fmadds alone sets FI from the rounding (FI = unrounded != result).
+   const bool fmadds_fi = inst.OPCD == 59 && inst.SUBOP5 == 29;
+@@ -9566,10 +9726,14 @@ std::vector<u8> BuildWasmCachedInterpreterBlock(std::span<const PPCAnalyst::Code
+   // range-check flag) and bump the leading group count 5 → 6. When the plan is
+   // inactive the locals section is byte-identical to today (no extra local).
+   // A last group of sixteen f64 locals follows: WasmFpScratchLocal(0..15).
++  // Patch 0141: then three i32 (a fragment's frame locals, 0135; unused in a
++  // block) and four v128 (WasmV128ScratchLocal(0..3)), at the same indices
++  // in blocks and fragments, whose blocks share the function's locals.
+   std::vector<u8> body = s_fmh_plan.active
+-      ? std::vector<u8>{0x07, 0x03, 0x7f, 0x02, 0x7e, 0x01, 0x7c, 0x01, 0x7f, 0x20, 0x7f, 0x01, 0x7f,
+-                        0x10, 0x7c}
+-      : std::vector<u8>{0x06, 0x03, 0x7f, 0x02, 0x7e, 0x01, 0x7c, 0x01, 0x7f, 0x20, 0x7f, 0x10, 0x7c};
++      ? std::vector<u8>{0x09, 0x03, 0x7f, 0x02, 0x7e, 0x01, 0x7c, 0x01, 0x7f, 0x20, 0x7f, 0x01, 0x7f,
++                        0x10, 0x7c, 0x03, 0x7f, 0x04, 0x7b}
++      : std::vector<u8>{0x08, 0x03, 0x7f, 0x02, 0x7e, 0x01, 0x7c, 0x01, 0x7f, 0x20, 0x7f, 0x10, 0x7c,
++                        0x03, 0x7f, 0x04, 0x7b};
+ 
+   // §28cx C1: set up the GPR register cache for this block, then eagerly load
+   // every GPR the block reads or writes into its local. Eager (not lazy) load
+@@ -16661,8 +16825,10 @@ struct FragmentBlock
+ 
+ // Locals of a block body without the fastmem hoist (the only layout a
+ // fragment takes: its blocks share the function's locals).
+-constexpr std::array<u8, 13> WASM_BLOCK_LOCALS = {0x06, 0x03, 0x7f, 0x02, 0x7e, 0x01, 0x7c,
+-                                                  0x01, 0x7f, 0x20, 0x7f, 0x10, 0x7c};
++// 0141: the frame's three i32 (56..58) and four v128 scratch locals follow.
++constexpr std::array<u8, 17> WASM_BLOCK_LOCALS = {0x08, 0x03, 0x7f, 0x02, 0x7e, 0x01, 0x7c,
++                                                  0x01, 0x7f, 0x20, 0x7f, 0x10, 0x7c,
++                                                  0x03, 0x7f, 0x04, 0x7b};
+ constexpr u32 WASM_FRAGMENT_PC_LOCAL = 56;  // appended after the block locals 1..55
+ 
+ // The block at pc as the CPU thread would build it (same analyzer, same
+@@ -16908,9 +17074,8 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+     out->relocs.push_back({static_cast<u32>(code.size()), kind, value});
+     EmitPaddedU32Leb(code, 0);
+   };
++  // The dispatch pc, npc, downcount (0135) are the block locals' 56..58 (0141).
+   code.assign(WASM_BLOCK_LOCALS.begin(), WASM_BLOCK_LOCALS.end());
+-  code[0] = 0x07;
+-  code.insert(code.end(), {0x03, 0x7f});  // the dispatch pc, npc, downcount (0135)
+   // 0111: compares store CR fields without SO (EmitLazyCrStore): with XER.SO
+   // set the fragment does not run (1, as a pc that is not an entry). The
+   // dispatcher and region chaining refuse first; this covers a direct call.
+@@ -17145,7 +17310,9 @@ namespace
+ // carry wasm branch hints (22 is 0130's). 25 (0133): a fragment's head finds
+ // the block by br_table (24 is 0132's). 27 (0135): region fragments keep pc,
+ // npc and downcount in locals, with one shared exit (26 is retired, 0134's).
+-constexpr u32 AOT_COMPILER_VERSION = 27;
++// 30 (0141): paired-single FMA in f64x2 with fused relaxed_madd (28, 29 are
++// 0137's and 0139's).
++constexpr u32 AOT_COMPILER_VERSION = 30;
+ constexpr u32 AOT_MAX_FRAGMENT_BYTES = 1u << 20;
+ thread_local std::vector<u32> t_aot_out;
+ u8* s_aot_ram = nullptr;

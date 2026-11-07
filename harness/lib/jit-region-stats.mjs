@@ -24,6 +24,15 @@
 // A reset (n >= 0) is applied by the CPU thread at its next slice boundary
 // (0075, 2026-10-20): a read right after it may still show the old values;
 // race-perf reads after its whole stats window.
+// Since 0215 the core publishes at most once per 250 ms of host time (and at
+// once when a reset is applied), no longer every 64 slices: the publication
+// copies and sorts the miss map, and at ~37,000 slices a second it took the
+// CPU thread from 6 % to 19 % of its host time over a minute of race (0213
+// v3). The cycle and time fields are written as they happen; the fields the
+// publication sets can be up to 250 ms old: installFallbacks and
+// installBootMaxSliceMs (the reserved word), regionsQueued, entriesMapped,
+// regionsEnabled, the topMiss pairs, the 64-entry miss table (0156) and the
+// transition tops.
 // DolphinWeb_JitRegionStats(n): n >= 0 sets the host-time sampling (1 call
 // out of n timed, 0 = counters only) and resets; n < 0 only reads. Before the
 // first n >= 0 call the stats are fully off (nothing is counted).

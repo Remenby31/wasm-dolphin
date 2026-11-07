@@ -69,8 +69,8 @@ file-local statics:
 // JIT compiler runs on the Dolphin CPU thread. Relaxed ordering is fine.
 std::atomic<u32> s_dolphin_web_disable_mask{0};
 
-constexpr u32 DOLPHIN_WEB_DISABLE_MELEELOOP   = 1u << 0;
-constexpr u32 DOLPHIN_WEB_DISABLE_MELEECALL   = 1u << 1;
+constexpr u32 DOLPHIN_WEB_DISABLE_IDLEPOLLLOOP   = 1u << 0;
+constexpr u32 DOLPHIN_WEB_DISABLE_STATUSCALL   = 1u << 1;
 constexpr u32 DOLPHIN_WEB_DISABLE_OSINTERRUPT = 1u << 2;
 constexpr u32 DOLPHIN_WEB_DISABLE_DCBXLOOP    = 1u << 3;
 constexpr u32 DOLPHIN_WEB_DISABLE_FASTBRANCH  = 1u << 4;
@@ -110,10 +110,10 @@ using a once-loaded `disable_mask` local. The full diff is in the working
 tree — search for `DolphinWebHelperDisabled(` and `DOLPHIN_WEB_DISABLE_`
 references in `CachedInterpreter.cpp`. Gated functions:
 
-- `TryWriteMeleeIdlePollLoop` / `TryWriteMeleeTitleLoop` → `DOLPHIN_WEB_DISABLE_MELEELOOP`
+- the idle-poll-loop and title-loop writers → `DOLPHIN_WEB_DISABLE_IDLEPOLLLOOP`
 - `TryWriteOsInterruptFunction` → `DOLPHIN_WEB_DISABLE_OSINTERRUPT`
 - `TryWriteDcbxLoop` → `DOLPHIN_WEB_DISABLE_DCBXLOOP`
-- `TryWriteFastInstruction` → per-sub-path gates on `MELEECALL`, `OSINTERRUPT`,
+- `TryWriteFastInstruction` → per-sub-path gates on `STATUSCALL`, `OSINTERRUPT`,
   `FASTBRANCH`, `FASTFP`, `FASTINT`, `FASTSYSTEM`
 - `TryWriteWasmBlock` → `DOLPHIN_WEB_DISABLE_WASMBLOCK`
 
@@ -129,12 +129,12 @@ renumber.
 
 ```
 http://127.0.0.1:8082/?...&disable=wasmblock
-http://127.0.0.1:8082/?...&disable=meleeloop,meleecall
+http://127.0.0.1:8082/?...&disable=idlepollloop,statuscall
 http://127.0.0.1:8082/?...&disable=0x1ff   # all-on
 ```
 
-Validator env var: `DISABLE=meleeloop,meleecall node tools/menu-progress-validate.mjs ...`
+Validator env var: `DISABLE=idlepollloop,statuscall node tools/menu-progress-validate.mjs ...`
 
 Aliases preserved for the plan's TL;DR-listed knobs:
-- `fastinputpoll` → `meleecall` (input-poll lives inside the Melee call branch family)
+- `fastinputpoll` → `statuscall` (input-poll lives inside the status call-branch family)
 - `fastmem` → `fastsystem` (load/store-ish helpers cluster here)

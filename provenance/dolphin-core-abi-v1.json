@@ -1,27 +1,27 @@
 {
   "schemaVersion": 1,
   "abiVersion": 1,
-  "coreId": "sha256:88560abae5ca3575134fbcb7ff39bf59c9902827f3fbaf8f5faa44e4c7cade0a",
+  "coreId": "sha256:d23ff1e53a24c916004699738d4782f7c11da23c2930595e09c0d6a54ec72da7",
   "upstreamCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
   "artifacts": [
     {
       "path": "cores/dolphin/dolphin-core-upstream.js",
       "hashMode": "lf-normalized",
-      "size": 283026,
-      "sha256": "1c9f71a200290815707ad980824ccd87662105de148187f132ce6c66064dc71f"
+      "size": 291463,
+      "sha256": "3b07a61d6c781078f3aaa2a5e96d36cddca59745c92f8166897e5b276f46a91d"
     },
     {
       "path": "cores/dolphin/dolphin-core-upstream.wasm",
-      "size": 13163064,
-      "sha256": "88560abae5ca3575134fbcb7ff39bf59c9902827f3fbaf8f5faa44e4c7cade0a"
+      "size": 13252214,
+      "sha256": "d23ff1e53a24c916004699738d4782f7c11da23c2930595e09c0d6a54ec72da7"
     }
   ],
   "contractSources": [
     {
       "path": "core/upstream/dolphin_web_discio.cpp",
       "hashMode": "lf-normalized",
-      "size": 72056,
-      "sha256": "cbfce8478d96f0d715c869e98562c7692018640fab16cae8db5d1827062d73de"
+      "size": 79435,
+      "sha256": "25680e8897556505d94085632ff8f07ef0268e16974217258c20f6c3d9b0095f"
     },
     {
       "path": "core/upstream/dolphin_web_raster_profile.h",
@@ -44,32 +44,32 @@
     {
       "path": "core/upstream/dolphin_web_core.cpp",
       "hashMode": "lf-normalized",
-      "size": 56394,
-      "sha256": "262ba9f9866bf82f6f3e494c583dc665f52bd4bc043a72d99bd60bb300b01c63"
+      "size": 80536,
+      "sha256": "c9fe8f882df26ec00a32ad8bac90940a27ee79754a37931c310ec2dc0fb435d5"
     },
     {
       "path": "src/app.js",
       "hashMode": "lf-normalized",
-      "size": 50421,
-      "sha256": "403e892c103cfd214dd41df68bded99043818369a663b4260045c35c938a76cc"
+      "size": 49666,
+      "sha256": "04e861f7c4fa4de96726ac109993c984cb80b547976b99c7c48cb4e2b6d02af7"
     },
     {
       "path": "src/audio.js",
       "hashMode": "lf-normalized",
-      "size": 13055,
-      "sha256": "66a0273c05c49987cb20bf9801e0605a6b56b708aae8e27331049145eac7a943"
+      "size": 22328,
+      "sha256": "d23c30f470864db23cb340d097f10e09c8892b4cc9da8afa90f10e435acebd14"
     },
     {
       "path": "src/audio-pcm-ring.js",
       "hashMode": "lf-normalized",
-      "size": 7901,
-      "sha256": "470a22753ad5b0563ab68f18c72a044aa700d6e51b780a1861c2a9faf4710dbc"
+      "size": 11481,
+      "sha256": "80e78a2cf5187d859915a3f449f88d5db7e35cf881bf57c9f842bc71c1d3a6db"
     },
     {
       "path": "src/audio-pcm-producer.js",
       "hashMode": "lf-normalized",
-      "size": 5434,
-      "sha256": "6b5f8dc493d25212d7dc5f1753ee69e6006b66603312d1a4730cd48e3eb37225"
+      "size": 19769,
+      "sha256": "3e2e53711f8badd0067e05909db5660eb065f0a2910d3215bbc88398869d6a28"
     },
     {
       "path": "src/audio-worklet-processor.js",
@@ -86,8 +86,8 @@
     {
       "path": "src/core-host.js",
       "hashMode": "lf-normalized",
-      "size": 74954,
-      "sha256": "3df7d01e00a50e787e6965f6f8449e6016eab846198791c7c8515c89196ce113"
+      "size": 103403,
+      "sha256": "a042faf5143baac62afb2d469fd177f3a74841c9151d2d26c31215c8abdc4347"
     },
     {
       "path": "src/diagnostic-log-filter.js",
@@ -140,8 +140,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 724975,
-      "sha256": "b808c46eb1de64191fe09361892879105f295e09c8b66e816568b932f7ca390e"
+      "size": 790254,
+      "sha256": "d8b25adb5d5067d64442fb8c8ba3a11419b0bcbecae54ed337a6586b468b02d8"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",
@@ -158,20 +158,20 @@
     {
       "path": "src/upstream-main-thread-adapter.js",
       "hashMode": "lf-normalized",
-      "size": 22584,
-      "sha256": "a5c3586d826400c06ef200002fe810997ae1f886003982c17e20b667d1de7dff"
+      "size": 24766,
+      "sha256": "c74107a1149b07635e5e0614ab4c47bd34fe3af4a126c74d9faecf4092ab85ae"
     },
     {
       "path": "src/upstream-worker-adapter.js",
       "hashMode": "lf-normalized",
-      "size": 52757,
-      "sha256": "db4e2b2046587e3ac622de43903a55c5404a4022ef85baaacf66e61820652b76"
+      "size": 64057,
+      "sha256": "102c8e00b2b8b92849b0ab5214fe104c4138421f5faf534d5651ffbbc9da63df"
     },
     {
       "path": "src/upstream-worker-protocol.js",
       "hashMode": "lf-normalized",
-      "size": 5226,
-      "sha256": "78bd3c731113df4da93fcb066d2283358a7f8112236e2bc3e330e049135662bf"
+      "size": 4372,
+      "sha256": "be7658e2128513d0cbb9f8e67f285b21d076c1144af3d6b3d018490952293b8f"
     },
     {
       "path": "src/wgpu-pass-state-cache.js",
@@ -188,8 +188,8 @@
     {
       "path": "src/wgpu-replay-diagnostics.js",
       "hashMode": "lf-normalized",
-      "size": 39205,
-      "sha256": "51d93e6463b7f234bb70eb4c1efa362c710c7ba03bc079870d12be8e6f73914a"
+      "size": 45431,
+      "sha256": "f4b3c67a0c5a602b7716f6cc31f797deca588be9fc53079141bfba4f67409300"
     },
     {
       "path": "src/wgpu-replay-quiescence.js",
@@ -290,14 +290,14 @@
     {
       "path": "src/wgpu-mapped-staging-pool.js",
       "hashMode": "lf-normalized",
-      "size": 33136,
-      "sha256": "e4a3ad1b169c5fb9e888e82f1433cc7cfdebbc44516835a8e56c67a542bebd4c"
+      "size": 34774,
+      "sha256": "c1b5c10d12090574073580c052ddccd742cea6e06d7737eac4a81f39a019ea0b"
     },
     {
       "path": "src/jit-cache-identity.js",
       "hashMode": "lf-normalized",
-      "size": 6647,
-      "sha256": "33a9c3d95ea53e227b4eac141b38cd60c7720a6e3dbc98da1d1e8222d4dcce6b"
+      "size": 7018,
+      "sha256": "e5fc6426011c3b897a2c002688365df1fab19ea32080257ba7fd581905a37ec1"
     },
     {
       "path": "src/wgpu-ubo-compute-projection.js",
@@ -366,6 +366,8 @@
     "_AudioChannels",
     "_AudioSampleRate",
     "_BootDisc",
+    "_CoreControlAbandon",
+    "_CoreControlResult",
     "_CoreInit",
     "_DolphinWeb_AotClearCacheForTest",
     "_DolphinWeb_AotDispatchRegionForTest",
@@ -382,6 +384,7 @@
     "_DolphinWeb_AotPublishStatsForTest",
     "_DolphinWeb_AotQueueRegion",
     "_DolphinWeb_AotRamReady",
+    "_DolphinWeb_AotRegionForcedInstalls",
     "_DolphinWeb_AotRegionHeapBases",
     "_DolphinWeb_AotRegionRechecks",
     "_DolphinWeb_AotRegionSleepInstalls",
@@ -389,7 +392,13 @@
     "_DolphinWeb_AotRegionsSkippedMmu",
     "_DolphinWeb_AotRunRegionForTest",
     "_DolphinWeb_AotServiceRegionsForTest",
+    "_DolphinWeb_AotSetBehindWindowForTest",
+    "_DolphinWeb_AotSetForcedPeriodForTest",
     "_DolphinWeb_AotSetInstallCostForTest",
+    "_DolphinWeb_AotSetInstallDelayForTest",
+    "_DolphinWeb_AotSetLargeBehindWaitForTest",
+    "_DolphinWeb_AotSetLargeOverrunForTest",
+    "_DolphinWeb_AotSetLoadWindowForTest",
     "_DolphinWeb_AotSetReadyWaitForTest",
     "_DolphinWeb_AotSetSleepWaitForTest",
     "_DolphinWeb_AotTestInterpretOne",
@@ -403,12 +412,19 @@
     "_DolphinWeb_AotTranslate",
     "_DolphinWeb_AotTranslateForTest",
     "_DolphinWeb_AotUnverifyForTest",
+    "_DolphinWeb_AudioQueueEvents",
+    "_DolphinWeb_AudioQueuedFifoMs",
+    "_DolphinWeb_AudioQueuedMs",
     "_DolphinWeb_AxHleStats",
     "_DolphinWeb_DirectPadBlock",
     "_DolphinWeb_DirectPadLayout",
+    "_DolphinWeb_DiscReadStats",
+    "_DolphinWeb_DiscReadStatsResetMax",
+    "_DolphinWeb_DstAlphaPassStats",
     "_DolphinWeb_EmulatedRtc",
     "_DolphinWeb_FmaIsMusl",
     "_DolphinWeb_FusedMadd",
+    "_DolphinWeb_GeometryCacheStats",
     "_DolphinWeb_GpuSyncDiag",
     "_DolphinWeb_GpuSyncDiagEnable",
     "_DolphinWeb_GuestPcAddress",
@@ -420,6 +436,9 @@
     "_DolphinWeb_HarnessCaptureTicks",
     "_DolphinWeb_HarnessCaptureWidth",
     "_DolphinWeb_HarnessDisarmCapture",
+    "_DolphinWeb_HarnessEfbSyncReset",
+    "_DolphinWeb_HarnessEfbSyncWord",
+    "_DolphinWeb_HarnessEfbSyncWords",
     "_DolphinWeb_HarnessEnable",
     "_DolphinWeb_HarnessEnabled",
     "_DolphinWeb_HarnessFifoRecord",
@@ -427,12 +446,19 @@
     "_DolphinWeb_HarnessFifoRecordState",
     "_DolphinWeb_HarnessLoadGeneration",
     "_DolphinWeb_HarnessPcAddress",
+    "_DolphinWeb_HarnessRecordSwap",
+    "_DolphinWeb_HarnessSwapRing",
+    "_DolphinWeb_HarnessSwapRingCapacity",
+    "_DolphinWeb_HarnessSwapRingHead",
+    "_DolphinWeb_HarnessSwapsEnable",
+    "_DolphinWeb_HarnessSwapsEnabled",
     "_DolphinWeb_HarnessViRing",
     "_DolphinWeb_HarnessViRingCapacity",
     "_DolphinWeb_HarnessViRingHead",
     "_DolphinWeb_HarnessViSinceBoot",
     "_DolphinWeb_HarnessViSinceLoad",
     "_DolphinWeb_HeadroomStats",
+    "_DolphinWeb_HeapStats",
     "_DolphinWeb_JitArmedStepForTest",
     "_DolphinWeb_JitCompileBytesForTest",
     "_DolphinWeb_JitCompileBytesInPlaceForTest",
@@ -449,37 +475,64 @@
     "_DolphinWeb_JitMtmsrTakesPendingExceptions",
     "_DolphinWeb_JitOnStateLoaded",
     "_DolphinWeb_JitOracleBuffer",
+    "_DolphinWeb_JitOracleCompileWithFpForTest",
     "_DolphinWeb_JitOracleMessage",
     "_DolphinWeb_JitOracleRun",
     "_DolphinWeb_JitReadyBitsPtr",
     "_DolphinWeb_JitRegionChainStats",
     "_DolphinWeb_JitRegionCount",
     "_DolphinWeb_JitRegionInstallSamples",
+    "_DolphinWeb_JitRegionMissTop",
     "_DolphinWeb_JitRegionStats",
     "_DolphinWeb_JitRegionTransitionTop",
     "_DolphinWeb_JitSetRegionChaining",
     "_DolphinWeb_JitSetRegionsEnabled",
     "_DolphinWeb_JitStateLayout",
     "_DolphinWeb_JitTableFull",
+    "_DolphinWeb_JitTimeStats",
     "_DolphinWeb_JitTransientRejectCount",
     "_DolphinWeb_MemAccessKindForTest",
     "_DolphinWeb_MemAccessStaticAt",
     "_DolphinWeb_MemAccessStats",
+    "_DolphinWeb_PacingConfig",
+    "_DolphinWeb_PresentCadenceStats",
     "_DolphinWeb_RecordCacheHit",
     "_DolphinWeb_RecordCacheMiss",
     "_DolphinWeb_RecordInstanceUs",
     "_DolphinWeb_RecordModuleUs",
     "_DolphinWeb_RecordWasmCompileError",
+    "_DolphinWeb_RegionCallDepthForTest",
+    "_DolphinWeb_RegionCallStats",
     "_DolphinWeb_RegionChainHelper",
     "_DolphinWeb_RegionGuardRefusals",
+    "_DolphinWeb_SetAudioBufferMs",
+    "_DolphinWeb_SetCodeSpaceMiB",
+    "_DolphinWeb_SetDiscReadStatsEnabled",
+    "_DolphinWeb_SetDstAlphaTwoPass",
+    "_DolphinWeb_SetDupXfbRearmsThrottle",
+    "_DolphinWeb_SetEnhancements",
     "_DolphinWeb_SetFprfForTest",
     "_DolphinWeb_SetFusedMadd",
     "_DolphinWeb_SetGpuSpinBudget",
+    "_DolphinWeb_SetJitTimeStatsEnabled",
+    "_DolphinWeb_SetPresentOnArrival",
+    "_DolphinWeb_SetThrottleRatePpm",
+    "_DolphinWeb_SetThrottleSleepCascade",
+    "_DolphinWeb_SetThrottleSleepMarginUs",
+    "_DolphinWeb_SetThrottleSleepStepUs",
+    "_DolphinWeb_SetWidescreen",
+    "_DolphinWeb_StaleXfbHeld",
+    "_DolphinWeb_StaleXfbHeldPreload",
+    "_DolphinWeb_ThrottleRatePpm",
+    "_DolphinWeb_ThrottleSleepCascade",
+    "_DolphinWeb_ThrottleSleepStepUs",
+    "_DolphinWeb_UnverifyRegions",
     "_FlushMemoryCards",
     "_FrameBuffer",
     "_FrameHeight",
     "_FrameWidth",
     "_GameConfigMmuForTest",
+    "_GameConfigValue",
     "_GameConfigValueForTest",
     "_GetApploaderDate",
     "_GetApploaderSize",
@@ -525,6 +578,7 @@
     "_GetRawSize",
     "_GetRegion",
     "_GetRendererFeatureMask",
+    "_GetRevision",
     "_GetRootEntryCount",
     "_GetRootEntryIsDirectory",
     "_GetRootEntryName",
@@ -546,6 +600,8 @@
     "_PumpHostJobs",
     "_ReadDisc",
     "_ReadDiscFile",
+    "_RequestCoreControl",
+    "_RequestCoreControlSlot",
     "_Reset",
     "_ResetCore",
     "_RunFrame",
@@ -592,6 +648,7 @@
     "_SetSoftwareTevHotCaseMode",
     "_SetVideoBackend",
     "_SetWebGpuDrawProfileEnabled",
+    "_SetWebGpuGeometryCacheEnabled",
     "_SetWebGpuGeometryPackEnabled",
     "_SetWebGpuGeometryRangeEnabled",
     "_SetWebGpuOwnershipTraceEnabled",
@@ -651,12 +708,15 @@
       "mountFile",
       "pause",
       "rendererDiagnostics",
+      "replacePresenterCanvas",
       "reset",
       "resume",
       "runFrame",
       "saveState",
       "saveStateFile",
       "setAudioMuted",
+      "setDisplayFilter",
+      "setEnhancements",
       "setInputMask",
       "setInputState",
       "start",
@@ -665,26 +725,44 @@
       "streamCaptureStats",
       "streamCaptureStop",
       "validationAotCacheProbe",
+      "validationAudioTrace",
       "validationBeginWgpuRendererProbeMeasurement",
       "validationCaptureAtVi",
+      "validationDropSampler",
       "validationEnableGpuSyncDiag",
       "validationEnableHarness",
       "validationFifoRecord",
       "validationFinalizeWgpuMappedDrain",
       "validationFinalizeWgpuRendererProbe",
       "validationFinalizeWgpuReplay",
+      "validationFlickerWatch",
+      "validationHeapStats",
+      "validationLoseWebGlContext",
+      "validationLoseWebGpuDevice",
       "validationPcSampler",
       "validationReadAotProgress",
+      "validationReadAudioQueue",
       "validationReadAxHleStats",
       "validationReadCoreProgress",
       "validationReadDetTrace",
+      "validationReadDiscReads",
+      "validationReadDstAlphaPasses",
+      "validationReadEfbSyncStats",
+      "validationReadGeometryCache",
       "validationReadHeadroomStats",
+      "validationReadIntegrity",
       "validationReadJitCacheReadiness",
       "validationReadJitRegionStats",
       "validationReadMemAccessStats",
+      "validationReadPacingConfig",
       "validationReadPipelinePrewarm",
+      "validationReadPresentCadence",
+      "validationReadPresentVsync",
+      "validationReadPthreads",
+      "validationReadRegionLedgerStale",
       "validationReadRelaxedMadd",
       "validationReadTimeline",
+      "validationReadWgpuReadback",
       "validationReadWgpuReplayState",
       "validationSetCorePaused",
       "validationSetWgpuPerturbation",

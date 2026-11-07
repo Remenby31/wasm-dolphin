@@ -14,7 +14,8 @@ test("wgpu skips the XFB copy to RAM (base value, a GameINI can still override)"
 });
 
 test("wgpu skips the XFB decode and hash but still counts the frame", () => {
-  assert.match(core, /s_skip_xfb_decode = s_video_backend == "WebGPU";/);
+  // WebGPU always; the null backend only with the bench's ?xfbdecode=0.
+  assert.match(core, /s_skip_xfb_decode =\n\s*s_video_backend == "WebGPU" \|\| \(s_video_backend == "Null" && xfb_no_decode\);/);
   const onXfb = discio.slice(discio.indexOf("void DolphinWeb_OnXfb("), discio.indexOf("void DolphinWeb_OnGlBackbuffer("));
   assert.ok(onXfb.indexOf("HarnessOnViOutput(") < onXfb.indexOf("if (s_skip_xfb_decode)"), "the VI ring advances before the skip");
   assert.match(onXfb, /\}\n\s*else\n\s*\{\n\s*DecodeXfbToPresentationBuffer/, "the decode only runs when not skipped");

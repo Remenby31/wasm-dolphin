@@ -1,8 +1,7 @@
 // §28ca short-prefix A/B — ON. Lowers MIN_WASM_PREFIX_INSTRUCTIONS 4→2.
 // Targets the 54% short-block reject finding from §28bz audit.
 const tag = process.env.OUT_TAG || "shortprefix-on";
-process.env.ROM = process.env.ROM ||
-  "F:/Emulation/super-smash-bros.-melee-usa-en-ja-rev-2.nkit_202203/Super Smash Bros. Melee (USA) (En,Ja) (Rev 2).nkit.iso";
+if (!process.env.ROM) throw new Error("set ROM to the disc image to run");
 process.env.SAVE_STATE_URL = process.env.SAVE_STATE_URL || "/__battle.sav";
 process.env.SAVE_STATE_AT = process.env.SAVE_STATE_AT || "35";
 process.env.VIDEO = process.env.VIDEO || "software";

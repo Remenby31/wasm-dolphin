@@ -1,6 +1,7 @@
 // cores/dolphin/core.lock.json: the hash of the core the browser accepts by
-// default. Pure data, read by src/upstream-worker-protocol.js (JSON module
-// import) and written only by update:core-abi, so no tool evaluates or
+// default. Pure data, read by src/default-core.js (a JSON module import, in
+// page modules only: WebKit cannot load one in a module worker) and written
+// only by update:core-abi, so no tool evaluates or
 // pattern-matches JavaScript to find or change it.
 import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";

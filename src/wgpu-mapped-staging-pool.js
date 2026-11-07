@@ -98,6 +98,10 @@ export function createWgpuMappedStagingPool({
     remapFailures: 0,
     remapLatencyTotalMs: 0,
     remapLatencyMaxMs: 0,
+    // Time this worker spends in the remap callbacks themselves
+    // (getMappedRange: ~0.45 ms per mapped MiB on JSC), outside any drain:
+    // part of the replay worker's occupancy (replayBusy).
+    remapCallbackTotalMs: 0,
     remapLatencyHistogram: new Array(REMAP_LATENCY_BUCKET_BOUNDS_MS.length + 1).fill(0),
     invalidations: 0,
   };
@@ -630,7 +634,9 @@ export function createWgpuMappedStagingPool({
       metrics.remapsStarted += 1;
       return Promise.resolve(slot.buffer.mapAsync(mapMode)).then(() => {
         if (failed || slot.epoch !== generation || slot.state !== "remapping") return false;
+        const callbackStartedAt = now();
         slot.mappedBytes = new Uint8Array(slot.buffer.getMappedRange());
+        metrics.remapCallbackTotalMs += Math.max(0, now() - callbackStartedAt);
         slot.state = "mapped";
         metrics.remapsCompleted += 1;
         const latencyMs = Math.max(0, now() - remapStartedAt);
@@ -781,6 +787,8 @@ export function createWgpuMappedStagingPool({
     rejectSubmission,
     invalidate,
     snapshot,
+    /** Total ms spent in remap callbacks (cheap: no snapshot object). */
+    remapCallbackTotalMs: () => metrics.remapCallbackTotalMs,
   });
 }
 
@@ -1014,4 +1022,28 @@ function isNonnegativeInteger(value) {
 
 function isPositiveInteger(value) {
   return Number.isSafeInteger(value) && value > 0;
+}
+
+// When an upload the pool refused goes through queue.writeBuffer/writeTexture
+// instead: "oversize" when it is larger than a slot, "pass-capacity" when no
+// slot is free inside a render pass (which cannot wait for a remap); null
+// otherwise (outside a pass the replay holds the record until a slot remaps).
+export function queueWgpuUploadReason(stageReason, inPass) {
+  if (stageReason === "payload-too-large") return "oversize";
+  if (stageReason === "no-capacity" && inPass) return "pass-capacity";
+  return null;
+}
+
+// The queue applies writeBuffer/writeTexture when called, ahead of every
+// command buffer not yet submitted. So what was staged before the upload is
+// submitted first (submitPending), then the upload is written: uploads keep
+// program order. submitPending returns false when the submission failed;
+// nothing is written then.
+export function writeWgpuUploadThroughQueue({ submitPending, write } = {}) {
+  if (typeof submitPending !== "function" || typeof write !== "function") {
+    throw new TypeError("submitPending and write callbacks are required");
+  }
+  if (!submitPending()) return false;
+  write();
+  return true;
 }

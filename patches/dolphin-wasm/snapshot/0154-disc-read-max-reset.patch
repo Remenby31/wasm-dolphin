@@ -1,0 +1,18 @@
+diff --git a/Source/Core/Core/HW/DVD/DVDThread.cpp b/Source/Core/Core/HW/DVD/DVDThread.cpp
+--- a/Source/Core/Core/HW/DVD/DVDThread.cpp
++++ b/Source/Core/Core/HW/DVD/DVDThread.cpp
+@@ -56,6 +56,14 @@
+ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_SetDiscReadStatsEnabled(int on)
+ {
+   s_disc_read_stats.store(on != 0, std::memory_order_relaxed);
++}
++
++// Patch 0154: the maxima start over (a measurement window); the sums and
++// counts stay cumulative, read as deltas.
++extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_DiscReadStatsResetMax()
++{
++  s_disc_read_max_us.store(0, std::memory_order_relaxed);
++  s_disc_finish_wait_max_us.store(0, std::memory_order_relaxed);
+ }
+ 
+ // out: reads, bytes (lo, hi), read us (lo, hi), read max us, finish waits,

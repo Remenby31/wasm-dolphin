@@ -3,6 +3,8 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import vm from "node:vm";
 
+import { createSerial, waitCoreReadyForState } from "../src/core-lifecycle.js";
+
 const source = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
 function extractFunction(name, optional = false) {
   const match = new RegExp(`^(?:async )?function ${name}\\(`, "m").exec(source);
@@ -77,21 +79,38 @@ function createHarness() {
     wgpuGeometryRangeEnabled: false,
     softwareTevHotCaseMode: 0,
     applyWgpuTailGate: noop,
-    wgpuExactCapture: { onLoad: noop },
+    wgpuExactCapture: { onLoad: noop }, wgpuIntegrity: { stateLoad: noop },
+    prioritizeAotAfterStateLoad: noop,
     webGpuUboCacheMode: () => 0,
     webGpuUboPackMode: () => 0,
+    // loadStateFile (#325): a booted core, and the production wait.
+    coreBoot: { accepted: true },
+    coreStopping: false,
+    coreBootGeneration: 0,
+    coreBootInFlight: 0,
+    mountSeq: 0,
+    lastMountDone: 0,
+    waitCoreReadyForState,
   });
+  const serial = createSerial();
+  context.loadStateFileRequest = (payload) => serial(() => context.loadStateFileNow(payload));
   context.framePayload = () => {
     context.maybeEnablePpcWasmJit();
     return { frame };
   };
-  vm.runInContext(`${thresholds}\n${jitSource}\n${extractFunction("handleMessage")}`, context);
+  vm.runInContext(`${thresholds}\n${jitSource}\n${extractFunction("loadStateFileNow")}\n${extractFunction("handleMessage")}`, context);
   return {
     context, api, modes, statuses,
     advance: (ms, frames = 0) => { now += ms; frame += frames; },
     tick: () => context.maybeEnablePpcWasmJit(),
     request: (type, payload = {}) => context.handleMessage(type, payload),
+    // A state load suspends the gate once the core takes it (after the
+    // wait for a ready core, #325): a few turns of the event loop.
+    settle: () => new Promise((r) => setImmediate(r)),
     finishTimer: async (request) => {
+      // the pause is awaited (0209: it may run on the core's control
+      // pthread): its timer is set a turn of the event loop later
+      await new Promise((r) => setImmediate(r));
       assert.equal(timers.length, 1, "one asynchronous operation should be pending");
       timers.shift()();
       return await request;
@@ -161,6 +180,7 @@ for (const accepted of [true, false]) {
     h.context.ppcWasmJitActive = false;
     h.api.loadStateFile = () => accepted ? 1 : 0;
     const load = h.request("loadStateFile", { fsPath: "/test.sav" });
+    await h.settle();
     h.advance(6000);
     h.context.presentationMaxIntervalMs = 6000;
     h.tick();
@@ -186,7 +206,9 @@ test("load cleanup preserves an enclosing native pause", async () => {
   const h = createHarness();
   h.context.ppcWasmJitActive = false;
   await h.finishTimer(h.request("validationSetCorePaused", { paused: true }));
-  await h.finishTimer(h.request("loadStateFile", { fsPath: "/test.sav" }));
+  const load = h.request("loadStateFile", { fsPath: "/test.sav" });
+  await h.settle();
+  await h.finishTimer(load);
   h.advance(6000);
   h.tick();
   assert.deepEqual(h.modes, []);
@@ -223,4 +245,86 @@ test("failed pause requests preserve the gate", async () => {
     assert.equal(h.context.ppcWasmJitCorePaused, false);
     assertGateOperational(h);
   }
+});
+
+// Refused before the core takes it (no game booted, #325): the gate was
+// never suspended, nothing to release.
+test("a state load refused at once never suspends the JIT gate", async () => {
+  const h = createHarness();
+  h.context.ppcWasmJitActive = false;
+  h.context.coreBoot = { accepted: false };
+  const result = await h.request("loadStateFile", { fsPath: "/test.sav" });
+  assert.deepEqual([result.loaded, result.refused], [false, "refused"]);
+  assert.match(result.error, /no game booted/);
+  assertGateOperational(h);
+});
+
+// Signalled by the drop-meter A/A (#325 follow-up): a load handled while the
+// boot is still in flight (mountFile awaiting, the core "Uninitialized", no
+// game accepted yet) waits for that boot instead of "no game booted".
+test("a state load received before the boot is acknowledged waits for that boot, then loads", async () => {
+  const h = createHarness();
+  let name = "Uninitialized";
+  h.api.getCoreStateName = () => name;
+  h.context.coreBoot = { accepted: false };
+  h.context.coreBootInFlight = 1;
+  h.context.mountSeq = 1;
+  const load = h.request("loadStateFile", { fsPath: "/test.sav" });
+  await new Promise((r) => setTimeout(r, 60));
+  assert.equal(h.context.ppcWasmJitTimingSuspensions, 0, "not loading yet: the boot is in flight");
+  // The boot answers: a new generation, accepted, the core running.
+  h.context.coreBootGeneration += 1;
+  h.context.coreBoot = { accepted: true };
+  h.context.coreBootInFlight = 0;
+  h.context.lastMountDone = 1;
+  name = "Running";
+  await new Promise((r) => setTimeout(r, 60));
+  const result = await h.finishTimer(load);
+  assert.equal(result.loaded, true);
+  assert.equal(h.context.ppcWasmJitTimingSuspensions, 0);
+});
+
+test("a booted game's load gives up when another boot starts while it waits", async () => {
+  const h = createHarness();
+  let name = "Starting";
+  h.api.getCoreStateName = () => name;
+  const load = h.request("loadStateFile", { fsPath: "/test.sav" });
+  await new Promise((r) => setTimeout(r, 30));
+  h.context.coreBootInFlight = 1;
+  const result = await load;
+  assert.deepEqual([result.loaded, result.refused], [false, "refused"]);
+  assert.match(result.error, /another boot meanwhile/);
+});
+
+// Review of #328: during a mount the core still runs the previous game
+// (BootDisc stops it only at the boot): a load meanwhile must not go into it.
+test("the previous game still Running during a mount takes no state until the new boot answers", async () => {
+  const h = createHarness();
+  let loads = 0;
+  h.api.loadStateFile = () => { loads += 1; return 1; };
+  h.context.coreBoot = { accepted: true };
+  h.context.coreBootInFlight = 1;
+  h.context.mountSeq = 1;
+  const load = h.request("loadStateFile", { fsPath: "/test.sav" });
+  await new Promise((r) => setTimeout(r, 60));
+  assert.equal(loads, 0, "game A is Running but being replaced: no load");
+  h.context.coreBootGeneration += 1;
+  h.context.coreBootInFlight = 0;
+  h.context.lastMountDone = 1;
+  await new Promise((r) => setTimeout(r, 60));
+  const result = await h.finishTimer(load);
+  assert.deepEqual([result.loaded, loads], [true, 1]);
+});
+
+test("a load that joined one mount gives up when another mount answered instead", async () => {
+  const h = createHarness();
+  h.context.coreBoot = { accepted: false };
+  h.context.coreBootInFlight = 1;
+  h.context.mountSeq = 1;
+  const load = h.request("loadStateFile", { fsPath: "/test.sav" });
+  await new Promise((r) => setTimeout(r, 30));
+  h.context.mountSeq = 2;
+  const result = await load;
+  assert.deepEqual([result.loaded, result.refused], [false, "refused"]);
+  assert.match(result.error, /another boot meanwhile/);
 });

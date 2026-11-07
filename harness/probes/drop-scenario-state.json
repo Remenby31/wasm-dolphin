@@ -1,0 +1,7 @@
+{
+ "about": "From a savestate (drop-meter --state): A held 40 guest seconds from the load. KeyX = A.",
+ "steps": [
+  { "at": 0, "down": "KeyX", "label": "scene" }
+ ],
+ "end": 40
+}

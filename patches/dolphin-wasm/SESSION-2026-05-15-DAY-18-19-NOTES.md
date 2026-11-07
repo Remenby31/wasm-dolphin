@@ -34,7 +34,7 @@ Namespace gotchas hit during the build: `Clipper`, `Rasterizer`,
 `SW::SWBoundingBox`, `SW::SWEFBInterface`, `SW::TextureCache` live in
 namespace `SW`. Matched `VideoSoftware::Initialize` exactly.
 
-Result: `?video=wgpu` shows the Melee 1P-mode menu — 18 distinct
+Result: `?video=wgpu` shows the game's 1P-mode menu — 18 distinct
 canvas hashes in a 20s probe (vs 11 for the Day-16 hybrid).
 
 ## Day 19 — zero-copy ShowImage (the perf win)

@@ -118,7 +118,7 @@ test("race-multi --aot-seed: a stable count below the seed's is not done", async
   assert.equal((await waitRegionsQuiescent(seq([p(0)]), fast)).quiescent, true);
   const ko = await waitRegionsQuiescent(seq([p(0)]), { ...fast, target: 143, timeoutMs: -1 });
   assert.equal(ko.quiescent, false);
-  assert.match(ko.why, /0 installed, 143 expected/);
+  assert.match(ko.why, /0 installed \+ 0 dropped, 143 expected/);
   assert.equal((await waitRegionsQuiescent(seq([p(100), p(143), p(143), p(143)]), { ...fast, target: 143 })).installed, 143);
 });
 
@@ -159,11 +159,43 @@ test("race-multi: a run where an arm lacks some of its seeded regions is discard
   assert.equal(discardReason([{ regionGate: ok }, { regionGate: ok }], [143, 143]), null);
   assert.equal(discardReason([{ regionGate: ok }, { regionGate: { installed: 0, layoutRefused: 143, quiescent: false, why: "0 installed, 143 expected" } }], [143, 143]),
     "layoutRefused on arm 1 (143)");
-  assert.match(discardReason([{ regionGate: { ...ok, installed: 140 } }, { regionGate: ok }], [143, 143]), /arm 0 installed 140 of 143/);
+  assert.match(discardReason([{ regionGate: { ...ok, installed: 140 } }, { regionGate: ok }], [143, 143]), /arm 0 installed 140 \(\+ 0 dropped\) of 143/);
   assert.equal(discardReason([{ regionGate: ok }, { regionGate: ok }], [142, 143]), null, "more regions than the seed reached: kept");
-  assert.match(discardReason([{ regionGate: { ...ok, installed: undefined } }], [142]), /arm 0 installed \? of 142/);
+  assert.match(discardReason([{ regionGate: { ...ok, installed: undefined } }], [142]), /arm 0 installed \? \(\+ 0 dropped\) of 142/);
   assert.match(discardReason([{ regionGate: null }, { regionGate: ok }], [143, 143]), /no region gate on arm 0/);
   assert.match(discardReason([{ regionGate: { ...ok, quiescent: false, why: "still compiling" } }], [null]), /arm 0: still compiling/);
+});
+
+test("race-multi --aot-seed: regions the guest overwrote (dropped) count as arrived; arms of one tree must install the same count, other trees may differ", async () => {
+  const { discardReason, regionCountsDiffer } = await import("../harness/probes/race-multi.mjs");
+  // multi2-aa-5x5 (2026-10-28): every arm 141 installed + 2 dropped of the seed's 143.
+  const g = (installed, dropped) => ({ regionGate: { installed, dropped, refused: 0, layoutRefused: 0, quiescent: true } });
+  assert.equal(discardReason([g(141, 2), g(141, 2)], [143, 143]), null);
+  // A/A (one tree): drops vary with timing; a gap up to 3 % of the seed (4 of 143) kept, beyond discarded.
+  const { sameTreeTolerance, installedDelta } = await import("../harness/probes/race-multi.mjs");
+  assert.equal(sameTreeTolerance(143), 4);
+  assert.equal(sameTreeTolerance(20), 2);
+  assert.equal(discardReason([g(140, 3), g(141, 2)], [143, 143], ["/t/base", "/t/base"]), null);
+  // multi2-aa-5x5-b, installed + dropped 143 on every arm: 139/141 and 137/136 kept, 137/132 and 138/128 discarded.
+  assert.equal(discardReason([g(139, 4), g(141, 2)], [143, 143], ["/t/base", "/t/base"]), null);
+  assert.equal(discardReason([g(137, 6), g(132, 11)], [143, 143], ["/t/base", "/t/base"]), "installed regions differ between arms 0 and 1 of one tree beyond 4 (137 / 132)");
+  assert.equal(discardReason([g(138, 5), g(128, 15)], [143, 143], ["/t/base", "/t/base"]), "installed regions differ between arms 0 and 1 of one tree beyond 4 (138 / 128)");
+  assert.equal(discardReason([g(141, 2), g(150, 0), g(130, 13)], [143, 150, 143], ["/t/base", "/t/cand", "/t/base"]), "installed regions differ between arms 0 and 2 of one tree beyond 4 (141 / 130)");
+  assert.equal(installedDelta([g(141, 2), g(150, 0), g(138, 5)], ["/t/base", "/t/cand", "/t/base"]), 3);
+  assert.equal(installedDelta([g(141, 2), g(150, 0)], ["/t/base", "/t/cand"]), null, "one arm per tree: no gap");
+  // A/B (two trees): a candidate with other regions is kept, flagged by regionCountsDiffer.
+  assert.equal(discardReason([g(141, 2), g(150, 0)], [143, 150], ["/t/base", "/t/cand"]), null);
+  assert.equal(regionCountsDiffer([g(141, 2), g(150, 0)], ["/t/base", "/t/cand"]), true);
+  assert.equal(regionCountsDiffer([g(141, 2), g(141, 2)], ["/t/base", "/t/cand"]), false);
+  assert.equal(regionCountsDiffer([g(140, 3), g(141, 2)], ["/t/base", "/t/base"]), false, "one tree: a discard, not a difference");
+  assert.match(discardReason([g(140, 2), g(140, 2)], [143, 143]), /arm 0 installed 140 \(\+ 2 dropped\) of 143/);
+  const seq = (states) => { let i = 0; return async () => states[Math.min(i++, states.length - 1)]; };
+  const p = (installed, dropped) => ({ queued: 0, installed, refused: 0, dropped, pending: 0 });
+  const fast = { everyMs: 0, sleep: async () => {} };
+  const ok = await waitRegionsQuiescent(seq([p(141, 2)]), { ...fast, target: 143 });
+  assert.equal(ok.quiescent, true);
+  const short = await waitRegionsQuiescent(seq([p(140, 2)]), { ...fast, target: 143, timeoutMs: -1 });
+  assert.equal(short.why, "140 installed + 2 dropped, 143 expected, after -1 ms");
 });
 
 test("counters: cycles per guest cycle, extra PMU events per arm, and perf's multiplexing kept", async () => {
@@ -197,4 +229,44 @@ test("race-multi: no local const shadows one of the module's own exported names"
   const exported = [...src.matchAll(/^export (?:const|function|async function) (\w+)/gm)].map((m) => m[1]);
   const shadowed = exported.filter((name) => new RegExp(`^\\s+(?:const|let) ${name}\\b`, "m").test(src));
   assert.deepEqual(shadowed, []);
+});
+
+test("race-multi: a boot that fails sets the run aside and plays it again, at most --max-boot-replays times in a row", async () => {
+  const { bootFailureStep } = await import("../harness/probes/race-multi.mjs");
+  assert.equal(bootFailureStep(1, 2), "replay");
+  assert.equal(bootFailureStep(2, 2), "replay");
+  assert.equal(bootFailureStep(3, 2), "fail", "a third failure in a row: the machine, not a hiccup");
+  assert.equal(bootFailureStep(1, 0), "fail", "--max-boot-replays 0: fail at once");
+  // The loop: the boot sits in its own try, a failure skips the windows, is
+  // recorded as a boot discard (outside the region discards' cap) and resets
+  // only after a run that booted.
+  const src = readFileSync(new URL("../harness/probes/race-multi.mjs", import.meta.url), "utf8");
+  assert.match(src, /record\.bootFailed = \{ arm: booting/);
+  assert.match(src, /const results = record\.bootFailed \? \[\] :/);
+  assert.match(src, /discarded\.push\(\{ run: r, attempt: record\.attempt, why, boot: true \}\)/);
+  assert.match(src, /const regionDiscards = discarded\.filter\(\(d\) => !d\.boot\)\.length;/);
+  assert.match(src, /bootFailures = 0;\n\s+record\.arms\.forEach/);
+});
+
+test("counters: every renderer thread counted, the busiest kept after the window; an impossible window rejected", async () => {
+  const { busiestOf, counterSanity, parsePerfCsvPerThread } = await import("../harness/lib/perf-counters.mjs");
+  const csv = [
+    "# started on Sat Oct 24 07:38:35 2026", "",
+    "DedicatedWorker-101,9000000,,armv8_pmuv3_1/instructions/u,1,100.00,,",
+    "DedicatedWorker-101,4000000,,armv8_pmuv3_1/cycles/u,1,100.00,,",
+    "DedicatedWorker-102,250000000,,armv8_pmuv3_1/instructions/u,1,100.00,,",
+    "DedicatedWorker-102,60000000,,armv8_pmuv3_1/cycles/u,1,100.00,,",
+    "DedicatedWorker-102,<not counted>,,armv8_pmuv3_0/cycles/u,0,100.00,,",
+    "Compositor-7-103,100,,armv8_pmuv3_1/cycles/u,1,100.00,,"
+  ].join("\n");
+  const threads = parsePerfCsvPerThread(csv);
+  assert.equal(threads.length, 3);
+  assert.deepEqual(threads.find((t) => t.tid === 103), { tid: 103, comm: "Compositor-7", instructions: 0, cycles: 100 }, "a dash in the thread name");
+  const best = busiestOf(threads);
+  assert.equal(best.tid, 102, "the CPU thread: most cycles over the window, whatever it did in its first 500 ms");
+  assert.equal(best.cycles, 60000000);
+  // 10 M guest ticks: 6 cycles per guest cycle is the CPU thread; 0.4 is not.
+  assert.equal(counterSanity({ counters: { cycles: 60e6 }, guestTicks: 10e6 }), null);
+  assert.match(counterSanity({ counters: { cycles: 4e6 }, guestTicks: 10e6 }), /0\.4 < 1: not the emulated CPU thread/);
+  assert.equal(counterSanity({ counters: { error: "x" }, guestTicks: 10e6 }), null, "no counts: nothing to judge");
 });

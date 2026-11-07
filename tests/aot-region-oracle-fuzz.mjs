@@ -5,6 +5,7 @@
 // interpreter, with a full and a small cycle budget per program.
 //
 //   node tests/aot-region-oracle-fuzz.mjs --programs 20000 --length 48 [--seed S] [--mask hex]
+//     [--only name,name] [--fprf] [--fused 0|1]
 //
 // Exit 0 when nothing diverged.
 import { loadAotCore, runOracleProgramsAsRegions } from "./helpers/aot-core-equivalence.mjs";
@@ -26,7 +27,11 @@ if (!core?.has("DolphinWeb_AotTestLoadState")) {
 }
 // --fprf: FPRF on for every tier (Config::MAIN_FPRF, patch 0121); off by default.
 if (args.includes("--fprf")) core.module._DolphinWeb_SetFprfForTest(1);
+// --fused 1|0: the FMA emitter's relaxed_madd mode (patches 0129, 0141);
+// 1 only where this engine fuses it (the page never selects it elsewhere).
+if (opt("fused", null) !== null) core.module._DolphinWeb_SetFusedMadd(Number(opt("fused")) ? 1 : 0);
+const names = opt("only", null)?.split(",") ?? null;
 const t0 = performance.now();
-const tally = runOracleProgramsAsRegions(core, { seed, count: programs, length, mask });
+const tally = runOracleProgramsAsRegions(core, { seed, count: programs, length, mask, names });
 console.log(JSON.stringify({ ...tally, mismatches: tally.mismatches.slice(0, 3), mismatchCount: tally.mismatches.length, seconds: Math.round((performance.now() - t0) / 1000) }));
 process.exit(tally.mismatches.length ? 1 : 0);

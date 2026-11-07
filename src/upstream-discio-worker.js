@@ -1,7 +1,9 @@
-import { readViRing } from "./harness-vi-ring.js";
+import { asDiscBlob } from "./remote-disc.js";
+import { readSwapRing, readViRing } from "./harness-vi-ring.js";
+import { createPipelineLog } from "./harness-pipeline-log.js";
 import { startPcSampler } from "./harness-pc-sampler.js";
+import { createDropSampler, histogramSum } from "./harness-drop-sampler.js";
 import {
-  DEFAULT_UPSTREAM_CORE_SHA256,
   DEFAULT_UPSTREAM_CORE_URL,
   WORKERFS_MOUNT_DIR,
   buildWorkerErrorReply,
@@ -12,10 +14,14 @@ import {
 } from "./upstream-worker-protocol.js";
 import { parseDolHeader } from "./dol.js";
 import { probeRelaxedMadd } from "./relaxed-madd-probe.js";
+import { probeWasmFeatures } from "./wasm-feature-probe.js";
 import { decodeWgpuSamplerState } from "./wgpu-sampler-state.js";
+import { bootBackbufferResize, clampInternalResolution, cpuFrameYieldsToHardware, enhancementCoreArgs, internalResolutionCeiling, resizeCanvasBackbuffer } from "./wgpu-enhancements.js";
+import { createDisplayFilter, displayFilterFits, displayFilterOutputSize, normalizeDisplayFilter } from "./wgpu-display-filter.js";
 import { gxClearDepthToStored, gxDepthState } from "./wgpu-depth-state.js";
 import { clampSourceRect, createWgpuExactCapture, packReadbackRows } from "./wgpu-exact-capture.js";
 import { createUniqueFrameCounter, hashRows, sampleRowOffsets } from "./harness-unique-frames.js";
+import { createFlickerRecorder, lumaSignature, SIGNATURE_ROWS } from "./harness-flicker.js";
 import { decodePrebuiltCache } from "./prebuilt-jit-cache-format.js";
 import {
   AOT_COMPILER_WORKER_NAME,
@@ -23,7 +29,8 @@ import {
   compileFailureReason,
   createAotCompilerClient
 } from "./aot-compiler-worker.js";
-import { migrateLegacyJitIdb, openAotBlockStore, openAotCache, readDiscKeyFromFile } from "./aot-cache.js";
+import { nativeModuleCache, WASM_ENGINES, wasmEngine } from "./wasm-engine.js";
+import { migrateLegacyJitIdb, openAotBlockStore, openAotCache, readDiscKeyFromFile, readDolKeyFromFile } from "./aot-cache.js";
 import {
   JIT_CACHE_ENTRY_KEY_SCHEMA,
   canonicalCoreFingerprint,
@@ -48,7 +55,9 @@ import {
   findPublishedAtomicPassEnd,
   isIntentionalBlankWgpuProbe,
   selectAtomicReplayLimit,
-  summarizeWgpuReplayRange
+  summarizeWgpuReplayRange,
+  wgpuMappedStagingSlotCountOf,
+  wgpuMappedStagingSlotMibOf
 } from "./wgpu-replay-diagnostics.js";
 import {
   WgpuRendererRuntime,
@@ -118,12 +127,24 @@ import {
   captureInitialWgpuConsumerResetAttestation,
 } from "./wgpu-consumer-reset-attestation.js";
 import { createWgpuSemanticRuntime } from "./wgpu-semantic-runtime.js";
-import { handleWgpuDeviceLoss } from "./wgpu-device-lifecycle.js";
+import { createWgpuFatalReporter, handleWgpuDeviceLoss, wgpuFatalPageReason } from "./wgpu-device-lifecycle.js";
+import { coreIntegrityOf, createWgpuIntegrity, SKIP, skippedDrawCause } from "./wgpu-integrity.js";
+import { createRegionLinkFailures } from "./region-link-failures.js";
+import { CORE_CONTROL_OPS, runCoreControl, setPausedThroughControl } from "./core-control.js";
+import { createNewFrameCounter } from "./wgpu-new-frames.js";
+import { createStalePresentDetector } from "./wgpu-stale-present.js";
+import { createBusyClock, createOccupancyMeter, readHeadroomStats } from "./occupancy-stats.js";
 import {
   attemptRetainedWgpuUpload,
-  createWgpuMappedStagingPool
+  createWgpuMappedStagingPool,
+  queueWgpuUploadReason,
+  writeWgpuUploadThroughQueue
 } from "./wgpu-mapped-staging-pool.js";
 import { createWgpuSparseUboCopyForward } from "./wgpu-sparse-ubo-copy-forward.js";
+import { createBindGroupCache } from "./wgpu-bind-group-cache.js";
+import { createVsyncQueue, vsyncLateMs } from "./wgpu-vsync-queue.js";
+import { createGamePacer, createRefreshHistogram, refreshOf } from "./wgpu-game-pacer.js";
+import { createViPhaseLock, MAX_RATIO, viLockMode } from "./wgpu-vi-phase-lock.js";
 import {
   WGPU_MAPPED_DRAIN_FORCE_REASONS,
   createWgpuMappedDrainCoalescer
@@ -135,6 +156,8 @@ import {
   enableWgpuNonDroppingBackpressure,
   failWgpuRingConsumer
 } from "./wgpu-ring-backpressure.js";
+import { createWgpuReplayParker } from "./wgpu-replay-park.js";
+import { createDiscReadahead } from "./disc-readahead.js";
 import {
   WGPU_UPLOAD_PROBE_SCHEMA,
   createWgpuUploadProbeExecutor
@@ -151,7 +174,7 @@ import {
   createWgpuVisualCadenceTelemetry,
   hashWgpuVisualSample
 } from "./wgpu-visual-cadence.js";
-import { createCoreLifecycle } from "./core-lifecycle.js";
+import { createCoreLifecycle, createSerial, waitCoreReadyForState } from "./core-lifecycle.js";
 import { WgpuReadback, unwrapSeq } from "./wgpu-readback.js";
 import { createDisplayCounter, startDisplayLoop } from "./wgpu-display-counter.js";
 import { PipelinePrewarm, wgslHash } from "./wgpu-pipeline-prewarm.js";
@@ -214,11 +237,26 @@ let renderCanvas = null;
 const WGPU_BACKBUFFER_W = 640;
 const WGPU_BACKBUFFER_H = 480;
 let wgpuBackbufferSized = false;
+// The core's backbuffer size (the pooled frame textures), once known; the
+// canvas is that size unless the display filter sizes it to the display.
+let wgpuBackbufferW = 0;
+let wgpuBackbufferH = 0;
+// Display filter (src/wgpu-display-filter.js, presentvsync only): sharpness,
+// fit (canvas at the page's display pixels) and the display box.
+let wgpuDisplayFilter = normalizeDisplayFilter();
+let wgpuDisplayFilterGpu = null;
+let wgpuDisplayFilterDevice = null;
 let renderContext = null;
 let renderImageData = null;
 let renderGpu = null;
 let renderGl = null;
 let renderGlState = null;
+// The WebGL presenter's context was lost (GPU process crash, driver reset):
+// draws are skipped until it is restored, or until the page hands over a new
+// canvas for a 2D presenter (WEBGL_RESTORE_WAIT_MS later).
+let renderGlLost = false;
+let renderGlRestoreTimer = null;
+const WEBGL_RESTORE_WAIT_MS = 3000;
 let renderUploadBuffer = null;
 let renderRequiresUploadCopy = false;
 let preferredPresenterBackend = "webgl";
@@ -268,6 +306,17 @@ let fifoLogBoot = false;
 // ?wgpumask=a,b: optional WebGPU features the device is created without, as
 // on a browser that lacks them (harness only, set at loadCore).
 let wgpuMaskedFeatures = new Set();
+// ?wgpufallback=1 (harness): keep a CPU fallback adapter; refused otherwise.
+let wgpuAcceptFallbackAdapter = false;
+// ?webglsw=1 (harness): keep a software WebGL presenter; refused otherwise
+// (setupSoftwarePresenter).
+let webglAcceptSoftware = false;
+// A CPU adapter is no usable GPU: with --enable-unsafe-webgpu (the harness
+// passes it) a GPU-less Chrome gives a SwiftShader fallback adapter, and both
+// the replay and the presenter would run on the CPU.
+export function isFallbackAdapterInfo(info) {
+  return info?.isFallbackAdapter === true || info?.architecture === "swiftshader";
+}
 export function parseWgpuMask(mask) {
   return new Set(String(mask || "").split(",").map((f) => f.trim()).filter(Boolean));
 }
@@ -323,11 +372,191 @@ function harnessHeapLayout(m) {
   return out;
 }
 
-function harnessJitRegionStats({ sampleEvery } = {}) {
+// Harness only: what this worker handed the core, per region module (key,
+// its entries, when, and whether it was queued or why not), to tell a
+// formation the translator produced from one the core runs (a scan says a
+// PC is held, the browser exits to it with no region). Kept only while the
+// harness hooks are on; reset per mount.
+const aotRegionLedger = new Map();
+function noteAotRegionLedger(key, entries, outcome, members = null) {
+  if (!harnessEnabled || !key) return;
+  aotRegionLedger.set(key, { entries: Uint32Array.from(entries ?? [], (pc) => pc >>> 0), outcome, ms: Math.round(performance.now()), members });
+}
+// The members of each queued module whose code no longer matches the plan's
+// hash (what the core's re-verification compares: one such member drops the
+// whole module), and whether the module holds code of theirs (`translated`:
+// one of its entries is in their ranges) or only lists them (refused at
+// translation, still verified).
+async function harnessRegionLedgerStale(m = moduleInstance) {
+  if (!harnessEnabled) return { error: "harness hooks are off" };
+  if (typeof m?._DolphinWeb_AotRegionHeapBases !== "function") return { error: "core has no DolphinWeb_AotRegionHeapBases" };
+  const [{ coreHeapBases }, { regionHash }] = await Promise.all([import("./aot-orchestrator.js"), import("./aot-plan.js")]);
+  const ram = coreHeapBases(m)[0];
+  const read32 = (a) => new DataView(m.HEAPU8.buffer).getUint32(ram + (a & 0x01ffffff), false);
+  const stale = [];
+  let checked = 0;
+  for (const [key, r] of aotRegionLedger) {
+    if (r.outcome !== "queued" || !r.members) continue;
+    for (const [i, member] of r.members.entries()) {
+      if (!member.hash) continue;
+      checked += 1;
+      if (regionHash(read32, member.ranges) === member.hash) continue;
+      const translated = r.entries.some((pc) => member.ranges.some(([a, b]) => pc >= a && pc < b));
+      stale.push({ key, member: i, start: member.ranges[0]?.[0] ?? null, ranges: member.ranges.length, translated });
+    }
+  }
+  return { checked, stale: stale.slice(0, 64), staleModules: new Set(stale.map((x) => x.key)).size, staleCount: stale.length };
+}
+// pcs: the modules holding each among their entries (queued or not), with
+// the outcome and when; mappedRegions: the core's own count of mapped entries.
+function harnessRegionLedger(pcs) {
+  const outcomes = {};
+  let entries = 0;
+  for (const r of aotRegionLedger.values()) {
+    outcomes[r.outcome] = (outcomes[r.outcome] ?? 0) + 1;
+    if (r.outcome === "queued") entries += r.entries.length;
+  }
+  const at = (Array.isArray(pcs) ? pcs : []).slice(0, 64).map((pc) => {
+    const holders = [];
+    for (const [key, r] of aotRegionLedger) if (r.entries.includes(pc >>> 0)) holders.push({ key, outcome: r.outcome, ms: r.ms });
+    return { pc: pc >>> 0, holders };
+  });
+  const mapped = moduleInstance?._DolphinWeb_JitRegionCount;
+  return { modules: aotRegionLedger.size, outcomes, queuedEntries: entries, mappedRegions: typeof mapped === "function" ? mapped() >>> 0 : null, nowMs: Math.round(performance.now()), pcs: at };
+}
+
+// QA harness only: the pacing settings the core runs with (patch 0150),
+// from its effective config, not from the URL: proof that a switch applied.
+function harnessPacingConfig() {
+  if (!harnessEnabled) return { error: "harness hooks are off" };
+  const read = moduleInstance?._DolphinWeb_PacingConfig;
+  if (typeof read !== "function") return { supported: false };
+  const bits = read() >>> 0;
+  // bit 3 (patch 0153): the video thread's present sleep (SmoothEarly on and
+  // not presenting on arrival); null on a core before 0153, which sleeps but
+  // has no bit for it.
+  const presentSleep = typeof moduleInstance?._DolphinWeb_SetPresentOnArrival === "function" ? Boolean(bits & 8) : null;
+  // bits 16-28 (patch 0165): the throttle sleep margin in us; null before.
+  const sleepMarginUs = typeof moduleInstance?._DolphinWeb_SetThrottleSleepMarginUs === "function" ? (bits >>> 16) & 0x1fff : null;
+  const sleepStepUs = typeof moduleInstance?._DolphinWeb_ThrottleSleepStepUs === "function" ? moduleInstance._DolphinWeb_ThrottleSleepStepUs() >>> 0 : null;
+  const cascade = typeof moduleInstance?._DolphinWeb_ThrottleSleepCascade === "function" ? moduleInstance._DolphinWeb_ThrottleSleepCascade() >>> 0 : null;
+  const sleepK = cascade === null ? null : cascade & 0xffff, sleepSpinUs = cascade === null ? null : cascade >>> 16;
+  return { supported: true, syncOnSkipIdle: Boolean(bits & 1), rushFramePresentation: Boolean(bits & 2), dupXfbResetsThrottle: Boolean(bits & 4), presentSleep, sleepMarginUs, sleepStepUs, sleepK, sleepSpinUs };
+}
+// Patch 0156: the guest cycles ran outside the regions by the PC a chain of
+// blocks started at, the 64 most costly, while the stats are on (timing or
+// not), each with its cause as the ledger sees it: "declared" (a module
+// handed to the core declares that PC: refused by the mode, not verified,
+// or its region left early) or "undeclared" (no module has it: outside the
+// plan, or not held by any fragment). Null with a core before 0156; torn
+// copies (the CPU thread publishing meanwhile) are read again.
+const REGION_MISS_TOP = 64;
+function harnessRegionMissTop(heap, m = moduleInstance) {
+  const at = typeof m?._DolphinWeb_JitRegionMissTop === "function" ? m._DolphinWeb_JitRegionMissTop() >>> 0 : 0;
+  const size = 8 + 16 * REGION_MISS_TOP + 8;
+  if (!at || at + size > heap.length) return null;
+  // A seqlock: the CPU thread stores seq, the entries, then seq_end; read
+  // seq_end first, copy, then seq: equal, no write overlapped the copy (read
+  // in the writer's order, a write begun after seq and still running when
+  // seq_end is read would match on a torn copy; review of #237).
+  const words = new Int32Array(heap.buffer);
+  const seqAt = at >>> 2, seqEndAt = (at + 8 + 16 * REGION_MISS_TOP) >>> 2;
+  const load = (i) => (typeof SharedArrayBuffer !== "undefined" && heap.buffer instanceof SharedArrayBuffer ? Atomics.load(words, i) : words[i]) >>> 0;
+  for (let tries = 0; tries < 3; tries += 1) {
+    const ended = load(seqEndAt);
+    const view = new DataView(heap.slice(at, at + size).buffer);
+    if (load(seqAt) !== ended) continue;
+    const count = Math.min(view.getUint32(4, true), REGION_MISS_TOP);
+    const declared = (pc) => [...aotRegionLedger.values()].some((r) => r.outcome === "queued" && r.entries.includes(pc));
+    return Array.from({ length: count }, (_, i) => {
+      const pc = view.getUint32(8 + 16 * i + 8, true) >>> 0;
+      return { pc, cycles: view.getFloat64(8 + 16 * i, true), cause: declared(pc) ? "declared" : "undeclared" };
+    });
+  }
+  return { torn: true };
+}
+
+// 0204: what the geometry content cache did (hits, bytes, insertions,
+// misses, blocked, cap skips, failures, buffer switches, comparisons,
+// collisions, resets), cumulative.
+const GEOMETRY_CACHE_FIELDS = ["hits", "hitBytes", "inserts", "insertBytes", "misses", "missBytes",
+  "blocked", "capSkips", "failed", "switches", "compares", "collisions", "resets"];
+// A resource a record names that the replay does not have: counted (always,
+// src/wgpu-integrity.js), then told to the replay classifier when it runs.
+function noteMissingResource(kind, id) {
+  wgpuIntegrity.missing(kind);
+  wgpuReplayClassifier?.recordMissingResource({ kind, id });
+}
+
+// Region modules the engine refused, by cause, once per module
+// (src/region-link-failures.js): the first launch's compile
+// (precompileAotRegion), the cache's load (onLoadReject) and the CPU thread's
+// instantiation (its "dolphin-region-link-failure" message).
+const regionLinkFailures = createRegionLinkFailures();
+export const regionLinkFailuresForTest = () => regionLinkFailures.snapshot();
+
+// validationReadIntegrity: the replay's integrity counters, cumulative and
+// flat (fatal ones: INTEGRITY_FATAL), plus non-fatal context (staging waits,
+// presents rejected, presents).
+function readWgpuIntegrity() {
+  const m = moduleInstance;
+  let geometryCacheCollisions = 0, geometryCacheFailed = 0;
+  if (typeof m?._DolphinWeb_GeometryCacheStats === "function" && typeof m._malloc === "function") {
+    const p = m._malloc(8 * GEOMETRY_CACHE_FIELDS.length);
+    try {
+      const n = m._DolphinWeb_GeometryCacheStats(p) | 0;
+      const values = new Float64Array(m.HEAPU8.buffer, p, Math.min(n, GEOMETRY_CACHE_FIELDS.length));
+      const at = (name) => { const k = GEOMETRY_CACHE_FIELDS.indexOf(name); return k >= 0 && k < values.length ? values[k] : 0; };
+      geometryCacheCollisions = at("collisions");
+      geometryCacheFailed = at("failed");
+    } finally {
+      m._free(p);
+    }
+  }
+  return wgpuIntegrity.snapshot({
+    ...coreIntegrityOf(api?.getWebGpuStateCacheStats?.()),
+    stagingUnsafe: webGpuCausalStats.mappedStagingUnsafeCapacityCount || 0,
+    stagingCapacityWaits: webGpuCausalStats.mappedStagingCapacityWaitCount || 0,
+    stagingOversize: webGpuCausalStats.mappedStagingOversizeCount || 0,
+    stagingPassCapacityQueue: webGpuCausalStats.mappedStagingPassCapacityQueueCount || 0,
+    presentRejected: self._wgPresentRejectedLogCount || 0,
+    framesOutOfOrder: wgpuNewFrames.outOfOrder,
+    stalePresents: wgpuStalePresent.stale,
+    // patch 0211: swaps that showed the last picture instead of a late XFB
+    staleXfbHeld: typeof m?._DolphinWeb_StaleXfbHeld === "function" ? m._DolphinWeb_StaleXfbHeld() >>> 0 : null,
+    // of those, holds that showed a picture from before the last state load
+    staleXfbHeldPreload: typeof m?._DolphinWeb_StaleXfbHeldPreload === "function" ? m._DolphinWeb_StaleXfbHeldPreload() >>> 0 : null,
+    geometryCacheCollisions,
+    geometryCacheFailed,
+    ...regionLinkFailures.snapshot(),
+    presents: webGpuExecStats.present
+  });
+}
+
+function harnessGeometryCacheStats() {
+  if (!harnessEnabled) return { error: "harness hooks are off" };
+  const m = moduleInstance;
+  if (typeof m?._DolphinWeb_GeometryCacheStats !== "function" || typeof m._malloc !== "function") {
+    return { supported: false, mode: wgpuGeometryCacheMode };
+  }
+  const p = m._malloc(8 * GEOMETRY_CACHE_FIELDS.length);
+  try {
+    const n = m._DolphinWeb_GeometryCacheStats(p) | 0;
+    const values = new Float64Array(m.HEAPU8.buffer, p, Math.min(n, GEOMETRY_CACHE_FIELDS.length));
+    return { supported: true, mode: wgpuGeometryCacheMode,
+      ...Object.fromEntries(GEOMETRY_CACHE_FIELDS.slice(0, values.length).map((name, k) => [name, values[k]])) };
+  } finally {
+    m._free(p);
+  }
+}
+function harnessJitRegionStats({ sampleEvery, pcs } = {}) {
   if (!harnessEnabled) return { error: "harness hooks are off" };
   const stats = moduleInstance?._DolphinWeb_JitRegionStats;
   if (!stats) return { error: "core has no DolphinWeb_JitRegionStats" };
   const ptr = stats(Number.isInteger(sampleEvery) && sampleEvery >= 0 ? sampleEvery : -1) >>> 0;
+  // 0142: the counters of guest calls made by regions as wasm calls start
+  // and stop with the region stats (on while sampling).
+  if (Number.isInteger(sampleEvery)) moduleInstance._DolphinWeb_RegionCallStats?.(sampleEvery >= 0 ? 1 : 0);
   const heap = moduleInstance.HEAPU8;
   if (!ptr || ptr + 8 > heap.length) return { error: `DolphinWeb_JitRegionStats returned ${ptr}` };
   const size = Math.min(new DataView(heap.buffer, ptr, 8).getUint32(4, true), 256);
@@ -344,7 +573,17 @@ function harnessJitRegionStats({ sampleEvery } = {}) {
   // (0084), the bytes of their unpatched compiles, and patched compiles refused.
   return { bytes: copy(), again: copy(), installSamples: harnessRegionInstallSamples(heap), layoutRefused, layoutHash, layout: harnessHeapLayout(moduleInstance),
     heapPatched: aotHeapPatched, heapPatchedBytes: aotHeapPatchedBytes, heapPatchFailed: aotHeapPatchFailed,
-    regionChain: harnessRegionChainStats(heap), regionSleep: harnessRegionSleepStats() };
+    regionChain: harnessRegionChainStats(heap), regionSleep: harnessRegionSleepStats(), ledger: harnessRegionLedger(pcs),
+    regionCalls: harnessRegionCallStats(), missTop: harnessRegionMissTop(heap) };
+}
+// Guest calls made by region code as wasm calls (patch 0142): calls, returns
+// elsewhere than the continuation, codes passed up, calls past the depth
+// cap, depth reached. Null with an older core.
+function harnessRegionCallStats() {
+  const f = moduleInstance?._DolphinWeb_RegionCallStats;
+  if (!f) return null;
+  const [calls, , elsewhere, passedUp, capped, depthMax] = new Uint32Array(moduleInstance.HEAPU8.buffer, f(-1) >>> 0, 6);
+  return { calls, elsewhere, passedUp, capped, depthMax };
 }
 // Installs in the CPU thread's throttle sleeps (patch 0107): how many, their
 // host time, the worst lateness past a sleep's deadline they caused (the
@@ -353,12 +592,29 @@ function harnessJitRegionStats({ sampleEvery } = {}) {
 function harnessRegionSleepStats() {
   const m = moduleInstance;
   if (!m?._DolphinWeb_AotRegionSleepInstalls || !m._malloc) return null;
-  const p = m._malloc(16);
+  const p = m._malloc(24);
   try {
-    new Uint32Array(m.HEAPU8.buffer, p, 4).fill(0);
+    new Uint32Array(m.HEAPU8.buffer, p, 6).fill(0);
     m._DolphinWeb_AotRegionSleepInstalls(p);
     const w = new Uint32Array(m.HEAPU8.buffer, p, 4);
-    return { installs: w[0], ms: w[1] / 100, overshootMaxMs: w[2] / 100, waitExpired: w[3] };
+    const stats = { installs: w[0], ms: w[1] / 100, overshootMaxMs: w[2] / 100, waitExpired: w[3] };
+    // Patch 0171: installs done at a slice boundary in the window after a
+    // state load while the thread was behind (no sleep window long enough),
+    // the worst slice that did one, those over the slice target (one per
+    // slice and per behind window), the measured install time over the
+    // estimate of large modules, the large modules the 6 ms bound kept
+    // waiting and the largest estimate x overrun it refused.
+    if (m._DolphinWeb_AotRegionForcedInstalls) {
+      const f = new Uint32Array(m.HEAPU8.buffer, p, 6).fill(0);
+      m._DolphinWeb_AotRegionForcedInstalls(p);
+      stats.forcedInstalls = f[0];
+      stats.forcedMaxSliceMs = f[1] / 100;
+      stats.forcedLargeInstalls = f[2];
+      stats.largeOverrun = f[3] / 100;
+      stats.boundRefused = f[4];
+      stats.boundRefusedMaxMs = f[5] / 100;
+    }
+    return stats;
   } finally {
     m._free?.(p);
   }
@@ -399,6 +655,31 @@ function harnessHeadroomStats({ reset } = {}) {
   // two byte loads while a thread writes it.
   const copy = () => Array.from(new Uint8Array(new Float64Array(heap.buffer, ptr, size / 8).slice().buffer));
   return { bytes: copy(), again: copy() };
+}
+
+// Present cadence (patch 0162, WasmPresentCadence.h): per-field histograms of
+// the throttle's wake-up lateness, the CPU burst from Throttle to OutputXFB and
+// a present's arrival against its intended time. reset >= 0 zeroes and turns
+// them on at the next Throttle. Copied as whole u32s until two copies agree
+// (else { torn: true }); the caller still checks on === 1 (2: a reset half
+// done) and video_generation === generation (word 12 against word 3) before
+// trusting the video section.
+function harnessPresentCadence({ reset } = {}) {
+  if (!harnessEnabled) return { error: "harness hooks are off" };
+  const stats = moduleInstance?._DolphinWeb_PresentCadenceStats;
+  if (!stats) return { supported: false };
+  const ptr = stats(Number.isInteger(reset) && reset >= 0 ? reset : -1) >>> 0;
+  const heap = moduleInstance.HEAPU8;
+  if (!ptr || ptr + 8 > heap.length) return { error: `DolphinWeb_PresentCadenceStats returned ${ptr}` };
+  const size = Math.min(new DataView(heap.buffer, ptr, 8).getUint32(4, true), 1872); // v2 (0165)
+  if (ptr + size > heap.length) return { error: `present cadence of ${size} bytes past the heap` };
+  if (ptr % 4 !== 0 || size % 4 !== 0) return { error: `present cadence at ${ptr} (${size} bytes): not 4-aligned` };
+  const copy = () => Array.from(new Uint32Array(heap.buffer, ptr, size / 4));
+  for (let tries = 0; tries < 4; tries += 1) {
+    const words = copy(), again = copy();
+    if (words.every((w, i) => w === again[i])) return { supported: true, words };
+  }
+  return { supported: true, torn: true };
 }
 
 // AX HLE timing (patch 0099, harness/lib/ax-hle-stats.mjs): reset >= 0
@@ -460,11 +741,38 @@ let harnessPresentHead = 0;
 // what each BeginFrame put on screen (src/wgpu-display-counter.js).
 const harnessDisplay = createDisplayCounter();
 let harnessDisplayStop = null;
+// Harness only, when it asks (validationEnableHarness { pipeline: true }): a
+// VI output's way to the screen, the worker's side (src/harness-pipeline-log.js)
+// and the core's swap ring (patch 0214), for harness/lib/no-present.mjs.
+let harnessPipeline = false;
+const harnessPipelineLog = createPipelineLog();
+let harnessSwapRead = null;
 let harnessPresentRead = 0;
 const presentationIntervalHistogram = new Uint32Array(
   PRESENTATION_HISTOGRAM_BUCKETS_MS.length + 1
 );
 let visualChangeFps = 0;
+// Patch 0208 (src/wgpu-new-frames.js): new XFBs shown and queued per second,
+// per window; null without frame tags (an older core, the software renderer).
+const wgpuNewFrames = createNewFrameCounter();
+// Presents of a new frame showing a texture not written since it was last
+// shown (src/wgpu-stale-present.js): the late-XFB jump back, on any device.
+const wgpuStalePresent = createStalePresentDetector();
+let newFramesPerSec = null;
+let newFramesProducedPerSec = null;
+// Occupancy per window (src/occupancy-stats.js): the CPU and GPU threads'
+// busy shares (0113 headroom counters, turned on once per core) and this
+// worker's (workerBusy: its product entry points, see the module); null
+// when unavailable.
+const occupancyMeter = createOccupancyMeter();
+const workerBusy = createBusyClock();
+let occupancyHeadroomModule = null; // the core the counters were turned on in
+let cpuThreadBusy = null;
+let gpuThreadBusy = null;
+let replayBusy = null;
+// XFB copies per second of the same window (src/occupancy-stats.js): the game
+// images made, with any renderer; null when unavailable.
+let xfbCopiesPerSec = null;
 let visualFrameHash = 0;
 let lastVisualFrameHash = 0;
 let lastOglSwapCount = 0;
@@ -507,16 +815,25 @@ let wgpuSparseUboEnabled = false;
 let wgpuSparseUbo = null;
 let wgpuGeometryPackEnabled = false;
 let wgpuGeometryRangeEnabled = false;
+// 0204: the geometry content cache's mode (bit 0 on, bit 1 the sampled
+// comparison). Set at boot and after a device loss only, never around a save
+// load: the cache's content stays valid there.
+let wgpuGeometryCacheMode = 0;
 let wgpuUploadArenaMiB = 32;
 let wgpuUploadTransport = "queue";
 const WGPU_MAPPED_STAGING_SLOT_COUNT = 3;
-const WGPU_MAPPED_STAGING_SLOT_BYTES = 16 * 1024 * 1024;
 let wgpuMappedStagingSlotCount = WGPU_MAPPED_STAGING_SLOT_COUNT;
+// ?wgpustagingslotmib: JSC's getMappedRange costs ~0.45 ms per mapped MiB,
+// so a smaller slot makes every remap cheaper on iOS.
+let wgpuMappedStagingSlotBytes = 16 * 1024 * 1024;
 let wgpuMappedStageFastEnabled = false;
 const WGPU_FAST_STAGE_ACCEPTED = Object.freeze({ ok: true, reason: null });
 let wgpuMappedDrainCoalescingEnabled = false;
 let wgpuRendererWorkerProbe = "off";
 let wgpuVisualCadenceEnabled = false;
+// ?wgpurecover=1 (docs/wgpu-session-fallback.md): a lost device pauses the
+// core here, before the page hears of it.
+let wgpuSessionRecoverEnabled = false;
 // Mirrors the loaded core's videoBackend for code outside loadCore's scope.
 let hardwareVideoBackend = false;
 // Staging-texture readbacks of the hardware renderer, per device and per
@@ -530,6 +847,8 @@ function readbackFor(device) {
     const module = moduleInstance;
     wgpuReadback = new WgpuReadback({
       device,
+      // completions timed for replayBusy
+      busy: (fn) => workerBusy.run(fn),
       heap: () => module.HEAPU8,
       words: () => new Int32Array(module.HEAPU8.buffer)
     });
@@ -614,6 +933,19 @@ let wgpuReplayPumpTimer = null;
 let wgpuReplayBudgetMs = 0;
 let wgpuPowerPreference = "high-performance";
 let wgpuReplayFatal = null;
+// Patch 0168 follow-ups: the highest internal resolution the adapter is
+// trusted with (internalResolutionCeiling, set when the presenter takes its
+// adapter), 1 for the rest of this worker once a device was lost above 1x,
+// and the scale in effect (boot value, then each setEnhancements).
+let wgpuScaleAdapterCeiling = 4;
+let wgpuScaleLostCeiling = 4;
+// The page hears once per device that the renderer failed (lost device or a
+// fatal replay error): `wgpu-device-lost`, core-host handleGpuDeviceLost.
+const wgpuFatalReporter = createWgpuFatalReporter((message) => self.postMessage(message));
+let wgpuInternalResolution = 1;
+function wgpuScaleCeiling() {
+  return Math.min(wgpuScaleAdapterCeiling, wgpuScaleLostCeiling);
+}
 let wgpuReplayYieldPending = false;
 let wgpuReplayPumpScheduledAt = 0;
 let wgpuReplayPumpDueAt = 0;
@@ -642,6 +974,9 @@ const workletAudioProducer = new AudioPcmProducer({
     audioBufferFrames: api?.audioBufferFrames,
     audioChannels: api?.audioChannels,
     audioSampleRate: api?.audioSampleRate,
+    audioQueuedMs: api?.audioQueuedMs,
+    audioQueueEvents: api?.audioQueueEvents,
+    audioQueuedFifoMs: api?.audioQueuedFifoMs,
     heapU8: moduleInstance?.HEAPU8,
   }),
   recordMix: (requested, returned, durationMs) =>
@@ -664,6 +999,8 @@ let worstLoopMsLogged = 0;
 let stallCount = 0;
 let worstSignalWaitMs = 0;
 let signalStallCount = 0;
+// ?stalllog=1 (core-host, through the load payload): [signal-stall] logging.
+let stallLogEnabled = false;
 let presentationChannel = null;
 let frameSignalHeap = null;
 let frameSignalIndex = -1;
@@ -736,6 +1073,18 @@ let queuedFreshFrameCount = 0;
 let tickRepaintCount = 0;
 let frameReuseTelemetry = createFrameReuseTelemetry();
 let lastCapturedCoreFrame = -1;
+// Bumped by every boot and every stop: a state load waiting for the core
+// gives up when it changes (the state belongs to the session it was asked
+// for).
+let coreBootGeneration = 0;
+// Mounts (and boots) under way: from the request to the boot's answer,
+// across mountFile's awaits (user data, the first-launch plan). A state load
+// meanwhile waits for that boot instead of finding "no game booted".
+let coreBootInFlight = 0;
+// The latest mount asked for and the latest one answered: a load that
+// joins a mount in flight takes that mount's boot, no other.
+let mountSeq = 0;
+let lastMountDone = 0;
 let coreBoot = {
   attempted: false,
   accepted: false,
@@ -878,6 +1227,10 @@ let wgpuDiagLastDrainAt = 0;
 let gpuSyncDiagEnabled = false;
 // probeRelaxedMadd()'s answer: "fused", "unfused", "unsupported" or "inconsistent".
 let relaxedMadd = null;
+// probeWasmFeatures()'s answer ({ simd, tailCall }), and why ?aot=1 was turned
+// off by it (null when it was not).
+let wasmFeatures = null;
+let aotRegionsOffReason = null;
 
 // Milliseconds before the next drain the drainEveryMs perturbation allows (0:
 // drain now). The replay pump sleeps that long instead of polling.
@@ -965,6 +1318,13 @@ function readWgpuReplayState() {
     mappedCapacityBlocked: wgpuMappedCapacityBlocked,
     mappedRemapPending: wgpuMappedRemapPromises.size,
     uploadTransport: wgpuUploadTransport,
+    bindGroupCache: webGpuObjects.bindGroupCache?.stats() ?? null,
+    // Live bind groups: bounded by the core's bind group caches since 0201
+    // (it destroys the ones it evicts); it grew ~2,000 a second before.
+    bindGroups: webGpuObjects.bindGroups.size,
+    // Live textures: bounded by the core's texture cache since 0202 (a
+    // destroyed WebGPUTexture sends OP_DESTROY); it only grew before.
+    textures: webGpuObjects.textures.size,
     loadFenceActive: wgpuLoadFenceActive,
     replayYieldPending: wgpuReplayYieldPending,
     presentationLoopActive,
@@ -1019,6 +1379,9 @@ function wgpuOutputContractPayload() {
 function wgpuRuntimeConfigPayload() {
   return {
     schema: "wasm-dolphin.wgpu-runtime-config.v1",
+    // The engine whose defaults applied (mapped staging, 4 slots and the bind
+    // group cache under JavaScriptCore): what tools/perf-artifacts.mjs expects.
+    wasmEngine: wasmEngineName,
     metricsEnabled: causalMetricsEnabled,
     uploadTransport: wgpuUploadTransport,
     stateCacheEnabled: wgpuStateCacheEnabled,
@@ -1030,11 +1393,17 @@ function wgpuRuntimeConfigPayload() {
     producerUboPackAvailable: Boolean(api?.setWebGpuUboPackEnabled),
     geometryPackEnabled: wgpuGeometryPackEnabled,
     geometryRangeEnabled: wgpuGeometryRangeEnabled,
+    // 0204's content cache (0 off, 1 on, 2 on with sampled byte checks) and
+    // the bind group cache (wgpubgcache): what the G3 oracle's reference
+    // checks it really turned off.
+    geometryCacheMode: wgpuGeometryCacheMode,
+    bindGroupCacheEnabled: Boolean(webGpuObjects.bindGroupCache),
     producerGeometryRangeAvailable: Boolean(api?.setWebGpuGeometryRangeEnabled),
     mappedStagingFastPath: wgpuMappedStageFastEnabled,
     mappedStaging: {
       enabled: wgpuUploadTransport === "mapped",
       slotCount: wgpuMappedStagingSlotCount,
+      slotBytes: wgpuMappedStagingSlotBytes,
       recordStore: wgpuMappedStageFastEnabled ? "flat" : "objects",
       timing: {
         enabled: causalMetricsEnabled,
@@ -1102,7 +1471,9 @@ function wgpuVisualCadenceSnapshot() {
   };
 }
 
-self.addEventListener("message", async (event) => {
+// Timed for replayBusy (its synchronous part: src/occupancy-stats.js).
+self.addEventListener("message", (event) => workerBusy.run(handleWorkerMessage, event));
+async function handleWorkerMessage(event) {
   const data = event.data ?? {};
   // Forward detachedOglFrame messages from Dolphin's GPU pthread to main.
   // The C++ Swap path posts the bitmap from whichever pthread owns the
@@ -1151,7 +1522,29 @@ self.addEventListener("message", async (event) => {
       )
     );
   }
-});
+}
+
+// Patch 0164: the video thread's blocking EFB copies to RAM (harness hooks
+// on): per kind, how long it waited and whether FIFO work was waiting behind.
+const EFB_SYNC_BOUNDS_MS = [0.5, 1, 2, 4, 8, 16, 33, null];
+function readEfbSyncStats(payload = {}) {
+  const m = moduleInstance;
+  if (!m?._DolphinWeb_HarnessEfbSyncWord) return { available: false, why: "core has no EFB sync counters (patch 0164)" };
+  const n = m._DolphinWeb_HarnessEfbSyncWords() >>> 0;
+  const w = Array.from({ length: n }, (_, i) => m._DolphinWeb_HarnessEfbSyncWord(i) >>> 0);
+  const kind = (k) => {
+    const b = 1 + 16 * k;
+    return {
+      flushes: w[b], copies: w[b + 1], fifoBehindStart: w[b + 2], fifoBehindEnd: w[b + 3],
+      waitUs: w[b + 4], waitUsFifoBehind: w[b + 5], maxWaitUs: w[b + 6],
+      waitHistogram: w.slice(b + 7, b + 15)
+    };
+  };
+  const out = { available: true, harness: Boolean(m._DolphinWeb_HarnessEnabled?.()), version: w[0],
+    boundsMs: EFB_SYNC_BOUNDS_MS, syncPoint: kind(0), immediate: kind(1) };
+  if (payload?.reset) m._DolphinWeb_HarnessEfbSyncReset();
+  return out;
+}
 
 // Drain both harness rings since the previous read: presentations (worker)
 // and VI outputs (core). Every entry is returned; `lost` counts entries
@@ -1191,8 +1584,28 @@ function readHarnessTimeline() {
   }
   // displayed: null when not asked for, or when this worker has no rAF.
   const display = harnessDisplayStop ? harnessDisplay.drain() : { displayed: null, displayedLost: 0, dropped: null };
+  // The pipeline diag: null when not asked for, or (swaps) when the core has
+  // no swap ring; `swapsWhy` says which. The ring's address is read here, at
+  // every read, never kept: the core allocates it at the first enable (null
+  // before: no ring, never zeros) and never moves it.
+  const swapsWhy = !harnessPipeline ? "not requested (validationEnableHarness { pipeline: true })"
+    : !m?._DolphinWeb_HarnessSwapRing ? "core has no swap ring (patch 0214)"
+      : !m._DolphinWeb_HarnessSwapRing() ? "swap ring not allocated yet (the core not loaded)" : null;
+  let swaps = null;
+  if (!swapsWhy) {
+    const head = m._DolphinWeb_HarnessSwapRingHead() >>> 0;
+    swaps = readSwapRing({
+      buffer: m.HEAPU8.buffer,
+      ptr: m._DolphinWeb_HarnessSwapRing(),
+      capacity: m._DolphinWeb_HarnessSwapRingCapacity() >>> 0,
+      head,
+      read: harnessSwapRead
+    });
+    harnessSwapRead = head;
+  }
   return {
     presents: { ...presents, lost: presentsLost }, vi, now: harnessNow(),
+    swaps, swapsWhy, pipeline: harnessPipeline ? harnessPipelineLog.drain() : null,
     displayedEnabled: Boolean(harnessDisplayStop),
     displayedWhy: harnessDisplayStop ? null : typeof requestAnimationFrame !== "function" ? "no requestAnimationFrame in this worker" : "not requested (validationEnableHarness { displayed: true })",
     ...display
@@ -1278,10 +1691,16 @@ async function captureAtViOutput({ index, ahead, fromLoad = false, timeoutMs = 6
 async function captureAtViOutputWgpu(index, fromLoad, timeoutMs) {
   const generation = moduleInstance?._DolphinWeb_HarnessLoadGeneration?.() >>> 0;
   const { id, promise } = wgpuExactCapture.arm(index, fromLoad, generation);
-  const timer = setTimeout(() => wgpuExactCapture.cancel(id, new Error(
-    wgpuExactCapture.tagsSeen === 0
-      ? "core does not tag WebGPU presents with VI outputs (rebuild the core)"
-      : `VI output ${index} never reached within ${timeoutMs} ms`)), timeoutMs);
+  const timer = setTimeout(() => {
+    // Where it stood, for a run on another machine (the Windows runner).
+    const m = moduleInstance;
+    const state = `harnessEnabled ${harnessEnabled}, core VI since boot ${m?._DolphinWeb_HarnessViSinceBoot?.() ?? "?"}, ` +
+      `queue submissions ${webGpuCausalStats?.queueSubmissionCount ?? "?"}, VI tags seen ${wgpuExactCapture.tagsSeen}, ` +
+      `video ${harnessVideoBackend}, adapter ${rendererDiagnostics?.adapter?.architecture ?? rendererDiagnostics?.adapter?.vendor ?? "?"}`;
+    wgpuExactCapture.cancel(id, new Error(wgpuExactCapture.tagsSeen === 0
+      ? `core does not tag WebGPU presents with VI outputs (rebuild the core) [${state}]`
+      : `VI output ${index} never reached within ${timeoutMs} ms [${state}]`));
+  }, timeoutMs);
   try {
     return await promise;
   } finally {
@@ -1357,6 +1776,42 @@ function readbackWgpuPresentRowsHash() {
   });
 }
 
+// Glitch-meter G4 (harness only, src/harness-flicker.js): each present's
+// sampled rows, as luma, while the harness watches for flicker.
+const harnessFlicker = createFlickerRecorder();
+function readbackWgpuPresentSignature() {
+  const shown = wgpuPresentedSource;
+  const entry = shown?.textureId ? webGpuObjects.textures.get(shown.textureId) : null;
+  if (!entry || !renderGpu || !shown.rect) throw new Error("no presented WebGPU texture to sample");
+  const rect = clampSourceRect(shown.rect, entry.tex.width, entry.tex.height);
+  if (!rect) throw new Error("presented rectangle lies outside its texture");
+  const rows = sampleRowOffsets(rect.h, SIGNATURE_ROWS);
+  const bytesPerRow = Math.ceil(rect.w * 4 / 256) * 256;
+  const dev = renderGpu.device;
+  const buffer = dev.createBuffer({ size: bytesPerRow * rows.length, usage: 0x1 | 0x8 });
+  const encoder = dev.createCommandEncoder({ label: "harness-flicker" });
+  rows.forEach((row, i) => encoder.copyTextureToBuffer({ texture: entry.tex, origin: { x: rect.x, y: rect.y + row, z: 0 } },
+    { buffer, offset: i * bytesPerRow, bytesPerRow }, { width: rect.w, height: 1, depthOrArrayLayers: 1 }));
+  dev.queue.submit([encoder.finish()]);
+  return buffer.mapAsync(0x1).then(() => {
+    const sig = lumaSignature(new Uint8Array(buffer.getMappedRange()), rect.w, rows.length, bytesPerRow, entry.format === "bgra8unorm");
+    buffer.unmap();
+    buffer.destroy();
+    return sig;
+  });
+}
+
+async function harnessFlickerRequest({ action } = {}) {
+  if (!harnessEnabled) return { error: "harness hooks are off" };
+  if (action === "start") {
+    if (!(harnessVideoBackend === "WebGPU-Real" || harnessVideoBackend === "WebGPU")) return { error: `flicker watch: WebGPU presents only (backend ${harnessVideoBackend ?? "unknown"})` };
+    harnessFlicker.start();
+    return { started: true };
+  }
+  if (action === "stop") return harnessFlicker.stop();
+  return { error: `flicker watch: action ${action}` };
+}
+
 async function harnessUniqueFramesRequest({ action } = {}) {
   if (!harnessEnabled) return { error: "harness hooks are off" };
   if (action === "start") {
@@ -1367,6 +1822,205 @@ async function harnessUniqueFramesRequest({ action } = {}) {
   if (action === "stop") return { ...(await harnessUniqueFrames.stop()), readbacksTotal: harnessUniqueReadbacks };
   if (action === "status") return { active: harnessUniqueFrames.active, readbacksTotal: harnessUniqueReadbacks };
   return { error: `unique frames: action ${action}` };
+}
+
+// loadStateFile, one at a time: two loads at once would both write the
+// state file in the FS and the core load whichever was there.
+const stateLoadSerial = createSerial();
+const loadStateFileRequest = (payload) => stateLoadSerial(() => loadStateFileNow(payload));
+
+async function loadStateFileNow(payload) {
+  // Asked right after the boot, a load used to come back rc 0 (the core
+  // still Starting or Uninitialized) and every caller retried: wait here
+  // for a core that takes it, 15 s at most. No game booted, a core
+  // stopping, or another boot meanwhile: refused at once (the state
+  // must not reach another session).
+  if (api?.loadStateFile) {
+    // The session the state is for: the game booted now, or, with none yet,
+    // the boot in flight (mountFile still running: waited for like
+    // Starting). Another boot starting while a booted game waits, a stop,
+    // or no boot at all: refused at once.
+    let generation = coreBoot.accepted && !coreBootInFlight ? coreBootGeneration : null;
+    const joined = coreBootInFlight ? mountSeq : null;
+    const gone = () => {
+      if (coreStopping) return "core stopping";
+      if (coreBootInFlight) return generation === null && mountSeq === joined ? null : "another boot meanwhile";
+      if (!coreBoot.accepted) return "no game booted";
+      if (generation === null && lastMountDone !== joined) return "another boot meanwhile";
+      generation ??= coreBootGeneration;
+      return coreBootGeneration !== generation ? "another boot meanwhile" : null;
+    };
+    // During a mount the core's state is still the previous game's (BootDisc
+    // stops it only at the boot): read as Starting until the mount answers,
+    // so no state goes into the game being replaced.
+    const wait = await waitCoreReadyForState(
+      () => (coreBootInFlight && generation === null ? "Starting" : api?.getCoreStateName?.() ?? ""), { abort: gone });
+    if (!wait.ready) {
+      const coreState = api?.getCoreStateName?.() ?? "";
+      return { loaded: false, rc: 0, beforeState: coreState, refused: wait.reason,
+        error: wait.reason === "expired" ? `core not running (${coreState || "unknown"}) after 15 s`
+          : `load refused: ${wait.detail || coreState || wait.reason}` };
+    }
+  }
+  forceWgpuMappedDrainLifecycle(WGPU_MAPPED_DRAIN_FORCE_REASONS.LOAD);
+  wgpuSparseUbo?.reset("save-state-load");
+  if (wgpuUboComputeProjectionActive) {
+    wgpuUboComputeProjection.reset("save-state-load");
+  }
+  wgpuUboComputeReconstruction?.reset("save-state-load");
+  workletAudioProducer.transition();
+  // Write the .sav bytes into the Emscripten FS, then ask the core
+  // to State::LoadAs it. Dolphin save states are build/version
+  // locked — a state from a different Dolphin will be rejected by
+  // LoadAs's version check (logged, not a crash). We pump a few
+  // frames so the loaded state actually renders.
+  if (!api?.loadStateFile || !moduleInstance?.FS) {
+    return { loaded: false, error: "no loadStateFile/FS" };
+  }
+  // payload.fsPath: load an existing FS file in place (e.g. the
+  // one SaveStateFile just wrote) — proves a version-matched
+  // round-trip with zero serving. Else write payload.bytes first.
+  const path = payload.fsPath || "/savestate.sav";
+  if (!payload.fsPath) {
+    try {
+      const bytes = payload.bytes instanceof Uint8Array
+        ? payload.bytes
+        : new Uint8Array(payload.bytes);
+      moduleInstance.FS.writeFile(path, bytes);
+    } catch (e) {
+      return { loaded: false, error: `FS.writeFile: ${e?.message || e}` };
+    }
+  }
+  collectWebGpuProducerStateStats();
+  const uploadTimeoutCountBeforeLoad = webGpuCausalStats.uploadTimeoutCount;
+  const loadRingBoundary = (wgpuReplayClassifier || wgpuLoadEpochFence)
+    ? summarizeCurrentWgpuRing({ maxRecords: webGpuCmdRing?.capacity ?? 4096 })
+    : null;
+  const hasHeldReplay = webGpuCmdRing?.heldReplayStart != null ||
+    (webGpuCmdRing?.stagedUploads?.size ?? 0) > 0;
+  if (wgpuReplayClassifier) {
+    wgpuReplayClassifierGeneration += 1;
+    wgpuReplayClassifier = createWgpuReplayClassifier({
+      scope: "load-state-file",
+      generation: wgpuReplayClassifierGeneration
+    });
+    wgpuPresentCompletionProbeStarted = false;
+    wgpuClassifierEfbReadbackPending = false;
+    wgpuClassifierBackbufferReadbackPending = false;
+    wgpuClassifierXfbReadbackPending = false;
+    wgpuInputBackbufferReadbackPending = false;
+    wgpuInputVisualBaselineReady = false;
+    wgpuLastBackbufferSourceTextureId = 0;
+    wgpuReplayClassifier.recordLoadBoundary(loadRingBoundary);
+    wgpuLoadFenceActive = wgpuLoadEpochFence &&
+      (loadRingBoundary.summary.openPassDepth > 0 || hasHeldReplay);
+    wgpuReplayClassifier.recordLoadFence({ armed: wgpuLoadFenceActive });
+  } else {
+    wgpuLoadFenceActive = wgpuLoadEpochFence &&
+      (loadRingBoundary?.summary?.openPassDepth > 0 || hasHeldReplay);
+  }
+  const beforeState = api?.getCoreStateName?.() ?? "";
+  // The load fence (?wgpuloadfence=1) armed for this load: it may discard,
+  // with the pass it ends, records published after the epoch below, the
+  // create of the fresh geometry buffer included.
+  const loadFenceArmed = wgpuLoadFenceActive;
+  api?.setWebGpuUploadArenaMiB?.(wgpuUploadArenaMiB, collectMetrics ? 1 : 0);
+  api?.setWebGpuProducerProfileEnabled?.(wgpuProducerProfileRequested ? 1 : 0);
+  api?.setWebGpuDrawProfileEnabled?.(wgpuDrawProfileRequested ? 1 : 0);
+  applyWgpuTailGate("save-state pre-load");
+  api?.setWebGpuUboCacheEnabled?.(webGpuUboCacheMode());
+  api?.setWebGpuUboPackEnabled?.(webGpuUboPackMode());
+  api?.setWebGpuGeometryPackEnabled?.(wgpuGeometryPackEnabled ? 1 : 0);
+  api?.setWebGpuGeometryRangeEnabled?.(wgpuGeometryRangeEnabled ? 1 : 0);
+  wgpuExactCapture.onLoad();
+  let rc = 0;
+  let loadError = null;
+  ppcWasmJitTimingSuspensions += 1;
+  try {
+    if (api.coreControl) {
+      // 0209: on the core's control pthread, done when the core applied the
+      // state; everything below runs after that, not after a guess.
+      try {
+        await api.coreControl(CORE_CONTROL_OPS.loadFile, path, "Load state");
+        rc = 1;
+      } catch (error) {
+        loadError = String(error?.message || error);
+      }
+    } else {
+      rc = api.loadStateFile(path) | 0;
+      // A core without the control thread: LoadAs runs on the CPU pthread
+      // later; wait wall-clock time so the restore takes effect.
+      await new Promise((r) => setTimeout(r, 1200));
+    }
+    if (rc === 1) void prioritizeAotAfterStateLoad();
+  } finally {
+    resetPpcWasmJitTiming(rc === 1);
+    ppcWasmJitTimingSuspensions -= 1;
+  }
+  // counted once the load ended (the integrity gate excuses its epoch loss)
+  wgpuIntegrity.stateLoad();
+  api?.setWebGpuUploadArenaMiB?.(wgpuUploadArenaMiB, collectMetrics ? 1 : 0);
+  api?.setWebGpuProducerProfileEnabled?.(wgpuProducerProfileRequested ? 1 : 0);
+  api?.setWebGpuDrawProfileEnabled?.(wgpuDrawProfileRequested ? 1 : 0);
+  applyWgpuTailGate("save-state reload");
+  api?.setWebGpuUboCacheEnabled?.(webGpuUboCacheMode());
+  api?.setWebGpuUboPackEnabled?.(webGpuUboPackMode());
+  // The geometry placement epoch moved before the load (above). Moving it
+  // again here, ~1.2 s of live emulation later, gave up a pending range of
+  // post-load draws: a pass lost on screen (Spark, geomcache=0: 4 runs in 6,
+  // none without it). Only a load fence, which may have discarded the fresh
+  // buffer's create, needs a second fresh buffer.
+  if (loadFenceArmed) {
+    api?.setWebGpuGeometryPackEnabled?.(wgpuGeometryPackEnabled ? 1 : 0);
+    api?.setWebGpuGeometryRangeEnabled?.(wgpuGeometryRangeEnabled ? 1 : 0);
+  }
+  api?.setSoftwareTevHotCaseMode?.(softwareTevHotCaseMode);
+  if (wgpuProducerProfileRequested || wgpuDrawProfileRequested) {
+    verifyWgpuProducerProfileActivation("save-state reload");
+  }
+  collectWebGpuProducerStateStats();
+  const uploadTimeoutCountImmediatelyAfterLoad = webGpuCausalStats.uploadTimeoutCount;
+  const uploadTimeoutBoundaryVerified = rc === 1 && collectMetrics;
+  if (uploadTimeoutBoundaryVerified) {
+    webGpuCausalStats.uploadTimeoutBoundaryVerified = true;
+    webGpuCausalStats.uploadTimeoutCountAtVerifiedLoad = uploadTimeoutCountBeforeLoad;
+    webGpuCausalStats.uploadTimeoutCountBeforeVerifiedLoad = uploadTimeoutCountBeforeLoad;
+    webGpuCausalStats.uploadTimeoutCountAfterVerifiedLoad = Math.max(
+      0,
+      uploadTimeoutCountImmediatelyAfterLoad - uploadTimeoutCountBeforeLoad
+    );
+  }
+  // The fixed battle state is the measurement boundary. Clear boot/menu
+  // tuples after the core's existing post-load settle, then let the
+  // harness's later first sample act as the battle-settle baseline.
+  if (rc === 1 && collectMetrics &&
+      rendererDiagnostics.configuredVideoBackend === "Software Renderer") {
+    api?.setSoftwareRasterProfileEnabled?.(0);
+    api?.setSoftwareRasterProfileEnabled?.(1);
+  }
+  const afterState = api?.getCoreStateName?.() ?? "";
+  // §27 diagnostic (JS-only, served live, no rebuild): open a
+  // post-load watchdog window so drainWebGpuCmdRing logs whether
+  // the producer ring keeps advancing (producer alive) vs the
+  // consumer going stale, to localize the savestate-load desync.
+  self._postLoadProbeT0 = Date.now();
+  self._postLoadProbeUntil = self._postLoadProbeT0 + 35000;
+  self._postLoadProbeLast = 0;
+  console.log(`[loadStateFile] path=${path} rc=${rc} ` +
+    `before='${beforeState}' after='${afterState}' ` +
+    `frame=${api?.getFrame?.() ?? -1}`);
+  return { loaded: rc === 1, rc, beforeState, afterState, ...(loadError ? { error: loadError } : {}),
+           wgpuUploadTimeoutBoundary: {
+             enabled: collectMetrics,
+             verified: uploadTimeoutBoundaryVerified,
+             beforeLoad: uploadTimeoutCountBeforeLoad,
+             immediatelyAfterLoad: uploadTimeoutCountImmediatelyAfterLoad,
+             afterLoadDelta: Math.max(
+               0,
+               uploadTimeoutCountImmediatelyAfterLoad - uploadTimeoutCountBeforeLoad
+             ),
+           },
+           ...framePayload() };
 }
 
 async function handleMessage(type, payload) {
@@ -1406,7 +2060,7 @@ async function handleMessage(type, payload) {
       wgpuPassPackageProjectionActive = wgpuPassPackageProjectionRequested &&
         causalMetricsEnabled && payload.videoBackend === "WebGPU-Real";
       wgpuUploadRunProjection = createWgpuUploadRunProjection({
-        maxEnvelopeBytes: WGPU_MAPPED_STAGING_SLOT_BYTES,
+        maxEnvelopeBytes: wgpuMappedStagingSlotMibOf(payload.wgpuMappedStagingSlotMib) * 1024 * 1024,
       });
       wgpuUploadRunProjectionRequested = Boolean(payload.wgpuUploadRunProjection);
       wgpuUploadRunProjectionActive = wgpuUploadRunProjectionRequested &&
@@ -1489,8 +2143,10 @@ async function handleMessage(type, payload) {
         ppcWasmJitWarmupFrames: payload.ppcWasmJitWarmupFrames,
         ppcProfile: payload.ppcProfile,
         gpuSpinMicros: payload.gpuSpinMicros,
+        codeSpaceMiB: payload.codeSpaceMiB,
         cpuOverclock: payload.cpuOverclock,
         emulationSpeed: payload.emulationSpeed,
+        audioBufferMs: payload.audioBufferMs,
         presentationScale: payload.presentationScale,
         presentationQueueSize: payload.presentationQueueSize,
         presentationPacing: payload.presentationPacing,
@@ -1502,12 +2158,35 @@ async function handleMessage(type, payload) {
         softwareTevHotCaseMode: payload.softwareTevHotCaseMode,
         xfbFastPaths: payload.xfbFastPaths,
         correctTimeDrift: payload.correctTimeDrift,
+        rushPresentation: payload.rushPresentation,
+        syncOnSkipIdle: payload.syncOnSkipIdle,
+        dupXfbRearmsThrottle: payload.dupXfbRearmsThrottle,
+        smoothEarly: payload.smoothEarly,
+        sleepMarginUs: payload.sleepMarginUs,
+        sleepStepUs: payload.sleepStepUs,
+        sleepK: payload.sleepK,
+        sleepSpinUs: payload.sleepSpinUs,
+        presentVsync: payload.presentVsync,
+        presentGamePace: payload.presentGamePace,
+        presentPaceStats: payload.presentPaceStats,
+        viLock: payload.viLock,
         coreLog: payload.coreLog,
         memcardSlotB: payload.memcardSlotB,
+        internalResolution: payload.internalResolution,
+        maxAnisotropy: payload.maxAnisotropy,
+        widescreen: payload.widescreen,
+        displayFilter: payload.displayFilter,
         efbAccess: payload.efbAccess,
+        xfbNoDecode: payload.xfbNoDecode,
         fifoLog: payload.fifoLog,
         efbCopyRam: payload.efbCopyRam,
+        efbNoDefer: payload.efbNoDefer,
         wgpuMask: payload.wgpuMask,
+        wgpuFallback: payload.wgpuFallback,
+        dstAlphaTwoPass: payload.dstAlphaTwoPass,
+        discReadahead: payload.discReadahead,
+        discPrefetch: payload.discPrefetch,
+        webglSoftware: payload.webglSoftware,
         efbDiag: payload.efbDiag,
         jitVerbose: payload.jitVerbose,
         frameCap: payload.frameCap,
@@ -1517,7 +2196,11 @@ async function handleMessage(type, payload) {
         jitOffThread: payload.jitOffThread,
         aotCompiler: payload.aotCompiler,
         aotFirstLaunch: payload.aotFirstLaunch,
+        aotSampleMs: payload.aotSampleMs,
+        wasmEngine: payload.wasmEngine,
+        regionCap: payload.regionCap,
         regionChain: payload.regionChain,
+        aotAssembler: payload.aotAssembler,
         fusedMadd: payload.fusedMadd,
         reportedCoreSelection: payload.coreSelection,
         wgpuReplayDiagnostics: payload.wgpuReplayDiagnostics,
@@ -1529,6 +2212,7 @@ async function handleMessage(type, payload) {
         wgpuPowerPreference: payload.wgpuPowerPreference,
         wgpuAtomicPassReplay: payload.wgpuAtomicPassReplay,
         wgpuDiagnosticQuiet: payload.wgpuDiagnosticQuiet,
+        stallLog: payload.stallLog,
         wgpuProducerProfile: payload.wgpuProducerProfile,
         wgpuDrawProfile: payload.wgpuDrawProfile,
         wgpuTailGate: payload.wgpuTailGate,
@@ -1538,16 +2222,20 @@ async function handleMessage(type, payload) {
         wgpuVpDiag: payload.wgpuVpDiag,
         wgpuUniformFast: payload.wgpuUniformFast,
         wgpuUboPack: payload.wgpuUboPack,
+        wgpuBindGroupCache: payload.wgpuBindGroupCache,
         wgpuSparseUbo: payload.wgpuSparseUbo,
         wgpuGeometryPack: payload.wgpuGeometryPack,
         wgpuGeometryRange: payload.wgpuGeometryRange,
+        wgpuGeometryCacheMode: payload.wgpuGeometryCacheMode,
         wgpuUploadArenaMiB: payload.wgpuUploadArenaMiB,
         wgpuUploadTransport: payload.wgpuUploadTransport,
         wgpuMappedStagingSlotCount: payload.wgpuMappedStagingSlotCount,
+        wgpuMappedStagingSlotMib: payload.wgpuMappedStagingSlotMib,
         wgpuMappedStageFast: payload.wgpuMappedStageFast,
         wgpuMappedDrainCoalescing: payload.wgpuMappedDrainCoalescing,
         wgpuRendererWorkerProbe: payload.wgpuRendererWorkerProbe,
         wgpuVisualCadence: payload.wgpuVisualCadence,
+        wgpuSessionRecover: payload.wgpuSessionRecover,
         wgpuPipelinePrewarm: payload.wgpuPipelinePrewarm,
         wgpuPassPackageProjection: payload.wgpuPassPackageProjection,
         wgpuUploadRunProjection: payload.wgpuUploadRunProjection,
@@ -1560,7 +2248,7 @@ async function handleMessage(type, payload) {
       // Before any boot: Dolphin opens the GCI folder when the card goes in.
       return { ...metadataPayload(), userData: await startUserDataPersistence(payload.savesMode) };
     case "mountFile":
-      return mountFile(payload.file);
+      return mountFileTracked(payload.file);
     case "flushUserData":
     case "listUserData":
     case "exportMemcard":
@@ -1669,27 +2357,33 @@ async function handleMessage(type, payload) {
       api?.setWebGpuGeometryPackEnabled?.(wgpuGeometryPackEnabled ? 1 : 0);
       api?.setWebGpuGeometryRangeEnabled?.(wgpuGeometryRangeEnabled ? 1 : 0);
       let loaded = false;
+      let loadError = null;
       wgpuExactCapture.onLoad();
       ppcWasmJitTimingSuspensions += 1;
       try {
-        loaded = Boolean(api?.loadState(payload.slot | 0));
+        // 0209: awaited until the core applied the state (control pthread)
+        loaded = Boolean(await api?.loadState(payload.slot | 0));
+        if (loaded) void prioritizeAotAfterStateLoad();
+      } catch (error) {
+        loadError = String(error?.message || error);
       } finally {
         resetPpcWasmJitTiming(loaded);
         ppcWasmJitTimingSuspensions -= 1;
       }
+      wgpuIntegrity.stateLoad();
       api?.setWebGpuUploadArenaMiB?.(wgpuUploadArenaMiB, collectMetrics ? 1 : 0);
       api?.setWebGpuProducerProfileEnabled?.(wgpuProducerProfileRequested ? 1 : 0);
       api?.setWebGpuDrawProfileEnabled?.(wgpuDrawProfileRequested ? 1 : 0);
       applyWgpuTailGate("slot state reload");
       api?.setWebGpuUboCacheEnabled?.(webGpuUboCacheMode());
       api?.setWebGpuUboPackEnabled?.(webGpuUboPackMode());
-      api?.setWebGpuGeometryPackEnabled?.(wgpuGeometryPackEnabled ? 1 : 0);
-      api?.setWebGpuGeometryRangeEnabled?.(wgpuGeometryRangeEnabled ? 1 : 0);
+      // The geometry epoch moved before the load: not again (it would give up
+      // a pass of post-load draws). No load fence on this path.
       api?.setSoftwareTevHotCaseMode?.(softwareTevHotCaseMode);
       if (wgpuProducerProfileRequested || wgpuDrawProfileRequested) {
         verifyWgpuProducerProfileActivation("slot state reload");
       }
-      return { loaded, ...framePayload() };
+      return { loaded, ...(loadError ? { error: loadError } : {}), ...framePayload() };
     }
     case "validationSetCorePaused": {
       // Harness-only checkpoint barrier. The app never sends this message;
@@ -1702,7 +2396,7 @@ async function handleMessage(type, payload) {
       ppcWasmJitTimingSuspensions += 1;
       resetPpcWasmJitTiming();
       try {
-        if (api.setCorePaused(paused ? 1 : 0)) {
+        if (await api.setCorePaused(paused ? 1 : 0)) {
           ppcWasmJitCorePaused = paused;
         }
         if (paused) await new Promise((resolve) => setTimeout(resolve, 100));
@@ -1729,6 +2423,10 @@ async function handleMessage(type, payload) {
       if (payload.displayed && !harnessDisplayStop) {
         harnessDisplayStop = startDisplayLoop(harnessDisplay, { active: () => harnessEnabled });
       }
+      if (payload.pipeline) {
+        harnessPipeline = true;
+        moduleInstance?._DolphinWeb_HarnessSwapsEnable?.(1);
+      }
       // The determinism trace (WasmDetTrace.h) must see the boot from its
       // first event: requested here, started when the core loads.
       if (payload.detTrace && !detTraceRequested) {
@@ -1744,19 +2442,107 @@ async function handleMessage(type, payload) {
         ...(aotTestHeapShiftBytes ? { heapShift: coreBoot.attempted ? "too-late" : "before-boot" } : {}) };
     case "validationReadTimeline":
       return readHarnessTimeline();
+    case "validationReadAudioQueue":
+      // patch 0212: the mixer queue's overflow skips (an audible jump) and
+      // underrun fills since boot, and the throttle trim applied (ppm)
+      // (and the phase lock's counters, null without ?vilock=1)
+      return api?.audioQueueEvents
+        ? { overflowSkips: api.audioQueueEvents(0), underrunFills: api.audioQueueEvents(1),
+            trimPpm: typeof moduleInstance?._DolphinWeb_ThrottleRatePpm === "function" ? moduleInstance._DolphinWeb_ThrottleRatePpm() : null,
+            phaseLock: viLockStatus() }
+        : { unavailable: "core without patch 0212" };
+    case "validationAudioTrace":
+      // the AudioWorklet producer's 100 ms trace (audio-pcm-producer.js)
+      if (!harnessEnabled) return { error: "harness hooks are off" };
+      if (payload?.action === "start") return workletAudioProducer.traceStart({ everyMs: Number(payload.everyMs) || 100, pulls: payload.pulls === true });
+      if (payload?.action === "drain" || payload?.action === "stop") return workletAudioProducer.traceDrain({ stop: payload.action === "stop" });
+      return { error: `validationAudioTrace: unknown action ${payload?.action}` };
+    case "validationFlickerWatch":
+      return harnessFlickerRequest(payload);
     case "validationUniqueFrames":
       return harnessUniqueFramesRequest(payload);
     case "validationPcSampler":
       return harnessPcSampler(payload);
+    case "validationHeapStats": {
+      // Diagnostics (harness hooks on): malloc's use of the wasm heap
+      // (DolphinWeb_HeapStats). headroom: what is left above the arena
+      // plus the free bytes inside it. Never called by the product.
+      if (!harnessEnabled) return { error: "harness hooks are off" };
+      const m = moduleInstance;
+      if (typeof m?._DolphinWeb_HeapStats !== "function" || typeof m._malloc !== "function") {
+        return { supported: false };
+      }
+      const p = m._malloc(4 * 4);
+      try {
+        if (m._DolphinWeb_HeapStats(p, 4) !== 3) return { supported: false };
+        const [inUse, free, top] = new Uint32Array(m.HEAPU8.buffer, p, 3);
+        const heapBytes = m.HEAPU8.buffer.byteLength;
+        return { supported: true, inUse, free, top, heapBytes, headroom: heapBytes - top + free };
+      } finally {
+        m._free(p);
+      }
+    }
+    case "validationReadDiscReads":
+      return harnessDiscReads(payload);
+    case "validationDropSampler":
+      return harnessDropSampler(payload);
+    case "replacePresenterCanvas":
+      return replacePresenterCanvas(payload);
+    case "validationLoseWebGlContext": {
+      // Harness: lose the WebGL presenter's context as a GPU crash would;
+      // restoreAfterMs >= 0 restores it that much later (WEBGL_lose_context).
+      if (!harnessEnabled) return { error: "harness hooks are off" };
+      const lose = renderGl?.getExtension("WEBGL_lose_context");
+      if (!lose) return { error: `no WebGL presenter (${renderBackend})` };
+      lose.loseContext();
+      const after = Number(payload?.restoreAfterMs);
+      if (Number.isFinite(after) && after >= 0) setTimeout(() => lose.restoreContext(), after);
+      return { lost: true };
+    }
+    case "validationLoseWebGpuDevice": {
+      // Harness: lose the WebGPU device as an out-of-memory or a GPU process
+      // reset would (destroy() resolves device.lost; patch 0168 follow-up).
+      if (!harnessEnabled) return { error: "harness hooks are off" };
+      if (!renderGpu?.device) return { error: `no WebGPU device (${renderBackend})` };
+      const internalResolution = wgpuInternalResolution;
+      renderGpu.device.destroy();
+      return { lost: true, internalResolution };
+    }
+    case "validationReadDstAlphaPasses": {
+      // Patch 0149: the dst-alpha second pass (0136), cumulative.
+      if (!harnessEnabled) return { error: "harness hooks are off" };
+      const stats = moduleInstance?._DolphinWeb_DstAlphaPassStats;
+      if (!stats || !moduleInstance._malloc) return { error: "core without patch 0149" };
+      const ptr = moduleInstance._malloc(12);
+      try {
+        stats(ptr);
+        const v = new Uint32Array(moduleInstance.HEAPU8.buffer, ptr, 3);
+        return { flushes: v[0], extraDraws: v[1], enabled: v[2] === 1 };
+      } finally {
+        moduleInstance._free(ptr);
+      }
+    }
     case "validationReadRelaxedMadd":
       // coreFused: the core's own mode (null: a core without patch 0129).
       return { mode: relaxedMadd, coreFused: moduleInstance?._DolphinWeb_FusedMadd ? moduleInstance._DolphinWeb_FusedMadd() === 1 : null };
+    case "validationReadPacingConfig":
+      return harnessPacingConfig();
+    case "validationReadIntegrity":
+      return readWgpuIntegrity();
+    case "validationReadPthreads":
+      return readPthreadUse();
+    case "validationReadGeometryCache":
+      return harnessGeometryCacheStats();
     case "validationReadJitRegionStats":
       return harnessJitRegionStats(payload);
+    case "validationReadRegionLedgerStale":
+      return harnessRegionLedgerStale();
     case "validationReadAxHleStats":
       return harnessAxHleStats(payload);
     case "validationReadHeadroomStats":
       return harnessHeadroomStats(payload);
+    case "validationReadPresentCadence":
+      return harnessPresentCadence(payload);
     case "validationReadMemAccessStats":
       return harnessMemAccessStats(payload);
     case "validationCaptureAtVi":
@@ -1783,6 +2569,34 @@ async function handleMessage(type, payload) {
       return readDetTrace(payload);
     case "validationReadWgpuReplayState":
       return readWgpuReplayState();
+    case "validationReadPresentVsync":
+      // ?presentvsync=1: the rAF presenter's counters (shown, dropped, caught
+      // up, presented by the timer for want of a BeginFrame) and the visual
+      // cadence telemetry it feeds.
+      return {
+        enabled: wgpuPresentVsync,
+        displayFilter: { active: wgpuDisplayFilterActive(), ...wgpuDisplayFilter,
+          canvas: renderCanvas ? [renderCanvas.width, renderCanvas.height] : null,
+          backbuffer: wgpuBackbufferSize(), ...(wgpuDisplayFilterGpu?.stats ?? {}) },
+        ...wgpuPresentVsyncStats,
+        ...wgpuVsync.stats,
+        // frames waiting now (the `queued` counter is the total queued)
+        waiting: wgpuVsync.waiting,
+        // ?vilock=1: the phase lock's counters (src/wgpu-vi-phase-lock.js)
+        phaseLock: viLockStatus(),
+        ticks: wgpuVsyncTick,
+        // backbuffer passes and presents since boot: with one pass a frame
+        // they match; more passes than presents is a frame's pass reopened
+        beginFb0: webGpuExecStats.beginFb0,
+        presents: webGpuExecStats.present,
+        visualCadence: wgpuVisualCadenceSnapshot()
+      };
+    case "validationReadEfbSyncStats":
+      return readEfbSyncStats(payload);
+    case "validationReadWgpuReadback":
+      // EFB/staging readbacks (copies to RAM, peeks): counters and per-copy
+      // latency since the last read with { reset: true }.
+      return wgpuReadback ? wgpuReadback.snapshot({ reset: payload?.reset === true }) : { active: false };
     case "validationEnableGpuSyncDiag":
       // Applied now if the core is loaded, and again when it loads.
       gpuSyncDiagEnabled = payload.enabled !== false;
@@ -1795,7 +2609,12 @@ async function handleMessage(type, payload) {
     case "validationReadCoreProgress": {
       const loadedCheckpoint = readLastLoadedCheckpoint();
       return {
+        // frame counts runFrame calls, which run before a boot too (the
+        // page's loop while no game is booted): booted says the disc's
+        // boot was accepted, coreState what the core is doing now.
         frame: api?.getFrame?.() ?? 0,
+        booted: coreBoot.accepted === true,
+        coreState: api?.getCoreStateName?.() ?? null,
         coreTicks: readCoreTicks(),
         coreTicksPerSecond: readCoreTicksPerSecond(),
         ppcPc: api?.getPpcPc?.() ?? 0,
@@ -1843,6 +2662,10 @@ async function handleMessage(type, payload) {
         lazyFillTerminalReason: dolphinJitLazyFillTerminalReason,
         lazyFillFailureCount: dolphinJitLazyFillFailureCount,
         cacheSize: dolphinJitCacheMap.size,
+        // Modules not compiled or not kept here because the engine has no
+        // native module cache (wasmEngine: jsc, spidermonkey; iOS memory lever 1).
+        wasmEngine: wasmEngineName,
+        copiesSkipped: dolphinJitCopiesSkipped,
         newCompileCount: dolphinJitNewCompileCount,
         verificationPending: dolphinJitVerificationPending.size,
         compilePending: dolphinJitCompilePending,
@@ -1915,142 +2738,8 @@ async function handleMessage(type, payload) {
     }
     case "rendererDiagnostics":
       return rendererDiagnosticsPayload();
-    case "loadStateFile": {
-      forceWgpuMappedDrainLifecycle(WGPU_MAPPED_DRAIN_FORCE_REASONS.LOAD);
-      wgpuSparseUbo?.reset("save-state-load");
-      if (wgpuUboComputeProjectionActive) {
-        wgpuUboComputeProjection.reset("save-state-load");
-      }
-      wgpuUboComputeReconstruction?.reset("save-state-load");
-      workletAudioProducer.transition();
-      // Write the .sav bytes into the Emscripten FS, then ask the core
-      // to State::LoadAs it. Dolphin save states are build/version
-      // locked — a state from a different Dolphin will be rejected by
-      // LoadAs's version check (logged, not a crash). We pump a few
-      // frames so the loaded state actually renders.
-      if (!api?.loadStateFile || !moduleInstance?.FS) {
-        return { loaded: false, error: "no loadStateFile/FS" };
-      }
-      // payload.fsPath: load an existing FS file in place (e.g. the
-      // one SaveStateFile just wrote) — proves a version-matched
-      // round-trip with zero serving. Else write payload.bytes first.
-      const path = payload.fsPath || "/savestate.sav";
-      if (!payload.fsPath) {
-        try {
-          const bytes = payload.bytes instanceof Uint8Array
-            ? payload.bytes
-            : new Uint8Array(payload.bytes);
-          moduleInstance.FS.writeFile(path, bytes);
-        } catch (e) {
-          return { loaded: false, error: `FS.writeFile: ${e?.message || e}` };
-        }
-      }
-      collectWebGpuProducerStateStats();
-      const uploadTimeoutCountBeforeLoad = webGpuCausalStats.uploadTimeoutCount;
-      const loadRingBoundary = (wgpuReplayClassifier || wgpuLoadEpochFence)
-        ? summarizeCurrentWgpuRing({ maxRecords: webGpuCmdRing?.capacity ?? 4096 })
-        : null;
-      const hasHeldReplay = webGpuCmdRing?.heldReplayStart != null ||
-        (webGpuCmdRing?.stagedUploads?.size ?? 0) > 0;
-      if (wgpuReplayClassifier) {
-        wgpuReplayClassifierGeneration += 1;
-        wgpuReplayClassifier = createWgpuReplayClassifier({
-          scope: "load-state-file",
-          generation: wgpuReplayClassifierGeneration
-        });
-        wgpuPresentCompletionProbeStarted = false;
-        wgpuClassifierEfbReadbackPending = false;
-        wgpuClassifierBackbufferReadbackPending = false;
-        wgpuClassifierXfbReadbackPending = false;
-        wgpuInputBackbufferReadbackPending = false;
-        wgpuInputVisualBaselineReady = false;
-        wgpuLastBackbufferSourceTextureId = 0;
-        wgpuReplayClassifier.recordLoadBoundary(loadRingBoundary);
-        wgpuLoadFenceActive = wgpuLoadEpochFence &&
-          (loadRingBoundary.summary.openPassDepth > 0 || hasHeldReplay);
-        wgpuReplayClassifier.recordLoadFence({ armed: wgpuLoadFenceActive });
-      } else {
-        wgpuLoadFenceActive = wgpuLoadEpochFence &&
-          (loadRingBoundary?.summary?.openPassDepth > 0 || hasHeldReplay);
-      }
-      const beforeState = api?.getCoreStateName?.() ?? "";
-      api?.setWebGpuUploadArenaMiB?.(wgpuUploadArenaMiB, collectMetrics ? 1 : 0);
-      api?.setWebGpuProducerProfileEnabled?.(wgpuProducerProfileRequested ? 1 : 0);
-      api?.setWebGpuDrawProfileEnabled?.(wgpuDrawProfileRequested ? 1 : 0);
-      applyWgpuTailGate("save-state pre-load");
-      api?.setWebGpuUboCacheEnabled?.(webGpuUboCacheMode());
-      api?.setWebGpuUboPackEnabled?.(webGpuUboPackMode());
-      api?.setWebGpuGeometryPackEnabled?.(wgpuGeometryPackEnabled ? 1 : 0);
-      api?.setWebGpuGeometryRangeEnabled?.(wgpuGeometryRangeEnabled ? 1 : 0);
-      wgpuExactCapture.onLoad();
-      let rc = 0;
-      ppcWasmJitTimingSuspensions += 1;
-      try {
-        rc = api.loadStateFile(path) | 0;
-        // LoadAs runs on the autonomous CPU pthread (RunFrame doesn't
-        // step the core) — wait real wall-clock time so the restore
-        // actually takes effect before we sample/screenshot.
-        await new Promise((r) => setTimeout(r, 1200));
-      } finally {
-        resetPpcWasmJitTiming(rc === 1);
-        ppcWasmJitTimingSuspensions -= 1;
-      }
-      api?.setWebGpuUploadArenaMiB?.(wgpuUploadArenaMiB, collectMetrics ? 1 : 0);
-      api?.setWebGpuProducerProfileEnabled?.(wgpuProducerProfileRequested ? 1 : 0);
-      api?.setWebGpuDrawProfileEnabled?.(wgpuDrawProfileRequested ? 1 : 0);
-      applyWgpuTailGate("save-state reload");
-      api?.setWebGpuUboCacheEnabled?.(webGpuUboCacheMode());
-      api?.setWebGpuUboPackEnabled?.(webGpuUboPackMode());
-      api?.setWebGpuGeometryPackEnabled?.(wgpuGeometryPackEnabled ? 1 : 0);
-      api?.setWebGpuGeometryRangeEnabled?.(wgpuGeometryRangeEnabled ? 1 : 0);
-      api?.setSoftwareTevHotCaseMode?.(softwareTevHotCaseMode);
-      if (wgpuProducerProfileRequested || wgpuDrawProfileRequested) {
-        verifyWgpuProducerProfileActivation("save-state reload");
-      }
-      collectWebGpuProducerStateStats();
-      const uploadTimeoutCountImmediatelyAfterLoad = webGpuCausalStats.uploadTimeoutCount;
-      const uploadTimeoutBoundaryVerified = rc === 1 && collectMetrics;
-      if (uploadTimeoutBoundaryVerified) {
-        webGpuCausalStats.uploadTimeoutBoundaryVerified = true;
-        webGpuCausalStats.uploadTimeoutCountAtVerifiedLoad = uploadTimeoutCountBeforeLoad;
-        webGpuCausalStats.uploadTimeoutCountBeforeVerifiedLoad = uploadTimeoutCountBeforeLoad;
-        webGpuCausalStats.uploadTimeoutCountAfterVerifiedLoad = Math.max(
-          0,
-          uploadTimeoutCountImmediatelyAfterLoad - uploadTimeoutCountBeforeLoad
-        );
-      }
-      // The fixed battle state is the measurement boundary. Clear boot/menu
-      // tuples after the core's existing post-load settle, then let the
-      // harness's later first sample act as the battle-settle baseline.
-      if (rc === 1 && collectMetrics &&
-          rendererDiagnostics.configuredVideoBackend === "Software Renderer") {
-        api?.setSoftwareRasterProfileEnabled?.(0);
-        api?.setSoftwareRasterProfileEnabled?.(1);
-      }
-      const afterState = api?.getCoreStateName?.() ?? "";
-      // §27 diagnostic (JS-only, served live, no rebuild): open a
-      // post-load watchdog window so drainWebGpuCmdRing logs whether
-      // the producer ring keeps advancing (producer alive) vs the
-      // consumer going stale, to localize the savestate-load desync.
-      self._postLoadProbeT0 = Date.now();
-      self._postLoadProbeUntil = self._postLoadProbeT0 + 35000;
-      self._postLoadProbeLast = 0;
-      console.log(`[loadStateFile] path=${path} rc=${rc} ` +
-        `before='${beforeState}' after='${afterState}' ` +
-        `frame=${api?.getFrame?.() ?? -1}`);
-      return { loaded: rc === 1, rc, beforeState, afterState,
-               wgpuUploadTimeoutBoundary: {
-                 enabled: collectMetrics,
-                 verified: uploadTimeoutBoundaryVerified,
-                 beforeLoad: uploadTimeoutCountBeforeLoad,
-                 immediatelyAfterLoad: uploadTimeoutCountImmediatelyAfterLoad,
-                 afterLoadDelta: Math.max(
-                   0,
-                   uploadTimeoutCountImmediatelyAfterLoad - uploadTimeoutCountBeforeLoad
-                 ),
-               },
-               ...framePayload() };
-    }
+    case "loadStateFile":
+      return loadStateFileRequest(payload);
     case "saveStateFile": {
       // SaveStateFile queues SaveToFileSync onto the autonomous Dolphin
       // CPU pthread (the discio worker's RunFrame does NOT step the
@@ -2059,14 +2748,26 @@ async function handleMessage(type, payload) {
       // file; pumping runFrame did nothing and returned in <10 ms
       // (§24 size=0). handleMessage is async → await real timeouts so
       // the CPU/dump pthreads get scheduled.
-      if (!api?.saveStateFile || !moduleInstance?.FS) {
+      if ((!api?.saveStateFile && !api?.coreControl) || !moduleInstance?.FS) {
         return { saved: false, error: "no saveStateFile/FS" };
       }
       const path = "/savestate_out.sav";
       try { moduleInstance.FS.unlink(path); } catch (e) {}
-      const rc = api.saveStateFile(path) | 0;
+      const saveStartedAt = performance.now();
+      let rc = 0;
+      if (api.coreControl) {
+        // 0209: the core's control pthread; the polling below finds it whole
+        try {
+          await api.coreControl(CORE_CONTROL_OPS.saveFile, path, "Save state");
+          rc = 1;
+        } catch (error) {
+          return { saved: false, rc, error: String(error?.message || error) };
+        }
+      } else {
+        rc = api.saveStateFile(path) | 0;
+      }
       let prev = -1, stable = 0, size = 0;
-      // up to ~8 s real time (40 × 200 ms); a Melee state is ~tens of
+      // up to ~8 s real time (40 × 200 ms); a game state is ~tens of
       // MB so allow generous time for DoState + zstd on the pthread.
       for (let i = 0; i < 40; i++) {
         await new Promise((r) => setTimeout(r, 200));
@@ -2089,9 +2790,14 @@ async function handleMessage(type, payload) {
       const ab = bytes ? bytes.buffer.slice(bytes.byteOffset,
                                             bytes.byteOffset + bytes.byteLength)
                        : null;
+      // Until the file stopped growing (200 ms polls: a coarse time), and
+      // the wasm heap after it (states grow with the internal resolution,
+      // patch 0168; the heap tops out at 1.5 GiB).
+      const elapsedMs = Math.round(performance.now() - saveStartedAt);
+      const heapBytes = moduleInstance.HEAPU8?.buffer?.byteLength ?? null;
       return ab
-        ? { saved: true, rc, size, bytes: ab, transfer: [ab] }
-        : { saved: false, rc, size, error: "empty/no state file" };
+        ? { saved: true, rc, size, elapsedMs, heapBytes, bytes: ab, transfer: [ab] }
+        : { saved: false, rc, size, elapsedMs, heapBytes, error: "empty/no state file" };
     }
     case "mixAudio": {
       const mixStartedAt = causalMetricsEnabled ? performance.now() : 0;
@@ -2126,6 +2832,28 @@ async function handleMessage(type, payload) {
         stats: api.getAudioStats?.() || ""
       };
     }
+    case "setEnhancements": {
+      // Patch 0168: applied by the video thread at its next frame; the
+      // canvas follows the backbuffer size the core then announces.
+      const set = moduleInstance?._DolphinWeb_SetEnhancements;
+      if (typeof set !== "function") return { applied: false, reason: "core-without-0168" };
+      // 0: the core's runtime is not up yet (the boot reads the init values).
+      // Held to the adapter's ceiling: the answer says the scale in effect.
+      const internalResolution = set(...enhancementCoreArgs(payload, wgpuScaleCeiling()));
+      if (internalResolution > 0) wgpuInternalResolution = internalResolution;
+      // Patch 0178: 16:9 (absent from an older core: widescreen null).
+      const setWide = moduleInstance?._DolphinWeb_SetWidescreen;
+      const widescreen = typeof setWide === "function" && typeof payload.widescreen === "boolean"
+        ? setWide(payload.widescreen ? 1 : 0) === 1 : null;
+      return internalResolution > 0
+        ? { applied: true, internalResolution, widescreen, ceiling: wgpuScaleCeiling() }
+        : { applied: false, reason: "core-not-running" };
+    }
+    case "setDisplayFilter":
+      // Sharpness, fit and display box; the canvas follows at once, the
+      // filter from the next frame shown.
+      setWgpuDisplayFilter(payload);
+      return { applied: wgpuPresentVsync, active: wgpuDisplayFilterActive(), ...wgpuDisplayFilter };
     case "setAudioMuted":
       api?.setAudioMuted?.(payload.muted ? 1 : 0);
       workletAudioProducer.setMuted(Boolean(payload.muted));
@@ -2137,6 +2865,10 @@ async function handleMessage(type, payload) {
       }
       const result = workletAudioProducer.install(payload.sab, {
         muted: Boolean(payload.muted),
+        targetFrames: Number(payload.targetFrames) || undefined,
+        rateControl: Boolean(payload.rateControl),
+        rateMaxPpm: Number(payload.rateMaxPpm) || undefined,
+        ringLowMs: Number(payload.ringLowMs) || null,
       });
       if (result.active) api?.setAudioMuted?.(payload.muted ? 1 : 0);
       return result;
@@ -2148,7 +2880,8 @@ async function handleMessage(type, payload) {
 
 async function loadCore({
   coreUrl: nextCoreUrl = DEFAULT_UPSTREAM_CORE_URL,
-  expectedCoreSha256 = DEFAULT_UPSTREAM_CORE_SHA256,
+  // Always sent by the page (src/default-core.js): no JSON module here.
+  expectedCoreSha256,
   canvas = null,
   videoBackend = "Software Renderer",
   cpuThread = false,
@@ -2160,8 +2893,10 @@ async function loadCore({
   ppcWasmJitWarmupFrames: requestedPpcWasmJitWarmupFrames = DEFAULT_WASM_JIT_WARMUP_XFB_FRAMES,
   ppcProfile = false,
   gpuSpinMicros = -1,
+  codeSpaceMiB = null,
   cpuOverclock = 1,
   emulationSpeed = 1,
+  audioBufferMs = 0,
   presentationScale = 1,
   presentationQueueSize = DEFAULT_PRESENTATION_QUEUE,
   presentationPacing = "smooth",
@@ -2173,12 +2908,35 @@ async function loadCore({
   softwareTevHotCaseMode: requestedSoftwareTevHotCaseMode = 0,
   xfbFastPaths = 0,
   correctTimeDrift = false,
+  rushPresentation = false,
+  syncOnSkipIdle = false,
+  dupXfbRearmsThrottle = false,
+  smoothEarly = true,
+  sleepMarginUs = 0,
+  sleepStepUs = 0,
+  sleepK = 750,
+  sleepSpinUs = 150,
+  presentVsync = true,
+  presentGamePace = false,
+  presentPaceStats = false,
+  viLock = "off",
   coreLog = false,
   memcardSlotB = false,
+  internalResolution = 1,
+  maxAnisotropy = -1,
+  widescreen = false,
+  displayFilter = null,
   efbAccess = false,
+  xfbNoDecode = false,
   fifoLog = false,
   efbCopyRam = false,
+  efbNoDefer = false,
   wgpuMask = "",
+  wgpuFallback = false,
+  dstAlphaTwoPass = true,
+  discReadahead = true,
+  discPrefetch = false,
+  webglSoftware = false,
   efbDiag = false,
   jitVerbose = false,
   frameCap = 0,
@@ -2188,7 +2946,11 @@ async function loadCore({
   jitOffThread = true,
   aotCompiler = true,
   aotFirstLaunch = false,
+  aotSampleMs = AOT_PROFILE_SAMPLE_MS,
+  wasmEngine: requestedWasmEngine = null,
+  regionCap = null,
   regionChain = true,
+  aotAssembler = null,
   fusedMadd = true,
   reportedCoreSelection = null,
   wgpuReplayDiagnostics = false,
@@ -2200,6 +2962,7 @@ async function loadCore({
   wgpuPowerPreference: requestedWgpuPowerPreference = "high-performance",
   wgpuAtomicPassReplay: requestedWgpuAtomicPassReplay = true,
   wgpuDiagnosticQuiet: requestedWgpuDiagnosticQuiet = false,
+  stallLog: requestedStallLog = false,
   wgpuProducerProfile: requestedWgpuProducerProfile = false,
   wgpuDrawProfile: requestedWgpuDrawProfile = false,
   wgpuTailGate: requestedWgpuTailGate = false,
@@ -2209,17 +2972,21 @@ async function loadCore({
   wgpuVpDiag: requestedWgpuVpDiag = false,
   wgpuUniformFast: requestedWgpuUniformFast = false,
   wgpuUboPack: requestedWgpuUboPack = false,
+  wgpuBindGroupCache: requestedWgpuBindGroupCache = false,
   wgpuSparseUbo: requestedWgpuSparseUbo = false,
   wgpuGeometryPack: requestedWgpuGeometryPack = false,
   wgpuGeometryRange: requestedWgpuGeometryRange = false,
+  wgpuGeometryCacheMode: requestedWgpuGeometryCacheMode = 0,
   wgpuUploadArenaMiB: requestedWgpuUploadArenaMiB = 32,
   wgpuUploadTransport: requestedWgpuUploadTransport = "queue",
   wgpuMappedStagingSlotCount: requestedWgpuMappedStagingSlotCount =
     WGPU_MAPPED_STAGING_SLOT_COUNT,
+  wgpuMappedStagingSlotMib: requestedWgpuMappedStagingSlotMib = 16,
   wgpuMappedStageFast: requestedWgpuMappedStageFast = false,
   wgpuMappedDrainCoalescing: requestedWgpuMappedDrainCoalescing = false,
   wgpuRendererWorkerProbe: requestedWgpuRendererWorkerProbe = "off",
   wgpuVisualCadence: requestedWgpuVisualCadence = false,
+  wgpuSessionRecover: requestedWgpuSessionRecover = false,
   wgpuPipelinePrewarm: requestedWgpuPipelinePrewarm = true,
   wgpuPassPackageProjection: requestedWgpuPassPackageProjection = false,
   wgpuUploadRunProjection: requestedWgpuUploadRunProjection = false,
@@ -2231,11 +2998,16 @@ async function loadCore({
 } = {}) {
   fifoLogBoot = Boolean(fifoLog);
   wgpuMaskedFeatures = parseWgpuMask(wgpuMask);
+  wgpuAcceptFallbackAdapter = Boolean(wgpuFallback);
+  discReadaheadEnabled = discReadahead !== false;
+  discPrefetchEnabled = discPrefetch === true;
+  webglAcceptSoftware = Boolean(webglSoftware);
   if (moduleInstance) {
     return moduleInstance;
   }
   rendererDiagnostics = createRendererDiagnostics();
   wgpuDiagnosticQuiet = Boolean(requestedWgpuDiagnosticQuiet);
+  stallLogEnabled = Boolean(requestedStallLog);
   wgpuDiagnosticLogFilter.restore();
   wgpuDiagnosticLogFilter = installWgpuDiagnosticLogFilter({
     enabled: wgpuDiagnosticQuiet,
@@ -2362,17 +3134,19 @@ async function loadCore({
   }
   wgpuUniformFastEnabled = Boolean(requestedWgpuUniformFast);
   wgpuUboPackEnabled = Boolean(requestedWgpuUboPack);
+  webGpuObjects.bindGroupCache = requestedWgpuBindGroupCache === true ? createBindGroupCache() : null;
   if (requestedWgpuSparseUbo && videoBackend !== "WebGPU-Real") {
     throw new Error("wgpuubosparse=1 requires video=wgpu");
   }
   wgpuGeometryPackEnabled = Boolean(requestedWgpuGeometryPack);
   wgpuGeometryRangeEnabled =
     wgpuGeometryPackEnabled && Boolean(requestedWgpuGeometryRange);
+  wgpuGeometryCacheMode = wgpuGeometryPackEnabled ? Number(requestedWgpuGeometryCacheMode) & 3 : 0;
   wgpuUploadArenaMiB = Number(requestedWgpuUploadArenaMiB) === 64 ? 64 : 32;
   wgpuUploadTransport = requestedWgpuUploadTransport === "mapped" ? "mapped" : "queue";
-  wgpuMappedStagingSlotCount = Number(requestedWgpuMappedStagingSlotCount) === 4
-    ? 4
-    : WGPU_MAPPED_STAGING_SLOT_COUNT;
+  wgpuMappedStagingSlotCount = wgpuMappedStagingSlotCountOf(requestedWgpuMappedStagingSlotCount);
+  wgpuMappedStagingSlotBytes =
+    wgpuMappedStagingSlotMibOf(requestedWgpuMappedStagingSlotMib) * 1024 * 1024;
   if (requestedWgpuSparseUbo && wgpuUploadTransport !== "mapped") {
     throw new Error("wgpuubosparse=1 requires wgpuuploadtransport=mapped");
   }
@@ -2397,6 +3171,7 @@ async function loadCore({
   pipelinePrewarm?.stop();
   pipelinePrewarm = null;
   wgpuVisualCadenceEnabled = Boolean(requestedWgpuVisualCadence);
+  wgpuSessionRecoverEnabled = Boolean(requestedWgpuSessionRecover);
   wgpuVisualCadenceTelemetry = createWgpuVisualCadenceTelemetry(
     wgpuVisualCadenceEnabled
   );
@@ -2420,6 +3195,9 @@ async function loadCore({
   wgpuDetachedPresenter = Boolean(requestedWgpuDetachedPresenter);
   wgpuDetachedBitmapPending = false;
   wgpuLoadEpochFence = Boolean(requestedWgpuLoadEpochFence);
+  // 0204: never with the load fence (it drops published uploads, the cache's
+  // too); core-host refuses the pair already, the worker does as well.
+  if (wgpuLoadEpochFence) wgpuGeometryCacheMode = 0;
   wgpuLoadFenceActive = false;
   wgpuReplayPumpEnabled = Boolean(requestedWgpuReplayPump);
   wgpuReplayBudgetMs = [4, 6].includes(Number(requestedWgpuReplayBudgetMs))
@@ -2560,6 +3338,15 @@ async function loadCore({
     preferredPresenterBackend = "webgpu";
     await setupSoftwarePresenter(detachedWgpuCanvas, preferredPresenterBackend);
   }
+  // video=wgpu needs this worker's WebGPU device: the core asks for an adapter
+  // of its own and would take a CPU fallback the presenter refused, then run
+  // behind a black canvas (the replay has no device). Fail before the core
+  // starts, as without an adapter.
+  if (videoBackend === "WebGPU-Real" && !renderGpu && !isIntentionalBlankWgpuProbe(wgpuRendererWorkerProbe)) {
+    const message = `video=wgpu needs a usable WebGPU adapter; the presenter is ${renderBackend || "none"}`;
+    console.error(`[wgpu] ${message}`);
+    throw new Error(message);
+  }
 
   // §28cf boot-phase timing instrumentation. Attributes the ~1s page-load
   // freeze measured in §28cd. Each step's wall time is postStatus'd so the
@@ -2603,7 +3390,21 @@ async function loadCore({
   const _t_idb = performance.now();
   dolphinJitCachePersistenceEnabled = !noJitCache;
   dolphinAotCompilerEnabled = aotCompiler !== false;
+  // Regions are return_call chains: without wasm tail calls every region
+  // module would fail to compile. They stay off and the CPU runs on blocks,
+  // with a status line and aotStatus saying why (never a silent loss).
+  wasmFeatures = probeWasmFeatures();
+  aotRegionsOffReason = null;
+  if (aotFirstLaunch === true && !wasmFeatures.tailCall) {
+    aotFirstLaunch = false;
+    aotRegionsOffReason = "no wasm tail calls (return_call) in this engine";
+    postStatus(`aot: regions off: ${aotRegionsOffReason}`);
+  }
   aotFirstLaunchEnabled = aotFirstLaunch === true;
+  aotProfileSampleMs = Number.isInteger(aotSampleMs) && aotSampleMs >= 0 ? aotSampleMs : AOT_PROFILE_SAMPLE_MS;
+  wasmEngineName = resolveWasmEngineName(requestedWasmEngine);
+  aotRegionCapRequested = Number.isInteger(regionCap) && regionCap >= 0 ? regionCap : null;
+  aotAssemblerRequestedFlag = typeof aotAssembler === "boolean" ? aotAssembler : null;
   dolphinJitBootLoadComplete = false;
   dolphinJitBootLoadedEntries = 0;
   coreBuildFingerprint = String(buildFingerprint ?? "");
@@ -2637,6 +3438,25 @@ async function loadCore({
       : undefined;
 
   const _t_factory = performance.now();
+  // Not with the detached presenter: it shows a bitmap of the canvas, which
+  // the vsync presenter fills only at its rAF (a stale picture).
+  wgpuPresentVsync = presentVsync !== false && typeof self.requestAnimationFrame === "function" && !wgpuDetachedPresenter;
+  setWgpuDisplayFilter(displayFilter ?? {});
+  wgpuPresentGamePace = presentGamePace === true;
+  wgpuPresentPaceStats = presentPaceStats === true || wgpuPresentGamePace;
+  // The VI phase lock (on by default at 1:1, ?vilock=1 forces it at 2:1
+  // too, ?vilock=0 off): only on the WebGPU video path with the vsync
+  // presenter (its rAF measures the refresh) and at the normal speed (an
+  // unlimited or other speed is the user's). Where it cannot run, its status
+  // says why (the software renderer used to report "starting" for ever).
+  const viLockAs = viLockMode(viLock);
+  wgpuViLockUnavailable = viLockAs === "off" ? null
+    : !hardwareVideoBackend ? "not available on this video path"
+    : !wgpuPresentVsync ? "not available with this presenter"
+    : Number(emulationSpeed) !== 1 ? "not at this speed" : null;
+  wgpuViLock = viLockAs !== "off" && !wgpuViLockUnavailable ? createViPhaseLock({ maxRatio: MAX_RATIO[viLockAs] }) : null;
+  wgpuGamePacer.reset({ arrival: true });
+  wgpuRefreshHistogram.reset();
   releaseWgpuReadback();
   moduleInstance = await factory({
     noInitialRun: true,
@@ -2656,10 +3476,28 @@ async function loadCore({
     // Read by dolphin_web_core.cpp at CoreInit. Both are opt-in and default
     // false, so the shipping page load is unchanged.
     dolphinCorrectTimeDrift: Boolean(correctTimeDrift),
+    // Patch 0150 pacing switches (dolphin_web_core.cpp reads them at setup).
+    dolphinRushPresentation: rushPresentation === true,
+    dolphinSyncOnSkipIdle: syncOnSkipIdle === true,
+    dolphinDupXfbRearmsThrottle: dupXfbRearmsThrottle === true,
+    dolphinSmoothEarly: smoothEarly !== false,
+    dolphinSleepMarginUs: Number.isInteger(sleepMarginUs) ? sleepMarginUs : 0,
+    dolphinSleepStepUs: Number.isInteger(sleepStepUs) ? sleepStepUs : 0,
+    dolphinSleepK: Number.isInteger(sleepK) ? sleepK : 750,
+    dolphinSleepSpinUs: Number.isInteger(sleepSpinUs) ? sleepSpinUs : 150,
     dolphinCoreLog: Boolean(coreLog),
     dolphinMemcardSlotB: Boolean(memcardSlotB),
+    // Patch 0168: internal resolution (1-4, held to the adapter's ceiling)
+    // and anisotropy (log2, -1 = the game's). The core keeps 1 off the
+    // WebGPU path.
+    dolphinEfbScale: (wgpuInternalResolution = clampInternalResolution(internalResolution, wgpuScaleCeiling())),
+    dolphinMaxAnisotropy: Number.isInteger(maxAnisotropy) ? maxAnisotropy : -1,
+    // Patch 0178: Dolphin's generic widescreen hack, 16:9 backbuffer.
+    dolphinWidescreen: widescreen === true,
     dolphinEfbAccess: Boolean(efbAccess),
+    dolphinXfbNoDecode: Boolean(xfbNoDecode),
     dolphinEfbCopyRam: Boolean(efbCopyRam),
+    dolphinEfbNoDefer: Boolean(efbNoDefer),
     // Ranks the instructions that block JIT compilation (?jitverbose=1).
     dolphinWebVerbosePpcJit: Boolean(jitVerbose),
     dolphinFrameCap: (frameCapTarget = Number(frameCap) || 0),
@@ -2690,7 +3528,7 @@ async function loadCore({
   // Day-16: `?video=webgpu` runs the Software→WebGPU-presenter hybrid.
   // The C++ Software path writes XFB into s_framebuffer; the existing
   // JS WebGPU presenter uploads + blits those bytes via a real
-  // wgpuRenderPass. Plays Melee end-to-end today.
+  // wgpuRenderPass. Plays a full game end-to-end today.
   if (videoBackend === "WebGPU" && renderGpu) {
     postStatus("WebGPU video backend: Software→WebGPU presenter hybrid (day-16)");
   }
@@ -2716,6 +3554,7 @@ async function loadCore({
   }
   harnessVideoBackend = videoBackend;
   if (harnessEnabled) moduleInstance._DolphinWeb_HarnessEnable?.(1);
+  if (harnessPipeline) moduleInstance._DolphinWeb_HarnessSwapsEnable?.(1);
   if (detTraceRequested) moduleInstance._DolphinWeb_DetTraceEnable?.(1);
   if (gpuSyncDiagEnabled) moduleInstance._DolphinWeb_GpuSyncDiagEnable?.(1);
   // Patch 0129: the FMA emitter uses relaxed_madd only where it is fused,
@@ -2870,6 +3709,8 @@ async function loadCore({
   api.setJitRegionChaining?.(regionChain !== false ? 1 : 0);
   api.setPpcProfileEnabled?.(ppcProfile ? 1 : 0);
   if (Number.isInteger(gpuSpinMicros) && gpuSpinMicros >= 0) api.setGpuSpinBudget?.(gpuSpinMicros);
+  if (Number.isInteger(codeSpaceMiB)) api.setCodeSpaceMiB?.(codeSpaceMiB);
+  api.setDstAlphaTwoPass?.(dstAlphaTwoPass !== false ? 1 : 0);
   api.setWebGpuUploadArenaMiB?.(wgpuUploadArenaMiB, collectMetrics ? 1 : 0);
   api.setWebGpuProducerProfileEnabled?.(wgpuProducerProfileRequested ? 1 : 0);
   api.setWebGpuDrawProfileEnabled?.(wgpuDrawProfileRequested ? 1 : 0);
@@ -2879,8 +3720,12 @@ async function loadCore({
   api.setWebGpuUboPackEnabled?.(webGpuUboPackMode());
   api.setWebGpuGeometryPackEnabled?.(wgpuGeometryPackEnabled ? 1 : 0);
   api.setWebGpuGeometryRangeEnabled?.(wgpuGeometryRangeEnabled ? 1 : 0);
+  api.setWebGpuGeometryCacheEnabled?.(wgpuGeometryCacheMode);
   api.setCpuOverclock?.(Number(cpuOverclock));
   api.setEmulationSpeed?.(Number(emulationSpeed));
+  // ?audiobuffer: the mixer's queue (0: Dolphin's default, 80 ms); a core
+  // without the setter keeps its default
+  if (Number(audioBufferMs) > 0) api.setAudioBufferMs?.(Number(audioBufferMs));
   api.setPresentationScale?.(Number(presentationScale));
   api.setFastSoftwareRaster?.(Math.min(3, Math.max(0, Number(fastSoftwareRaster) || 0)));
   api.setSoftwareTevHotCaseMode?.(softwareTevHotCaseMode);
@@ -2913,7 +3758,7 @@ async function loadCore({
   // the cached-interpreter disable mask instead, at bit 24, defaulting to off.
   // Host and core are versioned independently -- a stale cached core, a
   // half-finished rebuild -- and getting this wrong is not a degraded feature
-  // but a black Mario Kart Wii, so fall back rather than assume they match.
+  // but a black Wii racing game, so fall back rather than assume they match.
   const LEGACY_DISABLE_BIT_CLEARRECT_ENABLE = 1 << 24;
   let disableMask = (Number(cachedInterpreterDisableMask) || 0) >>> 0;
   const rendererMaskSupported = Boolean(api.setRendererFeatureMask);
@@ -2934,7 +3779,6 @@ async function loadCore({
       `(${wgpuScissoredClearRect ? "on" : "off"})`
     );
   }
-  startFrameRingDrainLoop();
   configurePresentationQueue(presentationQueueSize);
   if (presentationPacing === "tick") presentationPacingMode = "tick";
   else if (presentationPacing === "direct") presentationPacingMode = "direct";
@@ -2950,6 +3794,220 @@ async function loadCore({
   }
   _bootMark("loadCore-return");
   return moduleInstance;
+}
+
+// Patch 0151 (harness): this worker's own time serving the core's disc reads
+// (WORKERFS, FileReaderSync). The DVD thread's read time (core side) minus
+// this is what a read waited for the worker, busy draining the WebGPU ring.
+// It counts every WORKERFS read, also those made outside the DVD thread (the
+// boot's HLE apploader and FST reads): over a window that holds any, the
+// difference is a lower bound; equal read counts on both sides mean none.
+const discReadService = { reads: 0, bytes: 0, ms: 0, maxMs: 0 };
+// The disc read ahead, 64 KiB to 1 MiB as a stream goes on, 8 MiB held at
+// most (src/disc-readahead.js); ?discreadahead=0 reads exactly what is asked,
+// as WORKERFS does.
+let discReadaheadEnabled = true;
+let discPrefetchEnabled = false;
+let discBlockReader = null;
+function readDiscAhead(workerFs) {
+  const ops = workerFs?.stream_ops;
+  if (!ops?.read || discBlockReader || typeof FileReaderSync !== "function") return;
+  const reader = new FileReaderSync();
+  discBlockReader = createDiscReadahead({
+    readBlob: (blob) => reader.readAsArrayBuffer(blob),
+    // Patch 0155: the next segment in the background, with ?discprefetch=1.
+    readBlobAsync: discPrefetchEnabled ? (blob) => blob.arrayBuffer() : null,
+  });
+  ops.read = discBlockReader.read;
+}
+// When this worker last served a disc read (performance.now()): the region
+// translator gives way to read bursts (discAwareYield, aot-orchestrator.js).
+let lastDiscReadAt = -Infinity;
+export const lastDiscReadAtForTest = () => lastDiscReadAt;
+export function noteDiscReads(workerFs) {
+  const ops = workerFs?.stream_ops;
+  if (!ops?.read || ops.read.notedDiscReads) return;
+  const read = ops.read;
+  ops.read = function notedRead(stream, buffer, offset, length, position) {
+    try {
+      return read.call(this, stream, buffer, offset, length, position);
+    } finally {
+      lastDiscReadAt = performance.now();
+    }
+  };
+  ops.read.notedDiscReads = true;
+}
+function timeDiscReads(workerFs) {
+  const ops = workerFs?.stream_ops;
+  if (!ops?.read || ops.read.timedDiscReads) return;
+  const read = ops.read;
+  ops.read = function timedRead(stream, buffer, offset, length, position) {
+    const startedAt = performance.now();
+    try {
+      // a read served here is worker time too (replayBusy)
+      return workerBusy.run(() => read.call(this, stream, buffer, offset, length, position));
+    } finally {
+      const ms = performance.now() - startedAt;
+      discReadService.reads += 1;
+      discReadService.bytes += length;
+      discReadService.ms += ms;
+      if (ms > discReadService.maxMs) discReadService.maxMs = ms;
+    }
+  };
+  ops.read.timedDiscReads = true;
+}
+
+// Drop sampler (harness/probes/drop-meter.mjs): every few tens of ms, the
+// cumulative counters that can explain a slow window, read without
+// resetting anything. A column is null when the core does not have it.
+// The headroom (0113) and present cadence (0162) counters must be turned on
+// by the harness first (their own reset messages); the others always count
+// while the harness is on. Off unless the harness starts it.
+const DROP_COLUMNS = [
+  "frame", "ticks",
+  // JIT blocks: compiled, the CPU thread's synchronous Module and Instance
+  // time (patch 0003's own counters, u32 µs that wrap), and its whole time
+  // compiling blocks (patch 0167: analysis, emission, compile or post)
+  "jitBlocks", "jitModuleUs", "jitInstanceUs", "jitCompiles", "jitUs",
+  // regions (0075): pipeline counts, the CPU thread's install time; with
+  // the region counters on (the harness asks, counters only, no timing),
+  // guest cycles run in regions, in all, and skipped as idle
+  "regionsQueued", "regionsInstalled", "regionsDropped", "regionInstallMs", "regionCycles", "totalCycles", "idleCycles",
+  // blocks posted to the off-thread compiler, interpreted meanwhile (0074)
+  "offThreadDefers",
+  // disc (0151): the DVD thread's reads, the CPU thread's waits for them;
+  // the worker's service of WORKERFS reads
+  "discReads", "discBytes", "discReadUs", "discWaits", "discWaitUs", "discServiceMs",
+  // headroom (0113)
+  "cpuSleepUs", "gpuWorkUs", "xfbCopies", "rushSkips", "flushGpuWaitUs", "gpuConsumerWaitUs", "presentSleepUs",
+  // present cadence (0162): paced throttles, those that slept, and the
+  // approximate total wake-up lateness and lateness behind target (µs)
+  "throttles", "throttleSleeps", "sleepLateUs", "behindUs",
+  // wake-ups later than the histogram's last bin (15.75 ms): sleepLateUs
+  // counts them at that edge, a lower bound
+  "sleepLateOverflow",
+  // EFB copies to RAM waiting for the GPU (0164), both kinds
+  "efbSyncs", "efbWaitUs",
+  // wgpu replay on this thread: pipelines and shaders created, and the
+  // synchronous time of those calls; prewarm misses (created at draw time)
+  "pipelines", "pipelineMs", "shaders", "shaderMs", "prewarmMisses",
+  // block bytes the CPU threads sent to this worker (new compiles)
+  "jitNewCompiles"
+];
+const dropWgpu = { pipelines: 0, pipelineMs: 0, shaders: 0, shaderMs: 0 };
+let dropSampler = null;
+let dropScratch = 0;
+let dropScratchModule = null; // the core dropScratch was allocated in
+function readDropCounters() {
+  const m = moduleInstance;
+  const heap = m?.HEAPU8;
+  const out = Object.fromEntries(DROP_COLUMNS.map((c) => [c, null]));
+  if (!m || !heap) return DROP_COLUMNS.map((c) => out[c]);
+  out.frame = api?.getFrame?.() ?? null;
+  out.ticks = readCoreTicks();
+  out.jitBlocks = api?.getPpcWasmBlockCompileCount?.() ?? null;
+  const helper = api?.getPpcWasmHelperStats?.();
+  if (typeof helper === "string") {
+    const mod = /modcompile:(\d+)us/.exec(helper), inst = /modinst:(\d+)us/.exec(helper);
+    const defer = /offthreaddefer:(\d+)/.exec(helper);
+    if (mod) out.jitModuleUs = Number(mod[1]);
+    if (inst) out.jitInstanceUs = Number(inst[1]);
+    if (defer) out.offThreadDefers = Number(defer[1]);
+  }
+  const region = m._DolphinWeb_JitRegionStats?.(-1) >>> 0;
+  if (region && region % 8 === 0 && region + 256 <= heap.length && new DataView(heap.buffer, region, 8).getUint32(4, true) >= 256) {
+    const f = new Float64Array(heap.buffer, region + 88, 21);
+    out.regionsQueued = f[0]; out.regionsInstalled = f[1]; out.regionsDropped = f[3]; out.regionInstallMs = f[20];
+    const c = new Float64Array(heap.buffer, region + 16, 2);
+    out.regionCycles = c[0]; out.totalCycles = c[1]; out.idleCycles = f[10];
+  }
+  if (dropScratchModule !== m) {
+    dropScratch = m._malloc?.(40) ?? 0;
+    dropScratchModule = m;
+  }
+  if (m._DolphinWeb_JitTimeStats && dropScratch) {
+    m._DolphinWeb_JitTimeStats(dropScratch);
+    const v = new Uint32Array(heap.buffer, dropScratch, 3);
+    out.jitCompiles = v[0]; out.jitUs = v[1] + v[2] * 2 ** 32;
+  }
+  if (m._DolphinWeb_DiscReadStats && dropScratch) {
+    m._DolphinWeb_DiscReadStats(dropScratch);
+    const v = new Uint32Array(heap.buffer, dropScratch, 10);
+    out.discReads = v[0]; out.discBytes = v[1] + v[2] * 2 ** 32; out.discReadUs = v[3] + v[4] * 2 ** 32;
+    out.discWaits = v[6]; out.discWaitUs = v[7] + v[8] * 2 ** 32;
+  }
+  out.discServiceMs = discReadService.ms;
+  const head = m._DolphinWeb_HeadroomStats?.(-1) >>> 0;
+  if (head && head % 8 === 0 && head + 96 <= heap.length && new Uint32Array(heap.buffer, head, 3)[2] === 1) {
+    const f = new Float64Array(heap.buffer, head + 16, 10);
+    out.cpuSleepUs = f[1]; out.gpuWorkUs = f[2]; out.xfbCopies = f[3]; out.rushSkips = f[4];
+    out.flushGpuWaitUs = f[5]; out.gpuConsumerWaitUs = f[7]; out.presentSleepUs = f[9];
+  }
+  const cad = m._DolphinWeb_PresentCadenceStats?.(-1) >>> 0;
+  if (cad && cad % 4 === 0 && cad + 1344 <= heap.length) {
+    const w = new Uint32Array(heap.buffer, cad, 336);
+    if (w[2] === 1) {
+      out.throttles = w[4]; out.throttleSleeps = w[5];
+      out.sleepLateUs = histogramSum(w, 16, 64, 250).sum;
+      out.sleepLateOverflow = w[16 + 63];
+      out.behindUs = histogramSum(w, 80, 64, 500).sum;
+    }
+  }
+  if (m._DolphinWeb_HarnessEfbSyncWord) {
+    const word = (i) => m._DolphinWeb_HarnessEfbSyncWord(i) >>> 0;
+    out.efbSyncs = word(1) + word(17);
+    out.efbWaitUs = word(5) + word(21);
+  }
+  Object.assign(out, dropWgpu);
+  out.prewarmMisses = pipelinePrewarm?.stats?.misses ?? null;
+  out.jitNewCompiles = dolphinJitNewCompileCount;
+  return DROP_COLUMNS.map((c) => out[c]);
+}
+// payload.action: "start" (everyMs), "drain", "stop".
+function harnessDropSampler(payload = {}) {
+  if (!harnessEnabled) return { error: "harness hooks are off" };
+  dropSampler ??= createDropSampler({ columns: DROP_COLUMNS, read: readDropCounters });
+  // Patch 0167's timer runs only while the sampler does.
+  if (payload.action === "start") {
+    moduleInstance?._DolphinWeb_SetJitTimeStatsEnabled?.(1);
+    return { ...dropSampler.start(payload.everyMs), jitTime: typeof moduleInstance?._DolphinWeb_JitTimeStats === "function" };
+  }
+  if (payload.action === "stop") {
+    moduleInstance?._DolphinWeb_SetJitTimeStatsEnabled?.(0);
+    return dropSampler.stop();
+  }
+  return dropSampler.drain();
+}
+
+// resetMax (patch 0154): the maxima start over after this read, both sides,
+// so the next read gives the maxima of a window.
+function harnessDiscReads({ resetMax = false } = {}) {
+  if (!harnessEnabled) return { error: "harness hooks are off" };
+  const stats = moduleInstance?._DolphinWeb_DiscReadStats;
+  let core = null;
+  if (stats && moduleInstance._malloc) {
+    const ptr = moduleInstance._malloc(40);
+    try {
+      stats(ptr);
+      const v = new Uint32Array(moduleInstance.HEAPU8.buffer, ptr, 10);
+      const u64 = (lo, hi) => v[lo] + v[hi] * 2 ** 32;
+      core = { reads: v[0], bytes: u64(1, 2), readUs: u64(3, 4), readMaxUs: v[5], finishWaits: v[6], finishWaitUs: u64(7, 8), finishWaitMaxUs: v[9] };
+    } finally {
+      moduleInstance._free(ptr);
+    }
+  }
+  const read = { service: { ...discReadService }, readahead: discBlockReader ? { ...discBlockReader.stats } : null, core, frame: api?.getFrame?.() ?? null };
+  // A read that finishes between this read and the reset is in neither
+  // window's maxima (accepted: a few microseconds). coreMaxReset says whether
+  // the core's maxima really started over (false with a core before 0154,
+  // where only the worker's did).
+  if (resetMax) {
+    discReadService.maxMs = 0;
+    const reset = moduleInstance?._DolphinWeb_DiscReadStatsResetMax;
+    reset?.();
+    read.coreMaxReset = typeof reset === "function";
+  }
+  return read;
 }
 
 // WORKERFS lookup, with a fallback that current Emscripten requires.
@@ -2974,6 +4032,16 @@ function bindApi(module) {
   const ccall = module.ccall.bind(module);
   const optionalCwrap = (name, returnType, argTypes = []) =>
     typeof module[`_${name}`] === "function" ? cwrap(name, returnType, argTypes) : null;
+  // 0209: a request run on the core's control pthread, awaited from the
+  // event loop (the worker keeps draining the ring meanwhile).
+  const requestCoreControl = optionalCwrap("RequestCoreControl", "number", ["number", "string"]);
+  const coreControlResult = optionalCwrap("CoreControlResult", "number", ["number"]);
+  const coreControlAbandon = optionalCwrap("CoreControlAbandon", null, ["number"]);
+  const coreControl = requestCoreControl && coreControlResult
+    ? (op, path, what) => runCoreControl({
+      request: requestCoreControl, result: coreControlResult, abandon: coreControlAbandon ?? undefined, op, path, what
+    })
+    : null;
 
   return {
     mountDisc: (path) => ccall("MountDisc", "number", ["string"], [path]),
@@ -2998,6 +4066,8 @@ function bindApi(module) {
     setJitRegionsEnabled: optionalCwrap("DolphinWeb_JitSetRegionsEnabled", null, ["number"]),
     setJitRegionChaining: optionalCwrap("DolphinWeb_JitSetRegionChaining", null, ["number"]),
     setGpuSpinBudget: optionalCwrap("DolphinWeb_SetGpuSpinBudget", null, ["number"]),
+    setCodeSpaceMiB: optionalCwrap("DolphinWeb_SetCodeSpaceMiB", null, ["number"]),
+    setDstAlphaTwoPass: optionalCwrap("DolphinWeb_SetDstAlphaTwoPass", null, ["number"]),
     getPpcWasmJitEngagedFrame: optionalCwrap("GetPpcWasmJitEngagedFrame", "number", []),
     getPpcWasmJitArmStartFrame: optionalCwrap("GetPpcWasmJitArmStartFrame", "number", []),
     setPpcWasmJitEnabled:
@@ -3081,6 +4151,10 @@ function bindApi(module) {
       typeof module._SetWebGpuGeometryRangeEnabled === "function"
         ? (enabled) => ccall("SetWebGpuGeometryRangeEnabled", null, ["number"], [enabled ? 1 : 0])
         : null,
+    setWebGpuGeometryCacheEnabled:
+      typeof module._SetWebGpuGeometryCacheEnabled === "function"
+        ? (mode) => ccall("SetWebGpuGeometryCacheEnabled", null, ["number"], [Number(mode) & 3])
+        : null,
     setWebGpuUploadArenaMiB:
       typeof module._SetWebGpuUploadArenaMiB === "function"
         ? (mib, metrics) => ccall(
@@ -3098,6 +4172,33 @@ function bindApi(module) {
     setEmulationSpeed:
       typeof module._SetEmulationSpeed === "function"
         ? (factor) => ccall("SetEmulationSpeed", "number", ["number"], [Number(factor)])
+        : null,
+    // ?vilock=1 (patch 0212): the throttle's rate trimmed at run time (ppm
+    // of the configured speed, +/-2000); null on a core without it
+    setThrottleRatePpm:
+      typeof module._DolphinWeb_SetThrottleRatePpm === "function"
+        ? (ppm) => module._DolphinWeb_SetThrottleRatePpm(Math.round(Number(ppm)) | 0)
+        : null,
+    // patch 0212: the mixer's queue events since boot (0 overflow skips, 1
+    // underrun fills); null on a core without them
+    audioQueueEvents:
+      typeof module._DolphinWeb_AudioQueueEvents === "function"
+        ? (which) => module._DolphinWeb_AudioQueueEvents(which | 0) >>> 0
+        : null,
+    setAudioBufferMs:
+      typeof module._DolphinWeb_SetAudioBufferMs === "function"
+        ? (ms) => module._DolphinWeb_SetAudioBufferMs(Number(ms) | 0)
+        : null,
+    // 0186: the mixer's queue in ms (-1 unknown); absent on an older core
+    audioQueuedMs:
+      typeof module._DolphinWeb_AudioQueuedMs === "function"
+        ? () => module._DolphinWeb_AudioQueuedMs()
+        : null,
+    // 0216: one FIFO's queue in ms (0 DMA, 1 streaming; -1 unknown); absent
+    // on an older core
+    audioQueuedFifoMs:
+      typeof module._DolphinWeb_AudioQueuedFifoMs === "function"
+        ? (which) => module._DolphinWeb_AudioQueuedFifoMs(which | 0)
         : null,
     setPresentationScale:
       typeof module._SetPresentationScale === "function"
@@ -3137,29 +4238,21 @@ function bindApi(module) {
       typeof module._GetCachedInterpreterDisableMask === "function"
         ? () => ccall("GetCachedInterpreterDisableMask", "number", [], []) >>> 0
         : null,
-    getFrameRingEntryPtr:
-      typeof module._GetFrameRingEntryPtr === "function"
-        ? () => ccall("GetFrameRingEntryPtr", "number", [], []) >>> 0
-        : null,
-    getFrameRingCapacity:
-      typeof module._GetFrameRingCapacity === "function"
-        ? () => ccall("GetFrameRingCapacity", "number", [], []) | 0
-        : null,
-    getFrameRingEntrySize:
-      typeof module._GetFrameRingEntrySize === "function"
-        ? () => ccall("GetFrameRingEntrySize", "number", [], []) | 0
-        : null,
-    getFrameRingHead:
-      typeof module._GetFrameRingHead === "function"
-        ? () => ccall("GetFrameRingHead", "number", [], []) >>> 0
-        : null,
     bootDisc:
       typeof module._BootDisc === "function"
         ? (path) => ccall("BootDisc", "number", ["string"], [path])
         : null,
-    stopCore: optionalCwrap("StopCore", null, []),
+    // 0209: pause, resume and stop on the core's control pthread (they wait
+    // for the GPU thread, which waits for this worker to drain the ring);
+    // the synchronous exports only for a core without it.
+    stopCore: coreControl
+      ? () => coreControl(CORE_CONTROL_OPS.stop, "", "stop")
+      : optionalCwrap("StopCore", null, []),
     resetCore: optionalCwrap("ResetCore", "number", []),
-    setCorePaused: optionalCwrap("SetCorePaused", "number", ["number"]),
+    setCorePaused: coreControl
+      ? (paused) => setPausedThroughControl(coreControl, paused)
+      : optionalCwrap("SetCorePaused", "number", ["number"]),
+    coreControl,
     pumpHostJobs: optionalCwrap("PumpHostJobs", null, []),
     getCoreState: optionalCwrap("GetCoreState", "number", []),
     getCoreStateName: optionalCwrap("GetCoreStateName", "string", []),
@@ -3250,6 +4343,8 @@ function bindApi(module) {
     getPlatform: cwrap("GetPlatform", "string", []),
     getRegion: cwrap("GetRegion", "string", []),
     getDiscNumber: cwrap("GetDiscNumber", "number", []),
+    getRevision: optionalCwrap("GetRevision", "number", []),
+    gameConfigValue: optionalCwrap("GameConfigValue", "number", ["string", "number", "string"]),
     getApploaderDate: cwrap("GetApploaderDate", "string", []),
     getApploaderSize: cwrap("GetApploaderSize", "number", []),
     getBootDolOffset: cwrap("GetBootDolOffset", "number", []),
@@ -3327,6 +4422,7 @@ const coreLifecycle = createCoreLifecycle({
   },
   afterStop: async () => {
     coreBoot = { ...coreBoot, accepted: false };
+    coreBootGeneration += 1;
     // Shutting the memory card down flushes its GCI files; keep them.
     try {
       await flushUserData();
@@ -3520,10 +4616,15 @@ function stageBytes(name, bytes) {
 }
 
 // Legacy slot API (api.loadState) used by the JIT timing paths.
-function loadStateSlot(slot) {
-  if (!api?.loadStateFile) throw new Error("This core build cannot load save states");
+async function loadStateSlot(slot) {
+  if (!api?.loadStateFile && !api?.coreControl) throw new Error("This core build cannot load save states");
   const path = stateSlotPath(saveIdentity(), slot);
   if (!fsExists(path)) throw new Error(`Save state slot ${slot} is empty`);
+  // 0209: done when the core applied it, on its control pthread
+  if (api.coreControl) {
+    await api.coreControl(CORE_CONTROL_OPS.loadFile, path, `Load slot ${slot}`);
+    return 1;
+  }
   return api.loadStateFile(path);
 }
 
@@ -3531,11 +4632,19 @@ function loadStateSlot(slot) {
 // waits for it. Dolphin writes a temporary file and renames it, so the file
 // appears whole; it is then checked like an imported one.
 async function writeSaveState(path) {
-  if (!api?.saveStateFile) throw new Error("This core build cannot write save states");
+  if (!api?.saveStateFile && !api?.coreControl) throw new Error("This core build cannot write save states");
   if (!coreBoot.accepted) throw new Error("No game is booted");
   const fs = moduleInstance.FS;
   mkdirTreeFs(path.slice(0, path.lastIndexOf("/")) || "/");
   fsRemove(path);
+  if (api.coreControl) {
+    // 0209: on the core's control pthread, done when the CPU thread wrote
+    // the file whole (a failure or a time limit comes back as an error).
+    await api.coreControl(CORE_CONTROL_OPS.saveFile, path, "Save state");
+    const bytes = fs.readFile(path);
+    validateSaveStateData(bytes);
+    return bytes;
+  }
   if (!api.saveStateFile(path)) {
     throw new Error(`SaveStateFile refused (core ${api.getCoreStateName?.() || "unknown"})`);
   }
@@ -3795,7 +4904,44 @@ async function handleSavesMessage(type, payload) {
   }
 }
 
+// What the mounted disc's settings ask of the renderer, read before the boot
+// through Dolphin's own game config (the GameSettings INIs the core embeds,
+// merged as the boot will): the bounding box, which video=wgpu does not
+// compute (its box is the software rasterizer's, never updated by the GPU
+// path). A host renders such a disc in software.
+let discNeeds = { boundingBox: false };
+
+function mountedDiscNeeds() {
+  const gameId = api?.getGameId?.() || "";
+  const revision = api?.getRevision?.() ?? -1;
+  if (!gameId || revision < 0 || !api?.gameConfigValue) return { boundingBox: false };
+  const value = api.gameConfigValue(gameId, revision, "BBoxEnable");
+  if (value < 0) {
+    // -1: a game's settings layer is already loaded (a game is running), which
+    // the read must not replace; the need is unknown, not "no".
+    postStatus(`The disc's settings could not be read before the boot (GameConfigValue ${value}): its bounding-box need is unknown`);
+    return { boundingBox: false, known: false };
+  }
+  return { boundingBox: value === 1 };
+}
+
+async function mountFileTracked(file) {
+  const id = ++mountSeq;
+  coreBootInFlight += 1;
+  try {
+    return await mountFile(file);
+  } finally {
+    coreBootInFlight -= 1;
+    lastMountDone = Math.max(lastMountDone, id);
+  }
+}
+
 async function mountFile(file) {
+  // A disc served over HTTP ranges (measurements, src/remote-disc.js) reads
+  // through a Blob-like; the descriptor itself goes on to the plan worker.
+  // Only from this machine, unless the harness hooks are on (remoteDiscAllowed).
+  const mountedDescriptor = file;
+  file = asDiscBlob(file, { anyHost: harnessEnabled });
   if (!moduleInstance) {
     throw new Error("Upstream core must be loaded before mounting a disc");
   }
@@ -3803,6 +4949,7 @@ async function mountFile(file) {
   if (!file) {
     throw new Error("No disc file was provided to the upstream worker");
   }
+  resetWgpuBackbufferForBoot();
   await ensureUserDataReady();
 
   const fs = moduleInstance.FS;
@@ -3823,6 +4970,12 @@ async function mountFile(file) {
   const _t_workerfs = performance.now();
   fs.mount(resolveWorkerFs(moduleInstance), { blobs: [{ name: safeName, data: file }] }, WORKERFS_MOUNT_DIR);
   mounted = true;
+  if (discReadaheadEnabled) readDiscAhead(resolveWorkerFs(moduleInstance));
+  if (harnessEnabled) {
+    timeDiscReads(resolveWorkerFs(moduleInstance));
+    moduleInstance._DolphinWeb_SetDiscReadStatsEnabled?.(1);
+  }
+  noteDiscReads(resolveWorkerFs(moduleInstance));
   // P6: the disc's key for the region cache is read from this File only when
   // a region cache is first opened, never during boot: this worker serves the
   // core's file reads, and extra work here while the core boots shifts what
@@ -3841,15 +4994,18 @@ async function mountFile(file) {
   aotHotSampler = null;
   aotCoreBooted = false;
   aotRegionsBeforeBoot.length = 0;
+  aotRegionInstaller = null;
   // The previous disc's flow never sees this disc's first image (review of #86).
   for (const resolve of aotFirstImageWaiters.splice(0)) resolve(false);
   aotLayoutSkipped = 0;
+  aotRegionLedger.clear();
   aotHeapPatched = 0;
   aotHeapPatchedBytes = 0;
   aotHeapPatchFailed = 0;
   aotDiscKey = null;
   aotDiscKeyPromise = null;
-  aotDiscFile = file;
+  aotDiscFile = mountedDescriptor;
+  aotDiscKind = "disc";
   console.log(`[boot-phase] fs.mount(WORKERFS) took ${(performance.now() - _t_workerfs).toFixed(1)}ms (${(file.size / 1048576).toFixed(1)}MiB image)`);
 
   // A .dol/.elf/.dff is no disc: DiscIO cannot open it, and BootDisc's
@@ -3866,6 +5022,10 @@ async function mountFile(file) {
     if (!accepted) {
       throw new Error("Upstream Dolphin DiscIO rejected the selected disc");
     }
+    discNeeds = mountedDiscNeeds();
+    if (discNeeds.boundingBox && rendererDiagnostics.configuredVideoBackend === "WebGPU-Real") {
+      postStatus("This disc's settings read the bounding box (BBoxEnable), which video=wgpu does not compute: render it in software");
+    }
   } else {
     const head = new Uint8Array(await file.slice(0, BOOT_FILE_HEAD_BYTES).arrayBuffer());
     executable = checkExecutable(bootKind, head, file.size);
@@ -3878,6 +5038,7 @@ async function mountFile(file) {
     path,
     skippedReason: ""
   };
+  coreBootGeneration += 1;
   frameQueue = [];
   resetPresentationBuffer();
   lastCapturedCoreFrame = -1;
@@ -3886,15 +5047,27 @@ async function mountFile(file) {
   presentedFrame = 0;
 
   // P7 (?aot=1): the regions cached for this disc are installed before the
-  // boot; the optimisation of the rest starts once the boot is accepted.
-  if (aotFirstLaunchEnabled && bootKind === "disc" && api.bootDisc && file.size >= MIN_FULL_BOOT_BYTES) {
-    await prepareAotFirstLaunch(file);
+  // boot; the optimisation of the rest starts once the boot is accepted. A
+  // booted .dol too (a homebrew, the CI bench's workloads): its own key
+  // namespace (dol-sha256-v1, the file's SHA-256) and plan (the .dol alone).
+  const aotKind = aotBootKind(bootKind, file.size);
+  if (aotFirstLaunchEnabled && aotKind && api.bootDisc) {
+    aotDiscKind = aotKind;
+    // The descriptor of a remote disc, not its Blob-like (functions do not clone to the plan worker).
+    await prepareAotFirstLaunch(mountedDescriptor, { kind: aotKind });
   }
   if (aotTestHeapShiftBytes && !aotTestHeapPad && moduleInstance?._malloc) {
     aotTestHeapPad = moduleInstance._malloc(aotTestHeapShiftBytes); // kept for the session
     postStatus(`harness: ${aotTestHeapShiftBytes >> 20} MiB taken from the core's heap before the boot (heap shift test)`);
   }
   if (api.bootDisc && (executable || file.size >= MIN_FULL_BOOT_BYTES)) {
+    // 0209: BootDisc stops a running game first, and that stop waits for the
+    // CPU thread (behind the GPU thread, behind this worker): stop it on the
+    // control pthread before.
+    const running = api.getCoreStateName?.() ?? "";
+    if (api.coreControl && running && running !== "Uninitialized") {
+      await api.coreControl(CORE_CONTROL_OPS.stop, "", "Stop the previous game");
+    }
     coreBoot.attempted = true;
     const _t_boot = performance.now();
     coreBoot.accepted = Boolean(api.bootDisc(path));
@@ -3930,6 +5103,7 @@ async function mountFile(file) {
       ? { title: file.name, gameId: "", platform: "GameCube", region: "", bootKind, entryPoint: executable.entryPoint }
       : { bootKind }),
     bootProbe: bootProbePayload(metadata),
+    needs: bootKind === "disc" ? { ...discNeeds } : { boundingBox: false },
     path,
     ...framePayload()
   };
@@ -3953,6 +5127,14 @@ function resetPresentationBuffer() {
   presentationMaxIntervalMs = 0;
   presentationLongFrameCount = 0;
   visualChangeFps = 0;
+  wgpuNewFrames.reset();
+  newFramesPerSec = null;
+  newFramesProducedPerSec = null;
+  occupancyMeter.reset();
+  cpuThreadBusy = null;
+  gpuThreadBusy = null;
+  replayBusy = null;
+  xfbCopiesPerSec = null;
   visualFrameHash = 0;
   lastVisualFrameHash = 0;
   lastOglSwapCount = 0;
@@ -4398,6 +5580,9 @@ function framePayload({ forceCausalTelemetry = false } = {}) {
       // geometry flowing into the EFB, are pipes/bind-groups missing,
       // are draws being poison-guard-skipped).
       ` jitc:${dolphinJitCacheMap.size}/${dolphinJitNewCompileCount}` +
+      // refreshes each game frame stayed on screen (1/2/3/4+), refreshes
+      // beyond its share, the screen's Hz and the game pace (on/off)
+      (wgpuPresentVsync && wgpuVsyncTracking() ? refreshHelperField() : "") +
       ` wgx:d${webGpuExecStats.drawIdx}/mp${webGpuExecStats.missPipe}` +
       `/mb${webGpuExecStats.missBg}/sk${webGpuExecStats.skipDraw}`
     ),
@@ -4424,6 +5609,24 @@ function framePayload({ forceCausalTelemetry = false } = {}) {
     presentationIntervalHistogramBuckets: PRESENTATION_HISTOGRAM_BUCKETS_MS,
     presentationFrameLag,
     presentationQueueAgeMs,
+    // Patch 0208: the reference smoothness rate (new XFBs on the canvas),
+    // the new XFBs queued, those shown since boot (a mean over any span), and
+    // the older pictures shown after newer ones (lifetime); null without
+    // frame tags.
+    newFramesPerSec,
+    newFramesProducedPerSec,
+    newFramesShown: wgpuNewFrames.shownTotal,
+    framesOutOfOrder: wgpuNewFrames.outOfOrder,
+    // presents of a new frame showing a texture not rewritten since its last
+    // present (src/wgpu-stale-present.js; lifetime, null without tags)
+    stalePresents: wgpuStalePresent.stale,
+    // Shares of the last window, 0..1 or null (src/occupancy-stats.js).
+    cpuThreadBusy,
+    gpuThreadBusy,
+    replayBusy,
+    // XFB copies per second of the last window: the game images made, any
+    // renderer (src/occupancy-stats.js); null when unavailable.
+    xfbCopiesPerSec,
     visualChangeFps,
     visualFrameHash,
     visualSampleSource,
@@ -4502,6 +5705,15 @@ function maybeCreateCausalTelemetry(videoStats, { force = false } = {}) {
     },
     webgpu: {
       ...webGpuCausalStats,
+      presentVsync: wgpuPresentVsync ? {
+        ...wgpuPresentVsyncStats, ...wgpuVsync.stats,
+        refreshMs: wgpuVsyncTracking() ? wgpuVsyncRefreshMs() : null,
+        refreshes: wgpuVsyncTracking() ? wgpuRefreshHistogram.snapshot(performance.now()) : null,
+        gamePace: wgpuPresentGamePace ? { ...wgpuGamePacer.stats, periodMs: wgpuGamePacer.period } : null,
+        // ?vilock=1: on/off, the speed's nudge (ppm), the drift it cancels,
+        // locks taken and lost, why not locked, the refresh and frame periods
+        phaseLock: viLockStatus()
+      } : null,
       visualCadence: wgpuVisualCadenceSnapshot(),
       mappedStaging: wgpuMappedStagingPool?.snapshot() ?? null,
       mappedDrainCoalescing: wgpuMappedDrainCoalescer.snapshot(),
@@ -4602,7 +5814,7 @@ function startPresentationLoop() {
 // already runs in <2ms typical; re-painting the same buffer at 60Hz costs
 // the same as a fresh frame would have. The new-frame presentFrame path
 // is unchanged so latency stays at direct-mode levels; this only fills
-// the visual gaps when Melee internally renders duplicates.
+// the visual gaps when the game internally renders duplicates.
 let _tickRepaintTimer = null;
 function startTickRepaintLoop() {
   if (_tickRepaintTimer) return;
@@ -4635,8 +5847,8 @@ function startTickRepaintLoop() {
     const displayBytes = markerApplied ? marked.bytes : tickBytes;
     let markerOutputIssued = false;
     if (renderGpu) {
-      drawFrameBytesToWebGpu(_lastFrameWidth, _lastFrameHeight, displayBytes);
-      markerOutputIssued = markerApplied;
+      // not issued when the frame was dropped (cpuFrameYieldsToHardware)
+      markerOutputIssued = drawFrameBytesToWebGpu(_lastFrameWidth, _lastFrameHeight, displayBytes) && markerApplied;
     } else if (renderGl) {
       drawFrameBytesToWebGl(_lastFrameWidth, _lastFrameHeight, displayBytes);
       markerOutputIssued = markerApplied;
@@ -4751,7 +5963,7 @@ function scheduleFrameSignalWait() {
       if (waitMs > 200) {
         signalStallCount += 1;
         const isNewWorst = waitMs > worstSignalWaitMs;
-        if (isNewWorst || signalStallCount % 5 === 0) {
+        if (stallLogEnabled && (isNewWorst || signalStallCount % 5 === 0)) {
           if (isNewWorst) worstSignalWaitMs = waitMs;
           // eslint-disable-next-line no-console
           console.log(
@@ -4847,7 +6059,11 @@ function pollInputStateFromSab() {
   }
 }
 
+// Every scheduler of the loop comes here: timed for replayBusy.
 function runPresentationLoop() {
+  return workerBusy.run(runPresentationLoopOnce);
+}
+function runPresentationLoopOnce() {
   const stages = {};
   try {
     loopsSincePresentationFps += 1;
@@ -5148,7 +6364,7 @@ function runPacedPresentation(timestamp = performance.now()) {
 let _firstPaintLogged = false;
 // §28cl last-frame cache for tick-mode re-paints. Updated on every real
 // presentFrame call (NEW content) so the tick timer can re-paint the same
-// content at a steady cadence without waiting for Melee to produce a fresh
+// content at a steady cadence without waiting for the game to produce a fresh
 // xfb. Width/height/pointer/length are exactly what drawFrameToWebGpu /
 // drawFrameToCanvas / drawFrameToWebGl expect — the same call signature
 // presentFrame uses internally.
@@ -5257,9 +6473,8 @@ function presentFrame(width, height, pointer, length, coreFrame = api?.getFrame?
   const drawStartedAt = startProfileSample();
   let markerOutputIssued = false;
   if (renderGpu) {
-    if (markerApplied) drawFrameBytesToWebGpu(width, height, displayFrameView);
-    else drawFrameToWebGpu(width, height, pointer, length);
-    markerOutputIssued = markerApplied;
+    const drawn = markerApplied ? drawFrameBytesToWebGpu(width, height, displayFrameView) : drawFrameToWebGpu(width, height, pointer, length);
+    markerOutputIssued = markerApplied && drawn;
   } else if (renderGl) {
     if (markerApplied) drawFrameBytesToWebGl(width, height, displayFrameView);
     else drawFrameToWebGl(width, height, pointer, length);
@@ -5387,8 +6602,7 @@ function presentFrameBytes(width, height, bytes, coreFrame) {
   const drawStartedAt = startProfileSample();
   let markerOutputIssued = false;
   if (renderGpu) {
-    drawFrameBytesToWebGpu(width, height, displayBytes);
-    markerOutputIssued = markerApplied;
+    markerOutputIssued = drawFrameBytesToWebGpu(width, height, displayBytes) && markerApplied;
   } else if (renderGl) {
     drawFrameBytesToWebGl(width, height, displayBytes);
     markerOutputIssued = markerApplied;
@@ -5475,7 +6689,7 @@ function recordPresentedFrame(coreFrame, shownVi = null) {
     harnessPresentRing[slot + 1] = coreFrame;
     harnessPresentRing[slot + 2] = shownVi ?? moduleInstance?._DolphinWeb_HarnessViSinceBoot?.() ?? -1;
     harnessPresentHead += 1;
-    if (harnessDisplayStop) harnessDisplay.submit(harnessPresentRing[slot + 2]);
+    if (harnessDisplayStop) harnessDisplay.submit(harnessPresentRing[slot + 2], wgpuVsyncFrameTime);
   }
   presentedFrame += 1;
   framesSincePresentationFps += 1;
@@ -5543,6 +6757,8 @@ function updatePresentationFps() {
     presentationWindowUnderrunCount = presentationUnderrunsSinceFps;
     presentationWindowDropCount = presentationDropsSinceFps;
     visualChangeFps = Math.round((visualChangesSincePresentationFps * 1000) / profileElapsedMs);
+    ({ newFramesPerSec, newFramesProducedPerSec } = wgpuNewFrames.window(profileElapsedMs));
+    ({ cpuThreadBusy, gpuThreadBusy, replayBusy, xfbCopiesPerSec } = occupancyMeter.window({ atMs: now, ...readOccupancyCounters() }));
     if (collectMetrics) {
       frameProfileStats = formatProfileWindow(profileElapsedMs);
       lastStructuredProfileWindow = stageWindowFromProfile(profileWindow, profileElapsedMs);
@@ -5562,6 +6778,47 @@ function updatePresentationFps() {
     lastPresentationFpsTime = now;
     checkBootStallWatchdog();
   }
+}
+
+// The counters behind cpuThreadBusy and replayBusy, read once per window.
+// Headroom (0113): off until DolphinWeb_HeadroomStats(n >= 0); turned on
+// once per core while it runs, unless already on (a harness window, never
+// reset under it); then read only (-1). Their cost is one timing per
+// throttle on the CPU thread and per pass with work on the GPU thread
+// (WasmHeadroom.h). Worker time: workerBusy (always on, two clock reads
+// per timed entry) plus the mapped staging pool's remap callbacks
+// (getMappedRange runs outside any drain; ~47 % of the worker on an iPhone).
+// The pool's remap callback time, cumulated across pools (a pool replaced
+// after a device loss or an invalidation keeps counting from the last total).
+let occupancyRemapPool = null;
+let occupancyRemapBaseMs = 0;
+function occupancyRemapMs() {
+  const pool = wgpuMappedStagingPool;
+  if (!pool?.remapCallbackTotalMs) return occupancyRemapBaseMs;
+  if (pool !== occupancyRemapPool) {
+    occupancyRemapBaseMs += occupancyRemapPool?.remapCallbackTotalMs?.() ?? 0;
+    occupancyRemapPool = pool;
+  }
+  return occupancyRemapBaseMs + pool.remapCallbackTotalMs();
+}
+
+function readOccupancyCounters() {
+  const m = moduleInstance;
+  const stats = m?._DolphinWeb_HeadroomStats;
+  let headroom = null;
+  if (typeof stats === "function" && m.HEAPU8 && coreBoot.accepted && api) {
+    headroom = readHeadroomStats(m.HEAPU8.buffer, stats(-1) >>> 0);
+    if (headroom?.on === false && occupancyHeadroomModule !== m) {
+      stats(0);
+      occupancyHeadroomModule = m;
+    }
+  }
+  // The worker's busy time: its timed entry points (workerBusy) and the
+  // pool's remap callbacks (promise callbacks: never inside a timed entry).
+  const busyMs = webGpuCmdRing && renderGpu && !wgpuReplayFatal
+    ? workerBusy.totalMs() + occupancyRemapMs()
+    : null;
+  return { headroom, busyMs };
 }
 
 function checkBootStallWatchdog() {
@@ -5855,6 +7112,50 @@ function formatProfileWindow(elapsedMs) {
   );
 }
 
+// A lost WebGL context (GPU crash mid-game) left the screen black for good.
+// preventDefault() lets the browser restore it: the blitter is then rebuilt.
+// Not restored in time: the page gives this worker a new canvas
+// ("presenter-canvas-lost" → replacePresenterCanvas), presented in 2D.
+function watchWebGlContextLoss(canvas) {
+  canvas.addEventListener("webglcontextlost", (event) => {
+    if (canvas !== renderCanvas) return;
+    event.preventDefault();
+    renderGlLost = true;
+    rendererDiagnostics.webglContextLostCount = (rendererDiagnostics.webglContextLostCount ?? 0) + 1;
+    postStatus("WebGL presenter context lost; waiting for the browser to restore it");
+    clearTimeout(renderGlRestoreTimer);
+    renderGlRestoreTimer = setTimeout(() => {
+      renderGlRestoreTimer = null;
+      if (canvas === renderCanvas && renderGlLost) self.postMessage({ type: "presenter-canvas-lost" });
+    }, WEBGL_RESTORE_WAIT_MS);
+  });
+  canvas.addEventListener("webglcontextrestored", () => {
+    if (canvas !== renderCanvas || !renderGl) return;
+    clearTimeout(renderGlRestoreTimer);
+    renderGlRestoreTimer = null;
+    // Every GL object died with the context.
+    renderGlState = createSoftwareBlitter(renderGl);
+    renderGlLost = false;
+    rendererDiagnostics.webglContextRestoredCount = (rendererDiagnostics.webglContextRestoredCount ?? 0) + 1;
+    postStatus("WebGL presenter context restored");
+  });
+}
+
+// The page's new canvas after a WebGL context that never came back: a 2D
+// presenter, showing the last frame at once.
+async function replacePresenterCanvas({ canvas } = {}) {
+  if (!canvas) return { presenter: renderBackend, replaced: false };
+  clearTimeout(renderGlRestoreTimer);
+  renderGlRestoreTimer = null;
+  await setupSoftwarePresenter(canvas, "2d");
+  rendererDiagnostics.presenterReplacedAfterContextLoss = (rendererDiagnostics.presenterReplacedAfterContextLoss ?? 0) + 1;
+  if (_lastFrameCopyValid && _lastFrameLength > 0) {
+    drawFrameBytesToCanvas(_lastFrameWidth, _lastFrameHeight, _lastFrameCopy.subarray(0, _lastFrameLength));
+  }
+  postStatus(`WebGL presenter replaced by ${renderBackend} after its context was lost`);
+  return { presenter: renderBackend, replaced: true };
+}
+
 async function setupSoftwarePresenter(canvas, presenterBackend) {
   rendererDiagnostics.requestedPresenterBackend = presenterBackend;
   renderCanvas = canvas;
@@ -5862,9 +7163,12 @@ async function setupSoftwarePresenter(canvas, presenterBackend) {
   renderGpu = null;
   renderGl = null;
   renderGlState = null;
+  renderGlLost = false;
   renderImageData = null;
   renderUploadBuffer = null;
   renderRequiresUploadCopy = false;
+  // A presenter set up again (a new canvas) says why it fell back, or nothing.
+  rendererDiagnostics.webglFallback = null;
 
   if (presenterBackend === "webgpu") {
     try {
@@ -5882,15 +7186,21 @@ async function setupSoftwarePresenter(canvas, presenterBackend) {
   }
 
   if (presenterBackend !== "2d") {
-    renderGl =
-      renderCanvas.getContext("webgl2", softwareBlitContextAttributes()) ||
-      renderCanvas.getContext("webgl", softwareBlitContextAttributes());
+    // Without a usable GPU, WebGL rasterises on the CPU (WARP on Windows,
+    // SwiftShader): on a GPU-less Windows runner the 2D canvas showed the same
+    // picture for 13-18 % less Chrome CPU (windows-nogpu lane).
+    // failIfMajorPerformanceCaveat refuses such a context (WARP included), and
+    // a refused getContext leaves the canvas free for 2D.
+    const attributes = { ...softwareBlitContextAttributes(), failIfMajorPerformanceCaveat: !webglAcceptSoftware };
+    renderGl = renderCanvas.getContext("webgl2", attributes) || renderCanvas.getContext("webgl", attributes);
     if (renderGl) {
       renderBackend = "webgl";
       rendererDiagnostics.activePresenterBackend = renderBackend;
       renderGlState = createSoftwareBlitter(renderGl);
+      watchWebGlContextLoss(renderCanvas);
       return;
     }
+    rendererDiagnostics.webglFallback = "no hardware WebGL context (software or none): 2D presenter";
   }
 
   renderContext = renderCanvas.getContext("2d", { alpha: false });
@@ -5932,11 +7242,23 @@ async function createWebGpuPresenter(canvas) {
   if (!adapter) {
     throw new Error(`WebGPU adapter request (${wgpuPowerPreference}) returned null`);
   }
+  if (isFallbackAdapterInfo(adapter.info) && !wgpuAcceptFallbackAdapter) {
+    // As no adapter: the presenter falls back to WebGL, video=wgpu fails.
+    throw new Error(`WebGPU adapter is a CPU fallback (${adapter.info?.architecture || "isFallbackAdapter"}): no usable GPU`);
+  }
 
   let adapterInfo = adapter.info || null;
   if (!adapterInfo && typeof adapter.requestAdapterInfo === "function") {
     try { adapterInfo = await adapter.requestAdapterInfo(); } catch {}
   }
+  const scaleCeiling = internalResolutionCeiling(
+    { info: adapterInfo, limits: adapter.limits, isFallbackAdapter: adapter.isFallbackAdapter },
+    { deviceMemory: self.navigator?.deviceMemory });
+  wgpuScaleAdapterCeiling = scaleCeiling.ceiling;
+  rendererDiagnostics.internalResolutionCeiling = { ...scaleCeiling, lost: wgpuScaleLostCeiling < 4 };
+  // The page holds its scales to this adapter's ceiling (core-host), not to
+  // its own guess from another adapter.
+  self.postMessage({ type: "wgpu-scale-ceiling", ceiling: scaleCeiling.ceiling, reason: scaleCeiling.reason });
   rendererDiagnostics.adapter = {
     selected: true,
     vendor: adapterInfo?.vendor || null,
@@ -5965,6 +7287,9 @@ async function createWebGpuPresenter(canvas) {
   console.log("[wgpu-features] got=" + (haveFeatures.join(",") || "none") +
               " missing=" + (wantFeatures.filter((f) => !haveFeatures.includes(f)).join(",") || "none") +
               " masked=" + ([...wgpuMaskedFeatures].join(",") || "none"));
+  // timestamp-query: the display filter's GPU timing, metrics on only
+  // (drop-meter); the player's device is created as before.
+  if (collectMetrics && adapter.features?.has("timestamp-query") && !wgpuMaskedFeatures.has("timestamp-query")) haveFeatures.push("timestamp-query");
   const device = await adapter.requestDevice(
     haveFeatures.length ? { requiredFeatures: haveFeatures } : undefined);
   rendererDiagnostics.device = {
@@ -5978,6 +7303,7 @@ async function createWebGpuPresenter(canvas) {
     },
   };
   device.addEventListener?.("uncapturederror", (event) => {
+    wgpuIntegrity.note("uncapturedErrors");
     recordRendererError("uncaptured-error", event?.error?.message || event?.message || "unknown");
   });
   const format = typeof gpu.getPreferredCanvasFormat === "function" ? gpu.getPreferredCanvasFormat() : "bgra8unorm";
@@ -6077,7 +7403,8 @@ fn fs(input: VertexOutput) -> @location(0) vec4f {
       alphaMode: "opaque",
       usage: textureUsage.RENDER_ATTACHMENT |
         ((wgpuReplayClassifier || inputReadbackDiagnostics) ? textureUsage.COPY_SRC : 0) |
-        (wgpuVisualCadenceEnabled ? textureUsage.TEXTURE_BINDING : 0)
+        (wgpuVisualCadenceEnabled ? textureUsage.TEXTURE_BINDING : 0) |
+        (wgpuPresentVsync ? textureUsage.COPY_DST : 0)
     });
   } catch (e) {
     recordRendererError("validation", `context.configure: ${e?.message || e}`);
@@ -6106,9 +7433,10 @@ fn fs(input: VertexOutput) -> @location(0) vec4f {
   }
 
   wgpuReplayFatal = null;
+  wgpuFatalReporter.reset();
 
-  device.lost.then((info) => {
-    handleWgpuDeviceLoss({
+  device.lost.then(async (info) => {
+    const loss = handleWgpuDeviceLoss({
       activeDevice: renderGpu?.device,
       lostDevice: device,
       info,
@@ -6119,14 +7447,39 @@ fn fs(input: VertexOutput) -> @location(0) vec4f {
       invalidateGeometry: () => {
         api?.setWebGpuGeometryPackEnabled?.(wgpuGeometryPackEnabled ? 1 : 0);
         api?.setWebGpuGeometryRangeEnabled?.(wgpuGeometryRangeEnabled ? 1 : 0);
+        api?.setWebGpuGeometryCacheEnabled?.(wgpuGeometryCacheMode);
       },
       clearActiveDevice: () => { renderGpu = null; },
       setBackend: (backend) => { renderBackend = backend; },
       postStatus,
     });
+    if (!loss.handled) return;
+    wgpuIntegrity.note("deviceLosses");
+    // Lost above 1x (out of memory, GPU process reset): never again at that
+    // scale in this worker, and the page restarts at 1x (core-host).
+    const internalResolution = wgpuInternalResolution;
+    if (internalResolution > 1) wgpuScaleLostCeiling = 1;
+    rendererDiagnostics.internalResolutionCeiling = {
+      ...rendererDiagnostics.internalResolutionCeiling, lost: wgpuScaleLostCeiling < 4
+    };
+    // ?wgpurecover=1: stop the game here, not a round trip to the page
+    // later (it ran ~0.45 s blind then); the page then saves the state.
+    const pause = wgpuSessionRecoverEnabled ? await pauseCoreAfterDeviceLoss() : null;
+    wgpuFatalReporter.report({ internalResolution, reason: String(info?.reason ?? "unknown"), detail: loss.detail, ...(pause ? { pause } : {}) });
   });
 
   return state;
+}
+
+// { state, changed } once paused (changed false: the player had paused it),
+// or { error }. Never throws: the page must hear of the loss either way.
+async function pauseCoreAfterDeviceLoss() {
+  try {
+    const { state, changed } = await coreLifecycle.pause();
+    return { state, changed };
+  } catch (error) {
+    return { error: String(error?.message || error) };
+  }
 }
 
 function ensureWgpuVisualCadenceResources(gpu = renderGpu) {
@@ -6424,18 +7777,26 @@ function drawFrameToWebGpu(width, height, pointer, length) {
     return;
   }
 
-  drawFrameBytesToWebGpu(width, height, new Uint8Array(moduleInstance.HEAPU8.buffer, pointer, length));
+  return drawFrameBytesToWebGpu(width, height, new Uint8Array(moduleInstance.HEAPU8.buffer, pointer, length));
 }
 
+// Whether the frame was drawn: false when skipped (nothing to draw on, or a
+// CPU frame the hardware path's canvas does not take), so that a frame's
+// input marker is not counted as shown.
 function drawFrameBytesToWebGpu(width, height, frameView) {
   if (!renderCanvas || !renderGpu || width <= 0 || height <= 0 || !frameView?.byteLength) {
-    return;
+    return false;
+  }
+  // The hardware path sized the backbuffer: a CPU frame (the demo scene's
+  // 320x240) would shrink the canvas for good (wgpu-enhancements.js).
+  if (cpuFrameYieldsToHardware({ hardware: hardwareVideoBackend, backbufferSized: wgpuBackbufferSized, ringOwnsCanvas: cmdRingOwnsCanvas })) {
+    return false;
   }
 
   const gpu = renderGpu;
   const textureUsage = self.GPUTextureUsage;
   if (!textureUsage) {
-    return;
+    return false;
   }
 
   if (renderCanvas.width !== width || renderCanvas.height !== height) {
@@ -6450,7 +7811,8 @@ function drawFrameBytesToWebGpu(width, height, frameView) {
       format: gpu.format,
       usage: textureUsage.RENDER_ATTACHMENT |
         ((wgpuReplayClassifier || inputReadbackDiagnostics) ? textureUsage.COPY_SRC : 0) |
-        (wgpuVisualCadenceEnabled ? textureUsage.TEXTURE_BINDING : 0)
+        (wgpuVisualCadenceEnabled ? textureUsage.TEXTURE_BINDING : 0) |
+        (wgpuPresentVsync ? textureUsage.COPY_DST : 0)
     });
     gpu.canvasWidth = width;
     gpu.canvasHeight = height;
@@ -6505,6 +7867,7 @@ function drawFrameBytesToWebGpu(width, height, frameView) {
   pass.end();
   gpu.device.queue.submit([encoder.finish()]);
   gpuCompletionTracker.recordSubmittedWork(gpu.device.queue, "software-present");
+  return true;
 }
 
 function webGpuUploadSource(gpu, frameView, rowBytes, bytesPerRow, height) {
@@ -6530,7 +7893,7 @@ function alignTo(value, alignment) {
 }
 
 function drawFrameToWebGl(width, height, pointer, length) {
-  if (!renderCanvas || !renderGl || !renderGlState || width <= 0 || height <= 0 || pointer <= 0 || length <= 0) {
+  if (!renderCanvas || !renderGl || !renderGlState || renderGlLost || width <= 0 || height <= 0 || pointer <= 0 || length <= 0) {
     return;
   }
 
@@ -6538,7 +7901,7 @@ function drawFrameToWebGl(width, height, pointer, length) {
 }
 
 function drawFrameBytesToWebGl(width, height, frameView) {
-  if (!renderCanvas || !renderGl || !renderGlState || width <= 0 || height <= 0 || !frameView?.byteLength) {
+  if (!renderCanvas || !renderGl || !renderGlState || renderGlLost || width <= 0 || height <= 0 || !frameView?.byteLength) {
     return;
   }
 
@@ -6757,7 +8120,7 @@ const DOLPHIN_JIT_IDB_NAME = "dolphin-jit-cache";
 const DOLPHIN_JIT_IDB_STORE = "modules";
 const DOLPHIN_JIT_IDB_META = "metadata";
 const DOLPHIN_JIT_IDB_VERSION = 3;
-// §28u: 8192 was far too small for full Melee — the user's cache
+// §28u: 8192 was far too small for a full game — the user's cache
 // plateaued at ~8135 (cap hit) while still in the menus, so EVERY
 // later 3D scene (intro/2nd cutscene, battle) exceeded the cap →
 // `handleDolphinJitNewCompile` early-returns at line ~2858 → those
@@ -7003,7 +8366,7 @@ async function writeDolphinJitEntryToIdb(hash, bytes) {
     }
   }
 }
-async function fetchWasmAndFingerprint(coreUrlValue, expectedSha256 = DEFAULT_UPSTREAM_CORE_SHA256) {
+async function fetchWasmAndFingerprint(coreUrlValue, expectedSha256) {
   // coreUrlValue points at the JS shim (dolphin-core-upstream.js). The
   // wasm sits beside it under the conventional name.
   const wasmUrl = new URL("dolphin-core-upstream.wasm", coreUrlValue).href;
@@ -7216,6 +8579,7 @@ async function reconcileJitCacheWithBuild(fingerprint) {
   if (identity.reset) {
     await clearDolphinJitModulesStore(dolphinJitIdb);
     dolphinJitCacheMap.clear();
+    dolphinJitPersistedOnly.clear();
     dolphinJitPrebuiltOverflow = null;
     postStatus(
       `jit-cache: identity reset (${identity.reason}); cleared unverified modules`
@@ -7253,10 +8617,17 @@ let aotDiscKey = null;
 let aotDiscGeneration = 0;
 let aotDiscKeyPromise = null;
 let aotDiscFile = null;
+let aotDiscKind = "disc"; // "dol": a booted .dol, keyed by readDolKeyFromFile
+// Which boots get ?aot=1: a disc as before (a full boot image), and a .dol;
+// nothing else (.elf, .dff, a disc too small to boot).
+export function aotBootKind(bootKind, size) {
+  if (bootKind === "disc") return size >= MIN_FULL_BOOT_BYTES ? "disc" : null;
+  return bootKind === "dol" ? "dol" : null;
+}
 function readMountedDiscKey() {
   if (!aotDiscKeyPromise) {
     const generation = aotDiscGeneration;
-    aotDiscKeyPromise = readDiscKeyFromFile(aotDiscFile).then(
+    aotDiscKeyPromise = (aotDiscKind === "dol" ? readDolKeyFromFile : readDiscKeyFromFile)(asDiscBlob(aotDiscFile, { anyHost: harnessEnabled })).then(
       (key) => (generation === aotDiscGeneration ? (aotDiscKey = key) : null),
       () => null
     );
@@ -7336,6 +8707,19 @@ let aotFirstLaunchEnabled = false;
 let aotFirstLaunch = null;
 const AOT_PROGRESS_SCHEMA = "wasm-dolphin.aot-progress.v1";
 const DOLPHIN_AOT_BOOT_BYTES = 192 << 20; // region modules retained before boot, at most
+// Test seams: the mounted file's key state as a mount sets it (the key then
+// read by readMountedDiscKey, by kind), and the plan worker's factory.
+export function setAotMountedFileForTest(file, kind = "disc") {
+  aotDiscGeneration += 1;
+  aotDiscKey = null;
+  aotDiscKeyPromise = null;
+  aotDiscFile = file;
+  aotDiscKind = kind;
+}
+let aotPlannerWorkerForTest = null;
+export function setAotPlannerWorkerForTest(createWorker) {
+  aotPlannerWorkerForTest = createWorker ?? null;
+}
 export function setAotFirstLaunchEnabledForTest(enabled) {
   aotFirstLaunchEnabled = enabled === true;
   aotFirstLaunch?.dispose();
@@ -7346,7 +8730,10 @@ export async function handleAotMessage(type, payload = {}) {
   const idle = aotFirstLaunchEnabled ? "none" : "disabled";
   switch (type) {
     case "aotStatus": {
-      const status = aotFirstLaunch ? await aotFirstLaunch.status() : { state: idle, fraction: 0 };
+      const base = aotFirstLaunch ? await aotFirstLaunch.status() : { state: idle, fraction: 0 };
+      // The engine's features, and why regions are off when a missing one
+      // turned them off.
+      const status = { ...base, wasmFeatures: { ...wasmFeatures, relaxedMadd }, ...(aotRegionsOffReason ? { regionsOff: aotRegionsOffReason } : {}) };
       const profile = aotProfileReport();
       return profile ? { ...status, profile } : status;
     }
@@ -7385,6 +8772,7 @@ function unsupportedAotFlow() {
 // Test seams: `module` stands for the core, `readDiscKey` for the disc key of
 // the mounted file, `cacheStorage` for the browser's.
 export async function prepareAotFirstLaunch(file, {
+  kind = "disc", // "dol": a booted .dol (planDolFile)
   module = moduleInstance,
   readDiscKey = readMountedDiscKey,
   coreHash = aotCoreFingerprint,
@@ -7401,16 +8789,31 @@ export async function prepareAotFirstLaunch(file, {
     return;
   }
   const generation = aotDiscGeneration;
-  const [{ coreAotKeyParts, coreAssembleOptions, coreRegionTranslator, createAotFirstLaunch }, { OpfsPlanStore }, { AotProfileStore, blocksFromPcSamples, profileKey }, { planDiscInWorker }, { fileReader, planDisc }, { createProfileRecorder, guestPcAddress, startHotSampler }] =
+  const [{ coreAotKeyParts, coreAssembleOptions, coreRegionTranslator, createAotFirstLaunch, createRegionInstaller, discAwareYield, sharedYield, REGION_JSC_FUNCTION_CAP }, { OpfsPlanStore }, { AotProfileStore, blocksFromPcSamples, profileKey }, { planDiscInWorker }, { fileReader, planDisc, planDolFile }, { createProfileRecorder, guestPcAddress, startHotSampler }] =
     await Promise.all([import("./aot-orchestrator.js"), import("./aot-optimizer.js"), import("./aot-profile.js"), import("./aot-plan-worker.js"), import("./aot-recomp.js"), import("./aot-hot-sampler.js")]);
   const discKey = await readDiscKey();
   if (generation !== aotDiscGeneration) return;
-  const keyParts = coreAotKeyParts(module);
+  // The wasm function body cap the fragments are formed under: JSC's OMG
+  // limit under JavaScriptCore only (src/wasm-engine.js), none elsewhere
+  // (V8 pays for the extra transitions); ?regioncap=N|0 forces it. In the
+  // region key only when there is one.
+  const functionCap = regionFunctionCap(REGION_JSC_FUNCTION_CAP);
+  const coreKeyParts = coreAotKeyParts(module);
+  const keyParts = coreKeyParts ? { ...coreKeyParts, functionCap } : null;
   const core = coreAssembleOptions(module);
   const translator = keyParts && core && discKey && coreHash
-    ? coreRegionTranslator(module, { mask: keyParts.codegenMask, helperNames: core.helperNames })
+    ? coreRegionTranslator(module, { mask: keyParts.codegenMask, helperNames: core.helperNames, functionCap,
+      yieldNow: discAwareYield({ lastReadAt: () => lastDiscReadAt }) })
     : null;
   const opfs = translator ? await Promise.resolve(storageRoot()).catch(() => null) : null;
+  // 0189 (on by default): the entry -> fragment section only in its mode
+  // (bit 16 of the codegen mask, so its modules have their own keys).
+  const assembleOptions = core?.assemble && { ...core.assemble, fragmentEntries: ((keyParts?.codegenMask ?? 0) & (1 << 16)) !== 0 };
+  const assemblerModule = translator && assembleOptions && typeof Worker === "function" ? await import("./aot-assembler-worker.js") : null;
+  const aotAssemblerClient = assemblerModule && (aotAssemblerRequestedFlag ?? assemblerModule.aotAssemblerDefault(wasmEngineName))
+    ? assemblerModule.createAotAssemblerClient({ options: assembleOptions,
+      onHelperFailure: (why) => postStatus(`aot: assembler worker failed (${why}); regions assembled on this worker`) })
+    : null;
   const flow = createAotFirstLaunch({
     discKey,
     coreHash,
@@ -7418,8 +8821,26 @@ export async function prepareAotFirstLaunch(file, {
     loadProfile: () => (opfs ? new AotProfileStore(opfs).load(profileKey(discKey)).catch((error) => noteAotProfileReadFailure(error)) : null),
     keyParts,
     translator,
-    assembleOptions: core?.assemble,
-    openCache: (identity) => openAotCache({ ...identity, baseUrl: AOT_BASE_URL, cacheStorage }),
+    assembleOptions,
+    // Regions loaded back from the cache go through the compiler worker as
+    // those of a first launch do (precompileAotRegion): handed over at once,
+    // then every function called once in the background, so V8's lazy
+    // Liftoff code exists in the shared NativeModule before the CPU thread
+    // first runs it. Compiled here, by compileStreaming, they were never
+    // warmed: the CPU thread compiled each function on its first call (a
+    // warm launch lost ~0.3 s at the race's load, harness drop-meter).
+    // Each region read back from the cache waits for the core's disc reads
+    // to be quiet first (with the same budget as the translator, its own):
+    // a warm boot's ~20 small reads per 50 ms each waited ~2 ms behind the
+    // cache's reads, digests and compile messages (drop meter, warm boot:
+    // ~180 ms lost with the worker never stalled).
+    openCache: (identity) => openAotCache({
+      ...identity, baseUrl: AOT_BASE_URL, cacheStorage,
+      // one wait per round of the loader's 8 lanes (sharedYield), not 8
+      beforeLoad: sharedYield(discAwareYield({ lastReadAt: () => lastDiscReadAt })),
+      onLoadReject: (key, error) => regionLinkFailures.record(key, error),
+      ...aotCacheCompileOptions()
+    }),
     planStore: opfs ? new OpfsPlanStore(opfs) : null,
     // Planning reads the DOL and RELs and runs discovery (about a second):
     // in a worker of its own, never on this one, which serves the core's
@@ -7427,7 +8848,9 @@ export async function prepareAotFirstLaunch(file, {
     buildPlan: async () => {
       const profile = opfs ? await new AotProfileStore(opfs).load(profileKey(discKey)).catch((error) => noteAotProfileReadFailure(error)) : null;
       aotPlanProfileForTest = profile;
-      return typeof Worker === "function" ? planDiscInWorker(file, { profile }) : planDisc(fileReader(file), { profile });
+      if (aotPlannerWorkerForTest) return planDiscInWorker(file, { profile, kind, createWorker: aotPlannerWorkerForTest });
+      if (typeof Worker === "function") return planDiscInWorker(file, { profile, kind });
+      return kind === "dol" ? planDolFile(fileReader(file), file.size, { profile }) : planDisc(fileReader(file), { profile });
     },
     compile: precompileAotRegion,
     // Queued once the module is also kept under its bytes' key: the CPU
@@ -7443,13 +8866,22 @@ export async function prepareAotFirstLaunch(file, {
       // parallel with the others; only the queueing waits its turn. Nothing
       // of a disc unmounted since (aotDiscGeneration) is queued.
       if (generation !== aotDiscGeneration) return;
-      const prepared = aotCoreBooted ? prepareAotRegion(module, region).catch(() => null) : null;
-      aotQueueChain = aotQueueChain.then(() => keyed.catch(() => {})).then(() => {
-        if (generation !== aotDiscGeneration) return undefined;
-        return prepared ? prepared.then((p) => p && submitAotRegion(module, p)) : queueAotRegionAfterBoot(module, region);
-      }).catch(() => {});
+      // One region at a time, back to the event loop between two (this
+      // worker serves the core's disc reads): prepared all at once, a warm
+      // launch's ~140 cached regions made a single ~210 ms task 0.3-0.5 s
+      // into the boot, the CPU thread waiting on the disc meanwhile (drop
+      // meter, warm boot).
+      aotRegionInstaller ??= newAotRegionInstaller(createRegionInstaller);
+      aotQueueChain = aotRegionInstaller.push({ module, region, keyed }, generation);
     },
     retain: (key, mod, bytes) => {
+      // After the boot, without a native module cache: not kept (the CPU
+      // thread compiles the region's bytes itself; the module here was only
+      // needed for its sections, read by the flow before this call).
+      if (!keepModulesForNativeCache()) {
+        dolphinJitCopiesSkipped += 1;
+        return;
+      }
       // Also under the key the CPU thread's compile looks up (the SHA-256 of
       // the bytes, as for a block): its install of the region is then a hit
       // in its own module map, handed over below before the boot.
@@ -7460,7 +8892,14 @@ export async function prepareAotFirstLaunch(file, {
     },
     maxBootModules: Math.max(0, DOLPHIN_JIT_CACHE_MAX - dolphinJitCacheMap.size),
     maxBootBytes: DOLPHIN_AOT_BOOT_BYTES,
-    onEvent: (event) => self.postMessage({ type: "aot-progress", event })
+    // The regions' assembly in a worker of its own (aot-assembler-worker.js):
+    // 30-60 ms of JS each, which on this worker held back presents.
+    ...(aotAssemblerClient ? { tuning: { assemble: (fragments) => aotAssemblerClient.assemble(fragments) }, disposeAssembler: () => aotAssemblerClient.terminate() } : {}),
+    onEvent: (event) => {
+      // the optimisation done: the assembler worker's memory goes back (made again on demand)
+      if (event?.type === "done") aotAssemblerClient?.idle();
+      self.postMessage({ type: "aot-progress", event });
+    }
   });
   aotFirstLaunch = flow;
   // Where this player's game spends its time, recorded into the local
@@ -7508,9 +8947,18 @@ export function startAotFirstLaunchAfterBoot(flow = aotFirstLaunch) {
     if (!ready || disc !== aotDiscGeneration) return;
     aotCoreBooted = true;
     const waiting = aotRegionsBeforeBoot.splice(0);
-    aotQueueChain = aotQueueChain.then(async () => {
-      for (const [module, region] of waiting) await queueAotRegion(module, region).catch(() => {});
-    });
+    // Through the same installer as the cache's (one order, hottest first;
+    // a remount meanwhile drops the rest), else as before.
+    if (aotRegionInstaller) {
+      for (const [module, region] of waiting) aotQueueChain = aotRegionInstaller.push({ module, region }, disc);
+    } else {
+      aotQueueChain = aotQueueChain.then(async () => {
+        for (const [module, region] of waiting) {
+          if (disc !== aotDiscGeneration) return;
+          await queueAotRegion(module, region).catch(() => {});
+        }
+      });
+    }
   });
   if (!flow?.supported) return Promise.resolve();
   const generation = flow.generation;
@@ -7524,13 +8972,67 @@ export function startAotFirstLaunchAfterBoot(flow = aotFirstLaunch) {
     // own reading the guest PC, nothing on the CPU thread).
     aotHotSampler?.stop();
     aotHotSampler = aotProfileTarget?.flow === flow
-      ? aotProfileTarget.startHotSampler({ buffer: moduleInstance?.HEAPU8?.buffer, pcAddress: aotProfileTarget.guestPcAddress(moduleInstance), periodMs: AOT_PROFILE_SAMPLE_MS })
+      ? aotProfileTarget.startHotSampler({ buffer: moduleInstance?.HEAPU8?.buffer, pcAddress: aotProfileTarget.guestPcAddress(moduleInstance), periodMs: aotProfileSampleMs })
       : null;
+    if (!aotHotSampler && aotProfileSampleMs === 0) postStatus("aot: local profile sampler off (?aotsample=0)");
     startAotProfileRecorder(flow, aotHotSampler);
     return flow.loadRest();
   }).catch(() => {}).then(() => {
     if (aotFirstLaunch === flow) return flow.start({ resume: true, ifGeneration: generation });
   });
+}
+// A save state loaded early in a first launch runs code the translation
+// reaches late (static order, ~25 modules/s): 1.4-2.3 s at 43-55 % after a
+// quick-load ~2 s in. The guest PCs since the load, from the local profile's
+// sampler (a thread of its own, 10 ms), put the modules that cover them first,
+// in rounds as the state's hot code shows up. Without that sampler, this
+// worker reads the PC itself (its event loop is busy: ~50 samples/s). Never
+// throws, never awaited by the load. A later load ends these rounds (its own
+// take over), and no round runs once the optimisation has nothing left.
+const AOT_STATE_ROUNDS_MS = [600, 1500, 3000];
+let aotStateLoads = 0;
+export async function prioritizeAotAfterStateLoad({ flow = aotFirstLaunch, instance = moduleInstance, sampler = aotHotSampler, rounds = AOT_STATE_ROUNDS_MS,
+  everyMs = 2, wait = (t) => new Promise((r) => setTimeout(r, t)), now = () => performance.now() } = {}) {
+  let watch = null;
+  const load = ++aotStateLoads;
+  const current = () => load === aotStateLoads && disc === aotDiscGeneration;
+  const disc = aotDiscGeneration;
+  try {
+    if (!flow?.supported || flow.hasWork?.() === false) return 0;
+    let read;
+    if (sampler?.watch) {
+      // counts from the load on: the sampler flushes what it had before
+      watch = sampler.watch();
+      read = async (until) => { await wait(Math.max(0, until - now())); return watch.read(); };
+    } else {
+      const pcAddress = aotProfileTarget?.guestPcAddress?.(instance) || instance?._DolphinWeb_GuestPcAddress?.() || 0;
+      // The real core exports HEAPU8 only (as the hot sampler reads it).
+      const heap = instance?.HEAPU8?.buffer ? new Uint32Array(instance.HEAPU8.buffer) : null;
+      if (!pcAddress || pcAddress % 4 || !heap) return 0;
+      const counts = new Map();
+      read = async (until) => {
+        while (now() < until && current()) {
+          const pc = heap[pcAddress >>> 2] >>> 0;
+          if (pc >= 0x80000000 && pc < 0x81800000) counts.set(pc, (counts.get(pc) ?? 0) + 1);
+          await wait(everyMs);
+        }
+        return [...counts.entries()];
+      };
+    }
+    const t0 = now();
+    let moved = 0;
+    for (const at of rounds) {
+      if (flow.hasWork?.() === false) break;
+      const hits = await read(t0 + at);
+      if (!current()) return moved; // another load or another disc meanwhile
+      if (hits.length && flow.hasWork?.() !== false) moved = flow.prioritize(hits);
+    }
+    return moved;
+  } catch {
+    return 0;
+  } finally {
+    watch?.stop();
+  }
 }
 let aotHotSampler = null;
 let aotProfileTarget = null;
@@ -7563,6 +9065,37 @@ export const recordAotProfileForTest = (samples) => aotProfileTarget?.record(sam
 export const aotPlanProfileReadForTest = () => aotPlanProfileForTest;
 let aotProfileTimer = null;
 const AOT_PROFILE_SAMPLE_MS = 10; // one guest PC per 10 ms: enough for block weights
+let aotProfileSampleMs = AOT_PROFILE_SAMPLE_MS;
+// The page's wasm engine (core-host, src/wasm-engine.js); without one, this
+// worker's own detection (no ?wasmengine= here: a worker's location is its
+// script's).
+let wasmEngineName = "unknown";
+// The page's engine as the adapter passed it (?wasmengine= resolved there),
+// else this worker's own detection.
+export function resolveWasmEngineName(requested, detect = () => wasmEngine({ search: "" })) {
+  return WASM_ENGINES.includes(requested) ? requested : detect();
+}
+export const wasmEngineForTest = () => wasmEngineName;
+// Test seams: the engine this worker believes it runs on, and whether the
+// core has booted (the Modules kept before it reach the pthreads).
+export function setWasmEngineForTest(name) {
+  wasmEngineName = name;
+}
+export function setAotCoreBootedForTest(on) {
+  aotCoreBooted = on === true;
+}
+// ?regioncap=N|0 (core-host): the region function cap forced, else null (by engine).
+let aotRegionCapRequested = null;
+// ?aotasm=0|1 (core-host), null when absent: the default by engine
+// (aotAssemblerDefault: off under JSC until measured on an iPhone).
+let aotAssemblerRequestedFlag = null;
+export function regionFunctionCap(jscCap) {
+  return aotRegionCapRequested ?? (wasmEngineName === "jsc" ? jscCap : 0);
+}
+export function setRegionCapForTest({ engine = null, cap = null } = {}) {
+  if (engine) wasmEngineName = engine;
+  aotRegionCapRequested = cap;
+}
 const AOT_PROFILE_RECORD_MS = 60000;
 // Every minute, and when the tab hides or closes (flushUserData), the
 // emulation pauses or stops, or another disc is mounted, what the sampler
@@ -7613,6 +9146,24 @@ async function whenCoreRamReady(module, { timeoutMs = 60000, everyMs = 50 } = {}
 }
 const aotRegionsBeforeBoot = [];
 let aotQueueChain = Promise.resolve();
+// The cached regions' installation, one at a time, submits in order
+// (createRegionInstaller, aot-orchestrator.js).
+let aotRegionInstaller = null;
+function newAotRegionInstaller(createRegionInstaller) {
+  return createRegionInstaller({
+    current: () => aotDiscGeneration,
+    prepare: async ({ module, region, keyed }) => {
+      await keyed?.catch(() => {});
+      if (!aotCoreBooted) {
+        queueAotRegionAfterBoot(module, region);
+        return null;
+      }
+      const r = await prepareAotRegion(module, region, aotFirstLaunch, { deferCompile: true }).catch(() => null);
+      return r && { prepared: { module, p: r.prepared }, pending: r.pending };
+    },
+    submit: ({ module, p }) => submitAotRegion(module, p)
+  });
+}
 function queueAotRegionAfterBoot(module, region) {
   if (aotCoreBooted) return queueAotRegion(module, region).catch(() => {});
   aotRegionsBeforeBoot.push([module, region]);
@@ -7635,13 +9186,20 @@ async function queueAotRegion(module, region, flow = aotFirstLaunch) {
 }
 // The part of queueAotRegion that may run alongside other modules' (heap
 // patch, compile of the patched bytes): what to queue, or null.
-async function prepareAotRegion(module, { key, bytes, entries, members, layout = 0 }, flow = aotFirstLaunch) {
-  if (typeof module?._DolphinWeb_AotQueueRegion !== "function" || !bytes?.length || !entries?.length || !members?.length) return null;
+// deferCompile: a compile of the patched bytes is started, not awaited; the
+// result then carries it as `pending` (resolves true once compiled and kept,
+// false if it failed), and the caller submits only after it.
+async function prepareAotRegion(module, { key, bytes, entries, members, layout = 0 }, flow = aotFirstLaunch, { deferCompile = false } = {}) {
+  if (typeof module?._DolphinWeb_AotQueueRegion !== "function" || !bytes?.length || !entries?.length || !members?.length) {
+    noteAotRegionLedger(key, entries, "empty");
+    return null;
+  }
   // Translated for another heap layout: the core would refuse it; not even
   // copied into its heap (counted). Translated again from guest memory, its
   // cache entry overwritten (the new module comes back through install).
   if (typeof module._DolphinWeb_AotLayoutHash === "function" && (layout >>> 0) !== (module._DolphinWeb_AotLayoutHash() >>> 0)) {
     aotLayoutSkipped += 1;
+    noteAotRegionLedger(key, entries, "layout");
     if (key) flow?.retranslate?.(key);
     return null;
   }
@@ -7653,6 +9211,7 @@ async function prepareAotRegion(module, { key, bytes, entries, members, layout =
   // section, or whose section does not parse, goes with none (0, 0), which
   // the core refuses; the core also checks every site itself.
   let heapBases = [0, 0];
+  let pending = null;
   if (typeof module._DolphinWeb_AotRegionHeapBases === "function") {
     const generation = aotDiscGeneration;
     const { coreHeapBases } = await import("./aot-orchestrator.js");
@@ -7664,6 +9223,7 @@ async function prepareAotRegion(module, { key, bytes, entries, members, layout =
       heap = regionHeapOfBytes(patched);
     } catch {
       aotLayoutSkipped += 1; // a malformed section or a site that does not hold its base: never queued
+      noteAotRegionLedger(key, entries, "heap-section");
       return null;
     }
     if (patched !== bytes) {
@@ -7671,22 +9231,27 @@ async function prepareAotRegion(module, { key, bytes, entries, members, layout =
       // thrown away (counted; up to the whole cache when the heap moved).
       aotHeapPatched += 1;
       aotHeapPatchedBytes += bytes.length;
-      const patchedKey = await regionBlockCacheKey(patched);
-      const compiled = await precompileAotRegion(patchedKey, patched);
-      if (!compiled.module) {
+      const compiling = (async () => {
+        const compiled = await precompileAotRegion(await regionBlockCacheKey(patched), patched);
+        if (compiled.module) return true;
         aotHeapPatchFailed += 1;
-        return null;
-      }
+        noteAotRegionLedger(key, entries, "heap-patch-compile");
+        return false;
+      })();
       bytes = patched;
+      if (deferCompile) pending = compiling;
+      else if (!(await compiling)) return null;
     }
     if (generation !== aotDiscGeneration) return null; // another disc meanwhile
     if (heap) heapBases = [heap.ramBase, heap.l1Base];
   }
-  return { generation: aotDiscGeneration, bytes, entries, members, layout, heapBases };
+  const prepared = { key, generation: aotDiscGeneration, bytes, entries, members, layout, heapBases };
+  return deferCompile ? { prepared, pending } : prepared;
 }
 // Copies a prepared region into the core's heap and queues it (in order).
-function submitAotRegion(module, { generation, bytes, entries, members, layout, heapBases }) {
+function submitAotRegion(module, { key, generation, bytes, entries, members, layout, heapBases }) {
   if (generation !== aotDiscGeneration) return; // another disc since it was prepared
+  noteAotRegionLedger(key, entries, "queued", members.map((x) => ({ ranges: x.ranges, hash: x.hash })));
   const ranges = members.flatMap((m) => m.ranges);
   const triples = members.flatMap((m) => [m.ranges.length, m.hash ? parseInt(m.hash.slice(8), 16) : 0, m.hash ? parseInt(m.hash.slice(0, 8), 16) : 0]);
   const words = [...entries, ...ranges.flat(), ...triples].map((v) => v >>> 0);
@@ -7704,19 +9269,40 @@ function submitAotRegion(module, { generation, bytes, entries, members, layout, 
   }
 }
 export const queueAotRegionForTest = queueAotRegion;
+export const regionLedgerForTest = (pcs) => harnessRegionLedger(pcs);
+export const regionMissTopForTest = (heap, m) => harnessRegionMissTop(heap, m);
+export const regionLedgerStaleForTest = (m) => harnessRegionLedgerStale(m);
+export function setHarnessEnabledForTest(on) {
+  harnessEnabled = on === true;
+  if (!harnessEnabled) aotRegionLedger.clear();
+}
 // A region module of the first launch: compiled off the CPU thread when the
-// compiler worker is on (?aotcompiler=1), kept alive under its key.
-async function precompileAotRegion(key, bytes) {
+// compiler worker is on (?aotcompiler=1), kept alive under its key (without
+// a native module cache past the boot: compiled for its sections and
+// validation, not kept).
+export async function precompileAotRegion(key, bytes) {
   let module;
   try {
     module = dolphinAotCompilerEnabled
       ? (await getDolphinAotCompiler().compile(bytes, { deliver: DELIVER_BEFORE_WARM })).module
       : await WebAssembly.compile(bytes);
   } catch (err) {
+    regionLinkFailures.record(key, err);
     return { reason: compileFailureReason(err) };
   }
-  if (dolphinJitCacheMap.size < DOLPHIN_JIT_CACHE_MAX) dolphinJitCacheMap.set(key, module);
+  if (!keepModulesForNativeCache()) dolphinJitCopiesSkipped += 1;
+  else if (dolphinJitCacheMap.size < DOLPHIN_JIT_CACHE_MAX) dolphinJitCacheMap.set(key, module);
   return { module };
+}
+// How the region cache compiles what it loads back (openAotCache options).
+// With the compiler worker, and only where V8 keeps a native module cache:
+// through that worker, handed over at once and every function then called
+// once in the background, as the first launch's regions are; elsewhere
+// (JSC, SpiderMonkey) the module would be dropped and the CPU thread compile
+// the bytes itself, the warm-up lost (an iPhone under its memory cap).
+export function aotCacheCompileOptions() {
+  if (!dolphinAotCompilerEnabled || !nativeModuleCache(wasmEngineName)) return {};
+  return { compile: (bytes) => compileDolphinJitModuleOffThread(bytes, DELIVER_BEFORE_WARM, true), compileStreaming: null };
 }
 // P5 (plan piste 3): cached and requested modules are compiled in a
 // dedicated worker that also runs every entry point once on scratch memory, so
@@ -7822,6 +9408,15 @@ export function precompileDolphinJitModule(key, input) {
       postStatus("jit-cache: rejected compile request with mismatched block identity");
       return { reason: "key-mismatch" };
     }
+    // No native module cache: compiling here would only make a second copy.
+    // The slot is marked ready and the CPU thread compiles its own (an engine
+    // reject is handled there, 0071). Nothing is stored from here: the bytes
+    // come back in the CPU thread's dolphin-jit-new-compile once its compile
+    // succeeded, and are stored then, once.
+    if (!keepModulesForNativeCache()) {
+      dolphinJitCopiesSkipped += 1;
+      return { reason: "no-native-cache" };
+    }
     let mod;
     try {
       mod = dolphinAotCompilerEnabled
@@ -7839,7 +9434,14 @@ export function precompileDolphinJitModule(key, input) {
   return outcome;
 }
 
-async function handleDolphinJitCompileRequest(event) {
+// The CPU thread's JIT messages: their synchronous part timed for
+// replayBusy; other pthread messages pass untimed.
+function handleDolphinJitCompileRequest(event) {
+  const type = event.data?.type;
+  if (type !== "dolphin-jit-compile-request" && type !== "dolphin-jit-warm-state") return undefined;
+  return workerBusy.run(handleDolphinJitCompileRequestOnce, event);
+}
+async function handleDolphinJitCompileRequestOnce(event) {
   const data = event.data;
   if (data?.type === "dolphin-jit-warm-state") {
     if (data.state instanceof Uint8Array && dolphinAotCompilerEnabled) getDolphinAotCompiler().setWarmState(data);
@@ -7852,7 +9454,7 @@ async function handleDolphinJitCompileRequest(event) {
   // compiles its own bytes.
   if (key && data.kind === "region" && !data.bytes) {
     dolphinJitCompileRequestCount += 1;
-    if (!dolphinJitCacheMap.has(key)) dolphinJitCompileRequestFailures += 1;
+    if (!dolphinJitCacheMap.has(key) && keepModulesForNativeCache()) dolphinJitCompileRequestFailures += 1;
     markDolphinJitModuleReady(data.readyPtr, data.readySlot);
     return;
   }
@@ -7861,7 +9463,7 @@ async function handleDolphinJitCompileRequest(event) {
   const firstAsk = !dolphinJitCompileRequestsInFlight.has(key);
   const outcome = await precompileDolphinJitModule(key, data.bytes);
   if (!firstAsk) return; // the first request marks the slot
-  if (!outcome.module || outcome.reason) dolphinJitCompileRequestFailures += 1;
+  if ((!outcome.module || outcome.reason) && outcome.reason !== "no-native-cache") dolphinJitCompileRequestFailures += 1;
   markDolphinJitModuleReady(data.readyPtr, data.readySlot);
 }
 
@@ -7880,6 +9482,19 @@ let dolphinJitReadyMarks = 0;
 // The only byte ever written into the core's heap from here: a slot of the
 // table the core itself reports (_DolphinWeb_JitReadyBitsPtr); a request
 // naming any other address is ignored.
+// Whether a Module compiled here is kept for the CPU thread's own compile of
+// the same bytes. That only pays where the engine caches native modules by
+// their bytes (V8): elsewhere (JSC, SpiderMonkey) the CPU thread compiles its
+// own copy anyway, and the one kept here is a second copy of the code
+// (research/deep-ios-memory-fit.md, lever 1: 107 to 190 MiB of regions on an
+// iPhone). Before the boot the Modules are handed to the pthreads and used,
+// whatever the engine: kept then. ?wasmengine= forces the engine (core-host).
+function keepModulesForNativeCache() {
+  return nativeModuleCache(wasmEngineName) || !aotCoreBooted;
+}
+let dolphinJitCopiesSkipped = 0;
+export const dolphinJitCopiesSkippedForTest = () => dolphinJitCopiesSkipped;
+
 function markDolphinJitModuleReady(readyPtr, readySlot) {
   if (!Number.isInteger(readyPtr) || !Number.isInteger(readySlot)) return;
   if (readyPtr <= 0 || readySlot < 0 || readySlot >= DOLPHIN_JIT_READY_SLOTS) return;
@@ -7895,17 +9510,33 @@ function markDolphinJitModuleReady(readyPtr, readySlot) {
 }
 
 let dolphinJitNewCompileCount = 0;
+// Keys stored without a Module (no native module cache): seen, for dedupe.
+const dolphinJitPersistedOnly = new Set();
 let dolphinJitCompilePending = 0;
 const dolphinJitVerificationPending = new Set();
-async function handleDolphinJitNewCompile(event) {
+// The CPU thread could not instantiate a region module (patch 0196: posted
+// from DolphinWeb_CachedInterpreterCompileWasmBlock's catch).
+function handleDolphinRegionLinkFailure(event) {
+  const data = event.data;
+  if (data?.type !== "dolphin-region-link-failure") return;
+  regionLinkFailures.record(data.key, { name: String(data.name ?? ""), message: String(data.message ?? "") });
+}
+
+function handleDolphinJitNewCompile(event) {
+  if (event.data?.type !== "dolphin-jit-new-compile") return undefined;
+  return workerBusy.run(handleDolphinJitNewCompileOnce, event);
+}
+async function handleDolphinJitNewCompileOnce(event) {
   const data = event.data;
   if (!data || data.type !== "dolphin-jit-new-compile") return;
   if (!data.hash || !data.bytes) return;
   const key = String(data.hash);
   const bytes = data.bytes instanceof ArrayBuffer ? new Uint8Array(data.bytes) : data.bytes;
   if (!(bytes instanceof Uint8Array)) return;
-  if (dolphinJitCacheMap.has(key) || dolphinJitVerificationPending.has(key)) return;
-  if (dolphinJitCacheMap.size >= DOLPHIN_JIT_CACHE_MAX) return;
+  if (dolphinJitCacheMap.has(key) || dolphinJitVerificationPending.has(key) || dolphinJitPersistedOnly.has(key)) return;
+  // Keys stored without a Module count as Modules would: the store stays
+  // within the same bound as under V8 (49 152 entries, then nothing new).
+  if (dolphinJitCacheMap.size + dolphinJitPersistedOnly.size >= DOLPHIN_JIT_CACHE_MAX) return;
   dolphinJitVerificationPending.add(key);
   let valid = false;
   try {
@@ -7922,6 +9553,14 @@ async function handleDolphinJitNewCompile(event) {
   }
   if (dolphinJitCacheMap.has(key)) return;
   dolphinJitNewCompileCount += 1;
+  // No native module cache: the bytes are stored for the next boot (whose
+  // Modules the pthreads do use), nothing is compiled or kept here.
+  if (!keepModulesForNativeCache()) {
+    dolphinJitPersistedOnly.add(key);
+    dolphinJitCopiesSkipped += 1;
+    void writeDolphinJitEntryToIdb(key, bytes);
+    return;
+  }
   // Reserve the slot synchronously so duplicate notifications dedupe even
   // before the async compile finishes. Replace with the real Module once
   // compilation completes. Async to keep discio off-critical-path. After
@@ -8013,6 +9652,7 @@ function ensureDolphinJitPthreadListeners(worker) {
   if (!dolphinJitPthreadCompileListeners.has(worker)) {
     worker.addEventListener("message", handleDolphinJitNewCompile);
     worker.addEventListener("message", handleDolphinJitCompileRequest);
+    worker.addEventListener("message", handleDolphinRegionLinkFailure);
     dolphinJitPthreadCompileListeners.add(worker);
   }
 }
@@ -8043,6 +9683,20 @@ async function waitForDolphinJitPthreadBarrier(timeoutMs = 30_000) {
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   return false;
+}
+
+// The core's pthreads against its pool (-sPTHREAD_POOL_SIZE=16 in the build
+// patch): running are in use now (CPU, GPU, control 0209, audio, JIT ...),
+// allocated counts the pool plus any worker Emscripten had to add past it,
+// which starts late (a pthread past the pool waits for a new Worker).
+export const PTHREAD_POOL_SIZE = 16;
+
+function readPthreadUse() {
+  const pthread = moduleInstance?.PThread;
+  if (!pthread) return { error: "Module.PThread unavailable" };
+  const running = (pthread.runningWorkers || []).length;
+  const unused = (pthread.unusedWorkers || []).length;
+  return { running, unused, allocated: running + unused, poolSize: PTHREAD_POOL_SIZE, margin: PTHREAD_POOL_SIZE - running };
 }
 
 export async function installDolphinPthreadChannels(
@@ -8356,6 +10010,7 @@ const WGPU_CMD_OP_VI_TAG = 26;
 const WGPU_CMD_OP_PRESENT_SOURCE = 27;
 // Readback of a staging texture (EFB peeks, copies to RAM): src/wgpu-readback.js.
 const WGPU_CMD_OP_COPY_TO_STAGING = 28;
+const WGPU_CMD_OP_BACKBUFFER_SIZE = 29;
 // ClearRect uses the full attachment viewport and [0,1] depth range, so its
 // scissor alone determines coverage and its depth is independent of game state.
 // A/B switch: false restores the original game-viewport-dependent clear.
@@ -8394,10 +10049,6 @@ const wgpuRendererRuntime = new WgpuRendererRuntime({
 // full AbstractGfx resource set.
 const webGpuObjects = {
   shaders: new Map(),
-  // Fragment-shader variants with the sampled UV pinned to the texture centre.
-  // Selected only for depth-using pipelines, so the 2D overlay -- which samples
-  // glyphs and would collapse to a flat colour -- keeps its real shader.
-  shadersUvForced: new Map(),
   pipelines: new Map(),
   buffers: new Map(),
   textures: new Map(),
@@ -8405,6 +10056,10 @@ const webGpuObjects = {
   samplerDescriptors: new Map(),
   nearestSamplers: new Map(),
   bindGroups: new Map(),
+  // The bind group cache (src/wgpu-bind-group-cache.js; on by default under
+  // JavaScriptCore, ?wgpubgcache=1|0): identical bind groups reused; null when off. Kept here, not in a global, so the binding
+  // functions that source-contract tests run on their own still work.
+  bindGroupCache: null,
   bindGroupSamplingMasks: new Map(),
   pipeTpl: new Map(),  // id → {desc, target, depthBase} template
   pipeVar: new Map(),  // pipeline/attachment/depth/sampling-layout key → pipeline|null
@@ -8818,7 +10473,9 @@ function publishWgpuReadIndex(ring, readIndex) {
 
 function startWgpuReplayPump() {
   if (!wgpuReplayPumpEnabled || wgpuReplayPumpTimer !== null) return;
-  const pump = () => {
+  // Timed for replayBusy (timer and parker wake-ups alike).
+  const pump = () => workerBusy.run(pumpOnce);
+  const pumpOnce = () => {
     wgpuReplayPumpTimer = null;
     if (!wgpuReplayPumpEnabled || !webGpuCmdRing) return;
     if (wgpuReplayPumpDueAt > 0) {
@@ -8841,14 +10498,36 @@ function startWgpuReplayPump() {
     } else {
       webGpuCausalStats.replayPumpEmptyPollCount += 1;
     }
-    // A backlog the drainEveryMs perturbation holds back waits for its next
-    // drain instead of rescheduling at 0 ms.
+    // An empty ring parks until the producer publishes (4 ms at most, the
+    // old poll). A backlog the drainEveryMs perturbation holds back waits for
+    // its next drain instead of rescheduling at 0 ms.
+    if (write === read && !wgpuMappedCapacityBlocked && parkWgpuReplayPump(pump, write)) return;
     scheduleWgpuReplayPump(
       pump,
       write === read || wgpuMappedCapacityBlocked ? 4 : wgpuDiagDrainWaitMs()
     );
   };
   scheduleWgpuReplayPump(pump, 0);
+}
+
+// Waits for the producer on the write index instead of a 4 ms timer; false
+// when this engine cannot (no Atomics.waitAsync): the caller polls.
+// Waits for the producer on the write index instead of a 4 ms timer (patch
+// 0148); false when this engine cannot (no Atomics.waitAsync): the caller
+// polls. Created lazily: webGpuCausalStats is declared further down.
+let wgpuReplayParker = null;
+function parkWgpuReplayPump(pump, observedWrite) {
+  wgpuReplayParker ??= createWgpuReplayParker({
+    stats: webGpuCausalStats,
+    schedule: scheduleWgpuReplayPump,
+    isCurrentRing: (ring) => ring === webGpuCmdRing,
+  });
+  if (!wgpuReplayParker.park(webGpuCmdRing, observedWrite, pump)) return false;
+  if (wgpuReplayParker.parked) {
+    wgpuReplayPumpTimer = "parked";
+    wgpuReplayPumpDueAt = 0;
+  }
+  return true;
 }
 
 function scheduleWgpuReplayPump(callback, delayMs) {
@@ -8863,7 +10542,8 @@ function scheduleWgpuReplayPump(callback, delayMs) {
 }
 
 function cancelWgpuReplayPump() {
-  if (wgpuReplayPumpTimer !== null) clearTimeout(wgpuReplayPumpTimer);
+  if (wgpuReplayPumpTimer !== null && wgpuReplayPumpTimer !== "parked") clearTimeout(wgpuReplayPumpTimer);
+  wgpuReplayParker?.cancel(webGpuCmdRing);
   wgpuReplayPumpTimer = null;
   wgpuReplayYieldPending = false;
   wgpuReplayPumpScheduledAt = 0;
@@ -8872,6 +10552,7 @@ function cancelWgpuReplayPump() {
 
 function clearWgpuReplayStateAfterDeviceLoss() {
   wgpuMappedStagingGeneration += 1;
+  webGpuObjects.bindGroupCache?.clear();
   resetWgpuMappedDrainCoalescing(WGPU_MAPPED_DRAIN_FORCE_REASONS.DEVICE_LOSS);
   wgpuUploadAttribution.cancelCapacityWait();
   destroyWgpuVisualCadenceResources();
@@ -8906,13 +10587,40 @@ function clearWgpuReplayStateAfterDeviceLoss() {
   }
 }
 
+// An upload that took the queue instead of a slot (always counted: the rate
+// per second tells whether the slot size and count fit the content).
+// "oversize": larger than a slot; "pass-capacity": no free slot inside a pass.
+function noteQueueWgpuUpload(reason, bytes) {
+  if (reason === "oversize") {
+    webGpuCausalStats.mappedStagingOversizeCount += 1;
+    webGpuCausalStats.mappedStagingOversizeBytes += bytes;
+  } else {
+    webGpuCausalStats.mappedStagingPassCapacityQueueCount += 1;
+    webGpuCausalStats.mappedStagingPassCapacityQueueBytes += bytes;
+  }
+}
+
+// Upload bytes replayed while one render pass was open: what a pass needs
+// from the slots, since a pass cannot wait for a remap (?metrics=1 only).
+const WGPU_PASS_UPLOAD_BUCKET_BOUNDS_BYTES = Object.freeze(
+  [0, 4, 16, 64, 256, 1024, 2048, 4096, 8192, 16384].map((k) => k * 1024)
+);
+function recordWgpuPassUploadBytes(bytes) {
+  recordBoundedHistogram(
+    webGpuCausalStats.passUploadBytesHistogram,
+    WGPU_PASS_UPLOAD_BUCKET_BOUNDS_BYTES,
+    bytes
+  );
+  webGpuCausalStats.passUploadBytesMax = Math.max(webGpuCausalStats.passUploadBytesMax, bytes);
+}
+
 function ensureWgpuMappedStagingPool(device) {
   if (wgpuUploadTransport !== "mapped") return null;
   if (!wgpuMappedStagingPool) {
     wgpuMappedStagingPool = createWgpuMappedStagingPool({
       device,
       slotCount: wgpuMappedStagingSlotCount,
-      slotSize: WGPU_MAPPED_STAGING_SLOT_BYTES,
+      slotSize: wgpuMappedStagingSlotBytes,
       // MAP_WRITE | COPY_SRC and GPUMapMode.WRITE. Passing the numeric
       // values keeps the worker test seam independent of WebGPU globals.
       bufferUsage: 0x0002 | 0x0004,
@@ -9071,7 +10779,9 @@ function resetWgpuMappedDrainCoalescing(reason, { clearTelemetry = false } = {})
 }
 
 function mappedDrainForceReason(reason) {
-  if (reason === "staging-capacity") return WGPU_MAPPED_DRAIN_FORCE_REASONS.CAPACITY;
+  if (reason === "staging-capacity" || reason === "staging-oversize") {
+    return WGPU_MAPPED_DRAIN_FORCE_REASONS.CAPACITY;
+  }
   if (reason === "present") return WGPU_MAPPED_DRAIN_FORCE_REASONS.PRESENT;
   if (reason.includes("readback")) return WGPU_MAPPED_DRAIN_FORCE_REASONS.READBACK;
   if (reason === "blit") return WGPU_MAPPED_DRAIN_FORCE_REASONS.BLIT;
@@ -9692,6 +11402,7 @@ function markWgpuMappedCapacityWait(uploadRole = WGPU_UPLOAD_ROLE.UNKNOWN) {
 function markWgpuReplayFatal(scope, detail) {
   if (wgpuReplayFatal) return false;
   wgpuReplayFatal = { scope: String(scope), detail: String(detail || "unknown") };
+  wgpuIntegrity.note("replayFatal");
   resetWgpuMappedDrainCoalescing(WGPU_MAPPED_DRAIN_FORCE_REASONS.FATAL);
   wgpuSparseUbo?.reset(`fatal-${scope}`);
   if (wgpuUboComputeProjectionActive) {
@@ -9708,6 +11419,18 @@ function markWgpuReplayFatal(scope, detail) {
       ? WGPU_CONSUMER_ERROR_SUBMIT
       : WGPU_CONSUMER_ERROR_UNKNOWN;
   wgpuRendererRuntime.emergencyFail(errorCode);
+  // The ring stays FAILED: tell the page on the device-loss path (a lost
+  // device posts from its own handler, with the browser's reason), as a
+  // renderer error, so it restarts at the same scale instead of showing a
+  // frozen picture.
+  if (scope !== "device-lost") {
+    wgpuFatalReporter.report({
+      internalResolution: wgpuInternalResolution,
+      reason: wgpuFatalPageReason(scope),
+      detail: wgpuReplayFatal.detail,
+      cause: "renderer-error",
+    });
+  }
   return true;
 }
 
@@ -9859,13 +11582,6 @@ function getFixedLayouts(unfilterableMask = 0, nonFilteringSamplerMask = unfilte
     size: [1, 1, 1], format: "rgba8unorm",
     usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
   });
-  // Unsupported integer formats and missing resources still need a float
-  // placeholder. DIAG_DUMMY_TINT makes those substitutions visible.
-  if (DIAG_DUMMY_TINT) {
-    dev.queue.writeTexture({ texture: dummyTex },
-      new Uint8Array([0, 255, 0, 255]), { bytesPerRow: 4, rowsPerImage: 1 },
-      [1, 1, 1]);
-  }
   const dummyTexView = dummyTex.createView({ dimension: "2d-array" });
   const dummySampler = dev.createSampler({});
   renderGpu._fixedLayouts = { l0, l1, l2, pipelineLayout,
@@ -9897,12 +11613,12 @@ function getNonFilteringSampler(id) {
 function replayCreateBindGroup(id, blobPtr, blobLen) {
   if (!renderGpu || webGpuObjects.bindGroups.has(id)) return;
   if (!blobPtr) {
-    wgpuReplayClassifier?.recordMissingResource({ kind: "bind-group-blob", id });
+    noteMissingResource("bind-group-blob", id);
     return;
   }
   const u = new Uint32Array(moduleInstance.HEAPU8.buffer, blobPtr, blobLen >>> 2);
   if (u[0] !== 0x57424731) {
-    wgpuReplayClassifier?.recordMissingResource({ kind: "bind-group-blob", id });
+    noteMissingResource("bind-group-blob", id);
     return;
   }
   const group = u[1], count = u[2];
@@ -9952,20 +11668,7 @@ function replayCreateBindGroup(id, blobPtr, blobLen) {
       if (binding === 0 && srcTexId < 0) srcTexId = resId;
       const t = webGpuObjects.textures.get(resId);
       if (!t) {
-        wgpuReplayClassifier?.recordMissingResource({ kind: "texture", id: resId });
-        // §28 diag: which texture ids are missing (→ whole draw
-        // skipped → screen-specific black, e.g. difficulty-select
-        // background)? Rate-limited tally of the missing resId.
-        self._wgMiss = self._wgMiss || { n: 0, ids: {} };
-        self._wgMiss.n++;
-        self._wgMiss.ids[resId] = (self._wgMiss.ids[resId] || 0) + 1;
-        if ((self._wgMiss.n & 0x3FFF) === 0) {
-          const top = Object.entries(self._wgMiss.ids)
-            .sort((a, b) => b[1] - a[1]).slice(0, 8)
-            .map(([k, v]) => `tex#${k}:${v}`).join(" ");
-          console.log(`[s28-missbg] n=${self._wgMiss.n} b${binding} ` +
-            `top-missing=${top}`);
-        }
+        noteMissingResource("texture", resId);
         // §28cx FORCE-VALID: do NOT drop the whole bind group when a texture
         // is missing — that permanently skips every draw using it (the
         // create record is one-shot), which is why characters & menus vanish
@@ -9974,7 +11677,7 @@ function replayCreateBindGroup(id, blobPtr, blobLen) {
         // the draw RENDERS (placeholder texel for the one missing map, not an
         // invisible character). Mirrors the non-filterable substitution below.
         // DIAG: a missing texture renders with a 1x1 placeholder, which looks
-        // exactly like the flat rectangles Mario Kart Wii shows where its 3D
+        // exactly like the flat rectangles a Wii racing game shows where its 3D
         // world should be. Count them, and record which ids.
         self._wgDummyMissing = (self._wgDummyMissing || 0) + 1;
         (self._wgDummyMissingIds = self._wgDummyMissingIds || new Set()).add(resId);
@@ -9996,7 +11699,7 @@ function replayCreateBindGroup(id, blobPtr, blobLen) {
     } else if (kind === 2) {
       const s = webGpuObjects.samplers.get(resId);
       if (!s) {
-        wgpuReplayClassifier?.recordMissingResource({ kind: "sampler", id: resId });
+        noteMissingResource("sampler", resId);
         // §28cx FORCE-VALID: missing sampler → dummy, don't drop the group.
         entries.push({ binding, resource: getFixedLayouts().dummySampler });
         continue;
@@ -10007,7 +11710,7 @@ function replayCreateBindGroup(id, blobPtr, blobLen) {
     } else {
       const b = webGpuObjects.buffers.get(resId);
       if (!b) {
-        wgpuReplayClassifier?.recordMissingResource({ kind: "buffer", id: resId });
+        noteMissingResource("buffer", resId);
         return;
       }
       // §16: group-0 UBO entries carry a class-size window (blob size
@@ -10073,8 +11776,10 @@ function replayCreateBindGroup(id, blobPtr, blobLen) {
     }
   }
   try {
-    webGpuObjects.bindGroups.set(id,
-      renderGpu.device.createBindGroup({ layout, entries }));
+    const bindGroupCache = webGpuObjects.bindGroupCache;
+    webGpuObjects.bindGroups.set(id, bindGroupCache
+      ? bindGroupCache.get(renderGpu.device, layout, entries)
+      : renderGpu.device.createBindGroup({ layout, entries }));
     if (group === 1) webGpuObjects.bindGroupSamplingMasks.set(id, samplingKey);
   } catch (e) {
     if (!self._webGpuBgErr) {
@@ -10226,7 +11931,7 @@ function blitTexture(enc, s, d, sx, sy, sw, sh, dx, dy, dw, dh,
 // DIAGNOSTIC (revertible): after the producer's present, blit the raw
 // EFB colour texture straight onto the canvas, bypassing the XFB-copy
 // + present-blit chain. Isolates "geometry not visible": if the canvas
-// then shows Melee geometry, the EFB is correct and the XFB/present
+// then shows game geometry, the EFB is correct and the XFB/present
 // chain (scale/UV) is the bug; if still uniform, the EFB itself is
 // wrong (transform/depth). Flip to false to restore normal present.
 // §28cx: diagnosis complete — the raw-EFB blit was the FLICKER source.
@@ -10311,10 +12016,6 @@ function vpDiagNoteViewport(near, far) {
 // which rescales the scene instead of cropping it -- so any draw where raw and
 // clamped differ is rendered at the wrong scale.
 let vpDiagRect = null;
-// Scissor rect in force for each draw, raw and after the clamp. The frame's
-// hard axis-aligned boundaries look like rectangles, and a scissor that
-// collapses (sx reaching passW makes sw 0) clips a draw away entirely.
-let vpDiagScissor = "sc?";
 // Per frame: how many times the EFB pass is (re)begun, how many of those clear
 // it, and how many draws land after the LAST clear. Anything drawn before a
 // clear is discarded, so "draws after last clear" is the only geometry that can
@@ -10330,18 +12031,6 @@ function vpDiagNoteEfbPass(cleared) {
   if (vpDiagDone) return;
   vpDiagEfbPasses++;
   if (cleared) { vpDiagEfbClears++; vpDiagDrawsSinceClear = 0; }
-}
-function vpDiagIsDepthAlways(pipelineId) {
-  const tpl = webGpuObjects.pipeTpl.get(pipelineId);
-  return !!(tpl && tpl.depthBase && tpl.depthBase.depthCompare === "always");
-}
-function vpDiagNoteScissor(rx, ry, rw, rh, sx, sy, sw, sh) {
-  if (vpDiagDone) return;
-  const same = rx === sx && ry === sy && rw === sw && rh === sh;
-  vpDiagScissor = (sw === 0 || sh === 0)
-    ? `sc COLLAPSED raw(${rx},${ry} ${rw}x${rh})`
-    : same ? `sc(${sx},${sy} ${sw}x${sh})`
-      : `sc raw(${rx},${ry} ${rw}x${rh})->(${sx},${sy} ${sw}x${sh})`;
 }
 // Distinct VS-constant slices used within one frame. Dolphin re-uploads the
 // vertex-shader constants (projection, position/normal matrices) per draw into
@@ -10847,11 +12536,7 @@ function vpDiagNoteDraw(fbId, pipelineId) {
 // Called from SUBMIT_PRESENT, before the present counter increments, so the
 // tally holds exactly the draws of the frame being presented.
 function vpDiagPresent() {
-  // Isolation bookkeeping must run every frame, before the tally's early
-  // return -- otherwise it silently stops once the dump window closes.
   const pn = self._wgPresentCount || 0;
-  vpDiagIsolateSeen = 0;
-  vpDiagIsolateIdx = Math.floor(pn / 300) % 60;
   if (vpDiagDone) return;
   const n = pn;
   if (n === 0) {
@@ -10891,10 +12576,6 @@ function vpDiagPresent() {
   vpDiagTc0.clear();
   vpDiagTev.clear();
   vpDiagFog.clear();
-  // Persist the frame's most-sampled textures before clearing, so the readback
-  // at SUBMIT_PRESENT has something to inspect -- vpDiagPresent() runs first
-  // and would otherwise hand it an empty tally.
-  vpDiagLastPicks = [...vpDiagTexBind.entries()].sort((a, b) => b[1] - a[1]).slice(0, 14);
   vpDiagTexBind.clear();
   vpDiagIdxTally.clear();
   vpDiagBatchPos.clear();
@@ -11090,122 +12771,6 @@ function diagGridSignature(bytes, bpr, w, h) {
   }
   return cells.join(" | ");
 }
-// Depth readback. diagReadTexture refuses depth formats, but the question is
-// exactly what depth values the world draws leave in the buffer: the viewport
-// bands and the vertex shader together predict 0.00..0.84 for the world, and if
-// the stored values are elsewhere the viewport transform is not mapping as
-// assumed. depth32float copies with aspect "depth-only", 4 bytes a texel.
-// mapAsync on a readback buffer BEFORE the encoder that copies into it is
-// submitted makes that submit invalid ("used in submit while pending map"), and
-// Dawn then drops the whole command buffer: the frame's draws, the copy, all of
-// it. The buffer maps anyway and reads back as the zeros it was created with.
-// That is exactly what the present-time depth readback reported, and what the
-// first two depth-trace runs reported, control write included. Every readback
-// must queue its map here and drain it after queue.submit().
-function dtraceDefer(fn) {
-  (self._wgDtPending = self._wgDtPending || []).push(fn);
-}
-function dtraceDrainPending() {
-  const pend = self._wgDtPending;
-  if (!pend || !pend.length) return;
-  self._wgDtPending = [];
-  for (const fn of pend) {
-    try { fn(); } catch (e) { console.log("[dtrace] drain failed: " + (e && e.message)); }
-  }
-}
-function diagReadDepth(dev, encoder, entry, tag) {
-  if (!entry || !entry.tex) return;
-  const w = entry.tex.width, h = entry.tex.height;
-  const bpr = Math.ceil(w * 4 / 256) * 256;
-  let buf;
-  try {
-    buf = dev.createBuffer({ size: bpr * h, usage: 0x1 | 0x8 });
-    encoder.copyTextureToBuffer({ texture: entry.tex, aspect: "depth-only" },
-      { buffer: buf, bytesPerRow: bpr, rowsPerImage: h },
-      { width: w, height: h, depthOrArrayLayers: 1 });
-  } catch (e) {
-    console.log("[vpdiag] depth readback rejected: " + (e && e.message));
-    return;
-  }
-  dtraceDefer(() => buf.mapAsync(0x1).then(() => {
-    const f = new Float32Array(buf.getMappedRange());
-    const stride = bpr >> 2;
-    let mn = Infinity, mx = -Infinity, sum = 0, n = 0, zeros = 0;
-    for (let y = 0; y < h; y += 4) {
-      for (let x = 0; x < w; x += 4) {
-        const v = f[y * stride + x];
-        if (!Number.isFinite(v)) continue;
-        if (v < mn) mn = v;
-        if (v > mx) mx = v;
-        if (v === 0) zeros++;
-        sum += v; n++;
-      }
-    }
-    console.log(`[vpdiag] EFB depth ${tag} ${w}x${h}: min=${mn.toFixed(4)} ` +
-      `max=${mx.toFixed(4)} mean=${(sum / Math.max(1, n)).toFixed(4)} ` +
-      `zeros=${zeros}/${n}`);
-    buf.unmap();
-  }).catch(() => {}));
-}
-function diagReadDepthTrace(dev, encoder, entry, tag) {
-  const dt = self._wgDt;
-  if (!entry || !entry.tex) { console.log(`[dtrace] no depth texture for: ${tag}`); return; }
-  const w = entry.tex.width, h = entry.tex.height;
-  const bpr = Math.ceil(w * 4 / 256) * 256;
-  let buf;
-  try {
-    buf = dev.createBuffer({ size: bpr * h, usage: 0x1 | 0x8 });
-    encoder.copyTextureToBuffer({ texture: entry.tex, aspect: "depth-only" },
-      { buffer: buf, bytesPerRow: bpr, rowsPerImage: h },
-      { width: w, height: h, depthOrArrayLayers: 1 });
-  } catch (e) { console.log(`[dtrace] copy rejected (${tag}): ${e && e.message}`); return; }
-  if (dt) dt.issued++;
-  const seq = dt ? dt.issued : 0;
-  dtraceDefer(() => buf.mapAsync(0x1).then(() => {
-    const f = new Float32Array(buf.getMappedRange());
-    const stride = bpr >> 2;
-    let mn = Infinity, mx = -Infinity, sum = 0, n = 0, nz = 0;
-    // 4x3 grid of the fraction of NON-ZERO texels, so where the writes landed
-    // is visible, not just whether any did.
-    const grid = new Array(12).fill(0), gridN = new Array(12).fill(0);
-    for (let y = 0; y < h; y += 2) {
-      for (let x = 0; x < w; x += 2) {
-        const v = f[y * stride + x]; n++;
-        const g = Math.floor(y * 3 / h) * 4 + Math.floor(x * 4 / w); gridN[g]++;
-        if (v !== 0) {
-          nz++; grid[g]++;
-          if (v < mn) mn = v;
-          if (v > mx) mx = v;
-          sum += v;
-        }
-      }
-    }
-    console.log(`[dtrace] #${seq} ${tag}: nonzero=${nz}/${n} ` +
-      (nz ? `min=${mn.toFixed(4)} max=${mx.toFixed(4)} mean=${(sum / nz).toFixed(4)} ` : "") +
-      `grid%=[${grid.map((c, i) => Math.round(100 * c / Math.max(1, gridN[i]))).join(",")}]`);
-    buf.unmap(); buf.destroy();
-    if (dt) dt.done++;
-  }).catch((e) => console.log(`[dtrace] #${seq} map failed (${tag}): ${e && e.message}`)));
-}
-function diagReadColorTrace(dev, encoder, entry, tag) {
-  if (!entry || !entry.tex) { console.log(`[dtrace] no colour texture for: ${tag}`); return; }
-  const w = entry.tex.width, h = entry.tex.height;
-  const bpr = Math.ceil(w * 4 / 256) * 256;
-  let buf;
-  try {
-    buf = dev.createBuffer({ size: bpr * h, usage: 0x1 | 0x8 });
-    encoder.copyTextureToBuffer({ texture: entry.tex },
-      { buffer: buf, bytesPerRow: bpr, rowsPerImage: h },
-      { width: w, height: h, depthOrArrayLayers: 1 });
-  } catch (e) { console.log(`[dtrace] colour copy rejected (${tag}): ${e && e.message}`); return; }
-  const dt = self._wgDt;
-  const seq = dt ? dt.issued : 0;
-  dtraceDefer(() => buf.mapAsync(0x1).then(() => {
-    const bytes = new Uint8Array(buf.getMappedRange());
-    console.log(`[dtrace] #${seq} colour ${tag}: ${diagGridSignature(bytes, bpr, w, h)}`);
-    buf.unmap(); buf.destroy();
-  }).catch((e) => console.log(`[dtrace] #${seq} colour map failed (${tag}): ${e && e.message}`)));
-}
 function diagReadTexture(dev, encoder, entry, label, tag) {
   if (!entry || !entry.tex || String(entry.format || "").startsWith("depth")) return;
   const w = entry.tex.width, h = entry.tex.height;
@@ -11257,7 +12822,7 @@ function diagNoteBackbufferDraw(srcId, vp, sc) {
 // WebGPU's loadOp:clear always clears the whole attachment and ignores
 // setScissorRect, so a sub-rect clear has to be a DRAW. Doing it as a utility
 // draw in the core was tried and reverted -- that path ends and restarts the
-// pass per clear, and Wario World issues ~7,800 a frame. Here the pass stays
+// pass per clear, and a platformer issues ~7,800 a frame. Here the pass stays
 // open: set the scissor, draw one full-screen triangle, restore the scissor.
 //
 // The colour and depth are baked into the shader constant rather than passed in
@@ -11349,9 +12914,6 @@ function diagTallyDrawTarget(passFbId, srcId) {
   }
 }
 
-// DIAGNOSTIC (revertible): force depthCompare "always" on every
-// pipeline (see resolvePipeline) to bisect the black-EFB cause.
-const DIAG_DEPTH_ALWAYS = false;  // §28ag: bisect done — dark 1P menu is NOT depth (still dark with depth bypassed) ⇒ blend/TEV/material/texture construct
 // §28ad/§28af ROOT FIX: WebGPU can't carry Dolphin's reverse-Z in
 // the viewport (Dawn rejects minDepth>maxDepth). Master enable for
 // the per-PASS reverse-Z compensation (flip GX depth compare
@@ -11387,293 +12949,26 @@ const DIAG_DEPTH_ALWAYS = false;  // §28ag: bisect done — dark 1P menu is NOT
 // arriving with near < far is what reverse-Z looks like after that 1-x, not
 // evidence against it.
 //
-// Measured consequence of getting it backwards: Mario Kart Wii's world sits at
+// Measured consequence of getting it backwards: a Wii racing game's world sits at
 // z(0.00,0.84) and its HUD at z(0.89,0.99), i.e. the HUD is nearer. With
 // GX_NATIVE_DEPTH the world occludes the HUD and the pause menu and controller
 // overlay vanish entirely; with it false they render and match the software
 // reference frame.
 const GX_NATIVE_DEPTH = false;
 const REVZ_COMPARE_FLIP = !GX_NATIVE_DEPTH;
-// §28aw: decisive dark-menu experiment — force FS textureSampleBias
-// array-layer to 0 (menu textures are single-layer, bound 2d-array;
-// a non-zero texgen layer ⇒ out-of-range sample ⇒ black). Gated so
-// it's toggleable/revertible; kept only if menu renders AND title/3D
-// does not regress.
-// §28aw FALSIFIED: forcing menu FS textureSampleBias layer→0 left the
-// menu identically dark (hash unchanged) ⇒ array-layer is NOT the
-// root. Flag kept inert (false) as a documented negative result.
-const S28AW_FORCE_TEXLAYER0 = false;
-// §28ax CONFIRMED: const-magenta FILLED the menu ⇒ draws reach the
-// framebuffer with valid full-screen geometry; the dark is purely
-// FS-internal. §28ay: dolphin_fn_1_→white showed only sparse white
-// lines + a dark-blue region (NOT the full menu) ⇒ the texture
-// sample WAS ~0 (secondary) AND the TEV/PS-constant chain collapses
-// the bulk output regardless (DOMINANT). Both flags reverted to
-// false (diagnostic shader rewrites must never ship); findings in
-// SESSION §28ax/§28ay. Next: pinpoint which TEV PS-constant/UBO
-// member is delivered ~0 for the menu draw.
-const S28AX_FS_CONST = false;
-const S28AY_SAMPLER_WHITE = false;
-// §28bb FALSIFIED: textureSampleLevel(…,0.0) gave the IDENTICAL dark
-// menu (hash 0x-680ec5c0, 0 valErr) ⇒ sample-mechanics (LOD/bias/
-// mip) is NOT the root. By the §28ba decision rule this isolates the
-// root to the UV addressing the WRONG atlas sub-region (the GC
-// texgen/posttransform path, §28an/al). Flag reverted (false).
-const S28BB_SAMPLE_LOD0 = false;
-// §28bf RESULT: UV-as-colour showed a spatially-VARYING gradient
-// (non-degenerate, not uniformly zero) ⇒ the texgen produces a real
-// varying UV. Combined with §28be (posttransform verified correct at
-// the right offset), every measurable value is correct yet the
-// sample is ~0 — a systemic texgen/atlas/sample mismatch needing
-// reference-texel comparison, not more value-probing. Flag reverted.
-const S28BF_SHOW_UV = false;
 // §28at: apply the compare flip uniformly (drop the per-pass `revZ`
 // gate). The single reverse-Z convention is correct for every
 // rzRelevant draw now that flag=false made all viewports uniform.
 const REVZ_COMPARE_FLIP_ALL = !GX_NATIVE_DEPTH;
-// DIAGNOSTIC (revertible): force cullMode "none" + skip scissor so no
-// primitive is culled/scissored. With EFB→canvas: geometry appears ⇒
-// it was rasterization state (cull/scissor); still black ⇒ VS math /
-// vertex fetch / clip-space.
-const DIAG_RASTER_OPEN = false;  // §28w: cull CONCLUSIVELY ruled out for the 3D region (clean A-only running repro)
-// Cull-only variant. DIAG_RASTER_OPEN also disables the scissor, so it cannot
-// separate the two. The §28w "conclusively ruled out" above was reached by
-// comparing runs driven by the harness's random input script, which diverge
-// into different scenes -- the methodology behind three retractions in
-// docs/webgpu-hardware-renderer-bugs.md. Re-testable now against the
-// deterministic save state.
-const DIAG_CULL_NONE = false;
-// Skip EFB draws whose pipeline ignores depth. The in-race frame carries ~21
-// full-screen depth=always quads; if one of them is painting over the world,
-// dropping them exposes the scene underneath. Diagnostic only -- these draws
-// are real content upstream draws too.
-const DIAG_SKIP_DEPTH_ALWAYS = false;
-// Replace the fragment shader of every depth-using pipeline with one that
-// returns a constant colour, keeping the real vertex shader so geometry is
-// still transformed and rasterised normally. Legal because the cfg pipelines
-// use an explicit fixed pipeline layout, not layout:"auto", so a fragment
-// module may declare fewer bindings than the layout provides.
-//
-// If magenta geometry appears, primitives rasterise and the defect is in the
-// TEV/texture path. If the frame stays black, the fragments are being
-// discarded or the primitives never rasterise at all.
-const DIAG_CONST_FS = false;
-const DIAG_DUMMY_TINT = false;
-const DIAG_NO_DISCARD = false;
-const DIAG_FORCE_LAYER0 = false;
-const DIAG_FORCE_UV = false;
-const DIAG_UV_FINITE = false;
-// Visualise the UV instead of judging it: red = fract(u), green = fract(v).
-// A healthy surface shows a red/green gradient across it; a UV pinned near zero
-// shows near-black, and a constant UV shows one flat colour.
-const DIAG_UV_VIS = false;
-const DIAG_UV_PERTURB = false;
-const DIAG_SHOW_VCOLOR = false;
-// Render ONLY the opaque depth-tested EFB draws -- blendEnable false -- and
-// skip the blended ones. The two busiest pipelines are noblend/wm15 with a
-// colour attribute, so they ignore alpha entirely and should be visible
-// whatever the vertex alpha does. Selecting by PROPERTY not by pipeline id:
-// bridge ids are assigned per run and shift between them.
-const DIAG_ONLY_OPAQUE = false;
-// Constant colour on the OPAQUE depth-tested pipelines only. The earlier
-// const-FS test covered every depth pipeline including the blended ones, and
-// returned alpha 1.0, so its magenta could have come entirely from those. This
-// isolates the noblend/wm15 pipelines that carry ~47,000 draws and are
-// invisible even though they ignore alpha.
-const DIAG_CONST_FS_OPAQUE = false;
-// With the constant colour forced on the opaque pipelines they still produce
-// nothing, so they are not rasterising. Force their depth compare to "always"
-// as well: if magenta then appears, the depth test is what rejects them.
-const DIAG_OPAQUE_DEPTH_ALWAYS = false;
-function vpDiagIsBlended(pipelineId) {
-  const l = vpDiagPipeVtx.get(pipelineId);
-  return !!(l && l.blendEnable);
-}
-const DIAG_ALPHA_COVERAGE = false;
-// Show vertex ALPHA as greyscale. The alpha stage reduces to
-// texAlpha * vertexAlpha, texture alpha measured 58..255, and the RGB
-// visualisation forced alpha to 1.0 -- so vertex alpha is the one operand in
-// that product still unmeasured.
-const DIAG_SHOW_VALPHA = false;
-// Drop EFB draws whose sampled texture received no non-zero data. If the empty
-// textures cover the large surfaces, what remains should be the draws that
-// sample populated textures -- and whether anything recognisable appears says
-// how much of the blackness those empty textures actually account for.
-const DIAG_SKIP_EMPTY_TEX = false;
-const DIAG_TEX_READBACK = false;
-const DIAG_DEPTH_READBACK = false;
-// Depth trace. The present-time depth readback cannot say WHEN the buffer was
-// zero: several frames share an encoder and clears re-run. This reads the EFB
-// depth buffer inside the target frame, in the same encoder, at chosen points:
-// after the Nth EFB draw (the pass is ended, copied, and re-opened with load
-// ops and its state restored), before every depth-clearing ClearRect, and at
-// every EFB pass end. Each read is tagged with how many EFB draws and
-// depth-writing draws preceded it, so "no fragment ever wrote depth" and "the
-// writes were wiped afterwards" become distinguishable.
-const DIAG_DEPTH_TRACE = false;
-const DTRACE_PRESENT = 2500;
-const DTRACE_SPLITS = new Set([1, 5, 20, 60, 119, 135, 251, 384, 419, 500, 792]);
-// Positive control: at the first split, write a known depth through the clear
-// pipeline over a 64x64 corner rect, so the readbacks that follow prove they
-// read the attachment the pass writes. A probe that cannot see its own write
-// is a null instrument, whatever else it reports.
-const DTRACE_CONTROL = true;
-// FINAL depth state per created pipeline object, so a draw can be classified
-// by what the descriptor actually carried rather than the pre-flip template.
-const vpDiagPipeFinalDs = new WeakMap();
-// Render ONE depth-tested EFB draw per frame and skip the rest, so a single
-// draw's output can be observed directly instead of inferred from texture and
-// state accounting. The index advances every 300 presents so successive
-// screenshots show different draws. Depth-less draws (the 2D overlay) are kept
-// for orientation.
-const DIAG_ISOLATE_DRAW = false;
-// Constant colour on pipelines that perform a REAL depth test (less/greater
-// family), leaving depth=always and depth=none alone. DIAG_CONST_FS covers
-// every depth-using pipeline including the always quads, which are the only
-// visible content, so it cannot show whether the less-equal world draws
-// actually cover the screen. This can.
-const DIAG_CONST_FS_TESTED_ONLY = false;
-// Substitute a trivial vertex shader (plus the constant fragment shader, since
-// a trivial VS cannot satisfy the real FS's inputs) on genuinely depth-tested
-// pipelines. It reads the position attribute at location 0 and normalises
-// model-space coordinates into clip space, so what appears is the silhouette
-// the vertex data itself describes -- independent of the translated VS, the
-// uniform blocks and the transform. If a real mesh appears, the data is fine
-// and the translated vertex shader is where the geometry goes wrong.
-const DIAG_TRIVIAL_VS = false;
-let diagTrivialVsModule = null;
-function getTrivialVsModule(dev) {
-  if (!diagTrivialVsModule) {
-    diagTrivialVsModule = dev.createShaderModule({
-      label: "diag-trivial-vs",
-      code: "@vertex fn main(@location(0) p: vec2<f32>) -> @builtin(position) vec4<f32> " +
-            "{ return vec4<f32>(p.x / 400.0, p.y / 400.0, 0.5, 1.0); }"
-    });
-  }
-  return diagTrivialVsModule;
-}
-let vpDiagIsolateIdx = 0;
-let vpDiagIsolateSeen = 0;
-function vpDiagIsolateAllows(fbId, pipelineId) {
-  if (!DIAG_ISOLATE_DRAW || fbId !== self._wgEfbColorId) return true;
-  const tpl = webGpuObjects.pipeTpl.get(pipelineId);
-  const cmp = tpl && tpl.depthBase ? tpl.depthBase.depthCompare : "none";
-  if (cmp === "none") return true;              // 2D overlay: always keep
-  const n = vpDiagIsolateSeen++;
-  return n === vpDiagIsolateIdx;
-}
-let vpDiagReadbackDone = false;
-let vpDiagLastPicks = [];
-function vpDiagTexIsEmpty(texId) {
-  const rec = vpDiagTexData.get(texId);
-  if (!rec) return false;                 // never uploaded: unknown, keep it
-  return rec.nonZero === 0 || (rec.samples && rec.nzBytes === 0);
-}
-let vpDiagUvFinite = 0;
-// Replace the sample with a verdict colour instead of a texel: magenta when the
-// sampled UV is finite, green when it is NaN or infinite. WGSL has no isNan, so
-// NaN is caught by (uv != uv) and infinities by abs(uv) > 1e30. The verdict
-// still flows through the TEV maths, so read the HUE, not the exact colour.
-function pickVariantFs(fsId) {
-  const v = webGpuObjects.shadersUvForced.get(fsId);
-  if (v && ++vpDiagVariantUsed <= 1) {
-    console.log("[vpdiag] variant fragment module selected for a depth pipeline");
-  }
-  return v;
-}
-let vpDiagVariantUsed = 0;
-// Perturb the sample instead of replacing it: keep the real call, add a
-// constant blue to its result. Every earlier probe substituted the sample, so
-// the verdict always flowed through the TEV maths afterwards and could not tell
-// "the texel is black" from "TEV zeroes a good texel".
-//   blue appears  -> the sample result reaches the output, so the texel is black
-//   stays black   -> TEV discards it regardless of what was sampled
-// Return the interpolated vertex colour0 instead of the TEV result, keeping the
-// shader's own signature and bindings. The combine is
-// texture.rgb + vertexColour0.rgb, so if this comes back black the lighting
-// path supplies nothing and the dark texel is only half the story.
-function vcolorRewrite(src) {
-  const sig = /@location\(0\)\s+(\w+)\s*:\s*vec4<f32>/.exec(src);
-  if (!sig) return null;
-  const name = sig[1];
-  // The fragment entry's final `return _eN;` is the last return in the module.
-  const m = [...src.matchAll(/return\s+(\w+)\s*;/g)];
-  if (!m.length) return null;
-  const last = m[m.length - 1];
-  const out = src.slice(0, last.index) +
-    // Alpha in red, a constant 1.0 in green as a coverage marker. This is what
-    // ad77cd6's greyscale version could not do: there, black meant "alpha zero"
-    // OR "no draw covered this pixel", and the two are not the same claim.
-    //   black  = not covered by any depth-tested draw
-    //   green  = covered, vertex alpha 0
-    //   yellow = covered, vertex alpha 1
-    (DIAG_ALPHA_COVERAGE
-      ? `return vec4<f32>(${name}.w, 1.0, 0.0, 1.0);`
-      : DIAG_SHOW_VALPHA
-        ? `return vec4<f32>(${name}.w, ${name}.w, ${name}.w, 1.0);`
-        : `return vec4<f32>(${name}.x, ${name}.y, ${name}.z, 1.0);`) +
-    src.slice(last.index + last[0].length);
-  if (out !== src && ++vpDiagVcolor <= 1) {
-    console.log("[vpdiag] built vertex-colour visualisation variants");
-  }
-  return out === src ? null : out;
-}
-let vpDiagVcolor = 0;
-function uvPerturbRewrite(src) {
-  const out = src.replace(
-    /(textureSample[A-Za-z]*\([^;]*?\));/g,
-    "($1 + vec4<f32>(0.0, 0.0, 0.5, 0.0));");
-  if (out !== src && ++vpDiagUvPerturb <= 1) {
-    console.log("[vpdiag] built sample-perturbation variants");
-  }
-  return out === src ? null : out;
-}
-let vpDiagUvPerturb = 0;
-function uvFiniteRewrite(src) {
-  const out = src.replace(
-    // Match the WHOLE call up to its terminating ");", so textureSampleBias --
-    // which carries a trailing bias argument -- is rewritten too. Requiring the
-    // call to end right after the layer matched only plain textureSample, which
-    // is why the first version left the frame untouched.
-    /textureSample[A-Za-z]*\(([^,]+),\s*([^,]+),\s*(vec2<f32>\([^)]*\))[^;]*?\);/g,
-    (DIAG_UV_VIS
-      ? "vec4<f32>(fract($3.x), fract($3.y), 0.0, 1.0);"
-      : "select(vec4<f32>(1.0, 0.0, 1.0, 1.0), vec4<f32>(0.0, 1.0, 0.0, 1.0), " +
-        "any($3 != $3) || any(abs($3) > vec2<f32>(1e30, 1e30)));"));
-  if (out !== src && ++vpDiagUvFinite <= 1) {
-    console.log("[vpdiag] built UV-finiteness probe variants");
-  }
-  return out === src ? null : out;
-}
-function uvForceRewrite(src) {
-  const out = src.replace(
-    /textureSample([A-Za-z]*)\(([^,]+),\s*([^,]+),\s*vec2<f32>\([^)]*\)/g,
-    "textureSample$1($2, $3, vec2<f32>(0.5, 0.5)");
-  if (out !== src && ++vpDiagUvForced <= 1) {
-    console.log("[vpdiag] built UV-forced fragment variants");
-  }
-  return out === src ? null : out;
-}
-let vpDiagUvForced = 0;
-let vpDiagLayerForced = 0;
-let vpDiagDiscardStripped = 0;
 const vpDiagShaderStage = {};
 let vpDiagShaderWithDiscard = 0;
-let diagConstFsModule = null;
-function getConstFsModule(dev) {
-  if (!diagConstFsModule) {
-    diagConstFsModule = dev.createShaderModule({
-      label: "diag-const-fs",
-      code: "@fragment fn main() -> @location(0) vec4<f32> { return vec4<f32>(1.0, 0.0, 1.0, 1.0); }"
-    });
-  }
-  return diagConstFsModule;
-}
 
 // Set true once the WebGPU hardware renderer (cmd-ring executor) has
 // presented a frame; suppresses the legacy CPU-framebuffer canvas blit
 // in runPresentationLoop so the two don't fight over renderGpu.context.
 let cmdRingOwnsCanvas = false;
+// Always on (src/wgpu-integrity.js): what makes a picture wrong silently.
+const wgpuIntegrity = createWgpuIntegrity();
 const webGpuExecStats = {
   beginFb0: 0, beginFbN: 0, draw: 0, drawIdx: 0, setPipe: 0,
   setBg: 0, present: 0, missPipe: 0, missBg: 0, skipDraw: 0, lastLog: 0
@@ -11689,6 +12984,15 @@ const webGpuCausalStats = {
   backlogHighWater: 0,
   replayPumpDrainCount: 0,
   replayPumpEmptyPollCount: 0,
+  // Patch 0148: the pump parks on an empty ring (waitAsync on the write
+  // index) and the producer wakes it. timedOutWithData counts a park that
+  // timed out although the write index had moved: with a 0148 core, a
+  // publish racing the timeout (rare); with an older core, every publish.
+  replayPumpParkCount: 0,
+  replayPumpParkNotifiedCount: 0,
+  replayPumpParkTimedOutCount: 0,
+  replayPumpParkTimedOutWithDataCount: 0,
+  replayPumpParkNotEqualCount: 0,
   replayPumpScheduleCount: 0,
   replayPumpBacklogScheduleCount: 0,
   replayPumpIdleScheduleCount: 0,
@@ -11858,6 +13162,13 @@ const webGpuCausalStats = {
   mappedStagingCapacityWaitMaxMs: 0,
   mappedStagingRemapFailureCount: 0,
   mappedStagingUnsafeCapacityCount: 0,
+  mappedStagingOversizeCount: 0,
+  mappedStagingOversizeBytes: 0,
+  mappedStagingPassCapacityQueueCount: 0,
+  mappedStagingPassCapacityQueueBytes: 0,
+  passUploadBytesBucketBounds: [...WGPU_PASS_UPLOAD_BUCKET_BOUNDS_BYTES],
+  passUploadBytesHistogram: new Array(WGPU_PASS_UPLOAD_BUCKET_BOUNDS_BYTES.length + 1).fill(0),
+  passUploadBytesMax: 0,
   heldUploadScannedRecords: 0,
   heldUploadScanTotalMs: 0,
   heldUploadScanMaxMs: 0,
@@ -11952,7 +13263,433 @@ function recordBoundedHistogram(values, bounds, value) {
   values[bucket] += 1;
 }
 
+// ?presentvsync=1 (research/deep-frame-pacing.md §5 step 2): wgpu frames
+// reach the canvas at the worker's rAF, one per BeginFrame. Chrome pushes an
+// OffscreenCanvas to the compositor at its BeginFrame and keeps only the last
+// picture since the previous one: presenting as the ring drains lost 4-5
+// pictures a second on the race (--display, 24/10). Here the backbuffer pass
+// renders into a texture of a small pool instead of getCurrentTexture(); the
+// present only queues it; each rAF copies the oldest queued frame to the
+// canvas. The drain is never held (holding it made the core skip frames).
+// Catch-up: a frame that has already waited a whole BeginFrame is dropped
+// (counted) when a newer one waits too, so a backlog left by a burst does
+// not keep the display a frame late; a burst itself is shown in order.
+// More than WGPU_VSYNC_QUEUE waiting: the oldest is dropped, counted. With no
+// BeginFrame for WGPU_VSYNC_FALLBACK_MS (hidden tab, a host streaming in the
+// background), a timer presents instead.
+// v3: the stream captures each frame when it is queued, from its pooled
+// texture copied to a canvas of its own (wgpuVsyncStreamCanvas), not from the
+// display canvas at the rAF: the stream keeps every frame at its own time,
+// free of the local display's BeginFrames, catch-up drops and timer fallback.
+let wgpuPresentVsync = false;
+const WGPU_VSYNC_FALLBACK_MS = 50;
+// A frame queued while the presenter's rAF is late (the worker busy in a
+// long task, as compiles at boot) is shown at once instead of waiting for a
+// BeginFrame the busy worker cannot run: held there it stayed 3 vsyncs or
+// more (drop-meter, review of #265). Late: 1.5 x the display's frame
+// period, at least WGPU_VSYNC_LATE_FLOOR_MS; 25 ms (1.5 vsync at 60 Hz)
+// before there are ticks to measure. The period is the smallest of the last
+// 16 rAF frame-time deltas (vsyncLateMs, src/wgpu-vsync-queue.js): frame
+// times fall on vsyncs, so a busy stretch cannot push it up and turn byLate
+// off where it is needed (reviews of #265 and #274).
+const WGPU_VSYNC_LATE_FLOOR_MS = 12;
+const wgpuVsyncFrameGaps = new Float64Array(16);
+let wgpuVsyncFrameGapCount = 0;
+let wgpuVsyncLastFrameTime = null;
+function wgpuVsyncLateMs() {
+  const n = Math.min(wgpuVsyncFrameGapCount, wgpuVsyncFrameGaps.length);
+  return vsyncLateMs(Array.from(wgpuVsyncFrameGaps.subarray(0, n)), { floor: WGPU_VSYNC_LATE_FLOOR_MS });
+}
+// The screen's refresh period from the last 16 rAF frame-time deltas
+// (refreshOf: the mean of those near the shortest, a missed refresh left
+// out; the shortest alone ran short with rounded or jittery frame times);
+// null before there are 4.
+function wgpuVsyncRefreshMs() {
+  const n = Math.min(wgpuVsyncFrameGapCount, wgpuVsyncFrameGaps.length);
+  return refreshOf(Array.from(wgpuVsyncFrameGaps.subarray(0, n)));
+}
+// ?presentpace=game (src/wgpu-game-pacer.js): frames shown at the game's own
+// pace on a screen faster than the game (60 fps on 120 Hz, 30 fps on 60 Hz).
+// Every queued frame is stamped on the pacer's arrival clock either way, so
+// the refresh histogram (frames on screen for 1, 2, 3, 4+ refreshes, shown in
+// the HUD) reads the same with the switch on or off.
+let wgpuPresentGamePace = false;
+// The VI phase lock (src/wgpu-vi-phase-lock.js; default on at 1:1, ?vilock=1
+// forces it, ?vilock=0 off): the VI locked in phase on the refresh; fed the rAF frame times and the frames' arrivals, it trims the
+// core's throttle rate (patch 0212: +/- at most 0.2 % of the configured
+// speed; the emulated time is unchanged) every 500 ms, from the rAF tick or,
+// without rAF (hidden), from the next arrival. A core without the trim: no
+// lock, and why.
+let wgpuViLock = null;
+// why the lock is not running (null: turned off, or running)
+let wgpuViLockUnavailable = null;
+// The VI phase lock's status for the audio queue telemetry: its stats when
+// it runs, off with the reason when it could not run, null when turned off (?vilock=0).
+function viLockStatus() {
+  if (wgpuViLock) return { ...wgpuViLock.stats };
+  if (wgpuViLockUnavailable) return { on: false, ppm: 0, locks: 0, lost: 0, why: wgpuViLockUnavailable, driftPpm: null, refreshMs: null, frameMs: null, ratio: null, phase: null };
+  return null;
+}
+let wgpuViLockLastUpdate = 0;
+function wgpuViLockUpdate(now) {
+  if (!wgpuViLock || now - wgpuViLockLastUpdate < 500) return;
+  wgpuViLockLastUpdate = now;
+  if (!api?.setThrottleRatePpm) {
+    wgpuViLock.stats.why = "core without a throttle rate trim";
+    return;
+  }
+  const r = wgpuViLock.update(now);
+  if (r.changed) api.setThrottleRatePpm(wgpuViLock.stats.ppm);
+}
+// The frames' arrival period, the screen's refresh and the refresh histogram
+// are kept only with ?presentpace=game|observe or the harness: by default the
+// presenter does none of this work.
+let wgpuPresentPaceStats = false;
+const wgpuVsyncTracking = () => wgpuPresentPaceStats || harnessEnabled;
+const wgpuGamePacer = createGamePacer();
+const wgpuRefreshHistogram = createRefreshHistogram();
+// The HUD's refresh field: the last 10 s of the histogram.
+function refreshHelperField() {
+  const h = wgpuRefreshHistogram.snapshot(performance.now());
+  return ` refresh:${h.counts.join("/")}/rep${h.repeats}/hz${Math.round(1000 / (wgpuVsyncRefreshMs() || 1000 / 60))}/${wgpuPresentGamePace ? "pace" : "nopace"}`;
+}
+// A frame went up since the presenter's last BeginFrame (shown at a
+// BeginFrame, by the late path or the fallback timer).
+let wgpuVsyncShownSinceTick = 0;
+// The VI output of the frame shown last (harness pipeline diag; -1: untagged).
+let wgpuVsyncShownVi = -1;
+// Pool and queue, one texture per frame (src/wgpu-vsync-queue.js).
+const wgpuVsync = createVsyncQueue({
+  queueSize: 2,
+  createTexture: (width, height) => {
+    const u = self.GPUTextureUsage;
+    return renderGpu.device.createTexture({
+      label: "wgpu-vsync-backbuffer",
+      size: [width, height],
+      format: renderGpu.format,
+      usage: u.RENDER_ATTACHMENT | u.COPY_SRC | u.TEXTURE_BINDING
+    });
+  },
+  destroyTexture: (tex) => tex.destroy()
+});
+// The presenter's rAF loop stops after this many BeginFrames with nothing to
+// show (2 s at 60 Hz: a paused game, a menu that does not render) and starts
+// again with the next queued frame (battery, 120/144 Hz screens).
+const WGPU_VSYNC_IDLE_TICKS = 120;
+let wgpuVsyncIdleTicks = 0;
+// A device's number in the pool key: a new device (lost and recreated)
+// drops the pool, whose textures belong to the old one.
+const wgpuVsyncDeviceIds = new WeakMap();
+let wgpuVsyncDeviceCount = 0;
+let wgpuVsyncLoop = false;
+let wgpuVsyncLastTickAt = 0;
+// BeginFrames seen (the worker's rAF ticks).
+let wgpuVsyncTick = 0;
+// The rAF frame time of the presenter's callback running now (null outside
+// it): the harness display counter matches it to that BeginFrame's entry,
+// whichever of the two worker rAF loops runs first in the frame.
+let wgpuVsyncFrameTime = null;
+let wgpuVsyncFallback = null;
+// The device the display canvas was configured on with COPY_DST (null: not yet).
+let wgpuVsyncCanvasDevice = null;
+const wgpuPresentVsyncStats = { byTimer: 0, byLate: 0, byNoBeginFrame: 0, streamed: 0 };
+// v3: the stream's own canvas, sized like the frames and configured on the
+// current device (made again when either changes).
+let wgpuVsyncStreamCanvas = null;
+let wgpuVsyncStreamContext = null;
+let wgpuVsyncStreamDevice = null;
+
+// The pool's drops count in the presentation's lifetime drops.
+function wgpuVsyncCountDrops(before) {
+  presentationLifetimeDropCount += wgpuVsync.stats.dropped - before;
+}
+
+// v3: one queued frame to the stream, at queue time: its texture copied to
+// the stream canvas, then a VideoFrame of that canvas (submitted first, on
+// the same queue, before any later pass reuses the texture).
+function streamWgpuVsyncFrame(tex, coreFrame) {
+  if (!streamCapture.ready()) return;
+  const dev = renderGpu.device;
+  if (!wgpuVsyncStreamCanvas || wgpuVsyncStreamDevice !== dev ||
+      wgpuVsyncStreamCanvas.width !== tex.width || wgpuVsyncStreamCanvas.height !== tex.height) {
+    wgpuVsyncStreamDevice = dev;
+    wgpuVsyncStreamCanvas = new OffscreenCanvas(tex.width, tex.height);
+    wgpuVsyncStreamContext = wgpuVsyncStreamCanvas.getContext("webgpu");
+    const u = self.GPUTextureUsage;
+    wgpuVsyncStreamContext.configure({ device: dev, format: renderGpu.format, alphaMode: "opaque", usage: u.RENDER_ATTACHMENT | u.COPY_DST });
+  }
+  const enc = dev.createCommandEncoder({ label: "wgpu-vsync-stream" });
+  enc.copyTextureToTexture({ texture: tex }, { texture: wgpuVsyncStreamContext.getCurrentTexture() }, [tex.width, tex.height, 1]);
+  dev.queue.submit([enc.finish()]);
+  streamCapture.offerCanvas(wgpuVsyncStreamCanvas, coreFrame);
+  wgpuPresentVsyncStats.streamed += 1;
+}
+
+// The texture a backbuffer pass renders into, in place of the canvas's:
+// the frame's, kept for all its passes, across drains (one per frame).
+function acquireWgpuVsyncTexture(width, height) {
+  const dev = renderGpu.device;
+  if (!wgpuVsyncDeviceIds.has(dev)) wgpuVsyncDeviceIds.set(dev, ++wgpuVsyncDeviceCount);
+  const before = wgpuVsync.stats.dropped;
+  const tex = wgpuVsync.textureForPass(`${width}x${height}:${renderGpu.format}:${wgpuVsyncDeviceIds.get(dev)}`, width, height);
+  wgpuVsyncCountDrops(before);
+  return tex;
+}
+
+// The frame's present: its texture queued for the rAF (and streamed now,
+// v3). False when the frame had no backbuffer pass: nothing new to show,
+// nothing queued, streamed or counted as presented.
+function queueWgpuVsyncFrame(coreFrame, shownVi, stream, tag = 0, tagEpoch = 0) {
+  const before = wgpuVsync.stats.dropped;
+  // No BeginFrame lately (hidden tab): an overflow is not a drop.
+  const hidden = wgpuVsyncLoop && performance.now() - wgpuVsyncLastTickAt >= WGPU_VSYNC_FALLBACK_MS;
+  const at = performance.now();
+  const frame = wgpuVsync.queueFrame({ coreFrame, shownVi, stream, tick: wgpuVsyncTick, at, tag, tagEpoch }, { hidden });
+  wgpuVsyncCountDrops(before);
+  if (!frame) return false;
+  if (stream && streamCapture.active) streamWgpuVsyncFrame(frame.tex, coreFrame);
+  wgpuNewFrames.queued(tag, tagEpoch);
+  if (harnessPipeline) harnessPipelineLog.queued(shownVi, performance.timeOrigin + at);
+  if (wgpuVsyncTracking()) wgpuGamePacer.stamp(at);
+  if (wgpuViLock) {
+    wgpuViLock.arrival(at);
+    wgpuViLockUpdate(at);
+  }
+  wgpuVsyncIdleTicks = 0;
+  if (!wgpuVsyncLoop) {
+    wgpuVsyncLoop = true;
+    wgpuVsyncLastTickAt = performance.now();
+    const tick = (frameTime) => {
+      const now = performance.now();
+      if (wgpuVsyncLastFrameTime !== null && frameTime > wgpuVsyncLastFrameTime) {
+        wgpuVsyncFrameGaps[wgpuVsyncFrameGapCount++ % wgpuVsyncFrameGaps.length] = frameTime - wgpuVsyncLastFrameTime;
+      }
+      wgpuVsyncLastFrameTime = frameTime;
+      if (wgpuViLock) {
+        wgpuViLock.tick(frameTime, now);
+        wgpuViLockUpdate(now);
+      }
+      // Back after a gap of 50 ms or more (a block, a silent rAF): the newest
+      // frame first, not the oldest one queued before the gap.
+      const afterGap = now - wgpuVsyncLastTickAt >= WGPU_VSYNC_FALLBACK_MS;
+      wgpuVsyncLastTickAt = now;
+      wgpuVsyncTick += 1;
+      wgpuVsyncFrameTime = performance.timeOrigin + frameTime;
+      let shown = false;
+      const tracking = wgpuVsyncTracking();
+      const refreshMs = tracking ? wgpuVsyncRefreshMs() : null;
+      try {
+        shown = presentWgpuVsyncFrame({ newest: afterGap, t: frameTime, refreshMs });
+      } finally {
+        wgpuVsyncFrameTime = null;
+      }
+      if (harnessPipeline) harnessPipelineLog.tick(performance.timeOrigin + frameTime, performance.timeOrigin + now, shown ? wgpuVsyncShownVi : -1);
+      // The game frame now on screen and how many refreshes it covers. After
+      // a gap (a hidden tab: the fallback timer put up a frame every 50 ms,
+      // ~1,200 a minute), the frames shown meanwhile are not unseen ones.
+      if (tracking) {
+        const gameMs = wgpuGamePacer.period;
+        const shownCount = afterGap ? Math.min(1, wgpuVsyncShownSinceTick) : wgpuVsyncShownSinceTick;
+        wgpuRefreshHistogram.tick(shownCount ? (refreshMs && gameMs ? gameMs / refreshMs : 1) : null, now, shownCount);
+      }
+      wgpuVsyncShownSinceTick = 0;
+      wgpuVsyncIdleTicks = shown ? 0 : wgpuVsyncIdleTicks + 1;
+      if (wgpuVsyncIdleTicks >= WGPU_VSYNC_IDLE_TICKS && !wgpuVsync.waiting) {
+        wgpuVsyncLoop = false;  // the next queued frame starts it again
+        return;
+      }
+      self.requestAnimationFrame(tick);
+    };
+    self.requestAnimationFrame(tick);
+  } else {
+    const sinceTick = performance.now() - wgpuVsyncLastTickAt;
+    if (sinceTick >= WGPU_VSYNC_FALLBACK_MS) {
+      // No BeginFrame for 50 ms or more (a hidden tab, a rAF silent for
+      // seconds): no local copy per frame, the stream has it already (v3);
+      // the fallback timer shows the newest one every 50 ms.
+      wgpuPresentVsyncStats.byNoBeginFrame += 1;
+    } else if (sinceTick > wgpuVsyncLateMs()) {
+      // The rAF is late (busy worker): no BeginFrame to wait for, the
+      // newest frame now.
+      wgpuPresentVsyncStats.byLate += 1;
+      presentWgpuVsyncFrame({ newest: true });
+    }
+  }
+  wgpuVsyncFallback ??= setTimeout(wgpuVsyncFallbackCheck, WGPU_VSYNC_FALLBACK_MS);
+  return true;
+}
+
+function wgpuVsyncFallbackCheck() {
+  wgpuVsyncFallback = null;
+  // The device is gone: nothing can be shown, the queue goes (else this timer
+  // would run every 50 ms for ever).
+  if (!renderGpu) {
+    wgpuVsync.clear();
+    return;
+  }
+  if (!wgpuVsync.waiting) return;
+  if (performance.now() - wgpuVsyncLastTickAt >= WGPU_VSYNC_FALLBACK_MS) {
+    wgpuPresentVsyncStats.byTimer += 1;
+    // No BeginFrame for 50 ms: the older frames were never to be shown.
+    presentWgpuVsyncFrame({ newest: true, hidden: true });
+  }
+  if (wgpuVsync.waiting) wgpuVsyncFallback = setTimeout(wgpuVsyncFallbackCheck, WGPU_VSYNC_FALLBACK_MS);
+}
+
+// One queued frame to the canvas: the oldest, so a burst is shown in order
+// (after the catch-up, in takeForDisplay). True when a frame was shown.
+// `t`, `refreshMs`: the BeginFrame's time and the screen's period, for the
+// game pace (none outside a BeginFrame: the newest frame, the pace restarts).
+// The rAF tick and the fallback timer come here: timed for replayBusy.
+function presentWgpuVsyncFrame(options) {
+  return workerBusy.run(presentWgpuVsyncFrameOnce, options);
+}
+function presentWgpuVsyncFrameOnce({ newest = false, hidden = false, t = null, refreshMs = null } = {}) {
+  if (!renderGpu) {
+    wgpuVsync.clear();
+    wgpuGamePacer.reset({ arrival: true });
+    return false;
+  }
+  const before = wgpuVsync.stats.dropped;
+  const pace = wgpuPresentGamePace && t !== null && !newest ? (frame) => wgpuGamePacer.due(frame, t, refreshMs) : null;
+  if (newest) wgpuGamePacer.reset();
+  const f = newest ? wgpuVsync.takeNewest({ hidden }) : wgpuVsync.takeForDisplay(wgpuVsyncTick, pace);
+  wgpuVsyncCountDrops(before);
+  if (!f) {
+    if (pace && wgpuVsync.waiting) wgpuGamePacer.held();
+    return false;
+  }
+  if (pace) wgpuGamePacer.shown(f, t, refreshMs);
+  wgpuVsyncShownSinceTick += 1;
+  wgpuVsyncShownVi = f.shownVi ?? -1;
+  const dev = renderGpu.device;
+  if (wgpuVsyncCanvasDevice !== dev) {
+    wgpuVsyncCanvasDevice = dev;
+    const u = self.GPUTextureUsage;
+    renderGpu.context.configure({
+      device: dev,
+      format: renderGpu.format,
+      alphaMode: "opaque",
+      usage: wgpuCanvasUsage(u)
+    });
+  }
+  const dst = renderGpu.context.getCurrentTexture();
+  const enc = dev.createCommandEncoder({ label: "wgpu-vsync-present" });
+  if (wgpuDisplayFilterActive()) {
+    // Scale to the display (EASU up, area down) and sharpen (RCAS).
+    if (wgpuDisplayFilterDevice !== dev) {
+      wgpuDisplayFilterGpu?.destroy();
+      wgpuDisplayFilterGpu = createDisplayFilter(dev, renderGpu.format, { timing: collectMetrics && wgpuDisplayFilter.timing });
+      wgpuDisplayFilterDevice = dev;
+    }
+    wgpuDisplayFilterGpu.encode(enc, f.tex, dst, wgpuDisplayFilter.sharpness);
+  } else {
+    enc.copyTextureToTexture(
+      { texture: f.tex },
+      { texture: dst },
+      [Math.min(f.tex.width, dst.width), Math.min(f.tex.height, dst.height), 1]
+    );
+  }
+  dev.queue.submit([enc.finish()]);
+  // Same queue: the copy runs before any later pass renders into f.tex.
+  wgpuVsync.shown(f);
+  wgpuNewFrames.shown(f.tag, f.tagEpoch);
+  // v3: streamed at queue time (streamWgpuVsyncFrame), not here.
+  recordPresentedFrame(f.coreFrame, f.shownVi);
+  return true;
+}
+
+// The canvas's usage; COPY_DST when frames are copied to it at the rAF.
+function wgpuCanvasUsage(u) {
+  return u.RENDER_ATTACHMENT |
+    ((wgpuReplayClassifier || inputReadbackDiagnostics) ? u.COPY_SRC : 0) |
+    (wgpuVisualCadenceEnabled ? u.TEXTURE_BINDING : 0) |
+    (wgpuPresentVsync ? u.COPY_DST : 0);
+}
+
+// Size the canvas (Dolphin's backbuffer) and reconfigure its context. Once
+// for a core that never announces its size (640x480), then on every
+// BackbufferSize command (patch 0168: 640N x 480N at internal resolution N,
+// which can change while a game runs). Repeated resizes from per-frame
+// viewport extents blanked the output once (0.0 visual fps); only a size the
+// core lays the presenter out on reaches here.
+function resizeWgpuBackbuffer(width, height) {
+  wgpuBackbufferSized = true;
+  wgpuBackbufferW = width;
+  wgpuBackbufferH = height;
+  applyWgpuCanvasSize();
+}
+
+// The core's backbuffer size: the frames' (presentvsync pool). Before any
+// announce, the canvas's when it is the backbuffer, else Dolphin's 640x480.
+function wgpuBackbufferSize() {
+  if (wgpuBackbufferW > 0 && wgpuBackbufferH > 0) return [wgpuBackbufferW, wgpuBackbufferH];
+  return [renderCanvas?.width || WGPU_BACKBUFFER_W, renderCanvas?.height || WGPU_BACKBUFFER_H];
+}
+
+// The display filter draws the frames at rAF: only with presentvsync, on a
+// hardware path, and only when it has something to do.
+function wgpuDisplayFilterActive() {
+  return wgpuPresentVsync && hardwareVideoBackend && displayFilterFits(wgpuDisplayFilter);
+}
+
+function setWgpuDisplayFilter(payload = {}) {
+  const wasActive = wgpuDisplayFilterActive();
+  const before = wgpuDisplayFilter;
+  wgpuDisplayFilter = normalizeDisplayFilter({ ...before, ...payload });
+  // Turning it on before the core announced a size: freeze the backbuffer
+  // the canvas has now, the canvas is about to change.
+  if (!wasActive && wgpuDisplayFilterActive() && !(wgpuBackbufferW > 0)) {
+    [wgpuBackbufferW, wgpuBackbufferH] = wgpuBackbufferSize();
+  }
+  if (renderGpu && renderCanvas && (wasActive || wgpuDisplayFilterActive())) applyWgpuCanvasSize();
+  // Off: its textures, buffers and timing reads go (made again when on).
+  if (wasActive && !wgpuDisplayFilterActive()) {
+    wgpuDisplayFilterGpu?.destroy();
+    wgpuDisplayFilterGpu = null;
+    wgpuDisplayFilterDevice = null;
+  }
+}
+
+// Size the canvas: the backbuffer, or with the display filter the display
+// box at the backbuffer's aspect.
+function applyWgpuCanvasSize() {
+  try {
+    const [bw, bh] = wgpuBackbufferSize();
+    const size = wgpuDisplayFilterActive()
+      ? displayFilterOutputSize({ width: bw, height: bh }, wgpuDisplayFilter.box,
+        { maxSide: Math.min(5120, renderGpu?.device?.limits?.maxTextureDimension2D || 8192) })
+      : { width: bw, height: bh };
+    const usage = self.GPUTextureUsage.RENDER_ATTACHMENT |
+      ((wgpuReplayClassifier || inputReadbackDiagnostics) ? self.GPUTextureUsage.COPY_SRC : 0) |
+      (wgpuVisualCadenceEnabled ? self.GPUTextureUsage.TEXTURE_BINDING : 0) |
+      (wgpuPresentVsync ? self.GPUTextureUsage.COPY_DST : 0);
+    if (!resizeCanvasBackbuffer(renderCanvas, renderGpu, size.width, size.height, usage)) return;
+    console.log(`[bbresize] backbuffer ${bw}x${bh} canvas ${size.width}x${size.height}`);
+    postStatus(`wgpu backbuffer resized to ${bw}x${bh}`);
+  } catch (e) {
+    recordRendererError("validation", `backbuffer resize: ${e?.message || e}`);
+  }
+}
+
+// Before a disc boots in a worker that already ran one: the new core starts
+// from a 640x480 backbuffer and announces only other sizes (patch 0168), so
+// a canvas left at the previous session's scale would get the 640x480 frame
+// in its top-left corner. Bring it back, and re-arm the one-shot growth.
+function resetWgpuBackbufferForBoot() {
+  const size = renderGpu ? bootBackbufferResize(renderCanvas) : null;
+  const stale = renderGpu && wgpuBackbufferW > 0 &&
+    (wgpuBackbufferW !== WGPU_BACKBUFFER_W || wgpuBackbufferH !== WGPU_BACKBUFFER_H);
+  if (size || stale) resizeWgpuBackbuffer(WGPU_BACKBUFFER_W, WGPU_BACKBUFFER_H);
+  wgpuBackbufferSized = false;
+}
+
+// Whoever drains (loop, pump, a promise callback): timed for replayBusy,
+// once when nested.
 function drainWebGpuCmdRing(source = "presentation") {
+  return workerBusy.run(drainWebGpuCmdRingOnce, source);
+}
+function drainWebGpuCmdRingOnce(source = "presentation") {
   if (wgpuReplayFatal) return;
   if (wgpuDiagPerturb.drainEveryMs > 0) {
     const now = performance.now();
@@ -12138,6 +13875,7 @@ function drainWebGpuCmdRing(source = "presentation") {
   const q = dev.queue;
   let enc = null;
   let pass = null;
+  let passUploadBytes = 0;
   let passW = 0;
   let passH = 0;
   let passColorFmt = null;
@@ -12153,11 +13891,6 @@ function drainWebGpuCmdRing(source = "presentation") {
   // both for its clear triangle and must put the game's back afterwards.
   let lastAppliedViewport = null;
   let lastAppliedScissor = null;
-  // DIAG_DEPTH_TRACE: the rest of the last-applied pass state, so a split pass
-  // can be re-opened with the same state the game had set.
-  let dtLastPipe = null;
-  const dtLastBg = [null, null, null];
-  let dtLastVb = null, dtLastIb = null, dtPassDesc = null;
   let currentBackbufferSourceTextureId = 0;
   let lastBackbufferSourceTextureId = wgpuLastBackbufferSourceTextureId;
   let lastBackbufferTexture = null;
@@ -12214,99 +13947,7 @@ function drainWebGpuCmdRing(source = "presentation") {
   };
   let errScope = false;
   let mappedCapacityHold = false;
-  // One-shot present-path diagnostic: per-pass tally of pipeline/bind/
-  // draw activity for the backbuffer (fb=0) and XFB-format (fb=47)
-  // passes — tells us whether the present/XFB-copy draw actually runs.
   let passFbId = -1;
-  let pd = { pipeOk: 0, pipeMiss: 0, bgOk: 0, bgMiss: 0, draw: 0, drawIdx: 0 };
-  self._wgPassDiag = self._wgPassDiag || {};
-  const flushPassDiag = () => {
-    if (passFbId < 0) return;
-    const key = passFbId === 0 ? "fb0" : "fb" + passFbId;
-    const n = (self._wgPassDiag[key] = (self._wgPassDiag[key] || 0) + 1);
-    // [webgpu-DIAG-cpypass] EFB-copy target passes (the 640x480
-    // rgba8unorm depth-less RTs found opaque-black, §15a): does the
-    // copy draw actually run, and with a pipeline+bind group?
-    const isCopyTgt = self._wgCopyTargets &&
-      self._wgCopyTargets.has(passFbId);
-    // §28y: also fire on a wall-clock cadence (every 5 s, capped 30×)
-    // so the copy pass is observable DEEP in the A-only black-3D
-    // dwell (n≫6 there) — does the EFB→640×480 copy draw actually
-    // run, with what srcTex/pipe/bg, when the copies read all-white?
-    let _cpWcOk = false;
-    if (isCopyTgt) {
-      const _cn = Date.now();
-      self._wgCpPassT0 = self._wgCpPassT0 || _cn;
-      const _ct = Math.floor((_cn - self._wgCpPassT0) / 5000);
-      self._wgCpPassWc = (self._wgCpPassWc == null) ? -1 : self._wgCpPassWc;
-      if (_ct !== self._wgCpPassWc && _ct < 30) {
-        self._wgCpPassWc = _ct;
-        _cpWcOk = true;
-      }
-    }
-    if (isCopyTgt && (n <= 6 || _cpWcOk)) {
-      const _ct = webGpuObjects.pipeTpl.get(self._wgCurPipe);
-      console.log(`[webgpu-DIAG-cpypass] pass#${n} fb=${passFbId} ` +
-        `pipeOk=${pd.pipeOk} pipeMiss=${pd.pipeMiss} bgOk=${pd.bgOk} ` +
-        `bgMiss=${pd.bgMiss} draw=${pd.draw} drawIdx=${pd.drawIdx} ` +
-        `srcTex=${self._wgCpySrc != null ? "tex#" + self._wgCpySrc : "?"} ` +
-        `pipe=${self._wgCurPipe} ${_ct ? _ct.s28dbg : "?"} ` +
-        `${passColorFmt}/${passDepthFmt} ${passW}x${passH}`);
-      // §28z: one-shot dump the 640×480 EFB-copy's FS WGSL — the
-      // shader that outputs white instead of mirroring tex#14. Keyed
-      // off the copy pipeline (not the broken 4096 heuristic).
-      if (passW === 640 && passH === 480 && _ct && !self._wgCpFsDone &&
-          self._wgFsSrc && self._wgFsSrc[_ct.fsId] !== undefined) {
-        self._wgCpFsDone = true;
-        const w = self._wgFsSrc[_ct.fsId].replace(/\s+/g, " ");
-        console.log(`[s28z-cpfs] fb=${passFbId} pipe=${self._wgCurPipe} ` +
-          `fs#${_ct.fsId} vs#${_ct.vsId} len=${w.length} ` +
-          `nSample=${(w.match(/textureSample/g) || []).length}`);
-        for (let o = 0; o < w.length && o < 4200; o += 700)
-          console.log(`[s28z-cpfs ${o}] ${w.slice(o, o + 700)}`);
-      }
-    }
-    if ((passFbId === 0 || passFbId === 47) && n <= 3) {
-      console.log(`[webgpu-exec] pass#${n} fb=${passFbId} ` +
-        `pipeOk=${pd.pipeOk} pipeMiss=${pd.pipeMiss} bgOk=${pd.bgOk} ` +
-        `bgMiss=${pd.bgMiss} draw=${pd.draw} drawIdx=${pd.drawIdx} ` +
-        `${passColorFmt}/${passDepthFmt} ${passW}x${passH}`);
-    }
-    // [webgpu-DIAG-efbpass] The EFB colour pass (depth-attached
-    // tex#14) sampled across the run. Decides menu-black: real draws
-    // but black EFB ⇒ state/shader; ~0 draws ⇒ menu uses another path.
-    if (self._wgEfbColorId && passFbId === self._wgEfbColorId &&
-        (n % 240) === 1) {
-      console.log(`[webgpu-DIAG-efbpass] p=${webGpuExecStats.present} ` +
-        `n=${n} fb=${passFbId} pipeOk=${pd.pipeOk} pipeMiss=${pd.pipeMiss} ` +
-        `bgOk=${pd.bgOk} bgMiss=${pd.bgMiss} draw=${pd.draw} ` +
-        `drawIdx=${pd.drawIdx} ${passColorFmt}/${passDepthFmt} ` +
-        `${passW}x${passH}`);
-    }
-    // §28k: where do intro-cutscene / title / main-menu draws go?
-    // Those screens render BLACK with zero draws into tex#14 (the EFB
-    // pass). Tally per-fbId draw totals over the run and dump the full
-    // map periodically so we can see whether they target a different
-    // FB / copy target instead of the depth-attached EFB.
-    if (pd.draw + pd.drawIdx > 0) {
-      self._wgFbDraws = self._wgFbDraws || {};
-      const fk = passFbId === 0 ? "fb0" : "fb" + passFbId;
-      const e = self._wgFbDraws[fk] || { d: 0, passes: 0, efb: 0 };
-      e.d += pd.draw + pd.drawIdx; e.passes += 1;
-      if (passFbId === self._wgEfbColorId) e.efb = 1;
-      self._wgFbDraws[fk] = e;
-    }
-    self._wgFbDumpN = (self._wgFbDumpN || 0) + 1;
-    if ((self._wgFbDumpN % 600) === 0) {
-      const rows = Object.entries(self._wgFbDraws || {})
-        .map(([k, v]) => `${k}${v.efb ? "*EFB" : ""}=${v.d}/${v.passes}p`)
-        .join(" ");
-      console.log(`[s28k-fbdraws] p=${webGpuExecStats.present} ` +
-        `efbId=${self._wgEfbColorId} ${rows}`);
-    }
-    passFbId = -1;
-    pd = { pipeOk: 0, pipeMiss: 0, bgOk: 0, bgMiss: 0, draw: 0, drawIdx: 0 };
-  };
   const ensureEnc = () => {
     if (!enc) {
       dev.pushErrorScope("validation");
@@ -12385,6 +14026,17 @@ function drainWebGpuCmdRing(source = "presentation") {
     prepareWgpuMappedDrainSubmission(reason, decisionPrepared);
     return submitPendingWgpuMappedUploads(reason);
   };
+  // Submits what was staged before an upload that takes the queue (see
+  // writeWgpuUploadThroughQueue). Outside a pass, the open encoder goes too.
+  // Inside one, only the staged batch: it is a command buffer of its own, and
+  // the render command buffer is submitted after it either way, so uploads
+  // stay in program order and still precede the drain's draws, as every
+  // upload of a drain does (and as the queue transport always does).
+  const submitPendingForQueueUpload = () => {
+    if (enc && !pass) submitEnc("staging-oversize");
+    else flushMappedUploadsOnly("staging-oversize");
+    return !wgpuReplayFatal;
+  };
   let lastSubmitFailureReason = null;
   const submitEnc = (reason = "drain-boundary", decisionPrepared = false) => {
     lastSubmitFailureReason = null;
@@ -12414,7 +14066,6 @@ function drainWebGpuCmdRing(source = "presentation") {
       gpuCompletionTracker.recordSubmittedWork(q, "hardware-replay");
       acceptMappedBatch(mappedBatch);
       submitted = true;
-      dtraceDrainPending();
     } catch (e) {
       lastSubmitFailureReason = "submit-error";
       rejectMappedBatch(mappedBatch, e);
@@ -12455,20 +14106,16 @@ function drainWebGpuCmdRing(source = "presentation") {
   };
   const endPass = (reason = "implicit", recordIndex = read) => {
     if (pass) {
+      if (causalMetricsEnabled) {
+        recordWgpuPassUploadBytes(passUploadBytes);
+        passUploadBytes = 0;
+      }
       const endedFramebufferId = passFbId;
       if (passFbId === 0) {
         lastBackbufferSourceTextureId = currentBackbufferSourceTextureId;
         wgpuLastBackbufferSourceTextureId = currentBackbufferSourceTextureId;
       }
       try { pass.end(); } catch (e) {}
-      if (DIAG_DEPTH_TRACE && self._wgDt && self._wgDt.armed &&
-          endedFramebufferId === self._wgEfbColorId && passDepthId) {
-        const dt = self._wgDt;
-        diagReadDepthTrace(dev, ensureEnc(), webGpuObjects.textures.get(passDepthId),
-          `end of pass#${dt.passSeq} (${reason}) | efbDraws=${dt.draws} depthWrites=${dt.writes} clearRects=${dt.clears}`);
-        diagReadColorTrace(dev, ensureEnc(), webGpuObjects.textures.get(endedFramebufferId),
-          `end of pass#${dt.passSeq} | efbDraws=${dt.draws}`);
-      }
       // Read the copy destination AND the EFB immediately after the copy pass
       // ends, so both reads sit adjacent in the command stream. Reading at
       // present time instead was confounded by encoder batching: several
@@ -12507,7 +14154,7 @@ function drainWebGpuCmdRing(source = "presentation") {
       }
       pass = null;
       if (wgpuConsumerStateCacheEnabled) wgpuPassStateCache.reset(reason);
-      flushPassDiag();
+      passFbId = -1;
 
       // Present-time EFB sampling can be invalidated by a later clear.  When
       // the classifier is enabled, submit exactly one readback immediately
@@ -12586,78 +14233,12 @@ function drainWebGpuCmdRing(source = "presentation") {
     }
     return false;
   };
-  // DIAG_DEPTH_TRACE: end the open EFB pass, copy its depth buffer in the same
-  // encoder, and re-open the pass with load ops and the last-applied state.
-  const dtraceSplit = (tag) => {
-    const dt = self._wgDt;
-    if (!DIAG_DEPTH_TRACE || !dt || !dt.armed || !pass ||
-        passFbId !== self._wgEfbColorId) return;
-    if (!dtPassDesc || !dtPassDesc.depthStencilAttachment) {
-      console.log(`[dtrace] split skipped, no depth attachment: ${tag}`);
-      return;
-    }
-    const dtex = webGpuObjects.textures.get(passDepthId);
-    try { pass.end(); } catch (e) { console.log(`[dtrace] end failed: ${e && e.message}`); }
-    diagReadDepthTrace(dev, ensureEnc(), dtex,
-      `${tag} | efbDraws=${dt.draws} depthWrites=${dt.writes} clearRects=${dt.clears} pass#${dt.passSeq}`);
-    diagReadColorTrace(dev, ensureEnc(), webGpuObjects.textures.get(passFbId),
-      `${tag} | efbDraws=${dt.draws}`);
-    const d2 = {
-      colorAttachments: dtPassDesc.colorAttachments.map((c) => ({ ...c, loadOp: "load" })),
-      depthStencilAttachment: { ...dtPassDesc.depthStencilAttachment, depthLoadOp: "load" }
-    };
-    if (d2.depthStencilAttachment.stencilLoadOp) d2.depthStencilAttachment.stencilLoadOp = "load";
-    try {
-      pass = enc.beginRenderPass(d2);
-      if (wgpuConsumerStateCacheEnabled) wgpuPassStateCache.reset("dtrace-split");
-      if (lastAppliedViewport) pass.setViewport(...lastAppliedViewport);
-      if (lastAppliedScissor) pass.setScissorRect(...lastAppliedScissor);
-      if (dtLastPipe) pass.setPipeline(dtLastPipe);
-      for (let sl = 0; sl < 3; sl++) {
-        const g = dtLastBg[sl];
-        if (!g) continue;
-        if (g.off) pass.setBindGroup(sl, g.bg, g.off); else pass.setBindGroup(sl, g.bg);
-      }
-      if (dtLastVb) pass.setVertexBuffer(dtLastVb.slot, dtLastVb.b, dtLastVb.offset);
-      if (dtLastIb) pass.setIndexBuffer(dtLastIb.b, dtLastIb.format, dtLastIb.offset);
-      dt.splits++;
-      if (DTRACE_CONTROL && !dt.controlDone) {
-        dt.controlDone = true;
-        const cp = ensureClearPipeline(dev, passColorFmt, passDepthFmt, false, true, 0, 0.5);
-        if (cp) {
-          pass.setScissorRect(0, 0, 64, 64);
-          pass.setPipeline(cp);
-          pass.draw(3, 1, 0, 0);
-          if (lastAppliedScissor) pass.setScissorRect(...lastAppliedScissor); else pass.setScissorRect(0, 0, passW, passH);
-          if (dtLastPipe) pass.setPipeline(dtLastPipe);
-          console.log(`[dtrace] control: clear-pipeline depth write z=0.5 over (0,0 64x64) ` +
-            `with viewport ${lastAppliedViewport ? lastAppliedViewport.map((v) => +v.toFixed(2)).join(",") : "unset"}`);
-        } else {
-          console.log("[dtrace] control: clear pipeline unavailable");
-        }
-      }
-    } catch (e) {
-      console.log(`[dtrace] re-open failed: ${e && e.message}`);
-    }
-  };
-  const dtraceAfterDraw = () => {
-    const dt = self._wgDt;
-    if (!DIAG_DEPTH_TRACE || !dt || !dt.armed || passFbId !== self._wgEfbColorId) return;
-    dt.draws++;
-    const ds = dtLastPipe ? vpDiagPipeFinalDs.get(dtLastPipe) : null;
-    const k = ds ? `${ds.cmp}/${ds.write ? "write" : "nowrite"}` : "nodepth";
-    dt.cmpTally.set(k, (dt.cmpTally.get(k) || 0) + 1);
-    if (ds && ds.write && ds.cmp !== "never") dt.writes++;
-    if (DTRACE_SPLITS.has(dt.draws)) {
-      const z = vpDiagRaw ? vpDiagRaw.map((v) => v.toFixed(2)).join(",") : "?";
-      dtraceSplit(`after draw ${dt.draws} (${k} ${vpDiagRect || "vp?"} z=${z} ${vpDiagScissor})`);
-    }
-  };
 
   const heapCopy = (off, len) => heap.slice(off, off + len);
   // Atomic replay normally stops before an incomplete BEGIN_PASS and leaves
   // it in the ring until END_PASS is visible. The guard below is retained for
-  // the explicit legacy rollback mode (`?wgpuatomic=0`).
+  // the explicit legacy rollback mode (`?wgpuatomic=0&wgpureplayms=0`: the
+  // budgeted drain, on by default, always replays whole passes).
   // §28ao flicker fix: when BEGIN_PASS is reached but its back-to-back
   // SET_VIEWPORT isn't visible in the ring yet (consumer drained
   // between the producer's two separate atomic Push() stores), the
@@ -12668,10 +14249,20 @@ function drainWebGpuCmdRing(source = "presentation") {
   // wedge the ring forever.
   let deferBeginPass = false;
   let protocolPassDepth = 0;
+  // Without the vsync presenter the PRESENT reads the canvas texture this
+  // drain's backbuffer pass rendered into, and that texture expires once the
+  // task ends: neither the time budget nor the record window cuts between
+  // that pass and its PRESENT (as inside a pass), else the input marker, the
+  // cadence sample and the readbacks would skip the frame. Not covered: a
+  // drain that reaches the published end between them (the producer stores
+  // END_PASS and SUBMIT_PRESENT separately), as before the budget. A lost
+  // PRESENT (a Push timeout drops it) ends the hold at the next
+  // non-backbuffer pass.
+  let backbufferPresentPending = false;
   let budgetStopReason = null;
   while (read !== replayLimit) {
     const processedBeforeRecord = (read - initialRead) >>> 0;
-    if (wgpuReplayBudgetMs > 0 && protocolPassDepth === 0 &&
+    if (wgpuReplayBudgetMs > 0 && protocolPassDepth === 0 && !backbufferPresentPending &&
         processedBeforeRecord >= WGPU_REPLAY_WINDOW_RECORDS) {
       budgetStopReason = "record-window";
       break;
@@ -12681,7 +14272,7 @@ function drainWebGpuCmdRing(source = "presentation") {
     if (budgetGate) {
       const beforeRecordBudget = budgetGate.check({
         processed: processedBeforeRecord,
-        passDepth: protocolPassDepth,
+        passDepth: protocolPassDepth + (backbufferPresentPending ? 1 : 0),
         force: op === WGPU_CMD_OP_BEGIN_PASS && protocolPassDepth === 0,
       });
       if (beforeRecordBudget.shouldYield) {
@@ -12736,6 +14327,7 @@ function drainWebGpuCmdRing(source = "presentation") {
     const replayOpStartedAt = causalMetricsEnabled
       ? wgpuReplayOpMetrics.beginReplay(op)
       : null;
+    if (harnessFlicker.active) harnessFlicker.noteOp(op);
     let replayRecordAccepted = true;
     try {
       switch (op) {
@@ -12791,11 +14383,6 @@ function drainWebGpuCmdRing(source = "presentation") {
                 );
               }
             }
-            // The utility UBO is the unique 4096-byte uniform buffer
-            // (kUtilUboSize). Track its id so we can dump what
-            // UploadUtilityUniforms actually writes (src_offset/size
-            // for the EFB-copy VS).
-            if (u32[recWord + 2] === 4096) self._wgUtilBuf = id;
             // §28-vtxdata: the main vertex buffer is the unique 16 MB
             // buffer (kVertexBufferSize). Track its id so we can read
             // the uploaded per-vertex texcoord bytes for the dark-menu
@@ -12826,7 +14413,7 @@ function drainWebGpuCmdRing(source = "presentation") {
           let mappedStageAccepted = false;
           try {
             if (!buf) {
-              wgpuReplayClassifier?.recordMissingResource({ kind: "upload-buffer", id: bufferId });
+              noteMissingResource("upload-buffer", bufferId);
             }
             if (buf) {
               // writeBuffer requires offset & size multiples of 4
@@ -12858,19 +14445,6 @@ function drainWebGpuCmdRing(source = "presentation") {
             }
           }
             const bid = u32[recWord + 1];
-            self._wgUbN = (self._wgUbN || 0) + 1;
-            // First few + periodic so steady-state UBO uploads are
-            // visible (one-shot only caught the pre-SetConstants zero).
-            if (self._wgUbN <= 6 || (self._wgUbN % 4000) === 0) {
-              const ff = new Float32Array(uploadSource.buffer,
-                                          uploadSource.byteOffset,
-                                          Math.min(len, 160) >>> 2);
-              console.log(`[webgpu-DIAG-ub] id=${bid} dst=${u32[recWord+2]} ` +
-                `len=${len} f0=${ff[0]?.toFixed(3)},${ff[1]?.toFixed(3)} ` +
-                `pnm@32=${ff[8]?.toFixed(3)},${ff[9]?.toFixed(3)},${ff[10]?.toFixed(3)} ` +
-                `proj@128=${ff[32]?.toFixed(3)},${ff[33]?.toFixed(3)},` +
-                `${ff[34]?.toFixed(3)},${ff[35]?.toFixed(3)}`);
-            }
             // §28b: PixelShaderConstants has fogcolor (int4 @byte432),
             // fogi (int4 @448), fogf (float4 @464). The backdrop FS
             // lerps to fogcolor by a fogf-driven factor → if fogcolor
@@ -12935,40 +14509,6 @@ function drainWebGpuCmdRing(source = "presentation") {
               self._wgVsSnap.set(uploadSource.subarray(0, len));
               self._wgVsSnapLen = len;
             }
-            // [webgpu-DIAG-utilubo] EFB-copy VS reads src_offset(.xy)
-            // + src_size(.xy) from this UBO. If src_size≈0 every vertex
-            // gets the same uv ⇒ samples one EFB texel ⇒ uniform black.
-            // §28y: also wall-clock-sample (every 5 s, capped 24×) so
-            // the EFB-copy src_size is observable DEEP in the A-only
-            // black-3D dwell (src_size≈0 ⇒ degenerate UV ⇒ uniform
-            // white copy = the §28x root).
-            let _utWcOk = false;
-            if (bid === self._wgUtilBuf) {
-              const _un = Date.now();
-              self._wgUtUbT0 = self._wgUtUbT0 || _un;
-              const _ut = Math.floor((_un - self._wgUtUbT0) / 5000);
-              self._wgUtUbWc = (self._wgUtUbWc == null) ? -1 : self._wgUtUbWc;
-              if (_ut !== self._wgUtUbWc && _ut < 24) {
-                self._wgUtUbWc = _ut;
-                _utWcOk = true;
-              }
-            }
-            if (bid === self._wgUtilBuf &&
-                ((self._wgUtilUbN = (self._wgUtilUbN || 0) + 1) <= 8
-                 || _utWcOk)) {
-              const uf = new Float32Array(uploadSource.buffer,
-                                          uploadSource.byteOffset,
-                                          Math.min(len, 64) >>> 2);
-              const ui = new Uint32Array(uploadSource.buffer,
-                                         uploadSource.byteOffset,
-                                         Math.min(len, 64) >>> 2);
-              console.log(`[webgpu-DIAG-utilubo] id=${bid} len=${len} ` +
-                `src_offset=${uf[0]?.toFixed(4)},${uf[1]?.toFixed(4)} ` +
-                `src_size=${uf[2]?.toFixed(4)},${uf[3]?.toFixed(4)} ` +
-                `filt=${ui[4]},${ui[5]},${ui[6]} gamma_rcp=${uf[7]?.toFixed(3)} ` +
-                `clamp=${uf[8]?.toFixed(4)},${uf[9]?.toFixed(4)} ` +
-                `pxh=${uf[10]?.toFixed(5)}`);
-            }
             // §28-vtxdata: snapshot the vertex batch bytes from the
             // HEAP before they go to the GPU (this is the only window
             // to read them). Keyed by dst_offset; bounded to 64 batches.
@@ -12989,6 +14529,9 @@ function drainWebGpuCmdRing(source = "presentation") {
                 let retainedAccepted = false;
                 let stageAccepted;
                 let stageReason = null;
+                // Only plain pool staging may fall back to the queue: the
+                // sparse and compute UBO paths keep their own shadow state.
+                let viaPool = false;
                 const destinationOffset = u32[recWord + 2] & ~3;
                 if (stagedUpload) {
                   const stage = (data) => {
@@ -13008,6 +14551,7 @@ function drainWebGpuCmdRing(source = "presentation") {
                       role: uploadRole,
                     });
                     if (sparse?.handled) return sparse;
+                    viaPool = true;
                     if (wgpuMappedStageFastEnabled) {
                       const reason = pool.stageBufferFast(data, buf, destinationOffset);
                       return reason === null
@@ -13045,9 +14589,11 @@ function drainWebGpuCmdRing(source = "presentation") {
                     stageAccepted = sparse.ok;
                     stageReason = sparse.reason ?? null;
                   } else if (wgpuMappedStageFastEnabled) {
+                    viaPool = true;
                     stageReason = pool.stageBufferFast(uploadSource, buf, destinationOffset);
                     stageAccepted = stageReason === null;
                   } else {
+                    viaPool = true;
                     const staged = pool.stageBuffer({
                       data: uploadSource,
                       destination: buf,
@@ -13071,6 +14617,26 @@ function drainWebGpuCmdRing(source = "presentation") {
                 }
                 webGpuCausalStats.mappedStagingCopyCount += stageAccepted ? 1 : 0;
                 webGpuCausalStats.mappedStagingCopyBytes += stageAccepted ? len : 0;
+                const queueReason = stageAccepted || !viaPool
+                  ? null
+                  : queueWgpuUploadReason(stageReason, Boolean(pass));
+                if (queueReason &&
+                    writeWgpuUploadThroughQueue({
+                      submitPending: submitPendingForQueueUpload,
+                      write: () => q.writeBuffer(
+                        buf,
+                        destinationOffset,
+                        stagedUpload?.data ??
+                          copyImmediateWgpuBufferUpload(heap, srcP, uploadBytes)
+                      ),
+                    })) {
+                  noteQueueWgpuUpload(queueReason, uploadBytes);
+                  stageAccepted = true;
+                  if (stagedUpload) {
+                    ring.stagedUploads.delete(read);
+                    retainedAccepted = true;
+                  }
+                }
                 if (!stageAccepted) {
                   mappedCapacityHold = true;
                   if (stageReason === "no-capacity") {
@@ -13196,6 +14762,7 @@ function drainWebGpuCmdRing(source = "presentation") {
         case WGPU_CMD_OP_CREATE_TEXTURE: {
           const id = u32[recWord + 1];
           if (!webGpuObjects.textures.has(id)) {
+            wgpuStalePresent.created(id);
             const fmt = WGPU_TEX_FORMAT[u32[recWord + 4]] || "rgba8unorm";
             const layers = Math.max(1, u32[recWord + 6] || 1);
             const tex = dev.createTexture({
@@ -13204,13 +14771,13 @@ function drainWebGpuCmdRing(source = "presentation") {
               // Older producers leave this word zero. Preserve their single
               // mip allocation while accepting the game's complete mip chain.
               mipLevelCount: Math.max(1, u32[recWord + 7] || 1),
-              // DIAG_TEX_READBACK adds COPY_SRC so the texture can be copied
+              // The harness adds COPY_SRC so the texture can be copied
               // back and inspected. Upload-byte accounting has proved
               // unreliable twice; reading the actual texels replaces the whole
               // inference chain with a direct observation.
               format: fmt,
               usage: u32[recWord + 5] |
-                ((harnessEnabled || DIAG_TEX_READBACK || DIAG_DEPTH_READBACK || DIAG_DEPTH_TRACE) ? 0x1 : 0)
+                (harnessEnabled ? 0x1 : 0)
             });
             webGpuObjects.textures.set(id,
               { tex, format: fmt, layers, view2dArray: null,
@@ -13233,12 +14800,13 @@ function drainWebGpuCmdRing(source = "presentation") {
             );
           }
           const t = webGpuObjects.textures.get(textureId);
+          wgpuStalePresent.wrote(textureId);
           const uploadSource = stagedUpload?.data ??
             new Uint8Array(moduleInstance.HEAPU8.buffer, src, uploadBytes);
           let mappedStageAccepted = false;
           try {
             if (!t) {
-              wgpuReplayClassifier?.recordMissingResource({ kind: "upload-texture", id: textureId });
+              noteMissingResource("upload-texture", textureId);
             }
             if (!vpDiagDone) {
               vpDiagNoteTexUpload(textureId, uploadSource, uploadBytes);
@@ -13250,21 +14818,6 @@ function drainWebGpuCmdRing(source = "presentation") {
             const uz = u32[recWord + 7];
             if (t && !t.format.startsWith("depth") && uz < t.layers) {
               const w = u32[recWord + 4];
-            // DIAG one-shot per tex id: confirm uploaded pixels aren't
-            // all-zero (→ black sampling). Dumps first 4 RGBA texels.
-            self._wgUtN = self._wgUtN || {};
-            const tid = u32[recWord + 1];
-            if (!self._wgUtN[tid] &&
-                (self._wgUtTot = (self._wgUtTot || 0) + 1) <= 14) {
-              self._wgUtN[tid] = true;
-              const px = uploadSource.subarray(0, Math.min(uploadBytes, 16));
-              let nz = 0;
-              const chk = uploadSource.subarray(0, Math.min(uploadBytes, 4096));
-              for (let q2 = 0; q2 < chk.length; q2++) if (chk[q2]) { nz++; }
-              console.log(`[webgpu-DIAG-ut] tex#${tid} ${w}x${h} bpr=${bpr} ` +
-                `mip=${u32[recWord+6]} px0=${px[0]},${px[1]},${px[2]},${px[3]} ` +
-                `px1=${px[4]},${px[5]},${px[6]},${px[7]} nz=${nz}/${chk.length}`);
-            }
               if (wgpuUploadTransport === "mapped") {
                 const stageStartedAt = causalMetricsEnabled
                   ? wgpuUploadAttribution.beginMappedStageTiming(
@@ -13330,6 +14883,26 @@ function drainWebGpuCmdRing(source = "presentation") {
                 }
                 webGpuCausalStats.mappedStagingCopyCount += stageAccepted ? 1 : 0;
                 webGpuCausalStats.mappedStagingCopyBytes += stageAccepted ? uploadBytes : 0;
+                const queueReason = stageAccepted
+                  ? null
+                  : queueWgpuUploadReason(stageReason, Boolean(pass));
+                if (queueReason &&
+                    writeWgpuUploadThroughQueue({
+                      submitPending: submitPendingForQueueUpload,
+                      write: () => q.writeTexture(
+                        { texture: t.tex, mipLevel: u32[recWord + 6], origin },
+                        stagedUpload?.data ?? heapCopy(src, uploadBytes),
+                        { offset: 0, bytesPerRow: bpr, rowsPerImage: h },
+                        copySize
+                      ),
+                    })) {
+                  noteQueueWgpuUpload(queueReason, uploadBytes);
+                  stageAccepted = true;
+                  if (stagedUpload) {
+                    ring.stagedUploads.delete(read);
+                    retainedAccepted = true;
+                  }
+                }
                 if (!stageAccepted) {
                   mappedCapacityHold = true;
                   if (stageReason === "no-capacity") {
@@ -13432,7 +15005,7 @@ function drainWebGpuCmdRing(source = "presentation") {
           // correctly -- it simply reports "clear both", which is what it did.
           //
           // Before this, a single bit drove BOTH attachments, so a depth-only
-          // clear also wiped colour. On Wario World that destroyed a fully
+          // clear also wiped colour. In one platformer that destroyed a fully
           // rendered 3D EFB right before the XFB copy, leaving only the 2D
           // overlay on black (issue #8).
           const clearMask = u32[recWord + 6];
@@ -13444,7 +15017,6 @@ function drainWebGpuCmdRing(source = "presentation") {
           const depthLoadOpResolved = clearDepth ? "clear" : "load";
           const depthId = u32[recWord + 7];
           passDepthId = depthId;
-          if (fbId === self._wgEfbColorId && depthId) self._wgEfbDepthId = depthId;
           passLoadOp = loadOp;
           // §28af: the producer emits SET_VIEWPORT immediately after
           // BEGIN_PASS (cached vp re-emit). Peek it to learn this
@@ -13473,20 +15045,6 @@ function drainWebGpuCmdRing(source = "presentation") {
           // REVZ_COMPARE_FLIP). dcv=1.0/unflipped was backwards = black;
           // §28as's dcv=0.0-but-unflipped was the half-right mismatch.
           const dcv = GX_NATIVE_DEPTH ? 1.0 : 0.0;
-          // §28aq DISCRIMINATING PROBE: record the revZ baked into
-          // this pass's depthClearValue; the SET_VIEWPORT handler
-          // logs when a later viewport in the SAME pass disagrees
-          // (⇒ the bake-time value was wrong = the flicker source).
-          self._wgPassRevZAtBegin = self._wgPassRevZ;
-          self._wgBpSeq = (self._wgBpSeq || 0) + 1;
-          self._wgVpInPass = 0;
-          if (depthId && (self._wgAqN = (self._wgAqN || 0) + 1) <= 60) {
-            console.log(`[s28aq-bp] bp#${self._wgBpSeq} fb=${fbId} ` +
-              `depth=${depthId} dcv=${dcv} revZ=${self._wgPassRevZ ? 1 : 0} ` +
-              `peeked=${(((read + 1) >>> 0) !== replayLimit &&
-                u32[(ring.slotsBase + ((read + 1) % ring.capacity) * 32) >>> 2]
-                  === WGPU_CMD_OP_SET_VIEWPORT) ? 1 : 0}`);
-          }
           let colorView;
           if (fbId === 0) {
             webGpuExecStats.beginFb0++;
@@ -13498,30 +15056,15 @@ function drainWebGpuCmdRing(source = "presentation") {
             // resizing the swapchain repeatedly blanked the output entirely
             // (0.0 visual fps). The size must be stable, so take the page
             // canvas's intended size once and leave it alone.
-            if (!wgpuBackbufferSized && renderCanvas &&
-                (renderCanvas.width < WGPU_BACKBUFFER_W ||
-                 renderCanvas.height < WGPU_BACKBUFFER_H)) {
-              wgpuBackbufferSized = true;
-              const newW = WGPU_BACKBUFFER_W;
-              const newH = WGPU_BACKBUFFER_H;
-              try {
-                renderCanvas.width = newW;
-                renderCanvas.height = newH;
-                renderGpu.context.configure({
-                  device: renderGpu.device,
-                  format: renderGpu.format,
-                  alphaMode: "opaque",
-                  usage: self.GPUTextureUsage.RENDER_ATTACHMENT |
-                    ((wgpuReplayClassifier || inputReadbackDiagnostics) ?
-                      self.GPUTextureUsage.COPY_SRC : 0) |
-                    (wgpuVisualCadenceEnabled ? self.GPUTextureUsage.TEXTURE_BINDING : 0)
-                });
-                renderGpu.canvasWidth = newW;
-                renderGpu.canvasHeight = newH;
-                console.log(`[bbresize] backbuffer ${newW}x${newH} (game viewport extent)`);
-                postStatus(`wgpu backbuffer resized to ${newW}x${newH}`);
-              } catch (e) {
-                recordRendererError("validation", `backbuffer resize: ${e?.message || e}`);
+            // The canvas is what the demo scene shrank (the backbuffer
+            // only with the display filter, which sizes the canvas itself).
+            if (!wgpuBackbufferSized && renderCanvas) {
+              const [bbW, bbH] = wgpuDisplayFilterActive()
+                ? wgpuBackbufferSize() : [renderCanvas.width, renderCanvas.height];
+              if (bbW < WGPU_BACKBUFFER_W || bbH < WGPU_BACKBUFFER_H) {
+                resizeWgpuBackbuffer(WGPU_BACKBUFFER_W, WGPU_BACKBUFFER_H);
+              } else if (wgpuDisplayFilterActive()) {
+                applyWgpuCanvasSize();
               }
             }
             // Content check on the texture actually about to be presented,
@@ -13549,8 +15092,11 @@ function drainWebGpuCmdRing(source = "presentation") {
               const until = performance.now() + wgpuDiagPerturb.presentDelayMs;
               while (performance.now() < until) { /* harness perturbation: a blocking present */ }
             }
-            const cur = renderGpu.context.getCurrentTexture();
+            const cur = wgpuPresentVsync
+              ? acquireWgpuVsyncTexture(...wgpuBackbufferSize())
+              : renderGpu.context.getCurrentTexture();
             lastBackbufferTexture = cur;
+            backbufferPresentPending = !wgpuPresentVsync;
             currentBackbufferSourceTextureId = 0;
             colorView = cur.createView();
             passW = cur.width;
@@ -13558,12 +15104,14 @@ function drainWebGpuCmdRing(source = "presentation") {
             passColorFmt = renderGpu.format;
             if (frameCapActive()) frameCapPush(`BEGINPASS fb#0 BACKBUFFER ${passW}x${passH}`);
           } else {
+            backbufferPresentPending = false;
             webGpuExecStats.beginFbN++;
             const ct = webGpuObjects.textures.get(fbId);
             if (!ct) {
-              wgpuReplayClassifier?.recordMissingResource({ kind: "color-texture", id: fbId });
+              noteMissingResource("color-texture", fbId);
               break;
             }
+            wgpuStalePresent.wrote(fbId);
             colorView = ct.tex.createView({ dimension: "2d", mipLevelCount: 1,
               baseArrayLayer: 0, arrayLayerCount: 1 });
             passW = ct.tex.width;
@@ -13571,16 +15119,6 @@ function drainWebGpuCmdRing(source = "presentation") {
             passColorFmt = ct.format;
             if (frameCapActive()) frameCapPush(`BEGINPASS fb#${fbId} ${passW}x${passH} fmt=${ct.format}` +
               `${fbId === (self._wgEfbColorId || -1) ? " (EFB)" : ""}`);
-            // DIAG: which texture ids are ever render targets (+size).
-            // Cross-ref with tex#69 (640x480 green, sampled at b1
-            // everywhere): if 640x480 ids never appear here, they're
-            // pure XFB-from-RAM ⇒ EFB-copy-to-RAM (staging) is stubbed.
-            self._wgRT = self._wgRT || {};
-            if (!self._wgRT[fbId]) {
-              self._wgRT[fbId] = true;
-              console.log(`[webgpu-DIAG-rt] render-target tex#${fbId} ` +
-                `${ct.tex.width}x${ct.tex.height} ${ct.format} depth=${depthId}`);
-            }
             // [webgpu-DIAG-cpy] EFB-copy color targets: depth-less
             // rgba8unorm RTs that aren't the bgra8 XFB. These are the
             // textures textured draws later SAMPLE — if they are empty
@@ -13589,7 +15127,6 @@ function drainWebGpuCmdRing(source = "presentation") {
                 ct.tex.width <= 1024) {
               self._wgCopyTargets = self._wgCopyTargets || new Set();
               self._wgCopyTargets.add(fbId);
-              self._wgCpySrc = null;
             }
             // The XFB blit target: the large bgra8unorm depth-less RT.
             // If menu content lives HERE while the EFB is cleared, the
@@ -13611,7 +15148,7 @@ function drainWebGpuCmdRing(source = "presentation") {
           };
           const dt = depthId ? webGpuObjects.textures.get(depthId) : null;
           if (depthId && !dt) {
-            wgpuReplayClassifier?.recordMissingResource({ kind: "depth-texture", id: depthId });
+            noteMissingResource("depth-texture", depthId);
           }
           if (dt) {
             const ds = {
@@ -13635,13 +15172,7 @@ function drainWebGpuCmdRing(source = "presentation") {
           }
           if (fbId === self._wgEfbColorId) vpDiagNoteEfbPass(loadOp === "clear");
           pass = enc.beginRenderPass(desc);
-          dtPassDesc = desc;
-          lastAppliedViewport = lastAppliedScissor = dtLastPipe = dtLastVb = dtLastIb = null;
-          dtLastBg.fill(null);
-          if (DIAG_DEPTH_TRACE && self._wgDt && self._wgDt.armed &&
-              fbId === self._wgEfbColorId) {
-            self._wgDt.passSeq++;
-          }
+          lastAppliedViewport = lastAppliedScissor = null;
           if (causalMetricsEnabled) wgpuUploadAttribution.recordPassBegin();
           wgpuReplayClassifier?.recordPassBegin({ framebufferId: fbId, recordIndex: read });
           if (depthId && loadOp === "clear") {
@@ -13670,7 +15201,7 @@ function drainWebGpuCmdRing(source = "presentation") {
           // executed this frame at that moment. The copy's source rect is
           // correct and the EFB is correct at present time, so if the copy
           // runs early in the frame it captures a half-drawn EFB.
-          if (fbId !== 0 && fbId !== (self._wgEfbColorId || -1)) {
+          if (DIAG_EFB_TO_CANVAS && fbId !== 0 && fbId !== (self._wgEfbColorId || -1)) {
             const _d = webGpuObjects.textures.get(fbId);
             if (_d && _d.tex && _d.tex.width === 608 && _d.tex.height === 456) {
               diagLastCopyDst = fbId;
@@ -13682,22 +15213,6 @@ function drainWebGpuCmdRing(source = "presentation") {
           // attachment (the fb=47 XFB has none) — track its id so the
           // DIAG path can blit it straight to the canvas.
           if (fbId !== 0 && depthId) self._wgEfbColorId = fbId;
-          if (fbId !== 0) {
-            self._wgEfbN = (self._wgEfbN || 0) + 1;
-            if (self._wgEfbN <= 6) {
-              const ct2 = webGpuObjects.textures.get(fbId);
-              console.log(`[webgpu-exec] EFB pass#${self._wgEfbN} fb=${fbId}` +
-                `(${ct2 ? ct2.format : "?"}) depth=${depthId}` +
-                `(${dt ? dt.format : "none"}) load=${loadOp} ` +
-                `clear=${f32[recWord + 2].toFixed(2)},${f32[recWord + 3].toFixed(2)},` +
-                `${f32[recWord + 4].toFixed(2)},${f32[recWord + 5].toFixed(2)}`);
-            }
-          } else if (!self._wgFb0Logged) {
-            self._wgFb0Logged = true;
-            console.log(`[webgpu-exec] first backbuffer pass load=${loadOp} ` +
-              `clear=${f32[recWord + 2].toFixed(2)},${f32[recWord + 3].toFixed(2)},` +
-              `${f32[recWord + 4].toFixed(2)}`);
-          }
           break;
         }
         case WGPU_CMD_OP_SET_PIPELINE: {
@@ -13724,23 +15239,20 @@ function drainWebGpuCmdRing(source = "presentation") {
                 if (wgpuConsumerStateCacheEnabled) wgpuPassStateCache.recordPipelineApplied(p);
               }
               passHasPipe = true;
-              dtLastPipe = p;
               passNeedsVertexBuffer = Boolean(
                 webGpuObjects.pipeTpl.get(pid)?.desc?.vertex?.buffers?.length
               );
               webGpuExecStats.setPipe++;
-              pd.pipeOk++;
             } catch (error) {
               if (wgpuConsumerStateCacheEnabled) wgpuPassStateCache.recordPipelineApplyFailed();
               passHasPipe = false;
               recordRendererError("set-pipeline", error?.message || error);
               webGpuExecStats.missPipe++;
-              pd.pipeMiss++;
             }
           } else {
-            webGpuExecStats.missPipe++; pd.pipeMiss++;
+            webGpuExecStats.missPipe++;
             if (pass && !p) {
-              wgpuReplayClassifier?.recordMissingResource({ kind: "pipeline", id: pid });
+              noteMissingResource("pipeline", pid);
             }
           }
           break;
@@ -13753,7 +15265,7 @@ function drainWebGpuCmdRing(source = "presentation") {
             wgpuReplayClassifier?.recordStateOutsidePass({ op: "set-bind-group", recordIndex: read });
           }
           if (!bg) {
-            wgpuReplayClassifier?.recordMissingResource({ kind: "bind-group", id: bgId });
+            noteMissingResource("bind-group", bgId);
           }
           if (bgSlot === 1 && pass) {
             const samplingKey = webGpuObjects.bindGroupSamplingMasks.get(bgId) || "0/0";
@@ -13769,7 +15281,6 @@ function drainWebGpuCmdRing(source = "presentation") {
                 if (pipeline) {
                   try {
                     pass.setPipeline(pipeline);
-                    dtLastPipe = pipeline;
                     if (wgpuConsumerStateCacheEnabled) {
                       wgpuPassStateCache.recordPipelineApplied(pipeline);
                     }
@@ -13790,21 +15301,22 @@ function drainWebGpuCmdRing(source = "presentation") {
             drawState.dynamicOffsetCounts[bgSlot] = u32[recWord + 3];
           }
           if (u32[recWord + 1] === 1) self._wgCurBg1 = bgId;
-          if (bgSlot === 1 && self._wgBgTex) {
+          if (bgSlot === 1 && self._wgBgTex && frameCapActive()) {
             const _bt = self._wgBgTex[bgId];
             const _bo = _bt != null ? webGpuObjects.textures.get(_bt) : null;
-            if (frameCapActive()) frameCapPush(`  BINDTEX  fb#${passFbId} tex#${_bt != null ? _bt : "?"}` +
+            frameCapPush(`  BINDTEX  fb#${passFbId} tex#${_bt != null ? _bt : "?"}` +
               `${_bo && _bo.tex ? " " + _bo.tex.width + "x" + _bo.tex.height : ""}`);
           }
           if (passFbId === 0 && bgSlot === 1 && self._wgBgTex) {
             currentBackbufferSourceTextureId = self._wgBgTex[bgId] >>> 0;
-            // DIAG: what does the backbuffer blit actually sample? Mario Kart
-            // Wii presents what looks like its minimap scaled to full frame,
+            // DIAG: what does the backbuffer blit actually sample? A Wii racing
+            // game presents what looks like its minimap scaled to full frame,
             // so the question is whether this is the EFB colour texture at all
             // and what size it is. Capped: first few, then occasional, so a
             // long run still shows the in-race state.
-            self._wgBbSrcN = (self._wgBbSrcN || 0) + 1;
-            if (self._wgBbSrcN <= 6 || (self._wgBbSrcN % 600) === 0) {
+            if (DIAG_EFB_TO_CANVAS &&
+                ((self._wgBbSrcN = (self._wgBbSrcN || 0) + 1) <= 6 ||
+                 (self._wgBbSrcN % 600) === 0)) {
               const _t = webGpuObjects.textures.get(currentBackbufferSourceTextureId);
               const _e = webGpuObjects.textures.get(self._wgEfbColorId || 0);
               const _dim = (o) => (o && o.tex) ? `${o.tex.width}x${o.tex.height}` : "?";
@@ -13814,11 +15326,6 @@ function drainWebGpuCmdRing(source = "presentation") {
                 ` xfb=tex#${self._wgXfbId || 0}`);
             }
           }
-          if (u32[recWord + 1] === 1 && self._wgBgTex &&
-              self._wgBgTex[bgId] != null &&
-              self._wgCopyTargets && self._wgCopyTargets.has(passFbId)) {
-            self._wgCpySrc = self._wgBgTex[bgId];
-          }
           if (pass && bg) {
             // §16: arg.u[2]=nDynOff, u[3..6]=per-draw ring offsets
             // (group0 has 4 dynamic-offset UBO bindings; groups 1/2: 0).
@@ -13827,7 +15334,6 @@ function drainWebGpuCmdRing(source = "presentation") {
               WGPU_DYN_OFF_SCRATCH[k] = u32[recWord + 4 + k];
               if (bgSlot === 0) vpDiagNoteVsOffset(u32[recWord + 4 + k]);
             }
-            dtLastBg[bgSlot] = { bg, off: nOff ? Array.from(WGPU_DYN_OFF_SCRATCH.subarray(0, nOff)) : null };
             const needsApply = !wgpuConsumerStateCacheEnabled ||
               wgpuPassStateCache.bindGroupNeedsApply(
                 bgSlot,
@@ -13853,7 +15359,6 @@ function drainWebGpuCmdRing(source = "presentation") {
                 }
               }
               webGpuExecStats.setBg++;
-              pd.bgOk++;
             } catch (error) {
               if (wgpuConsumerStateCacheEnabled) {
                 wgpuPassStateCache.recordBindGroupApplyFailed(bgSlot);
@@ -13861,10 +15366,9 @@ function drainWebGpuCmdRing(source = "presentation") {
               if (bgSlot < 3) bgValid[bgSlot] = false;
               recordRendererError("set-bind-group", error?.message || error);
               webGpuExecStats.missBg++;
-              pd.bgMiss++;
             }
           }
-          else { webGpuExecStats.missBg++; pd.bgMiss++; }
+          else { webGpuExecStats.missBg++; }
           break;
         }
         case WGPU_CMD_OP_SET_VERTEX_BUFFER: {
@@ -13875,10 +15379,9 @@ function drainWebGpuCmdRing(source = "presentation") {
           if (!pass) {
             wgpuReplayClassifier?.recordStateOutsidePass({ op: "set-vertex-buffer", recordIndex: read });
           }
-          if (!b) wgpuReplayClassifier?.recordMissingResource({ kind: "vertex-buffer", id: bufferId });
+          if (!b) noteMissingResource("vertex-buffer", bufferId);
           if (pass && b) {
             const offset = u32[recWord + 3];
-            dtLastVb = { slot, b, offset };
             const needsApply = !wgpuConsumerStateCacheEnabled ||
               wgpuPassStateCache.vertexBufferNeedsApply(slot, b, offset);
             try {
@@ -13906,11 +15409,10 @@ function drainWebGpuCmdRing(source = "presentation") {
           if (!pass) {
             wgpuReplayClassifier?.recordStateOutsidePass({ op: "set-index-buffer", recordIndex: read });
           }
-          if (!b) wgpuReplayClassifier?.recordMissingResource({ kind: "index-buffer", id: bufferId });
+          if (!b) noteMissingResource("index-buffer", bufferId);
           if (pass && b) {
             const format = u32[recWord + 2] === 1 ? "uint32" : "uint16";
             const offset = u32[recWord + 3];
-            dtLastIb = { b, format, offset };
             const needsApply = !wgpuConsumerStateCacheEnabled ||
               wgpuPassStateCache.indexBufferNeedsApply(b, format, offset);
             try {
@@ -13936,7 +15438,7 @@ function drainWebGpuCmdRing(source = "presentation") {
           // the presented entry all verify correct, so the remaining suspect is
           // how this pass samples that entry. Record the raw requested viewport
           // for fb#0 against the pass size.
-          if (passFbId === 0) {
+          if (DIAG_EFB_TO_CANVAS && passFbId === 0) {
             self._wgLastVp = `${f32[recWord + 1].toFixed(0)},${f32[recWord + 2].toFixed(0)}` +
               `+${f32[recWord + 3].toFixed(0)}x${f32[recWord + 4].toFixed(0)}`;
           }
@@ -13966,40 +15468,6 @@ function drainWebGpuCmdRing(source = "presentation") {
             // clear (set self._wgPassRevZ BEFORE the Dawn-required
             // mn≤mx swap so the reversal signal isn't lost).
             self._wgPassRevZ = f32[recWord + 5] > f32[recWord + 6];
-            // §28aq: a SET_VIEWPORT inside an open pass whose revZ
-            // disagrees with what BEGIN_PASS baked into depthClearValue
-            // = the flicker mechanism (bake-time guess was wrong).
-            self._wgVpInPass = (self._wgVpInPass || 0) + 1;
-            if (pass && self._wgPassRevZ !== self._wgPassRevZAtBegin &&
-                (self._wgAqMisN = (self._wgAqMisN || 0) + 1) <= 60) {
-              console.log(`[s28aq-MISMATCH] bp#${self._wgBpSeq} ` +
-                `vpInPass=${self._wgVpInPass} bakedRevZ=` +
-                `${self._wgPassRevZAtBegin ? 1 : 0} nowRevZ=` +
-                `${self._wgPassRevZ ? 1 : 0} (dcv stuck at ` +
-                `${self._wgPassRevZAtBegin ? 0.0 : 1.0}, wrong for this draw)`);
-            }
-            // §28at DISCRIMINATING PROBE (JS-only, flag=true run):
-            // BPFunctions emits near_T=max_depth,far_T=min_depth at
-            // flag=true; at flag=false it emits (1-max_depth,
-            // 1-min_depth) = exactly (1-near_T,1-far_T) for this SAME
-            // draw. So we can compute the precise flag=false viewport
-            // here without a rebuild and test the tracer's "zero-width
-            // collapse" hypothesis vs "stays healthy [0,1]" (⇒ the real
-            // coupling-(2) is the dcv/compare pairing, not BPFunctions).
-            {
-              const nT = f32[recWord + 5], fT = f32[recWord + 6];
-              const nF = 1.0 - nT, fF = 1.0 - fT;
-              const span = Math.abs(nF - fF);
-              const cls = span < 1e-4 ? "ZEROWIDTH"
-                : (nF > fF ? "inverted(needswap)" : "normal[0,1]");
-              if ((self._wgAtN = (self._wgAtN || 0) + 1) <= 120) {
-                console.log(`[s28at-vp] bp#${self._wgBpSeq} ` +
-                  `vp#${self._wgVpInPass} revZ=${self._wgPassRevZ ? 1 : 0} ` +
-                  `T(near=${nT.toFixed(5)},far=${fT.toFixed(5)}) ` +
-                  `=> F(near=${nF.toFixed(5)},far=${fF.toFixed(5)}) ` +
-                  `span=${span.toFixed(5)} ${cls}`);
-              }
-            }
             vpRescaled = f32[recWord + 3] !== vw || f32[recWord + 4] !== vh;
             vpDiagNoteViewport(f32[recWord + 5], f32[recWord + 6]);
             vpDiagNoteRect(f32[recWord + 1], f32[recWord + 2],
@@ -14025,7 +15493,7 @@ function drainWebGpuCmdRing(source = "presentation") {
           // Scissored clear inside the open pass: set the scissor, draw one
           // full-screen triangle with the clear colour/depth baked in, restore
           // the scissor. The pass is NOT torn down, which is what made the
-          // core-side utility-draw version regress Wario World.
+          // core-side utility-draw version regress a platformer.
           if (!pass || passW <= 0) break;
           const cx = Math.min(u32[recWord + 1], passW - 1);
           const cy = Math.min(u32[recWord + 2], passH - 1);
@@ -14047,14 +15515,6 @@ function drainWebGpuCmdRing(source = "presentation") {
           const colorWriteMask = (cflags & 8)
             ? ((cflags & 1) ? 0x7 : 0) | ((cflags & 4) ? 0x8 : 0)
             : ((cflags & 1) ? 0xF : 0);
-          if (DIAG_DEPTH_TRACE && self._wgDt && self._wgDt.armed &&
-              passFbId === self._wgEfbColorId) {
-            if (cflags & 2) {
-              dtraceSplit(`before clearrect(${cx},${cy} ${cw}x${ch}) flags=${cflags} depth=${cdepth} ` +
-                `vpz=${lastAppliedViewport ? lastAppliedViewport[4] + "," + lastAppliedViewport[5] : "default"}`);
-            }
-            self._wgDt.clears++;
-          }
           const cpipe = ensureClearPipeline(dev, passColorFmt, passDepthFmt,
                                             colorWriteMask, (cflags & 2) !== 0,
                                             crgba, cdepth);
@@ -14062,12 +15522,12 @@ function drainWebGpuCmdRing(source = "presentation") {
           try {
             // The clear triangle's depth goes through the viewport transform
             // like any other fragment: window z = minDepth + z * (maxDepth -
-            // minDepth). Mario Kart Wii's frame-start clear arrives while its
+            // minDepth). a Wii racing game's frame-start clear arrives while its
             // HUD viewport z(0.89,0.99) is active, so a "0.0" clear wrote 0.89
             // across the whole EFB -- a plane NEARER than the entire world
             // band z(0.00,0.84) under reverse-Z. Every world fragment then
             // failed greater-equal and the world was black, while the HUD at
-            // >= 0.89 passed. Measured with DIAG_DEPTH_TRACE: 0.89 at every
+            // >= 0.89 passed. Measured with a depth trace: 0.89 at every
             // viewport texel right after the clear with only non-writing
             // draws in between, and a control write of 0.5 under the world
             // viewport landing as 0.42. Clear through a full [0,1] range and
@@ -14076,7 +15536,7 @@ function drainWebGpuCmdRing(source = "presentation") {
             // outside the game's viewport otherwise receives no fragments,
             // even when its scissor and depth are correct. Skip redundant
             // viewport calls only for the full-pass [0,1] viewport (important
-            // for Wario World's thousands of clears).
+            // for a platformer's thousands of clears).
             const vpFix = CLEARRECT_FULL_VIEWPORT && lastAppliedViewport &&
               !(lastAppliedViewport[0] === 0 && lastAppliedViewport[1] === 0 &&
                 lastAppliedViewport[2] === passW && lastAppliedViewport[3] === passH &&
@@ -14119,7 +15579,7 @@ function drainWebGpuCmdRing(source = "presentation") {
           break;
         }
         case WGPU_CMD_OP_SET_SCISSOR:
-          if (passFbId === 0) {
+          if (DIAG_EFB_TO_CANVAS && passFbId === 0) {
             self._wgLastSc = `${u32[recWord + 1]},${u32[recWord + 2]}` +
               `+${u32[recWord + 3]}x${u32[recWord + 4]}`;
           }
@@ -14133,15 +15593,13 @@ function drainWebGpuCmdRing(source = "presentation") {
                 `pass=${passW}x${passH}`);
             }
           }
-          if (pass && passW > 0 && !DIAG_RASTER_OPEN) {
+          if (pass && passW > 0) {
             let sx = u32[recWord + 1], sy = u32[recWord + 2];
             let sw = u32[recWord + 3], sh = u32[recWord + 4];
             if (sx > passW) sx = passW;
             if (sy > passH) sy = passH;
             sw = Math.min(sw, passW - sx);
             sh = Math.min(sh, passH - sy);
-            vpDiagNoteScissor(u32[recWord + 1], u32[recWord + 2],
-                              u32[recWord + 3], u32[recWord + 4], sx, sy, sw, sh);
             pass.setScissorRect(sx, sy, sw, sh);
             lastAppliedScissor = [sx, sy, sw, sh];
             if (drawState) drawState.scissor = [sx, sy, sw, sh];
@@ -14152,32 +15610,21 @@ function drainWebGpuCmdRing(source = "presentation") {
           // skipping prevents an invalid draw poisoning the whole
           // frame submit (→ black frame).
           if (!pass) {
+            wgpuIntegrity.skip(SKIP.NO_PASS);
             wgpuReplayClassifier?.recordStateOutsidePass({ op: "draw", recordIndex: read });
           }
           if (pass && passHasPipe && bgValid[0] && bgValid[1] && bgValid[2] &&
               (!passNeedsVertexBuffer || vertexBufferValid)) {
             diagTallyDrawTarget(passFbId, currentBackbufferSourceTextureId);
             vpDiagNoteDraw(passFbId, self._wgCurPipe);
-            if (!vpDiagIsolateAllows(passFbId, self._wgCurPipe)) break;
-            if (DIAG_ONLY_OPAQUE && passFbId === self._wgEfbColorId &&
-                vpDiagIsBlended(self._wgCurPipe)) break;
-            if (DIAG_SKIP_DEPTH_ALWAYS && vpDiagIsDepthAlways(self._wgCurPipe)) break;
-            if (DIAG_SKIP_EMPTY_TEX && passFbId === self._wgEfbColorId) {
-              const _l = vpDiagPipeVtx.get(self._wgCurPipe);
-              const _wb = _l ? vpDiagFsTexBinding.get(_l.fsId) : undefined;
-              const _bb = vpDiagBgTexByBinding.get(self._wgCurBg1);
-              const _t = (_bb && _wb !== undefined) ? _bb[_wb] : undefined;
-              if (_t !== undefined && vpDiagTexIsEmpty(_t)) break;
-            }
             if (VP_SKIP_RESCALED && vpRescaled) {
               self._wgVpSkipN = (self._wgVpSkipN || 0) + 1;
               break;
             }
-            frameCapPush(`  DRAW     fb#${passFbId}`);
+            if (frameCapActive()) frameCapPush(`  DRAW     fb#${passFbId}`);
             if (!vpDiagDone) vpDiagVerts += u32[recWord + 1] * Math.max(1, u32[recWord + 2]);
             pass.draw(u32[recWord + 1], u32[recWord + 2], u32[recWord + 3], 0);
-            dtraceAfterDraw();
-            webGpuExecStats.draw++; pd.draw++;
+            webGpuExecStats.draw++;
             wgpuReplayClassifier?.recordRealDraw({
               framebufferId: passFbId,
               indexed: false,
@@ -14192,42 +15639,35 @@ function drainWebGpuCmdRing(source = "presentation") {
           }
           else if (pass) {
             webGpuExecStats.skipDraw = (webGpuExecStats.skipDraw || 0) + 1;
+            wgpuIntegrity.skip(skippedDrawCause(true, passHasPipe, bgValid[0] && bgValid[1] && bgValid[2],
+              passNeedsVertexBuffer, vertexBufferValid, false, true));
           }
           break;
         case WGPU_CMD_OP_DRAW_INDEXED:
           if (!pass) {
+            wgpuIntegrity.skip(SKIP.NO_PASS);
             wgpuReplayClassifier?.recordStateOutsidePass({ op: "draw-indexed", recordIndex: read });
           }
           if (pass && !(passHasPipe && bgValid[0] && bgValid[1] && bgValid[2] &&
               (!passNeedsVertexBuffer || vertexBufferValid) && indexBufferValid)) {
             webGpuExecStats.skipDraw = (webGpuExecStats.skipDraw || 0) + 1;
+            wgpuIntegrity.skip(skippedDrawCause(true, passHasPipe, bgValid[0] && bgValid[1] && bgValid[2],
+              passNeedsVertexBuffer, vertexBufferValid, true, indexBufferValid));
           } else if (pass) {
             diagTallyDrawTarget(passFbId, currentBackbufferSourceTextureId);
             vpDiagNoteDraw(passFbId, self._wgCurPipe);
-            if (!vpDiagIsolateAllows(passFbId, self._wgCurPipe)) break;
-            if (DIAG_ONLY_OPAQUE && passFbId === self._wgEfbColorId &&
-                vpDiagIsBlended(self._wgCurPipe)) break;
-            if (DIAG_SKIP_DEPTH_ALWAYS && vpDiagIsDepthAlways(self._wgCurPipe)) break;
-            if (DIAG_SKIP_EMPTY_TEX && passFbId === self._wgEfbColorId) {
-              const _l = vpDiagPipeVtx.get(self._wgCurPipe);
-              const _wb = _l ? vpDiagFsTexBinding.get(_l.fsId) : undefined;
-              const _bb = vpDiagBgTexByBinding.get(self._wgCurBg1);
-              const _t = (_bb && _wb !== undefined) ? _bb[_wb] : undefined;
-              if (_t !== undefined && vpDiagTexIsEmpty(_t)) break;
-            }
             if (VP_SKIP_RESCALED && vpRescaled) {
               self._wgVpSkipN = (self._wgVpSkipN || 0) + 1;
               break;
             }
-            frameCapPush(`  DRAW     fb#${passFbId}`);
+            if (frameCapActive()) frameCapPush(`  DRAW     fb#${passFbId}`);
             if (!vpDiagDone) {
               vpDiagIdx += u32[recWord + 1] * Math.max(1, u32[recWord + 2]);
               vpDiagNoteIndexedDraw(u32[recWord + 1], u32[recWord + 3], u32[recWord + 4]);
             }
             pass.drawIndexed(u32[recWord + 1], u32[recWord + 2],
                              u32[recWord + 3], u32[recWord + 4], 0);
-            dtraceAfterDraw();
-            webGpuExecStats.drawIdx++; pd.drawIdx++;
+            webGpuExecStats.drawIdx++;
             wgpuReplayClassifier?.recordRealDraw({
               framebufferId: passFbId,
               indexed: true,
@@ -14240,11 +15680,6 @@ function drainWebGpuCmdRing(source = "presentation") {
                 baseVertex: u32[recWord + 4]
               })
             });
-            if ((self._wgDi = (self._wgDi || 0) + 1) <= 5) {
-              console.log(`[webgpu-exec] DRAW_INDEXED#${self._wgDi} ` +
-                `idx=${u32[recWord + 1]} inst=${u32[recWord + 2]} ` +
-                `firstIdx=${u32[recWord + 3]} baseVtx=${u32[recWord + 4]}`);
-            }
             if (!wgpuDeepReplayDiagnostics) break;
             // §28-vtxdata: dark-menu probe — for the menu textured
             // pipeline (stride 20, TexCoord0 @location(8) float32x2
@@ -14642,6 +16077,11 @@ function drainWebGpuCmdRing(source = "presentation") {
           endPass("explicit", read);
           break;
         case WGPU_CMD_OP_SUBMIT_PRESENT:
+          backbufferPresentPending = false;
+          // Patch 0208: the frame this present shows (u0, 0 = unknown) and
+          // its tag epoch (u1).
+          const presentFrameTag = u32[recWord + 1];
+          const presentFrameTagEpoch = u32[recWord + 2];
           frameCapPush("PRESENT");
           vpDiagPresent();
           if ((self._wgPresentCount || 0) % 600 === 0) {
@@ -14655,31 +16095,6 @@ function drainWebGpuCmdRing(source = "presentation") {
                 `formats=${[...(self._wgDummyFormats || [])].join(",")}`);
             }
           }
-          if (DIAG_TEX_READBACK && !vpDiagReadbackDone &&
-              (self._wgPresentCount || 0) >= 2500 && vpDiagLastPicks.length) {
-            vpDiagReadbackDone = true;
-            try {
-              ensureEnc();
-              const picks = vpDiagLastPicks;
-              for (const [k] of picks) {
-                const m = /tex#(\d+)/.exec(k);
-                if (!m) continue;
-                const e = webGpuObjects.textures.get(Number(m[1]));
-                if (e) diagReadTexture(dev, enc, e, k.slice(0, 60), "texcheck");
-              }
-            } catch (e) {
-              console.log("[vpdiag] readback queue failed: " + (e && e.message));
-            }
-          }
-          if (DIAG_DEPTH_READBACK && !self._wgDepthRbDone &&
-              (self._wgPresentCount || 0) >= 2500 && self._wgEfbDepthId) {
-            self._wgDepthRbDone = true;
-            try {
-              ensureEnc();
-              diagReadDepth(dev, enc, webGpuObjects.textures.get(self._wgEfbDepthId),
-                            "after-frame");
-            } catch (e) { console.log("[vpdiag] depth rb failed: " + (e && e.message)); }
-          }
           frameCapFinish();
           self._wgPresentCount = (self._wgPresentCount || 0) + 1;
           diagFrameEnd();
@@ -14691,35 +16106,23 @@ function drainWebGpuCmdRing(source = "presentation") {
               complete: true
             });
           }
-          if (DIAG_DEPTH_TRACE) {
-            const pn = self._wgPresentCount || 0;
-            const dt = self._wgDt;
-            if (dt && dt.armed) {
-              dt.armed = false;
-              console.log(`[dtrace] frame done: efbDraws=${dt.draws} depthWrites=${dt.writes} ` +
-                `clearRects=${dt.clears} efbPasses=${dt.passSeq} splits=${dt.splits} ` +
-                `readbacksIssued=${dt.issued}`);
-              for (const [k, n] of [...dt.cmpTally.entries()].sort((a, b) => b[1] - a[1])) {
-                console.log(`[dtrace]   ${String(n).padStart(4)}x ${k}`);
-              }
-            } else if (!dt && pn >= DTRACE_PRESENT && self._wgEfbColorId) {
-              self._wgDt = { armed: true, draws: 0, writes: 0, clears: 0, passSeq: 0,
-                             splits: 0, issued: 0, done: 0, cmpTally: new Map() };
-              console.log(`[dtrace] armed for the frame after present #${pn}`);
-            }
-          }
           let presentAlreadySubmitted = false;
+          // The texture this present shows: in vsync mode the frame's pooled
+          // texture (kept across drains, queued below), else the canvas
+          // texture this drain's backbuffer pass rendered into. The input
+          // marker, the cadence sample and the readbacks read it.
+          const presentTexture = wgpuPresentVsync ? wgpuVsync.current : lastBackbufferTexture;
           const hardwareInputMarkerCoreFrame = api?.getFrame?.() ?? 0;
           const hardwareInputMarker = prepareInputVisualMarker(hardwareInputMarkerCoreFrame);
           let hardwareInputMarkerApplied = false;
           const applyHardwareInputMarker = () => {
-            if (hardwareInputMarkerApplied || !hardwareInputMarker || !lastBackbufferTexture) {
+            if (hardwareInputMarkerApplied || !hardwareInputMarker || !presentTexture) {
               return hardwareInputMarkerApplied;
             }
             try {
               hardwareInputMarkerApplied = encodeHardwareInputMarker(
                 ensureEnc(),
-                lastBackbufferTexture,
+                presentTexture,
                 renderGpu.format,
                 hardwareInputMarker
               );
@@ -14731,8 +16134,8 @@ function drainWebGpuCmdRing(source = "presentation") {
           // Keep the sample on the same command encoder and before the
           // optional input marker so it represents the unmodified game
           // output submitted by this hardware present.
-          const visualCadenceSlot = wgpuVisualCadenceEnabled && lastBackbufferTexture
-            ? encodeWgpuVisualCadence(ensureEnc(), lastBackbufferTexture)
+          const visualCadenceSlot = wgpuVisualCadenceEnabled && presentTexture
+            ? encodeWgpuVisualCadence(ensureEnc(), presentTexture)
             : null;
           // ?efbdiag=1 blits the EFB; ?efbdiag=2 blits the XFB entry the game
           // last presented. The second answers whether that entry holds the
@@ -14821,7 +16224,7 @@ function drainWebGpuCmdRing(source = "presentation") {
             // input generation is pending.  This is opt-in because a mapped
             // GPU readback is intentionally too expensive for normal play.
             const _inputBackbufferOk = inputReadbackDiagnostics &&
-              lastBackbufferTexture && !wgpuInputBackbufferReadbackPending &&
+              presentTexture && !wgpuInputBackbufferReadbackPending &&
               (!wgpuInputVisualBaselineReady || inputVisibleLatencyTracker.hasPending());
             const _sourceOk = lastBackbufferSourceTextureId > 0 && Boolean(
               wgpuReplayClassifier?.needsPresentationReadback("xfb", P)
@@ -14878,16 +16281,16 @@ function drainWebGpuCmdRing(source = "presentation") {
                   `${e?.message || e}`);
               }
             }
-            if ((_backbufferOk || _inputBackbufferOk) && lastBackbufferTexture) {
+            if ((_backbufferOk || _inputBackbufferOk) && presentTexture) {
               try {
                 ensureEnc();
-                const w = lastBackbufferTexture.width;
-                const h = lastBackbufferTexture.height;
+                const w = presentTexture.width;
+                const h = presentTexture.height;
                 const bpr = Math.ceil(w * 4 / 256) * 256;
                 const rb = dev.createBuffer({ size: bpr * h,
                   usage: 0x1 | 0x8 });
                 enc.copyTextureToBuffer(
-                  { texture: lastBackbufferTexture },
+                  { texture: presentTexture },
                   { buffer: rb, bytesPerRow: bpr, rowsPerImage: h },
                   { width: w, height: h, depthOrArrayLayers: 1 });
                 pending.push({
@@ -15059,14 +16462,29 @@ function drainWebGpuCmdRing(source = "presentation") {
           // the current command-ring drain returns.
           cmdRingOwnsCanvas = true;
           // A frame carrying the diagnostic input marker is not streamed.
-          if (streamCapture.active && !hardwareInputMarkerApplied) streamCapture.offerCanvas(renderCanvas, api?.getFrame?.() ?? 0);
-          recordPresentedFrame(api?.getFrame?.() ?? 0, wgpuExactCapture.currentBoot());
+          if (wgpuPresentVsync) {
+            // The frame's texture (kept across drains) queued; streamed now
+            // (v3); shown and counted at the next rAF. A present with no
+            // backbuffer pass since the previous one queues nothing.
+            queueWgpuVsyncFrame(api?.getFrame?.() ?? 0, wgpuExactCapture.currentBoot(), !hardwareInputMarkerApplied,
+              presentFrameTag, presentFrameTagEpoch);
+          } else {
+            if (streamCapture.active && !hardwareInputMarkerApplied) streamCapture.offerCanvas(renderCanvas, api?.getFrame?.() ?? 0);
+            // Shown at the submit: queued and shown at once.
+            wgpuNewFrames.queued(presentFrameTag, presentFrameTagEpoch);
+            wgpuNewFrames.shown(presentFrameTag, presentFrameTagEpoch);
+            recordPresentedFrame(api?.getFrame?.() ?? 0, wgpuExactCapture.currentBoot());
+            if (harnessPipeline) harnessPipelineLog.queued(wgpuExactCapture.currentBoot(), harnessNow());
+          }
+          wgpuStalePresent.present(wgpuLastBackbufferSourceTextureId, presentFrameTag, presentFrameTagEpoch);
           wgpuPresentedSource = {
             textureId: wgpuLastBackbufferSourceTextureId, rect: wgpuNextPresentSource
           };
           wgpuNextPresentSource = null;
           wgpuExactCapture.onPresent(readbackWgpuPresentSource);
           if (harnessUniqueFrames.active) harnessUniqueFrames.onPresent(readbackWgpuPresentRowsHash);
+          if (harnessFlicker.active) harnessFlicker.onPresent(readbackWgpuPresentSignature, wgpuExactCapture.currentLoad(),
+            wgpuPresentedSource ? { texture: wgpuPresentedSource.textureId ?? null, rect: wgpuPresentedSource.rect ?? null } : null);
           scheduleDetachedWgpuBitmap(q);
           webGpuExecStats.present++;
           if (webGpuExecStats.present - webGpuExecStats.lastLog >= 120) {
@@ -15116,6 +16534,12 @@ function drainWebGpuCmdRing(source = "presentation") {
             if (resource && wgpuConsumerStateCacheEnabled) {
               wgpuPassStateCache.invalidateDestroyedResource(tag, resource);
             }
+            // With the bind group cache, the cached groups binding it go with it (a
+            // buffer is bound as itself, a texture through its array view).
+            if (resource && webGpuObjects.bindGroupCache) {
+              if (tag === 1) webGpuObjects.bindGroupCache.forget(resource);
+              else if (tag === 2 && resource.view2dArray) webGpuObjects.bindGroupCache.forget(resource.view2dArray);
+            }
             m.delete(id);
             if (tag === 3) webGpuObjects.bindGroupSamplingMasks.delete(id);
           }
@@ -15126,9 +16550,10 @@ function drainWebGpuCmdRing(source = "presentation") {
           const destinationId = u32[recWord + 2];
           const s = webGpuObjects.textures.get(sourceId);
           const d = webGpuObjects.textures.get(destinationId);
-          if (!s) wgpuReplayClassifier?.recordMissingResource({ kind: "blit-source", id: sourceId });
-          if (!d) wgpuReplayClassifier?.recordMissingResource({ kind: "blit-destination", id: destinationId });
+          if (!s) noteMissingResource("blit-source", sourceId);
+          if (!d) noteMissingResource("blit-destination", destinationId);
           if (s && d) {
+            wgpuStalePresent.wrote(destinationId);
             if (!vpDiagDone) {
               vpDiagBlitDst.set(destinationId, (vpDiagBlitDst.get(destinationId) || 0) + 1);
             }
@@ -15160,7 +16585,7 @@ function drainWebGpuCmdRing(source = "presentation") {
             heapPtr: u32[recWord + 5], dstStride: u32[recWord + 6]
           };
           if (!source) {
-            wgpuReplayClassifier?.recordMissingResource({ kind: "readback-source", id: u32[recWord + 1] });
+            noteMissingResource("readback-source", u32[recWord + 1]);
             rb.lose(copy);
             break;
           }
@@ -15177,11 +16602,17 @@ function drainWebGpuCmdRing(source = "presentation") {
         }
         case WGPU_CMD_OP_VI_TAG:
           // Harness only: the VI output the next ViSwap shows.
+          if (harnessPipeline) harnessPipelineLog.tag(u32[recWord + 1], harnessNow());
           wgpuExactCapture.onViTag({
             boot: u32[recWord + 1], load: u32[recWord + 2],
             ticks: u32[recWord + 3] + u32[recWord + 4] * 4294967296,
             generation: u32[recWord + 5]
           }, readbackWgpuPresentSource);
+          break;
+        case WGPU_CMD_OP_BACKBUFFER_SIZE:
+          // Patch 0168: the backbuffer the coming passes draw into (640N x
+          // 480N at internal resolution N), outside any pass.
+          resizeWgpuBackbuffer(u32[recWord + 1], u32[recWord + 2]);
           break;
         case WGPU_CMD_OP_PRESENT_SOURCE:
           // Harness only: the XFB rectangle the coming backbuffer blit samples.
@@ -15246,6 +16677,12 @@ function drainWebGpuCmdRing(source = "presentation") {
       }
       break;
     }
+    if (causalMetricsEnabled && pass && replayRecordAccepted &&
+        (op === WGPU_CMD_OP_UPLOAD_BUFFER || op === WGPU_CMD_OP_UPLOAD_TEXTURE)) {
+      passUploadBytes += op === WGPU_CMD_OP_UPLOAD_BUFFER
+        ? u32[recWord + 4]
+        : Math.imul(u32[recWord + 3], u32[recWord + 5]) >>> 0;
+    }
     if (wgpuPassPackageProjectionActive && replayRecordAccepted) {
       const payloadBytes = op === WGPU_CMD_OP_UPLOAD_BUFFER
         ? u32[recWord + 4]
@@ -15279,7 +16716,7 @@ function drainWebGpuCmdRing(source = "presentation") {
       if (op === WGPU_CMD_OP_END_PASS) protocolPassDepth = Math.max(0, protocolPassDepth - 1);
       const afterRecordBudget = budgetGate.check({
         processed: (read - initialRead) >>> 0,
-        passDepth: protocolPassDepth,
+        passDepth: protocolPassDepth + (backbufferPresentPending ? 1 : 0),
         force: op === WGPU_CMD_OP_END_PASS,
       });
       if (afterRecordBudget.shouldYield) {
@@ -15658,29 +17095,13 @@ function replayCreatePipelineCfg(pipelineId, blobPtr, blobLen) {
     label: `dolphin-pcfg-${pipelineId}`,
     layout: getFixedLayouts().pipelineLayout,
     vertex: {
-      module: (DIAG_TRIVIAL_VS && hasDepth && depthTest &&
-               ["less", "greater", "less-equal", "greater-equal"]
-                 .includes(WGPU_COMPARE[depthCompare]))
-        ? getTrivialVsModule(renderGpu.device) : vs,
+      module: vs,
       buffers: attrCount > 0
         ? [{ arrayStride: stride, stepMode: "vertex", attributes }]
         : []
     },
     fragment: {
-      module: ((DIAG_CONST_FS && hasDepth) ||
-               (DIAG_CONST_FS_OPAQUE && hasDepth && depthTest && !blendEnable &&
-                ["less", "greater", "less-equal", "greater-equal"]
-                  .includes(WGPU_COMPARE[depthCompare])) ||
-               (DIAG_TRIVIAL_VS && hasDepth && depthTest &&
-                ["less", "greater", "less-equal", "greater-equal"]
-                  .includes(WGPU_COMPARE[depthCompare])) ||
-               (DIAG_CONST_FS_TESTED_ONLY && hasDepth && depthTest &&
-                ["less", "greater", "less-equal", "greater-equal"]
-                  .includes(WGPU_COMPARE[depthCompare])))
-        ? getConstFsModule(renderGpu.device)
-        : (((DIAG_FORCE_UV || DIAG_UV_FINITE || DIAG_UV_PERTURB || DIAG_SHOW_VCOLOR) &&
-            hasDepth &&
-            pickVariantFs(fsId)) || fs),
+      module: fs,
       targets: [target]
     },
     primitive: {
@@ -15691,12 +17112,12 @@ function replayCreatePipelineCfg(pipelineId, blobPtr, blobLen) {
       // Dolphin-driven back/front cull then removes exactly the
       // geometry that should be visible — the confirmed cause of the
       // black difficulty-select roster/scene (bisected via
-      // DIAG_RASTER_OPEN → DIAG_CULL_NONE_ONLY: cull-none renders it
+      // a raster-open → cull-none-only diagnostic: cull-none renders it
       // fully, scissor innocent). Declaring frontFace "cw" compensates
       // for the VS Y-flip so Dolphin's cull semantics are correct;
       // cull-none draws (boot/text/2D UI) are unaffected.
       frontFace: "cw",
-      cullMode: (DIAG_RASTER_OPEN || DIAG_CULL_NONE) ? "none" : (CULL[cullCode] || "none")
+      cullMode: CULL[cullCode] || "none"
     },
     multisample: { count: 1 }
   };
@@ -15798,15 +17219,6 @@ function resolvePipeline(pipelineId, colorFmt, depthFmt, dbg, revZ, samplingKey 
       const c = d.depthStencil.depthCompare;
       if (F[c]) d.depthStencil.depthCompare = F[c];
     }
-    // DIAGNOSTIC (revertible): force depth-test off so nothing is
-    // depth-rejected. With the EFB→canvas DIAG, this bisects "black
-    // EFB": geometry appears ⇒ uniform depth-rejection (EFB depth
-    // clear / GX-vs-Vulkan z convention); still black ⇒ transform/
-    // vertex bug. Flip false to restore real depth state.
-    if (DIAG_DEPTH_ALWAYS) {
-      d.depthStencil.depthCompare = "always";
-      d.depthStencil.depthWriteEnabled = false;
-    }
   } else {
     delete d.depthStencil;
   }
@@ -15830,11 +17242,9 @@ function resolvePipeline(pipelineId, colorFmt, depthFmt, dbg, revZ, samplingKey 
   const prewarmed = prewarmEntry ? pipelinePrewarm.take(prewarmEntry.key) : null;
   try {
     renderGpu.device.pushErrorScope("validation");
+    const createdAt = dropSampler?.running && !prewarmed ? performance.now() : 0;
     pipe = prewarmed ?? renderGpu.device.createRenderPipeline(d);
-    if (pipe && d.depthStencil) {
-      vpDiagPipeFinalDs.set(pipe, { cmp: d.depthStencil.depthCompare,
-                                    write: !!d.depthStencil.depthWriteEnabled });
-    }
+    if (createdAt) { dropWgpu.pipelines += 1; dropWgpu.pipelineMs += performance.now() - createdAt; }
     renderGpu.device.popErrorScope().then((err) => {
       if (err) {
         recordRendererError("validation", err.message);
@@ -15888,7 +17298,6 @@ function replayCreateShader(id, blobPtr, blobLen, stage) {
     return;
   }
   let wgsl;
-  let uvForcedWgsl = null;
   try {
     // TextDecoder.decode() rejects SharedArrayBuffer-backed views in
     // several engines ("cannot decode from a shared ArrayBuffer"), so
@@ -15898,12 +17307,6 @@ function replayCreateShader(id, blobPtr, blobLen, stage) {
     const local = new Uint8Array(blobLen);
     local.set(shared);
     wgsl = webGpuTextDecoder.decode(local);
-    // Strip `discard` from fragment shaders. Dolphin bakes the GX alpha test
-    // into the pixel shader as a discard; if it rejects every world fragment
-    // the EFB keeps its clear colour and the geometry is invisible -- which is
-    // also what the constant-colour FS test bypassed, so it is consistent with
-    // everything measured so far. Diagnostic only: removing it draws fragments
-    // the game intended to throw away.
     vpDiagShaderStage[stage] = (vpDiagShaderStage[stage] || 0) + 1;
     if (stage === 2 && /discard/.test(wgsl)) {
       if (++vpDiagShaderWithDiscard === 1) {
@@ -15927,34 +17330,6 @@ function replayCreateShader(id, blobPtr, blobLen, stage) {
       if (mb) vpDiagFsTexBinding.set(id, Number(mb[1]));
       const decls = wgsl.match(/@group\([0-9]+\)\s*@binding\([0-9]+\)\s*var[^;]*;/g) || [];
       console.log("[vpdiag] FS bindings: " + JSON.stringify(decls));
-    }
-    // Force the texture-array layer to 0. The translated sampling call is
-    // textureSample(tex, samp, vec2<f32>(uv), i32(coord.z)), so the layer comes
-    // from the third texcoord. Every texture the world binds is single-layer,
-    // so a non-zero layer samples out of range.
-    if (DIAG_FORCE_LAYER0 && stage === 2) {
-      const before = wgsl;
-      wgsl = wgsl.replace(
-        /textureSample([A-Za-z]*)\(([^,]+),\s*([^,]+),\s*(vec2<f32>\([^)]*\)),\s*i32\([^)]*\)/g,
-        "textureSample$1($2, $3, $4, 0i");
-      if (before !== wgsl && ++vpDiagLayerForced <= 1) {
-        console.log("[vpdiag] forced texture array layer to 0");
-      }
-    }
-    // Force the sampled UV to the middle of the texture. The textures these
-    // draws bind begin with black rows -- that is what made a head-only scan
-    // misread them as empty -- so texcoords stuck near zero would sample that
-    // black corner and produce exactly the observed black.
-    if (DIAG_SHOW_VCOLOR && stage === 2) uvForcedWgsl = vcolorRewrite(wgsl);
-    else if (DIAG_UV_PERTURB && stage === 2) uvForcedWgsl = uvPerturbRewrite(wgsl);
-    else if (DIAG_UV_FINITE && stage === 2) uvForcedWgsl = uvFiniteRewrite(wgsl);
-    else if (DIAG_FORCE_UV && stage === 2) uvForcedWgsl = uvForceRewrite(wgsl);
-    if (DIAG_NO_DISCARD && stage === 2) {
-      const before = wgsl;
-      wgsl = wgsl.replace(/discard;/g, "");
-      if (before !== wgsl && ++vpDiagDiscardStripped <= 1) {
-        console.log("[vpdiag] stripped discard from fragment shaders");
-      }
     }
   } catch (e) {
     webGpuObjects.shaderFail += 1;
@@ -16039,90 +17414,14 @@ function replayCreateShader(id, blobPtr, blobLen, stage) {
     }
   }
 
-  // [s28aw] DECISIVE dark-menu experiment (JS-only, gated, revertible):
-  // §28av proved the menu sampled UV is valid [0,1]; the remaining
-  // strong candidate is the textureSampleBias array-LAYER index. The
-  // menu textures are single-layer but bound as 2d-array views; if the
-  // texgen 3rd coord makes i32(_eN.z) ≥ 1 the sample is out-of-range ⇒
-  // 0 ⇒ black. Force the layer to 0 in FS textureSampleBias calls and
-  // see if the menu renders. Verified against BOTH the menu (must
-  // render) and title/3D (must NOT regress) before keeping.
-  if (S28AW_FORCE_TEXLAYER0 && stage === 2 &&
-      wgsl.indexOf("textureSampleBias(") >= 0) {
-    const before = wgsl;
-    wgsl = wgsl.replace(/(textureSampleBias\([^;]*?,\s*)i32\(_e\d+\.z\)/g,
-                        "$1" + "0i");
-    if (wgsl !== before &&
-        (self._wgS28awN = (self._wgS28awN || 0) + 1) <= 4) {
-      console.log(`[s28aw] forced textureSampleBias layer→0 in fs id=${id}`);
-    }
-  }
-  // [s28ax] decisive bisection: replace the textured-FS entry body
-  // (the only `-> @location(0) vec4<f32> { … }`, no nested braces in
-  // Naga's main) with a constant magenta return.
-  if (S28AX_FS_CONST && stage === 2 &&
-      wgsl.indexOf("textureSampleBias(") >= 0) {
-    const before = wgsl;
-    wgsl = wgsl.replace(
-      /(->\s*@location\(0\)\s*vec4<f32>\s*\{)[^{}]*\}/,
-      "$1 return vec4<f32>(1.0, 0.0, 1.0, 1.0); }");
-    if (wgsl !== before &&
-        (self._wgS28axN = (self._wgS28axN || 0) + 1) <= 4) {
-      console.log(`[s28ax] forced const-magenta FS id=${id}`);
-    }
-  }
-  // [s28bf] visualise the sampled UV: replace textureSampleBias(t,s,
-  // vec2<f32>(UV), layer, bias) with vec4(UV.x, UV.y, 0, 1) so the
-  // TEV carries the texgen UV as colour. Naga form:
-  // textureSampleBias(p6, p7, vec2<f32>(_eN.x, _eN.y), i32(_eN.z), _eM)
-  if (S28BF_SHOW_UV && stage === 2 &&
-      wgsl.indexOf("textureSampleBias(") >= 0) {
-    const before = wgsl;
-    wgsl = wgsl.replace(
-      /textureSampleBias\(\s*\w+\s*,\s*\w+\s*,\s*(vec2<f32>\([^()]*\))\s*,\s*[^,]*,\s*\w+\s*\)/g,
-      "vec4<f32>(($1).x, ($1).y, 0.0, 1.0)");
-    if (wgsl !== before &&
-        (self._wgS28bfN = (self._wgS28bfN || 0) + 1) <= 4) {
-      console.log(`[s28bf] showing UV-as-colour fs id=${id}`);
-    }
-  }
-  // [s28bb] isolate sample mechanics: textureSampleBias(t,s,c,l,bias)
-  // → textureSampleLevel(t,s,c,l,0.0). Naga emits the bias as the
-  // final `_e<N>` arg right after `i32(_e<N>.z)`; swap the call name
-  // and replace that last arg with explicit LOD 0.0.
-  if (S28BB_SAMPLE_LOD0 && stage === 2 &&
-      wgsl.indexOf("textureSampleBias(") >= 0) {
-    const before = wgsl;
-    wgsl = wgsl
-      .replace(/textureSampleBias\(/g, "textureSampleLevel(")
-      .replace(/(textureSampleLevel\([^;]*?,\s*i32\(_e\d+\.z\)\s*),\s*_e\d+\)/g,
-               "$1, 0.0)");
-    if (wgsl !== before &&
-        (self._wgS28bbN = (self._wgS28bbN || 0) + 1) <= 4) {
-      console.log(`[s28bb] textureSampleBias→Level(…,0.0) fs id=${id}`);
-    }
-  }
-  // [s28ay] sample-vs-TEV bisect: dolphin_fn_1_ is the texture-sampler
-  // helper (`-> vec4<i32> { …no nested braces… return _eN; }`). Force
-  // it to return white so the TEV runs with a known-good "sample".
-  if (S28AY_SAMPLER_WHITE && stage === 2 &&
-      wgsl.indexOf("fn dolphin_fn_1_(") >= 0 &&
-      wgsl.indexOf("textureSampleBias(") >= 0) {
-    const before = wgsl;
-    wgsl = wgsl.replace(
-      /(fn dolphin_fn_1_\([^{]*\{)[^{}]*\}/,
-      "$1 return vec4<i32>(255i, 255i, 255i, 255i); }");
-    if (wgsl !== before &&
-        (self._wgS28ayN = (self._wgS28ayN || 0) + 1) <= 4) {
-      console.log(`[s28ay] forced dolphin_fn_1_→white FS id=${id}`);
-    }
-  }
   let module;
+  const createdAt = dropSampler?.running ? performance.now() : 0;
   try {
     module = renderGpu.device.createShaderModule({
       label: `dolphin-shader-${id}-s${stage}`,
       code: wgsl
     });
+    if (createdAt) { dropWgpu.shaders += 1; dropWgpu.shaderMs += performance.now() - createdAt; }
   } catch (e) {
     webGpuObjects.shaderFail += 1;
     if (!self._webGpuShaderFirstErr) {
@@ -16138,12 +17437,6 @@ function replayCreateShader(id, blobPtr, blobLen, stage) {
   if (harnessWgslCorpus && harnessWgslCorpus.size < HARNESS_WGSL_CORPUS_MAX) {
     const hash = wgslHash(wgsl);
     if (!harnessWgslCorpus.has(hash)) harnessWgslCorpus.set(hash, { stage, wgsl });
-  }
-  if (uvForcedWgsl) {
-    try {
-      webGpuObjects.shadersUvForced.set(id,
-        renderGpu.device.createShaderModule({ label: `uvforced-${id}`, code: uvForcedWgsl }));
-    } catch { /* variant is diagnostic only; fall back to the real module */ }
   }
   if (webGpuObjects.shaders.size <= 4) {
     console.log(
@@ -16253,68 +17546,6 @@ function handleDetachedOglFrame(event) {
     }
     try { data.bitmap.close(); } catch {}
   }
-}
-
-// Day-1 instrumentation: drain the C++ per-frame ring buffer ~1Hz and print
-// new entries to console. The C side pushes one entry per OGL swap; entries
-// are 32 bytes / 8 × u32 (see DolphinWebFrameRingEntry in
-// core/upstream/dolphin_web_discio.cpp). Layout:
-//   u32 frame, prim, draw, verts, xfb_hash, glerr; i32 commit_result; u32 debug_bits
-//
-// `head` is monotonic so we can detect overflow (newEntries > capacity).
-let frameRingDrainTimer = null;
-let frameRingLastDrainHead = 0;
-function startFrameRingDrainLoop() {
-  if (frameRingDrainTimer || !api?.getFrameRingHead || !api?.getFrameRingEntryPtr) {
-    return;
-  }
-  const capacity = api.getFrameRingCapacity?.() | 0;
-  const entrySize = api.getFrameRingEntrySize?.() | 0;
-  if (capacity <= 0 || entrySize !== 32) {
-    postStatus(`frame-ring drain disabled: capacity=${capacity} entrySize=${entrySize}`);
-    return;
-  }
-  const ptr = api.getFrameRingEntryPtr();
-  if (!ptr || !moduleInstance?.HEAPU32) {
-    postStatus("frame-ring drain disabled: no HEAPU32 or null ptr");
-    return;
-  }
-  frameRingLastDrainHead = api.getFrameRingHead?.() >>> 0;
-  postStatus(
-    `frame-ring drain online: capacity=${capacity} ptr=0x${ptr.toString(16)} startHead=${frameRingLastDrainHead}`
-  );
-  frameRingDrainTimer = setInterval(() => {
-    const heap = moduleInstance.HEAPU32;
-    if (!heap || !api?.getFrameRingHead) return;
-    const head = api.getFrameRingHead() >>> 0;
-    if (head === frameRingLastDrainHead) return;
-    const total = (head - frameRingLastDrainHead) >>> 0;
-    const overflowed = total > capacity;
-    const startIndex = overflowed ? head - capacity : frameRingLastDrainHead;
-    const baseIndex = (ptr >>> 2);
-    const u32sPerEntry = 8;
-    if (overflowed) {
-      postStatus(`frame-ring overflow: ${total} entries dropped (capacity=${capacity})`);
-    }
-    for (let n = startIndex; (n >>> 0) !== head; n = (n + 1) >>> 0) {
-      const slot = (n >>> 0) % capacity;
-      const off = baseIndex + slot * u32sPerEntry;
-      const frame = heap[off + 0] >>> 0;
-      const prim = heap[off + 1] >>> 0;
-      const draw = heap[off + 2] >>> 0;
-      const verts = heap[off + 3] >>> 0;
-      const xfbHash = heap[off + 4] >>> 0;
-      const glerr = heap[off + 5] >>> 0;
-      const commit = heap[off + 6] | 0; // signed
-      const debugBits = heap[off + 7] >>> 0;
-      console.log(
-        `[frame-ring] f=${frame} prim=${prim} draw=${draw} verts=${verts} ` +
-          `xfb=0x${xfbHash.toString(16)} glerr=${glerr} commit=${commit} ` +
-          `dbg=0x${debugBits.toString(16)}`
-      );
-    }
-    frameRingLastDrainHead = head;
-  }, 1000);
 }
 
 function formatHex(value) {

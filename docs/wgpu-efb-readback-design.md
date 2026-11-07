@@ -24,8 +24,8 @@ Two things hide the bug:
    settings Dolphin's defaults apply to every disc:
    `EFBAccessEnable=false` (peeks are skipped and read 0 on any backend),
    `EFBToTextureEnable=true` and `XFBToTextureEnable=true` (copies stay on the
-   GPU). Upstream turns EFB access on for 13 GameCube IDs (`GMS`, `GZL`,
-   `GKH`, `GIZ`, ...) and EFB copies to RAM for many more.
+   GPU). Upstream turns EFB access on for 13 GameCube IDs and EFB
+   copies to RAM for many more.
 2. Since the wgpu XFB skip (branch perf/wgpu-cpu-relief), video=wgpu no longer copies the XFB to RAM at
    all, like OGL and Dolphin's default.
 

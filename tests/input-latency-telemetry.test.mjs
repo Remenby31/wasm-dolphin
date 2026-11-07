@@ -164,7 +164,7 @@ test("hardware marker is encoded after diagnostic copies but before present subm
   const start = source.indexOf("case WGPU_CMD_OP_SUBMIT_PRESENT:");
   const end = source.indexOf("case WGPU_CMD_OP_DESTROY:", start);
   const present = source.slice(start, end);
-  const backbufferCopy = present.indexOf("{ texture: lastBackbufferTexture }");
+  const backbufferCopy = present.indexOf("{ texture: presentTexture }");
   const marker = present.indexOf("applyHardwareInputMarker();", backbufferCopy);
   const submit = present.indexOf('submitEnc("present")', marker);
   assert.ok(backbufferCopy >= 0, "diagnostic backbuffer copy must be present");

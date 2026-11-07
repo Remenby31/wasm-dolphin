@@ -315,8 +315,18 @@ test("committed Dolphin provenance and ABI manifests verify", () => {
   // first patch to touch FifoDataFile.cpp and FifoPlayer.cpp: 135. 0121 (FPRF
   // follows the setting in every tier) is the first to touch PowerPC.h and
   // PowerPC.cpp: 137.
+  // 0106 (static GameCube RAM views) touches Memmap.cpp/.h and DSP.cpp: 140.
+  // 0150 (pacing switches) is the first patch to touch Present.cpp: 141.
+  // 0162 (present cadence counters) adds WasmPresentCadence.h: 142.
+  // 0164 (EFB sync counters) is the first to touch TextureCacheBase.cpp: 143.
+  // 0186 (mixer queue depth, read-only) is the first to touch Mixer.h: 144.
+  // 0196 (no per-game fast paths) rewords two upstream comments that named
+  // a game, in FileMonitor.cpp and TMEM.cpp: 146.
+  // 0211 (a late XFB shows the last picture) is the first to touch Present.h: 147.
+  // 0212 (throttle rate trim) adds Core/WasmThrottleRate.h and is the first to
+  // touch Mixer.cpp: 149.
   // Update deliberately when the series changes what it modifies.
-  assert.equal(result.vendorSnapshot.rootPaths, 137);
+  assert.equal(result.vendorSnapshot.rootPaths, 149);
   assert.equal(result.vendorSnapshot.submodulePaths, 2);
   assert.equal(result.core.abiVersion, 1);
   assert.equal(result.core.memoryContract.jsGlue.initialPages, 24576);

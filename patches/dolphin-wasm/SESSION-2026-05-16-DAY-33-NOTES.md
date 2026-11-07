@@ -15,11 +15,11 @@ checkpoint commit. `?video=webgpu` hybrid must never regress.
 
 Two reference probes captured:
 - `?video=wgpu` — 64/64 shaders translate, test pipeline 22
-  (VS=1+FS=4) builds OK, `first DRAW replayed (verts=3)`, Melee CSS
+  (VS=1+FS=4) builds OK, `first DRAW replayed (verts=3)`, the character-select screen (CSS)
   renders at full speed (SW hybrid still in the chain via the
   Presenter ShowImage fallback). Artifacts:
   `.omx/menu-progress/2026-05-16T10-02-30-451Z`.
-- `?video=webgpu` hybrid — Melee CSS renders, 35 distinct hashes.
+- `?video=webgpu` hybrid — the character-select screen (CSS) renders, 35 distinct hashes.
   Artifacts: `.omx/menu-progress/2026-05-16T10-10-07-952Z`.
 
 ## A1 — opcode set widened + upload arena (behavior-preserving)
@@ -43,7 +43,7 @@ behavior is identical.
 
 Verified: build OK (`[6/6] linked`, only the pre-existing unused
 `m_device` warning); probe `?video=wgpu` → 64/64 shaders, pipeline 22
-built, `first DRAW replayed`, zero errors, Melee CSS renders — matches
+built, `first DRAW replayed`, zero errors, the character-select screen (CSS) renders — matches
 baseline. Checkpoint committed (`f9cdc32`).
 
 ## A2 — AbstractPipelineConfig → real GPURenderPipeline
@@ -72,7 +72,7 @@ modules not yet built, validation-scoped, coverage-counted.
 
 Verified `?video=wgpu`: **64 real pipeline configs build OK, 9 FAIL,
 0 defer**; 64/64 shaders; test `DrawTest` still replays; 41 distinct
-hashes; Melee CSS renders — no regression. Checkpoint committed.
+hashes; the character-select screen (CSS) renders — no regression. Checkpoint committed.
 
 ### Next construct (probe-surfaced, the A2→A3 blocker)
 
@@ -104,7 +104,7 @@ avoid a rebuild solely for a warning.)
 Verified `?video=wgpu`: **pcfg ok=64 fail=0 defer=0** (was fail=9) —
 **100% of real Dolphin pipeline configs build as valid WebGPU
 pipelines**; 64/64 shaders (no translation regression from the VS
-change); 45 distinct hashes; Melee CSS renders. Checkpoint committed.
+change); 45 distinct hashes; the character-select screen (CSS) renders. Checkpoint committed.
 
 ## A3 — real WebGPU VertexManager + AbstractGfx draw recording
 
@@ -218,7 +218,7 @@ records `SET_VERTEX/INDEX_BUFFER`+`DRAW_INDEXED`) are in.
 CMakeLists (reconfigure needed; done). All dormant — VertexManager not
 yet installed in VideoBackend, `CreateTexture` still SWTexture,
 `SupportsUtilityDrawing()` still false. Verified `?video=wgpu`: 64/64
-shaders, pcfg 64/0, test DRAW replays, Melee renders — no regression.
+shaders, pcfg 64/0, test DRAW replays, the game renders — no regression.
 Checkpoint committed.
 
 Bind layout (from the Day-22 translator SHADER_HEADER + shadergen,
@@ -511,7 +511,7 @@ every loop iteration. It's `runPresentationLoop`: right after
 `presentFrame(width,height,api.frameBuffer(),…)` →
 `drawFrameBytesToWebGpu` → renders the **CPU framebuffer** to
 `gpu.context.getCurrentTexture()` and submits. Pre-cutover that CPU
-buffer was the SW rasteriser's XFB (correct Melee). **Post-cutover the
+buffer was the SW rasteriser's XFB (correct game frames). **Post-cutover the
 SW rasteriser is retired**, so `api.frameBuffer()` is stale/empty —
 that's the uniform green — and it clobbered our correct cmd-ring GPU
 render on every single iteration. The hardware renderer was working
@@ -640,14 +640,14 @@ even have correct uniforms/textures), then transform/UBO.
 
 Added `[webgpu-ring] DROPPED` telemetry to `WebGPUCommandStream::Push`.
 Probe: the ring overflowed massively (50k+ records dropped) the moment
-Melee burst-loads textures (`tex` 62→241 around present 480-600).
+The game burst-loads textures (`tex` 62→241 around present 480-600).
 Dropping a record permanently loses a resource/state op → the
 consumer's `missBg/missPipe` ratchet up forever (geometry never lands).
 
 Three fixes, each probe-verified:
 - **Producer bind-group-1 sig→id cache** (`WebGPUGfx`, direct-mapped
   1024): the old single-last-sig slot re-emitted `CREATE_BIND_GROUP`
-  whenever consecutive draws used different texture sets (Melee cycles
+  whenever consecutive draws used different texture sets (the game cycles
   many/frame). Result: consumer `bg` count **135k → ~4k** (≈40×
   fewer builds).
 - **Ring 4096 → 65536** records (2 MB; trivial) for burst slack.
@@ -814,7 +814,7 @@ documented "revisit InitBackendInfo caps post-cutover" gotcha):
     g_backend_info.bSupportsClipControl = true;
 
 **PROBE-VERIFIED — FIRST REAL GEOMETRY.** Raw EFB (via the
-`DIAG_EFB_TO_CANVAS` bypass) now renders actual Melee: the
+`DIAG_EFB_TO_CANVAS` bypass) now renders actual game frames: the
 single-player **"Select / VERY EASY"** difficulty screen, `distinct`
 1→13 (live/animating), 100% speed. The remote WebGPU hardware renderer
 draws real GameCube geometry+text end-to-end. Committed.
@@ -825,7 +825,7 @@ present path doesn't deliver it (this is task #2's territory and was
 mis-scoped earlier as "working" from opcode counts alone). The
 `DIAG_EFB_TO_CANVAS` blit is, in effect, a *correct* present (it puts
 the real EFB on the canvas) and is left **enabled** as the interim
-present so `?video=wgpu` shows real Melee now; replace it with a
+present so `?video=wgpu` shows real game frames now; replace it with a
 proper EFB→XFB→backbuffer fix (aspect/sub-rect = the old "black left
 margin", task #2) and then revisit colour/TEV/texture fidelity.
 Remaining DIAG flags (`DIAG_DEPTH_ALWAYS`, `DIAG_RASTER_OPEN`) are
@@ -957,12 +957,12 @@ copy gets real pixels:
   `TextureCache` EFB-copy so the cmd-ring keeps the EFB-copy as a GPU
   texture and binds THAT for the matching `SetTexture`, skipping the
   RAM round-trip entirely (only true XFB→RAM / CPU-read cases need the
-  full readback). That likely fixes most of Melee's visuals without
+  full readback). That likely fixes most of the game's visuals without
   the async-readback machinery.
 
 Everything else (geometry, transforms, UBOs, pipelines, bind groups,
 present-to-canvas) is proven correct and instrumented. This stub is
-the last big construct between "real geometry" and "correct Melee".
+the last big construct between "real geometry" and "correct game frames".
 
 ### 13. copy-to-vram cap fixed (prerequisite, necessary not sufficient)
 
@@ -1158,7 +1158,7 @@ dynamic offsets (and Dolphin's GX constant streaming). Concretely:
   separate m_bg0_util needed once binding0 is a dynamic-offset slice).
 
 This is the last big construct between "real geometry + text" and
-"correct Melee". Everything else (geometry, transforms-at-upload,
+"correct game frames". Everything else (geometry, transforms-at-upload,
 pipelines, bind groups, textures, EFB-copy plumbing, utility-uniform
 upload) is proven correct and instrumented. Committed this checkpoint:
 the utility-uniform-upload prerequisite (no regression — "Select"
@@ -1216,7 +1216,7 @@ uniform foundation. Interim `DIAG_EFB_TO_CANVAS` present unchanged.
 ### 18. Menu/title/CSS-black NARROWED: 2D draws collapse (not skipped, not mis-targeted)
 
 Post-§17 the 3D **attract demo / trophy showcase renders beautifully**
-(recognisable textured Melee — Misty/Kirby/coin trophies, perspective).
+(recognisable textured game content — character/coin trophies, perspective).
 But **title screen, launch cutscene, main menu, character select stay
 black** (a tiny green-vertical / red-horizontal cross at screen centre
 on a flat clear colour). Drove a multi-probe evidence chain (all
@@ -1232,16 +1232,16 @@ JS-only, committed as passive `[webgpu-DIAG-*]`):
 - `[webgpu-DIAG-efbpass]` (EFB colour pass, depth-attached tex#14,
   sampled every ~240 passes): during menu frames the pass has
   **pipeOk≈59, bgOk≈700, drawIdx≈240, ZERO pipe/bg misses** — i.e.
-  Melee's menu geometry **is** issued into the EFB with full valid
+  The game's menu geometry **is** issued into the EFB with full valid
   pipeline+bind-group state, but the EFB stays `0,0,0,0`.
 
 **Conclusion (the narrowed construct):** not a missing render target,
-not skipped/missing-pipeline draws, not an XFB-present gap. Melee's
+not skipped/missing-pipeline draws, not an XFB-present gap. The game's
 2D/menu draws execute with correct pipelines/bind groups yet produce
 nothing — they **collapse to the clip origin** (the centre cross =
 ~240 quads degenerating to a point/line). The 3D perspective demo
 through the identical path renders. So the residual is a **per-draw
-transform/projection correctness bug specific to Melee's 2D
+transform/projection correctness bug specific to the game's 2D
 (orthographic) menu draws**. `[webgpu-DIAG-vs]` corroborates: most
 draws carry valid perspective `proj0≈2.0,proj3=0,0,-1,0`, but a class
 of draws shows **all-zero projection** (`proj0=0,0,0,0
@@ -1323,7 +1323,7 @@ real, visible win **and** isolate the next residual:
 
 So §19 correctly fixed the §18 projection-staleness root cause (menus
 went black→backgrounds), but a **second, UI-specific construct**
-remains: Melee's small 2D UI quads still degenerate while the big
+remains: the game's small 2D UI quads still degenerate while the big
 background quad renders. Likely class: per-vertex **posmtx / texture-
 matrix** (or the UI vertex format / a texmtx-collapse) for UI draws —
 same "constant updated on a path that doesn't set `dirty` ⇒ §17
@@ -1365,7 +1365,7 @@ but the collapse cause is now structurally removed for *all* VS
 draws, not a per-screen patch.)
 
 Trajectory this session: black → white "Select" → real textured 3D
-Melee (§16/§17) → menu backgrounds (§19) → **menu UI rendering
+The game (§16/§17) → menu backgrounds (§19) → **menu UI rendering
 (§20)**. Residual fidelity (exact backgrounds, per-texture sampler
 state, proper XFB present) remains the ongoing grind, now on a fully
 correct per-draw uniform foundation. `?video=webgpu` +
@@ -1389,7 +1389,7 @@ missing elements ⇒ those are a *different* per-draw fidelity construct
 
 To get a deterministic in-battle scene for the fidelity grind
 (observability was the real blocker: the blind validator can't
-navigate Melee — it sticks on difficulty-select), implemented full
+navigate the game — it sticks on difficulty-select), implemented full
 `.sav` load infrastructure:
 
 - `dolphin_web_core.cpp`: new `int LoadStateFile(const char* path)` →
@@ -1440,7 +1440,7 @@ fully wired to sidestep §22's foreign-build version lock with a
 version-matched state.
 
 **Key discovery (reframes "only pieces").** A no-input attract probe
-parks Melee at the GameCube **"The Memory Card in Slot A has no saved
+parks the game at the GameCube **"The Memory Card in Slot A has no saved
 Game Data. Create Game Data? Yes/No"** dialog — and it renders
 **100 % correctly**: crisp full multi-line white text, "Yes" in gold,
 "No" in grey, clean background. So §16–§21 deliver **complete, correct
@@ -1546,7 +1546,7 @@ Probed the deterministic repro (`LoadStateFile
 .omx/savestates/battle-state.sav`, `rc=1`). Found a real frame-poison
 bug: **`VALIDATION: ... [Texture 640x528 R32Float] ... expected
 sample types (Float)`** — the battle samples the **EFB depth**
-(r32float; Melee Z-texture/depth effects) but the fixed group-1
+(r32float; the game's Z-texture/depth effects) but the fixed group-1
 layout declares `sampleType:"float"` (filterable). r32float is
 `unfilterable-float` in WebGPU → bind-group/pipeline invalid → "one
 bad GPU op poisons the whole frame submit" → black. Menus don't
@@ -1942,7 +1942,7 @@ Instrumented `CoreTimingManager::Advance()` with `[s27-coretiming]`
   counter fires only 6× (the backlog burst) then stops.
 
 **Pinpointed root cause:** after the post-load FIFO backlog drains,
-Melee's PowerPC enters a tight **idle/poll loop at `0x80335E98`**
+The game's PowerPC enters a tight **idle/poll loop at `0x80335E98`**
 (MEM1 game code) and never leaves — it is busy-waiting on a
 hardware/memory condition that the savestate restore left permanently
 unsatisfiable. CoreTiming, the CPU thread, the GPU thread, and the
@@ -2002,7 +2002,7 @@ iteration into a deep PowerPC/HW savestate-desync (now precisely
 pinpointed for a future dedicated session: re-arm the stranded
 PE/DSP/VI completion in the after-load callback / `HW::DoState`
 post-fixup) does not advance the actual product goal. The renderer
-already renders menus, dialogs, and **textured 3D Melee via the
+already renders menus, dialogs, and **textured 3D game content via the
 attract demo** (§16–§24), which auto-reaches real CPU-vs-CPU gameplay
 with **no savestate and no navigation**. The highest-value
 continuation toward "all scenes render full speed" is to drive/grind
@@ -2015,7 +2015,7 @@ path now.
 
 Long no-input attract survey (`DURATION=180`, no savestate): **29
 distinct frames, avg gameSpeed 100.3 %, coreFps 60.2** — the renderer
-runs at **full native speed**. With no input Melee parks at the
+runs at **full native speed**. With no input the game parks at the
 **difficulty-select** screen (the blind validator can't navigate —
 §23). There: **"VERY EASY" TEV-coloured text renders correctly**
 (blue, sharp) and a partial grey diagonal backdrop element appears,
@@ -2109,7 +2109,7 @@ params) to byte offsets, log their live values via `[webgpu-DIAG-ub]`
 for the backdrop draw. If fog colour == 0 and/or params force
 factor=256 ⇒ confirm; then trace where Dolphin sets fog
 (`PixelShaderManager` fog) vs our upload, smallest gated fix,
-reprobe (backdrop must show Melee's fiery gradient; text/3D unbroken).
+reprobe (backdrop must show the game's fiery gradient; text/3D unbroken).
 
 **Status:** §28 root cause now precisely identified (untextured
 backdrop fogged to black via wrong fog PS-constants) — a concrete,
@@ -2145,7 +2145,7 @@ VertexShaderManager's depth-range path stays consistent with the
 EFB content `nz 3791→9697`, `max 160→255`; the screen went
 text-only → **"VERY EASY" (sharp blue, no regression) + the
 selection box outline + the cursor-dot row now render**. Full speed
-(≈100 % gameSpeed, 60 coreFps). Melee's difficulty-select is
+(≈100 % gameSpeed, 60 coreFps). The game's difficulty-select is
 genuinely a dark screen, so this is materially closer to correct.
 
 **Honest caveat (verification gap):** this is a *global* depth/fog
@@ -2166,7 +2166,7 @@ kept (gated/one-shot, passive). `?video=webgpu` / `DIAG_EFB_TO_CANVAS`
 Regression-checked the **shipping `?video=webgpu`** Software→WGSL
 hybrid after the §28c shared shadergen/cap change: **64 distinct
 frames / 71 samples, 99.9 % gameSpeed, 60 coreFps — it renders
-Melee's difficulty-select FULLY and correctly** (top roster/trophy
+The game's difficulty-select FULLY and correctly** (top roster/trophy
 grid, "VERY EASY" + yellow selector arrows, LEVEL indicator, red
 content box, proper background). **§28c did NOT regress the shipping
 path** — the never-break invariant holds (`InitBackendInfo` only
@@ -2248,7 +2248,7 @@ and every dependent draw samples a black copy → stays black →
 re-copies black (self-perpetuating). Boot avoids this (no
 copy-feedback) and renders correctly. The bootstrap that must break
 the circle = the first difficulty-select scene draw that produces
-colour *independent* of a prior copy (Melee's 3D trophy/character
+colour *independent* of a prior copy (the game's 3D trophy/character
 backdrop render → first EFB-copy). **Next probe:** instrument the
 difficulty-select EFB-colour pass *before* the first 640×480
 `cpypass` — dump the distinct (pipe,fs,vs,bind-group,blend,depth) of
@@ -2397,7 +2397,7 @@ unregressed) frame-by-frame:
 
 - **Steady difficulty-select frames** (t=50, t=62, t=69): render
   **FULLY and correctly** — roster/trophy grid, character portraits,
-  "VERY EASY" + yellow selector arrows, red LEVEL box, blue Melee
+  "VERY EASY" + yellow selector arrows, red LEVEL box, blue
   background — visually matching the reference. ✓
 - **Boot GameCube dialog**: correct, unregressed. ✓
 - **Early frames (t≤~28)**: `?video=wgpu` is still in JIT-warmup
@@ -2510,8 +2510,7 @@ BEGIN_PASS fb-ids + draw targets across p≈300-1314 vs the
 
 Confirmed the construct is REAL (not loading, not warmup, not cull):
 - `?video=webgpu` reference at t=15 (`12-t15-down-x.png`) renders the
-  **Melee Main Menu fully** ("Main Menu / 1-P Mode / VS. Mode /
-  Trophies / Options / Data / Solo Smash", blue bg). `?video=wgpu`
+  **the game's main menu fully** (all six menu entries, blue bg). `?video=wgpu`
   at the same point: EFB `tex#14 nz=0` → BLACK. Matches the user's
   "main menu isn't rendering" + cutscene flashing.
 - `DIAG_RASTER_OPEN=true` (cull none + no scissor) does **NOT**
@@ -2525,14 +2524,14 @@ Confirmed the construct is REAL (not loading, not warmup, not cull):
 
 **Root cause:** the present path (`SUBMIT_PRESENT` →
 `DIAG_EFB_TO_CANVAS`) blits the **raw live EFB `tex#14`** to the
-canvas every frame. Melee redraws the EFB every frame only for
+canvas every frame. The game redraws the EFB every frame only for
 **animated** screens (difficulty-select → EFB always fresh → the
 EFB-blit shows it). For **static** screens (title, main menu,
-between cutscene keyframes) Melee renders the screen once, copies
+between cutscene keyframes) the game renders the screen once, copies
 EFB→XFB, then re-presents the XFB for many frames **without
 redrawing the EFB**; our raw-EFB blit then samples a cleared/empty
 EFB → black, and the user sees "mostly black, occasional flash"
-(the flashes = the rare frames Melee does touch the EFB). This is
+(the flashes = the rare frames the game does touch the EFB). This is
 exactly the PLAN's Phase-C "present the XFB to the canvas" gap;
 `DIAG_EFB_TO_CANVAS` was always an interim shortcut.
 
@@ -2568,15 +2567,15 @@ did **not** move the metric. Root of the mis-diagnosis:
 - The `?video=wgpu` no-input probe timeline is: boot logos → GameCube
   **save-data dialog** (`tex#14 (0,0,25)` + text — renders
   CORRECTLY) → difficulty-select (`nz≈840k`, renders since §28g).
-  The p≈650-1000 "menu window" is the **save dialog**, not the Melee
+  The p≈650-1000 "menu window" is the **save dialog**, not the game's
   main menu.
 - The `?video=webgpu` reference at the same wall-clock (t=15) shows
-  the Melee **main menu** because the SW core's no-input attract
+  the game's **main menu** because the SW core's no-input attract
   advances on a **different timeline** (faster pre-JIT / auto-steps
   differently). Comparing the two cores **by timestamp is invalid** —
   at any given t they are at different game states. §28k's "main menu
   black in wgpu" was an artifact of that invalid comparison; the
-  blind probe never actually reaches the Melee main menu under
+  blind probe never actually reaches the game's main menu under
   `?video=wgpu`.
 - The snapshot-present change was therefore unverifiable with the
   deterministic probe and added present-path risk for zero shown
@@ -2676,7 +2675,7 @@ polls **nothing**; it is a **pure infinite halt loop** (`nop; li r3,0;
 nop; b .`) running with **`MSR[EE]=0`**. So §27g's "polling a
 stranded PE/DSP/VI completion" model is **wrong**: the game is not
 waiting on a device flag — its PowerPC has **deliberately branched
-into a dead-loop with interrupts disabled** (Melee's
+into a dead-loop with interrupts disabled** (the game's
 hang/`OSDeadLoop`/exception-tail). The PE_FINISH|VI bits in
 `picause=0x10540` accumulate *because* it already hung (ISRs can't
 run with EE=0), not as the cause.
@@ -2685,19 +2684,19 @@ PC trajectory (`[s27-coretiming]`): post-load the game runs **real
 code for several seconds** (PCs cycling 0x8034b164 / 0x80361bb8 /
 0x803447fc / 0x801a4dac / 0x8034738c — the §27d "burst", pimask 0xffc,
 interrupts live) → then transitions to `0x80335e98` and stays. So
-Melee executes normally for seconds post-load, then **its own code
+The game executes normally for seconds post-load, then **its own code
 trips a fault/assertion/exception path and self-halts**.
 
 **Decisive root cause (final, supersedes §27/§27g):** the
 savestate-load defect is a **state-fidelity** problem — the wasm
 Dolphin core's HW/PPC `DoState` restores RAM/PPC/device state subtly
-inconsistently; Melee runs a few seconds on it, then its own
+inconsistently; the game runs a few seconds on it, then its own
 sanity/exception code detects the inconsistency and jumps to its
 infinite hang loop. This is **not** fixable from the after-load video
 resync callback and **not** a re-armable interrupt/DMA completion. It
 is a deep, open-ended PowerPC/OS/HW savestate-compatibility audit
 (which DoState sub-state — MMU/BAT, cache, PPC SPRs/MSR, DSP/EXI/SI/
-DI/IPC — diverges enough to trip Melee's check), with **no bounded
+DI/IPC — diverges enough to trip the game's check), with **no bounded
 path** — exactly the effort the §27g strategic pivot deliberately
 deferred as out-of-scope for the renderer goal.
 
@@ -2766,8 +2765,8 @@ difficulty-select converged. Remaining nav-gated screens
 User navigated manually and sent 9 live screenshots — decisive triage
 of the nav-gated screens (which the blind probe can't dwell on):
 
-- **CSS RENDERS CORRECTLY** (img4: Mario/Bowser/Peach/Yoshi/DK/
-  C.Falcon portraits + "?" + "VERY EASY" + bg, sharp). The §28g cull
+- **CSS RENDERS CORRECTLY** (img4: character
+  portraits + "?" + "VERY EASY" + bg, sharp). The §28g cull
   fix covers CSS too. imgs 2-3 (purple/blue/grey fragments + yellow
   oval) are *transition/animation* frames — same residual class as
   the §28h difficulty-select transitions, low severity.
@@ -2786,7 +2785,7 @@ of the nav-gated screens (which the blind probe can't dwell on):
   vs img9 rendered): the black frames carry
   *"Experimental WASM JIT temporarily off (fps:0 baseline:0
   catastrophic; cooldown 300 frames)"* at 38-40 % speed; the
-  rendered frame (img9, the Melee intro 3D — sky/colosseum/flying
+  rendered frame (img9, the game's intro 3D — sky/arena/flying
   trophy) is at 40 % "JIT engaged". So during the heavy intro the
   WASM JIT trips its *catastrophic* cooldown, speed collapses,
   frames drop → flashing. This is a JIT/perf-stability construct,
@@ -2961,8 +2960,8 @@ User played the whole attract/Classic flow and sent 18 live
 screenshots. Decisive consolidated picture:
 
 **Renders correctly (2D menu screens):**
-- **Character Select FULLY renders** (img15: full Classic roster
-  Mario…Link + P1 panel + LEVEL/VERY EASY/STOCK/HIGH SCORE/BACK,
+- **Character Select FULLY renders** (img15: full character
+  roster + P1 panel + LEVEL/VERY EASY/STOCK/HIGH SCORE/BACK,
   101 % speed) — a genuine §28g win. imgs17/18 = CSS *transition*
   frames (mid-animation glitch → settles to 15; §28h minor class).
 - Difficulty-select (verified deterministically, §28g/o).
@@ -3119,7 +3118,7 @@ and the 640×480 EFB-copies *during* the black 3D region (p=908):
   EVERYWHERE** — pure **WHITE**, fully saturated, not the EFB.
 - `tex#52` (copy): mostly dark `16,16,16`.
 
-The Melee 3D scenes (intro/title/main-menu backdrop/battle)
+The game's 3D scenes (intro/title/main-menu backdrop/battle)
 composite their backdrop by **sampling these 640×480 EFB-copy
 textures**. The copies are **all-white (or all-dark) garbage instead
 of the captured EFB**, so every dependent composite draw collapses to
@@ -3425,7 +3424,7 @@ Layer (a) root-caused and FIXED (JS-only, served live, no rebuild).
 2. Re-tested `DIAG_DEPTH_ALWAYS=true` (the §28g "depth-reject
    DISPROVEN" verdict predated the §28w deterministic 3D repro —
    it was concluded on 2D difficulty-select). On the A-only repro
-   the **Melee title screen rendered** and the 640×480 EFB-copies
+   the **title screen rendered** and the 640×480 EFB-copies
    carried real varied scene content (`nz≈3700/8192 max=255`,
    orange/fire intro colours) instead of §28x's flat-grey/white
    garbage. ⇒ **depth-test rejection is conclusively the layer-(a)
@@ -3461,7 +3460,7 @@ fog/[0,1] shadergen stays correct):
   "always" are untouched — structurally no §28g regression).
 
 **Verification (probe + screenshots, real depth state, no DIAG):**
-- A-only repro: 9 distinct hashes incl. deep-dwell **Melee title
+- A-only repro: 9 distinct hashes incl. deep-dwell **title
   screen** (t=32) and a **fully-rendered 3D stage** — textured
   terrain/hills/structure/sky with correct perspective AND
   occlusion (t=64). 0 validation errors. First 3D content ever
@@ -3505,7 +3504,7 @@ DIAG):**
 - "Game Data has been created" save dialog: wgpu (t=8)
   **pixel-identical** to the reference (t=8) — same icon, dialog,
   text, backdrop.
-- Melee **title screen** (PRESS START): wgpu (t=31) renders
+- The game **title screen** (PRESS START): wgpu (t=31) renders
   fully and correctly (matches reference title).
 - 3D **stage** (textured terrain/structure/sky): renders with
   correct perspective AND occlusion (§28ad t=64).
@@ -3580,7 +3579,7 @@ served live):** make the reverse-Z compensation **per-pass**:
   grid renders crisply (t=68) — §28g intact, *improved* vs §28ad.
 - `?video=webgpu` reference unaffected (separate path).
 
-**Residual (NEW construct, not the reverse-Z class):** the Melee
+**Residual (NEW construct, not the reverse-Z class):** the game's
 **main menu** (post-Start "Classic/Adventure" 1P menu) still
 mis-renders — reference shows a crisp blue-grid menu with yellow
 buttons + text; `?video=wgpu` shows only a faint/dark partial
@@ -3600,7 +3599,7 @@ stand; `?video=webgpu` / per-draw ring / §26 untouched.
 
 ### 28ag. Dark 1P-menu construct — depth-bisect RULES OUT depth; it is a blend/TEV/fragment-alpha (or backdrop-EFB-copy-content) construct
 
-Continued the loop on the §28af residual (Melee 1P
+Continued the loop on the §28af residual (the 1P
 "Classic/Adventure" menu dark vs the crisp reference).
 
 **Bisect (JS-only, decisive — same method as §28ad-2):**
@@ -3995,7 +3994,7 @@ elements — expected.)
 the serialized layout/declaration is CORRECT.** The dark content
 is therefore one of (architect agent's remaining two):
 (a) the uploaded vertex buffer's texcoord **bytes are zero** —
-GX/Melee menus drive UV via hardware texgen from `SourceRow::Geom`
+GX/game menus drive UV via hardware texgen from `SourceRow::Geom`
 (position), not relayed per-vertex UVs, so the VertexLoader
 faithfully writes 0 texcoords and the (identity) texgen + missing
 screen→UV posttransform yields uv≈0 → atlas-corner (transparent)
@@ -4180,7 +4179,7 @@ remap → **uniform** viewport (no mixed reverse/normal pass) ⇒ the
 §28aq flicker is **structurally impossible**. Consumer paired to
 the single convention: a measurement-derived insight — flag=true-3D
 already `setViewport(0,1)` (after swapping its raw `(1,0)`) and
-renders with **`dcv=0.0` + GEQUAL**; flag=false delivers that same
+renders with **`dcv=0.0` + greater-equal**; flag=false delivers that same
 `(0,1)` directly, so the correct single convention =
 **`dcv=0.0` constant + the compare flipped for ALL rzRelevant
 draws** (`REVZ_COMPARE_FLIP=true` + new `REVZ_COMPARE_FLIP_ALL`,
@@ -4190,7 +4189,7 @@ dropping the per-pass `&& revZ` gate). The §28as experiment's
 distinct=5); `dcv=0.0`+uniform-flip renders.
 
 **Verified (rebuilt core, JS served live).** A-only repro
-(`?video=wgpu`): the **Melee title screen + "PRESS START" + the 3D
+(`?video=wgpu`): the **title screen + "PRESS START" + the 3D
 intro tunnel render correctly and stably** (screenshots t29/t43/
 t48/t49/t51), **`[s28aq-MISMATCH]=0`** (flicker mechanism gone),
 **0 GPU valErr**, distinct **19** vs the `dcv=1.0` dark run's
@@ -4217,7 +4216,7 @@ title screenshots, not by that counter. §28g/j/o/s/u/v/w/x/ac/ad/
 ae/af/ag/ah/ai/aj/al/am/an/ao/aq/ar/as stand; `?video=webgpu` /
 per-draw ring / §26 untouched. **Open:** the dark-menu construct
 (§28an/ap, task) — the `[s28-vtxdata]` probe is deployed but the
-cold-JIT ephemeral validator can't reach the Melee 1P menu in 95 s
+cold-JIT ephemeral validator can't reach the 1P menu in 95 s
 (only boot pipes 86/94 captured); needs a warm/longer reach. Next
 loop: capture menu-pipeline `[s28-vtxdata]` (zero-texcoord vs
 posttransform) and the smallest gated fix.
@@ -4238,7 +4237,7 @@ solved depth/flicker for 3D/title/attract).
 + the validator's `SAVE_STATE_URL`/`SAVE_STATE_AT` env support →
 staged `__menu.sav` at repo root (served by `tools/serve.mjs`,
 matches the gitignored `__*.sav` convention). `SAVE_STATE_URL=
-/__menu.sav SAVE_STATE_AT=35` loads the Melee main menu in ~35 s
+/__menu.sav SAVE_STATE_AT=35` loads the game's main menu in ~35 s
 and reproduces the dark menu every run — the prior multi-session
 blocker (cold validator never reaching the menu) is gone.
 
@@ -4521,7 +4520,7 @@ fetch is mechanically correct (right populated texture `tex#76` at
 **UV coordinate it samples points to the WRONG atlas sub-region** →
 transparent/empty atlas space → sample ≈ 0 → dark. This is the
 **GC hardware-texgen / posttransform** path (§28al/§28an branch):
-Melee menus drive UV from a texgen *source* (commonly position /
+The game's menus drive UV from a texgen *source* (commonly position /
 `SourceRow::Geom`) through the texgen matrix + the XF
 **posttransform** matrix. `[s28-vtxdata]` showed the per-vertex
 texcoord attribute is *non-zero* but that only means the
@@ -4663,7 +4662,7 @@ encode+convert) = a **constant ~1.2 ms/frame** independent of scene
 (0.9–1.7 ms across all). Battle held **30 % for 300 + s after the
 JIT compile count FROZE** (42→2829 in ~2 s at load, then zero new
 compiles, speed 29–30 % unchanged) ⇒ the steady-state cost is **PPC
-CPU-emulation execution of Melee's battle game-logic**, ~3.4× the
+CPU-emulation execution of the game's battle game-logic**, ~3.4× the
 title code — not cold-start, not the rasterizer, not GPU-offloadable.
 Eliminating ALL SW video CPU at battle ⇒ 30 % → **30.8 %**
 (+0.8 pp). The architect's offload design independently flagged
@@ -4724,7 +4723,7 @@ every hot block JIT-compiled in mixed mode the scene is no faster.
 The **only** real lever is `forcejit=1` (keep the JIT continuously
 engaged) — tier-independent, 30→46 % (+53 %) — and its ~46 % battle
 result is a **fundamental PPC→WASM execution-throughput ceiling**
-for Melee's battle code (§28bh), not a config defect. mixed-tier is
+for the game's battle code (§28bh), not a config defect. mixed-tier is
 NOT a win and should NOT be defaulted (no gain + historic post-boot
 corruption risk); the §28bi coercion fix is still kept (real latent
 bug — makes the knob honest) and §28bj's higher cap is harmless.
@@ -4777,7 +4776,7 @@ residual flicker — next.
 User feedback after the §28bk ship: "still not good" across the
 board (link-1 wgpu still flickers, link-2 software still not snappy,
 rendering wrong, "fundamentally off"). Honest reassessment given to
-the user: (1) heavy Melee battle has a **fundamental ~46 % PPC→WASM
+the user: (1) heavy battle scene has a **fundamental ~46 % PPC→WASM
 emulation ceiling** (§28bh) — not a fixable flag; (2) `?video=wgpu`
 is an experimental path with deep, non-trivial flicker + dark-menu
 defects (no simple fix); (3) `?video=software` is the only
@@ -4806,7 +4805,7 @@ User tested the §28bl clean stable baseline (commit `7197c56`,
 `video=software&presenter=webgpu`, forcejit OFF / fuse-protected /
 guarded — the pre-session last-stable default) in a real warm
 browser and confirmed **"GOOD BASELINE"** with screenshots of live
-in-game battle (Ice Climbers vs Link, full stage, HUD, correct
+in-game battle (two fighters, full stage, HUD, correct
 render) at **84 %, 90 %, 104 % speed**.
 
 This **falsifies §28bh's "battle is PPC-emulation-bound at a
@@ -4912,7 +4911,7 @@ not defaulted; `?video=webgpu` reference + §26 untouched.
 
 User hit a NEW failure on `416fc9e`: status "**Boot stall
 detected: core not advancing. Try reloading.**" — stuck at the
-Kirby-vs-Ness VS/"NOW LOADING" screen, never reached battle
+pre-battle VS/"NOW LOADING" screen, never reached battle
 (HUD: 45 %, JIT on, `jitc 7595/7548`, "discio recorded 7800 new
 compiles"). The user-confirmed-good baseline `7197c56` *did*
 progress to battle, so §28bo/§28bp regressed it.
@@ -4969,7 +4968,7 @@ web survey mapped to this codebase (full detail in memory
   *slower*. The `EmitReadU32MaybeDirect` masked-bounds + direct-load
   path is already the only correct in-browser fastmem — done.
 - **Already implemented** (don't re-chase): tiered int→cached→JIT;
-  software-fastmem; selective JIT admission; idle + Melee hot-loop
+  software-fastmem; selective JIT admission; idle + game hot-loop
   fast-paths; IndexedDB cross-session JIT-cache (§28u);
   warmup/stall-fuse mgmt.
 - **Two untapped levers** (mainline Dolphin's top wins missing here),

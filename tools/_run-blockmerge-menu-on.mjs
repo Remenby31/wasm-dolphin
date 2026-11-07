@@ -2,8 +2,7 @@
 // Exercises more code paths than the warm-battle savestate (boot through
 // menu → CSS → SSS → match), so more JIT compile pressure.
 const tag = process.env.OUT_TAG || "blockmerge-menu-on";
-process.env.ROM = process.env.ROM ||
-  "F:/Emulation/super-smash-bros.-melee-usa-en-ja-rev-2.nkit_202203/Super Smash Bros. Melee (USA) (En,Ja) (Rev 2).nkit.iso";
+if (!process.env.ROM) throw new Error("set ROM to the disc image to run");
 process.env.SAVE_STATE_URL = process.env.SAVE_STATE_URL || "/__menu.sav";
 process.env.SAVE_STATE_AT = process.env.SAVE_STATE_AT || "35";
 process.env.VIDEO = process.env.VIDEO || "software";

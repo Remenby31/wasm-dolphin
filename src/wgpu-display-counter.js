@@ -17,7 +17,24 @@ export function createDisplayCounter({ capacity = 16384 } = {}) {
   let head = 0, read = 0, pending = 0, lastVi = -1, dropped = 0;
   return {
     // One presentation submitted to the canvas, showing VI output `viIndex`.
-    submit(viIndex = -1) { pending += 1; lastVi = viIndex; },
+    // frameTime: submitted from a rAF callback of the BeginFrame at that time
+    // (?presentvsync=1), pushed with it: counted there, not at the next one.
+    // The presenter's rAF can run before or after the counter's in the same
+    // frame (their order is fixed by which loop started first): when the
+    // counter's has run, the last entry is that frame; otherwise the submit
+    // waits, pending, for its beginFrame later in the same frame. (Before,
+    // the presenter running first put its picture on the previous frame's
+    // entry: a false drop each frame, in one run of three.)
+    submit(viIndex = -1, frameTime = null) {
+      if (frameTime != null && head > 0 && t[(head - 1) % capacity] === frameTime) {
+        const slot = (head - 1) % capacity;
+        submits[slot] = Math.min(submits[slot] + 1, 0xFFFF);
+        vi[slot] = viIndex;
+        if (submits[slot] > 1) dropped += 1;
+        return;
+      }
+      pending += 1; lastVi = viIndex;
+    },
     // A BeginFrame (the worker's rAF callback), at `now` on the harness
     // clock. One entry each: submits 0 = nothing new on screen, 1 = one
     // picture shown, n > 1 = shown one, dropped n - 1.

@@ -1,0 +1,1060 @@
+#!/usr/bin/env node
+// Copyright 2026 wasm-dolphin contributors
+// SPDX-License-Identifier: MIT
+//
+// Speed drops over a whole play-through, headless only:
+//
+//   node harness/probes/drop-meter.mjs --iso disc.iso --port N [--runs 6]
+//     [--visits 2] [--candidate ref|dir] [--baseline ref|dir]
+//     [--noise <A/A>/summary.json] [--trend measures/drops/trend.jsonl]
+//     [--scenario harness/probes/drop-scenario.json] [--state scene.sav [--state-delay-ms N]] [--browser chrome|firefox]
+//     [--config product | --query "..."] [--baseline-query "..."] [--sample-ms 50] [--native ref.json]
+//     [--shots] [--display] [--pipeline] [--region-counters] [--audio-trace] [--pc-window FROM-TO] [--integrity-allow a,b] [--max-load L] [--load-wait 300] [--lock-wait 14400 | --no-lock]
+//     [--out dir]
+//   node harness/probes/drop-meter.mjs --analyze <out dir> [--native ref.json]
+//   node harness/probes/drop-meter.mjs --trace drop-trace-….json   (salon's dev HUD)
+//
+// Merge guard: --baseline origin/main (the candidate defaults to this tree)
+// alternates the sides run by run and gives a verdict per visit and per
+// phase of the scenario (each against its own A/A noise): a metric
+// regresses when its median moved the worse way by more than its noise (the
+// A/A of --noise, else the two sides' spread). Exit code 2 on a regression.
+// Nightly: --trend appends the run's medians to a JSONL file and rewrites
+// the table next to it (.md). Output: summary.json (machine) and its `human`
+// lines (also printed).
+//
+// A run boots the disc on a new, empty Chrome profile and plays the
+// scenario: boot, menus, the race's load, the race. Its steps fire at a
+// GUEST time (seconds of emulated time since boot, from the core's ticks),
+// so every run, whatever its speed, presses the same buttons at the same
+// place of the game. --visits 2 plays it again in the same profile (the
+// player's next launch: region cache, JIT cache, pipeline list warm).
+//
+// Recorded, nothing sampled away: every VI output (host time, guest ticks)
+// and every presentation (validationReadTimeline); every --sample-ms the
+// worker's cumulative counters (validationDropSampler: JIT compiles and
+// their synchronous time, region installs, disc reads and the CPU's waits
+// for them, GPU and EFB waits, throttle sleeps and late wake-ups, wgpu
+// pipeline creation, the worker's own stalls) and the page's (main-thread
+// stalls, audio underruns). lib/drops.mjs cuts that into 100 ms windows and
+// gives the drops with their cause, the loads (host vs guest duration), and
+// the summary per run, per visit and per phase of the scenario; over the
+// runs, the spread of every metric (the A/A noise).
+//
+// Integrity (glitch-meter G2, lib/integrity.mjs): the replay's fatal
+// counters over each visit (from the boot or the state load to the end); a
+// visit where one moved is left out of the noise and fails the batch (exit 2,
+// "INTEGRITY ..." in the summary), whatever the speeds say.
+// --pipeline (implies --display): each VI output followed to the screen (the
+// core's swap ring, patch 0214, and the worker's pipeline log), so that
+// --analyze --attribute splits the BeginFrames that showed nothing new by
+// cause (lib/no-present.mjs, no-present.json); without it, by the VI's phase.
+// Raw data is kept (raw-<run>-v<visit>.json.gz): --analyze re-reads it, e.g.
+// with a native reference (research/native-dolphin, guest seconds and game
+// frames of the same scenario) to compare game frames per guest second.
+// A timing measure: calm machine first, then the shared perf lock.
+import { execFileSync } from "node:child_process";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
+import { parseArgs } from "node:util";
+import { gunzipSync, gzipSync } from "node:zlib";
+
+import { defaultDisplay, bootIso, ensureServer, grabFrame, launchBrowser, loadHarnessState, readFrameInfo, readTimeline, REPO_ROOT, workerRequest } from "../lib/browser.mjs";
+import { ANALYSIS_VERSION, ATTRIBUTION_CONTENT_BUSY, ATTRIBUTION_STARVED_SHARE, attributeDips, attributionLines, attributionTable, dropEvents, dropSummary, dropWindowsForAttribution, loadSegments, nativeFps, noiseOf, phaseSummaries, rowsOf, trendLine, trendTable, VERDICT_MIN_RUNS, visitVerdict, windowsOf, worstDrops } from "../lib/drops.mjs";
+import { exportRef } from "../cli.mjs";
+import { calmLock, defaultMaxLoad, loadGaveUp, loadLimit } from "../lib/env.mjs";
+import { claim } from "../lib/ownership.mjs";
+import { acquirePerfLock } from "../lib/perf-lock.mjs";
+import { chromeInfo, isLocalOnly, probeOutDir } from "../lib/probe-out.mjs";
+import { savePng } from "../lib/session.mjs";
+import { median, round } from "../lib/stats.mjs";
+import { machineSnapshot, powerDrained, powerSnapshot, sampleChromeRss, MIN_BATTERY_PERCENT } from "../lib/system.mjs";
+import { mergeTimeline } from "../lib/timeline.mjs";
+import { analyzeNoPresent, noPresentLines, sumNoPresent } from "../lib/no-present.mjs";
+import { num, sideOrder, STATE_ROUTE } from "./race-perf.mjs";
+import { newFramesRate, visualProbeCheck } from "../lib/matrix.mjs";
+import { integrityBrief, integrityOf, parseIntegrityAllow, readIntegrity, treeHasIntegrity } from "../lib/integrity.mjs";
+
+// What this probe runs in the page and the worker (samplers, counters): an
+// A/A's noise holds only for the same version (review of #271: the page's
+// rAF counter changes the environment). Raised with each such change.
+export const PROBE_VERSION = 5; // 3: the power source per run and per summary (an older A/A has none); 4: the state load at the first call (#325), ~2.5 s earlier than after a refused try; 5: the product turns the 0113 headroom counters on and times the worker's entry points (occupancy stats, #386)
+
+// What the site runs (salon packages/core engineParams, profile "fast", with
+// a WebGPU adapter).
+export const PRODUCT_QUERY = "core=upstream&video=wgpu&presenter=webgpu&cpu=dual&speed=1&oc=1&pacing=tick&fastsw=1&wasmjit=1&jitwarmup=700&aot=1&aotcompiler=1&jitoffthread=1";
+
+// Scenario: [{ at: guest seconds since boot, label?, tap|down|up|click|mark,
+// hold?, only? }]. A label starts a phase (until the next label). `end`
+// (guest seconds) ends the run. only: "cold" (the first visit, e.g. the
+// prompt that creates the save file) or "warm" (the next ones).
+export function validateScenario(s) {
+  if (!s || !Array.isArray(s.steps) || !(s.end > 0)) throw new Error("scenario: { steps: [...], end: guest seconds }");
+  let at = 0;
+  s.steps.forEach((x, i) => {
+    const kinds = ["tap", "down", "up", "click", "mark"].filter((k) => k in x);
+    if (kinds.length !== 1) throw new Error(`scenario step ${i}: exactly one of tap/down/up/click/mark`);
+    if (!(x.at >= at)) throw new Error(`scenario step ${i}: at ${x.at} must be a guest second ≥ the previous step's`);
+    if (x.only != null && !["cold", "warm"].includes(x.only)) throw new Error(`scenario step ${i}: only must be "cold" or "warm"`);
+    at = x.at;
+  });
+  if (!(s.end > at)) throw new Error(`scenario: end ${s.end} must come after the last step (${at})`);
+  return s;
+}
+
+// In the page, before the app: main-thread stalls (a 50 ms timer that ran
+// late) and the audio output's underruns, same clock as the worker's rows.
+// The page's own BeginFrames too (requestAnimationFrame on the main thread,
+// counted): when the worker's rAF stops (no BeginFrame for seconds while
+// presents go on), they tell whether the whole compositor paused or only the
+// worker's rAF did.
+function installPageSampler(everyMs) {
+  const rows = [];
+  let due = performance.now();
+  let rafs = 0;
+  const frame = () => { rafs += 1; requestAnimationFrame(frame); };
+  requestAnimationFrame(frame);
+  const tick = () => {
+    const now = performance.now();
+    const a = window.__audio?.causalTelemetry?.();
+    // the audio queued between the game and the speaker, ms: the mixer's
+    // queue (a core with 0186, worklet path), the ring or schedule, the
+    // output; then the mixer's part alone
+    rows.push([performance.timeOrigin + now, Math.max(0, now - due), a ? Number(a.underrunCount ?? 0) : null, rafs, Number.isFinite(a?.latencyMs) ? a.latencyMs : null, Number.isFinite(a?.mixerQueueMs) ? a.mixerQueueMs : null]);
+    due = Math.max(due + everyMs, now);
+    setTimeout(tick, Math.max(0, due - performance.now()));
+  };
+  setTimeout(tick, everyMs);
+  window.__dropPage = { drain: () => rows.splice(0, rows.length) };
+}
+
+const guestSec = async (page) => {
+  const p = await workerRequest(page, "validationReadCoreProgress", {}, 5000);
+  return p?.coreTicks > 0 && p.coreTicksPerSecond > 0 ? { sec: p.coreTicks / p.coreTicksPerSecond, tps: p.coreTicksPerSecond } : null;
+};
+
+export const stepsFor = (scenario, visit) => scenario.steps.filter((x) => x.only == null || x.only === (visit === 1 ? "cold" : "warm"));
+
+async function playVisit(o, server, profileDir, shotDir, visit) {
+  const raw = { markers: [], chunks: [], rows: [], page: [], loads: [], rss: [] };
+  // On the bench (spark-run sets SPARK_LANE_CPUS), a visit that uses the GPU
+  // (headed, or video=wgpu) samples other users' share of it every
+  // GPU_SAMPLE_EVERY drains: the calm gate reads it only before the run.
+  const gpuBench = process.env.SPARK_LANE_CPUS ? await import("../lib/bench-load.mjs") : null;
+  const gpuSampled = Boolean(gpuBench?.gpuGateApplies({ display: defaultDisplay(), queries: [o.query] }));
+  if (gpuSampled) raw.gpu = [];
+  let drains = 0;
+  const context = await launchBrowser({ browser: o.browser, profileDir });
+  try {
+    await context.assertInvisible("after launch");
+    await context.addInitScript(installPageSampler, o.sampleMs);
+    const page = context.pages()[0] ?? (await context.newPage());
+    const t0 = Date.now();
+    raw.launchT = t0;
+    raw.power = powerSnapshot(); // mains or battery, this visit
+    // --display: the worker's rAF records what each BeginFrame put on screen.
+    await bootIso(page, { url: `${server.base}?${o.query}`, iso: o.iso, timeoutMs: 120000, harness: o.display ? { displayed: true, ...(o.pipeline ? { pipeline: true } : {}) } : {} });
+    raw.bootMs = Date.now() - t0;
+    raw.browser = await page.evaluate(() => navigator.userAgent.match(/(?:Headless)?Chrome\/[\d.]+|Firefox\/[\d.]+/)?.[0] ?? navigator.userAgent).catch(() => null);
+    await context.assertInvisible("after boot");
+    // --state: the scene starts at a savestate (e.g. a 2-player race); the
+    // scenario's guest seconds then count from the load.
+    let base = 0;
+    if (o.state) {
+      // --state-delay-ms: the load no earlier than N ms after the browser's
+      // launch (a quick-load ~2 s into a first launch vs ~4.5 s: the region
+      // translation is at a different point); 0 loads as soon as it can.
+      const wait = t0 + o.stateDelayMs - Date.now();
+      if (wait > 0) await page.waitForTimeout(wait);
+      await page.route(STATE_ROUTE, (route) => route.fulfill({ path: o.state, contentType: "application/octet-stream" }));
+      raw.stateLoad = await loadHarnessState(page, `${server.base}/`);
+      // the load's host instant (the rows' and markers' clock)
+      raw.stateLoadT = performance.timeOrigin + performance.now();
+      if (!raw.stateLoad?.loaded) throw new Error(`savestate not loaded: ${JSON.stringify(raw.stateLoad).slice(0, 200)}`);
+      base = (await guestSec(page))?.sec ?? 0;
+      raw.stateBaseSec = base;
+    }
+    // Counters that need turning on (0113 headroom, 0162 cadence), then the sampler.
+    raw.headroom = (await workerRequest(page, "validationReadHeadroomStats", { reset: 0 }, 5000))?.error ?? "on";
+    // patch 0212: the mixer queue's skips and fills, the throttle trim and
+    // the VI phase lock (?vilock=1); read at the start and the end, cheap
+    raw.audioQueueStart = await workerRequest(page, "validationReadAudioQueue", {}, 5000).catch((e) => ({ error: String(e?.message ?? e) }));
+    raw.cadence = await workerRequest(page, "validationReadPresentCadence", { reset: 0 }, 5000).then((r) => r?.error ?? (r?.supported === false ? "unsupported" : "on"));
+    // --region-counters: the region stats counting guest cycles (no timing):
+    // cheap, but not nothing; compare such runs only with each other.
+    if (o.regionCounters) raw.regionCounters = (await workerRequest(page, "validationReadJitRegionStats", { sampleEvery: 0 }, 10000))?.error ?? "on";
+    // glitch-meter G2: the replay's integrity counters over the visit
+    raw.integrityStart = await readIntegrity(page, { expected: o.integrityExpected });
+    raw.integrityAllow = o.integrityAllow;
+    raw.integrityPostload = Boolean(o.state);
+    // The new frames shown since boot (patch 0208), read with the integrity:
+    // their rate over the visit is the smoothness reference.
+    raw.newFramesStart = await readFrameInfo(page).catch(() => null);
+    raw.sampler = await workerRequest(page, "validationDropSampler", { action: "start", everyMs: o.sampleMs }, 5000);
+    // --audio-trace: the AudioWorklet producer's 100 ms trace (ring target
+    // and fill, mixer queue, skips, fills, pulls), drained at the end
+    if (o.audioTrace) raw.audioTraceStart = await workerRequest(page, "validationAudioTrace", { action: "start", everyMs: 100, pulls: Boolean(o.audioPulls) }, 5000).catch((e) => ({ error: String(e?.message ?? e) }));
+    // An older tree (a baseline before the sampler) still gives the
+    // timeline: speeds, presents, drops, without their causes.
+    const sampling = Boolean(raw.sampler?.started);
+    if (!sampling) raw.samplerMissing = raw.sampler?.error ?? "engine without validationDropSampler";
+    raw.audio = await page.evaluate(() => window.__audio?.setMuted?.(false).then(() => "unmuted", (e) => String(e?.message || e)) ?? "no audio").catch((e) => String(e.message || e));
+    let draining = true;
+    const drainOnce = async () => {
+      raw.chunks.push(await readTimeline(page).catch((e) => ({ error: String(e.message || e) })));
+      // The new-frame counter is null until the first tagged present after
+      // the boot (a visit from the boot reads it too early): the visit's
+      // start is then its first reading.
+      if (raw.newFramesStart?.newShown == null) {
+        const f = await readFrameInfo(page).catch(() => null);
+        if (f?.newShown != null) raw.newFramesStart = { ...f, late: true };
+      }
+      const d = sampling ? await workerRequest(page, "validationDropSampler", { action: "drain" }, 10000) : null;
+      if (d?.rows) raw.rows.push(d);
+      const p = await page.evaluate(() => window.__dropPage?.drain() ?? []).catch(() => []);
+      raw.page.push(...p);
+      raw.loads.push([Date.now(), os.loadavg()[0]]);
+      if (gpuSampled && drains++ % GPU_SAMPLE_EVERY === 0) {
+        const g = gpuBench.gpuNow();
+        // [t, other users' SM share (per process, our job's tree and the
+        // bench's Xorg left out), its top process, the GPU's total use (ours included)]
+        raw.gpu.push([Date.now(), g ? g.foreignSm : null, g?.foreign?.[0]?.command ?? null, g ? g.util : null]);
+      }
+      // Resident memory of this profile's Chrome processes (MB): the peak of
+      // a launch (e.g. regions kept as bytes and as modules).
+      const m = sampleChromeRss(profileDir);
+      if (!m.error) raw.rss.push([Date.now(), m.totalMB, m.byType.renderer ?? null]);
+    };
+    const drain = (async () => { while (draining) { await drainOnce(); await page.waitForTimeout(1000); } })();
+    try {
+      // --pc-window FROM-TO: the guest-PC sampler over those guest seconds.
+      const pcSteps = o.pcWindow ? [{ at: o.pcWindow[0], pc: "start" }, { at: o.pcWindow[1], pc: "stop" }] : [];
+      const steps = [...stepsFor(o.scenario, visit), ...pcSteps].sort((a, b) => a.at - b.at);
+      for (const step of [...steps, { at: o.scenario.end, mark: "end" }]) {
+        const deadline = Date.now() + Math.max(60000, step.at * 1000 * 20);
+        for (;;) {
+          const g = await guestSec(page);
+          if (g && g.sec - base >= step.at) break;
+          if (Date.now() > deadline) throw new Error(`guest second ${step.at} not reached (${g ? (g.sec - base).toFixed(1) : "?"})`);
+          await page.waitForTimeout(g && step.at - (g.sec - base) > 1 ? 200 : 15);
+        }
+        const t = performance.timeOrigin + performance.now();
+        // The phase starts at its guest second: the analysis places it on the
+        // VI ring (this host time is the poll's, up to ~20 ms late).
+        if (step.label) raw.markers.push({ t, label: step.label, guest: step.at + base });
+        // patch 0212's queue at each phase start: skips and fills per phase
+        if (step.label) raw.markers.at(-1).audioQueue = await workerRequest(page, "validationReadAudioQueue", {}, 2000).catch(() => null);
+        if ("tap" in step) {
+          await page.keyboard.down(step.tap);
+          await page.waitForTimeout(step.hold ?? 120);
+          await page.keyboard.up(step.tap);
+        } else if ("down" in step) await page.keyboard.down(step.down);
+        else if ("up" in step) await page.keyboard.up(step.up);
+        else if ("click" in step) await page.mouse.click(step.click[0], step.click[1]);
+        else if (step.pc === "start") {
+          raw.pc = { start: await workerRequest(page, "validationPcSampler", { action: "start", periodMs: 0.25 }, 5000) };
+          raw.jitCacheAtWindow = await workerRequest(page, "validationReadJitCacheReadiness", {}, 5000);
+        }
+        else if (step.pc === "stop") {
+          const r = await workerRequest(page, "validationPcSampler", { action: "stop" }, 10000);
+          raw.pc.window = o.pcWindow;
+          raw.pc.samples = r?.n ?? null;
+          raw.pc.error = r?.error ?? null;
+          raw.pc.top = (r?.counts ?? []).sort((a, b) => b[1] - a[1]).slice(0, 40).map(([pc, n]) => [`0x${(pc >>> 0).toString(16)}`, n]);
+        }
+        if (shotDir && step.label) savePng(await grabFrame(page), path.join(shotDir, `${String(raw.markers.length).padStart(2, "0")}-${step.label}.png`));
+      }
+      raw.endT = performance.timeOrigin + performance.now();
+      raw.powerEnd = powerSnapshot(); // unplugged (or plugged in) during the visit: "mixed"
+      raw.endGuest = o.scenario.end + base;
+    } finally {
+      draining = false;
+      await drain;
+    }
+    await drainOnce();
+    raw.tps = (await guestSec(page))?.tps ?? null;
+    raw.integrityEnd = await readIntegrity(page, { expected: o.integrityExpected });
+    raw.newFramesEnd = await readFrameInfo(page).catch(() => null);
+    // The JIT cache and the off-thread compiler at the end (cheap, read only).
+    raw.jitCache = await workerRequest(page, "validationReadJitCacheReadiness", {}, 5000);
+    raw.audioQueueEnd = await workerRequest(page, "validationReadAudioQueue", {}, 5000).catch((e) => ({ error: String(e?.message ?? e) }));
+    if (o.audioTrace) raw.audioTrace = await workerRequest(page, "validationAudioTrace", { action: "stop" }, 10000).catch((e) => ({ error: String(e?.message ?? e) }));
+    // The display filter (?fsr=, ?displayfit=): frames it drew and their GPU
+    // time (timestamp queries, metrics on), canvas and backbuffer sizes.
+    raw.displayFilter = (await workerRequest(page, "validationReadPresentVsync", {}, 5000))?.displayFilter ?? null;
+    if (sampling) {
+      const r = await workerRequest(page, "validationDropSampler", { action: "stop" }, 5000);
+      if (r?.rows) raw.rows.push(r);
+      raw.samplerEnd = { lost: r?.lost, errors: r?.errors, lastError: r?.lastError, lagMaxMs: r?.lagMaxMs, jitTime: raw.sampler.jitTime };
+    }
+    if (o.visits > 1) raw.flushed = await page.evaluate(() => window.__host?.adapter?.flushUserData?.().then(() => true, (e) => String(e?.message || e)) ?? "no adapter").catch((e) => String(e.message || e));
+    return raw;
+  } catch (error) {
+    return { ...raw, error: String(error?.message || error).slice(0, 300) };
+  } finally {
+    await context.close().catch(() => {});
+  }
+}
+
+// The phase bounds at the host time the VI ring reached their guest second
+// (markers with `guest`; a site trace or an older record keeps its own).
+export function markersOnVi(raw, vi) {
+  if (!(raw.tps > 0) || !vi.length) return {};
+  const at = (g) => {
+    const target = g * raw.tps;
+    const v = vi.find((x) => x.ticks >= target);
+    return v ? v.t : null;
+  };
+  const markers = raw.markers.map((m) => (m.guest != null && at(m.guest) != null ? { ...m, t: at(m.guest) } : m));
+  const endT = raw.endGuest != null && at(raw.endGuest) != null ? at(raw.endGuest) : raw.endT;
+  return { markers, endT };
+}
+
+// Why BeginFrames showed nothing new (lib/no-present.mjs), per phase of the
+// scenario (from its marker to the next one, the last to the end): with the
+// pipeline diag (--pipeline) each miss is followed down the pipeline, else
+// only the VI's phase on the BeginFrame grid speaks. The frames themselves
+// are left out (the table only). dips: attributeDips' dip seconds as
+// [t0, t1) spans, for the column restricted to them (null: none).
+export function noPresentByPhase(raw, timeline, rows, dips = null) {
+  const tl = { vi: timeline.vi, displayed: timeline.displayed, swaps: timeline.swaps, pipeline: timeline.pipeline };
+  const out = { swapsWhy: timeline.swapsWhy ?? null, swapsLost: timeline.swapsLost ?? 0, pipelineLost: timeline.pipelineLost ?? 0, phases: {} };
+  const markers = [...(raw.markers ?? [])].filter((m) => Number.isFinite(m.t)).sort((a, b) => a.t - b.t);
+  markers.forEach((m, i) => {
+    const { frames, ...table } = analyzeNoPresent(tl, { from: m.t, to: markers[i + 1]?.t ?? raw.endT ?? Infinity, rows, dips });
+    table.swapsLost = out.swapsLost;
+    table.pipelineLost = out.pipelineLost;
+    let key = m.label ?? `phase-${i}`;
+    while (out.phases[key]) key += "'";
+    out.phases[key] = table;
+  });
+  return out;
+}
+
+// The no-present tables of every usable run (as attributionAcross), per side,
+// visit and phase, summed. A run left out for a pipeline ring loss is counted
+// (runsLostRings, with its losses) in every phase of its side and visit, and
+// makes `pipeline` false there: losses are never silent.
+export function noPresentAcross(analyses) {
+  const groups = new Map();
+  const lostRuns = new Map();
+  for (const { side, visit, analysis: a } of analyses) {
+    const l = a?.diagLost;
+    if (a?.error && l && (l.swaps || l.pipeline)) {
+      const k = `${side}|${visit}`;
+      const x = lostRuns.get(k) ?? { runs: 0, swaps: 0, pipeline: 0 };
+      x.runs += 1; x.swaps += l.swaps ?? 0; x.pipeline += l.pipeline ?? 0;
+      lostRuns.set(k, x);
+    }
+    if (!a?.noPresent || a.error || a.overloaded || a.contaminated || a.powerDrained) continue;
+    for (const [phase, table] of Object.entries(a.noPresent.phases)) {
+      const key = `${side}|${visit}|${phase}`;
+      if (!groups.has(key)) groups.set(key, { side, visit, phase, tables: [], pipeline: true });
+      const g = groups.get(key);
+      g.tables.push(table);
+      g.pipeline &&= table.hasSwaps && table.hasPipeline && !table.swapsLost && !table.pipelineLost;
+    }
+  }
+  return [...groups.values()].map((g) => {
+    const lost = lostRuns.get(`${g.side}|${g.visit}`) ?? { runs: 0, swaps: 0, pipeline: 0 };
+    const sum = sumNoPresent(g.tables);
+    return {
+      side: g.side, visit: g.visit, phase: g.phase, pipeline: g.pipeline && lost.runs === 0, ...sum,
+      swapsLost: sum.swapsLost + lost.swaps, pipelineLost: sum.pipelineLost + lost.pipeline, runsLostRings: lost.runs
+    };
+  });
+}
+
+// One visit's analysis from its raw record (pure but for the reference).
+// patch 0212's counters over the visit: the mixer queue's overflow skips
+// (an audible jump) and underrun fills (deltas), the throttle trim and the
+// VI phase lock (?vilock=1) at the end, and the skips and fills per phase
+// (read at each phase marker). null on a core without them.
+export function audioQueueOfVisit(raw) {
+  const a = raw?.audioQueueStart, b = raw?.audioQueueEnd;
+  if (!b || b.error || b.unavailable) return b?.unavailable || b?.error ? { unavailable: b.unavailable ?? b.error } : null;
+  const delta = (x, y, k) => (Number.isFinite(y?.[k]) && Number.isFinite(x?.[k]) ? y[k] - x[k] : null);
+  const d = (k) => delta(a, b, k);
+  // per phase: from its marker's read to the next labelled marker's (the
+  // last to the end). Unknown stays unknown: a failed read at either end, or
+  // a delta not computable, makes the phase null (never 0, never stretched
+  // over the next phase).
+  const ok = (q) => Boolean(q) && !q.error && !q.unavailable && Number.isFinite(q.overflowSkips) && Number.isFinite(q.underrunFills);
+  const marks = (raw.markers ?? []).filter((m) => m.label);
+  const phases = {};
+  marks.forEach((m, i) => {
+    const from = m.audioQueue, to = i + 1 < marks.length ? marks[i + 1].audioQueue : b;
+    const skips = ok(from) && ok(to) ? delta(from, to, "overflowSkips") : null;
+    const fills = ok(from) && ok(to) ? delta(from, to, "underrunFills") : null;
+    if (m.label in phases && phases[m.label] === null) return;
+    if (skips == null || fills == null) { phases[m.label] = null; return; }
+    const p = phases[m.label] ??= { overflowSkips: 0, underrunFills: 0 };
+    p.overflowSkips += skips;
+    p.underrunFills += fills;
+  });
+  const anyRead = marks.some((m) => ok(m.audioQueue));
+  return { overflowSkips: d("overflowSkips"), underrunFills: d("underrunFills"), trimPpm: b.trimPpm ?? null, phaseLock: b.phaseLock ?? null, ...(anyRead ? { phases } : {}) };
+}
+
+// --state: whether the region translation had finished before the load
+// (the player's case: a load after the optimisation; frame ~47 on a first
+// launch loads in the middle of it). The sampler starts after the load, so
+// the region count is read over its first `windowMs` (from the load's host
+// instant, else from the first row): still growing there says the load came
+// before the optimisation ended (false); flat says it had ended (true).
+// Regions made later in the visit (a new scene) fall outside the window.
+// null without a state, or with fewer than 2 rows with counts in the window.
+export function regionsDoneBeforeLoadOf(raw, rowsWithRegions, { windowMs = 5000 } = {}) {
+  if (!raw?.stateLoad || !rowsWithRegions?.length) return null;
+  const from = Number.isFinite(raw.stateLoadT) ? raw.stateLoadT : rowsWithRegions[0].t;
+  const inWindow = rowsWithRegions.filter((r) => r.t >= from && r.t <= from + windowMs);
+  if (inWindow.length < 2) return null;
+  return inWindow.at(-1).regionsInstalled === inWindow[0].regionsInstalled;
+}
+
+export function analyzeVisit(raw, { native = null } = {}) {
+  // (raw is reassigned below with the markers placed on the VI ring)
+  if (raw.error) return { error: raw.error };
+  const timeline = mergeTimeline(raw.chunks);
+  // A ring that overflowed or a read that failed leaves holes a drop could
+  // hide in: the run is not used.
+  if (!timeline.complete) return { error: `timeline incomplete (lost presents ${timeline.lost.presents}, VI ${timeline.lost.vi}, swaps ${timeline.swapsLost}, pipeline log ${timeline.pipelineLost}, failed reads ${timeline.failedReads})`, diagLost: { swaps: timeline.swapsLost, pipeline: timeline.pipelineLost } };
+  const rows = rowsOf(raw.rows);
+  raw = { ...raw, ...markersOnVi(raw, timeline.vi) };
+  const page = raw.page.map(([t, lagMs, underruns, rafs, audioMs, mixerMs]) => ({ t, lagMs, underruns, rafs: rafs ?? null, audioMs: audioMs ?? null, mixerMs: mixerMs ?? null }));
+  const from = raw.markers[0]?.t ?? null;
+  const windows = windowsOf({ vi: timeline.vi, presents: timeline.presents, rows, page, markers: raw.markers, tps: raw.tps, from, to: raw.endT });
+  const span = (e) => e.t >= (from ?? -Infinity) && e.t <= (raw.endT ?? Infinity);
+  const presents = timeline.presents.filter(span), vi = timeline.vi.filter(span);
+  const events = dropEvents(windows);
+  const loads = loadSegments(windows).map((l) => (native && l.guestStart != null ? { ...l, nativeFps: nativeFps(native, l.guestStart, l.guestStart + l.guestMs / 1000) } : l));
+  const displayed = timeline.displayed?.length ? timeline.displayed.filter(span) : null;
+  const phases = phaseSummaries({ windows, presents, vi, tps: raw.tps, rows, displayed, page });
+  // Where the smoothness went (lib/drops.mjs attributeDips): with the
+  // pictures displayed (--display) only; the cadence learned per second, the
+  // run's VI rate before the first one; the beat proven frame by frame.
+  const viHz = vi.length > 1 ? (vi.length - 1) / ((vi.at(-1).t - vi[0].t) / 1000) : null;
+  let attribution = null;
+  if (displayed && viHz > 0) {
+    const aw = dropWindowsForAttribution(windows, { presents: timeline.presents, vi: timeline.vi, displayed: timeline.displayed, rows });
+    attribution = { ...attributeDips(aw, { cadence: viHz }), beat: { ...aw.beat, proven: aw.beat.proven.length } };
+  }
+  const noPresent = displayed ? noPresentByPhase(raw, timeline, rows, attribution ? attribution.dips.map((d) => [d.t, d.t + d.hostMs]) : null) : null;
+  if (native) for (const p of phases) {
+    const ws = windows.filter((w) => w.label === p.label && w.guestStart != null);
+    p.nativeFps = ws.length ? nativeFps(native, ws[0].guestStart, ws.at(-1).guestStart + 0.1) : null;
+  }
+  const loadAvg = raw.loads.map((x) => x[1]);
+  // When the region count reached its final value: host ms from the launch
+  // and guest seconds (a warm boot that delays its regions shows here).
+  const withRegions = rows.filter((r) => r.regionsInstalled != null);
+  const finalRegions = withRegions.at(-1)?.regionsInstalled ?? null;
+  const allAt = finalRegions == null ? null : withRegions.find((r) => r.regionsInstalled === finalRegions);
+  const regionsDone = allAt ? { regions: finalRegions, hostMsFromLaunch: raw.launchT ? Math.round(allAt.t - raw.launchT) : null, guestSec: allAt.ticks != null && raw.tps ? round(allAt.ticks / raw.tps, 2) : null } : null;
+  const regionsDoneBeforeLoad = regionsDoneBeforeLoadOf(raw, withRegions);
+  const rss = (raw.rss ?? []).map((x) => x[1]);
+  const integrity = integrityOf(raw.integrityStart, raw.integrityEnd, { allow: raw.integrityAllow ?? [], postload: Boolean(raw.integrityPostload) });
+  return {
+    integrity, integrityFailed: Boolean(integrity.fatal?.length),
+    timelineComplete: timeline.complete, sampled: rows.length > 0, power: powerOfVisit(raw), browser: raw.browser ?? null, bootMs: raw.bootMs, pc: raw.pc ?? null,
+    displayFilter: displayFilterCost(raw.displayFilter),
+    load1: { median: round(median(loadAvg), 2), max: round(Math.max(...loadAvg), 2) },
+    regionsDone, rssPeakMB: rss.length ? Math.max(...rss) : null,
+    regionsDoneBeforeLoad,
+    summary: { regionsDoneBeforeLoad, ...dropSummary({ windows, presents, vi, tps: raw.tps, rows: rows.filter(span), displayed, page: page.filter(span) }), newFramesPerSec: newFramesRate(raw.newFramesStart, raw.newFramesEnd), loads: loads.length, loadExcessMs: loads.reduce((a, l) => a + l.excessMs, 0), rssPeakMB: rss.length ? Math.max(...rss) : null, regionsDoneMs: regionsDone?.hostMsFromLaunch ?? null },
+    phases, loads, worst: worstDrops(events), drops: events.length,
+    audioQueue: audioQueueOfVisit(raw),
+    attribution: attribution && { viHz: round(viHz, 3), seconds: attribution.seconds, beat: attribution.beat, dips: attribution.dips, hitches: attribution.hitches },
+    noPresent,
+    // the 100 ms timeline, compact: [ms from start, speed %, VI/s, presents, max present gap, lost ms, top cause]
+    timeline: windows.map((w) => {
+      const top = Object.entries(w.causes).sort((a, b) => (b[1] ?? 0) - (a[1] ?? 0))[0];
+      return [Math.round(w.t0 - windows[0].t0), round(w.speed, 1), w.vis, w.presents, round(w.maxPresentGap, 1), round(w.lostMs, 1), top && top[1] > 1 ? top[0] : null];
+    })
+  };
+}
+
+// Over the runs of one visit number: A/A noise of the run summaries and of
+// each phase's, the loads by phase, the drops that recur.
+export function summarizeVisits(analyses) {
+  const ok = analyses.filter((a) => !a.error);
+  const byLabel = {};
+  for (const a of ok) for (const p of a.phases) (byLabel[p.label] ??= []).push(p);
+  const loadsByLabel = {};
+  for (const a of ok) for (const l of a.loads) (loadsByLabel[l.label] ??= []).push(l);
+  const drops = ok.flatMap((a, run) => a.worst.map((d) => ({ run: run + 1, ...d })));
+  return {
+    runs: ok.length, failed: analyses.filter((a) => a.error).map((a) => a.error),
+    noise: noiseOf(ok.map((a) => a.summary)),
+    phases: Object.fromEntries(Object.entries(byLabel).map(([k, ps]) => [k, noiseOf(ps.map(({ label, ...x }) => x))])),
+    loads: Object.fromEntries(Object.entries(loadsByLabel).map(([k, ls]) => [k, { perRun: round(ls.length / ok.length, 2), ...noiseOf(ls.map((l) => ({ hostMs: l.hostMs, guestMs: l.guestMs, excessMs: l.excessMs, worstSecond: l.worstSecond }))) }])),
+    worst: drops.sort((a, b) => b.lostMs - a.lostMs).slice(0, 15)
+  };
+}
+
+// A side: this tree, a directory served as is, or a git ref exported.
+function resolveSide(name, spec) {
+  if (!spec) return { name, label: "this tree", root: REPO_ROOT, temp: false };
+  if (existsSync(spec) && statSync(spec).isDirectory()) return { name, label: path.resolve(spec), root: path.resolve(spec), temp: false };
+  return { name, label: spec, root: exportRef(spec), temp: true };
+}
+
+// The 5 lines a person reads: per visit, the candidate's headline numbers,
+// and the verdict when there is a baseline.
+export function humanSummary(summary) {
+  const lines = [];
+  for (const f of summary.integrity ?? []) lines.push(`INTEGRITY ${f.side} run ${f.run} visit ${f.visit}: ${f.fatal.join(", ")}`);
+  for (const v of summary.visitSummary) {
+    const n = v.candidate.noise, top = v.candidate.worst[0];
+    lines.push(`${v.visit === 1 ? "cold" : "warm"} (${v.candidate.runs} runs): lost ${n.lostMs?.median ?? "–"} ms, <95 % ${n.pctBelow95?.median ?? "–"} % of the time, worst 1 s ${n.worstSecond?.median ?? "–"} %, hitches >100 ms ${n.hitches100?.median ?? "–"}, new frames ${n.newFramesPerSec?.median ?? "–"}/s, rendered ${n.renderedPerGuestSec?.median ?? "–"}/guest s, load excess ${n.loadExcessMs?.median ?? "–"} ms; worst drop ${top ? `${top.label} ${Math.round(top.lostMs)} ms (${top.cause})` : "none"}`);
+    if (v.verdict) {
+      const bad = v.verdict.regressions.map((r) => `${r.where} ${r.metric} ${r.baseline} → ${r.candidate} (> ${r.threshold})`);
+      lines.push(`   verdict: ${v.verdict.inconclusive ? "NO VERDICT (see noVerdict)" : v.verdict.regression ? `REGRESSION ${bad.join(", ")}` : "no regression beyond the noise"}${v.verdict.improvement ? " (some improvement)" : ""}`);
+    }
+  }
+  for (const [k, c] of Object.entries(summary.displayFilterCost ?? {})) lines.push(`display filter ${k}: GPU ${c.gpuMsMedian} ms/frame (max ${c.gpuMsMax}), ${c.backbuffer?.join("x")} → ${c.canvas?.join("x")}`);
+  if (summary.noVerdict) lines.push(`NO VERDICT: ${summary.noVerdict.join("; ")}`);
+  if (summary.confirmation) lines.push(`confirmation batch: ${summary.confirmation.confirmed ? `REGRESSION REPRODUCED (${summary.confirmation.metrics.join(", ")})` : `not reproduced (${summary.confirmation.metrics.join(", ") || "none"} on the 2nd batch)`}`);
+  return lines;
+}
+
+// The display filter's cost in a visit (pure): null when it was off.
+export function displayFilterCost(f) {
+  if (!f?.active) return null;
+  return {
+    sharpness: f.sharpness ?? null, canvas: f.canvas ?? null, backbuffer: f.backbuffer ?? null,
+    frames: f.frames ?? 0, gpuTimed: f.gpuTimed ?? 0,
+    gpuMsMean: f.gpuTimed ? round(f.gpuMsTotal / f.gpuTimed, 3) : null,
+    gpuMsMax: f.gpuTimed ? round(f.gpuMsMax, 3) : null,
+    encodeMsMean: f.frames ? round(f.encodeMsTotal / f.frames, 3) : null
+  };
+}
+
+// Per side and visit, the median of the runs' mean GPU ms per filtered
+// frame and the largest frame (null when the filter was off everywhere).
+export function displayFilterCostSummary(analyses, visits) {
+  const out = {};
+  for (const side of ["candidate", "baseline"]) for (let v = 1; v <= visits; v += 1) {
+    const costs = analyses.filter((a) => a.side === side && a.visit === v).map((a) => a.analysis?.displayFilter).filter((c) => c?.gpuMsMean != null);
+    if (costs.length) out[`${side}-v${v}`] = { runs: costs.length, gpuMsMedian: round(median(costs.map((c) => c.gpuMsMean)), 3), gpuMsMax: round(Math.max(...costs.map((c) => c.gpuMsMax)), 3), canvas: costs[0].canvas, backbuffer: costs[0].backbuffer };
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+// Why a comparison gives no verdict (exit code 3), or null (pure).
+// A visit's power source: the same at its start and end, else "mixed"; null
+// when unknown (another OS, a desktop).
+export function powerOfVisit(raw) {
+  const a = raw.power?.source ?? null, b = raw.powerEnd?.source ?? a;
+  // on battery at one end only; a failed reading (null) or AC <-> UPS is none
+  return (a === "battery") !== (b === "battery") && a != null && b != null ? "mixed" : a ?? b;
+}
+// On mains but the charge fell during the visit, or ended under
+// MIN_BATTERY_PERCENT (the charger not keeping up, 2026-10-29): left out of
+// verdicts and noise like an overloaded run, logged as POWER.
+export function visitPowerDrained(raw) {
+  return powerDrained(raw.power, raw.powerEnd);
+}
+// The sources of a batch's runs (known ones), sorted.
+export function powerSourcesOf(analyses) {
+  return [...new Set(analyses.filter((a) => !a.analysis?.error && a.analysis?.power).map((a) => a.analysis.power))].sort();
+}
+
+// One run's sides in turn, each behind its gate: the first gate or replay
+// that gives up ends the run (and the batch: the caller stops on it); a
+// later side's calm gate never clears it (review of #305).
+export async function runSides(names, { gate, play }) {
+  for (const name of names) {
+    const g = await gate(name);
+    if (g.gaveUp) return g.gaveUp;
+    const r = await play(name, g.gate);
+    if (r?.gaveUp) return r.gaveUp;
+  }
+  return null;
+}
+
+// Before a run is played again (a visit that failed, one unplugged midway):
+// the same gate as before any run, so it is never replayed on battery or on
+// a loaded machine. { gaveUp } when the gate gave up.
+export async function gateBeforeReplay(lock, { waitSec, log = () => {} }) {
+  const gate = await lock.waitCalmUnlocked({ waitSec, log });
+  return { gate, gaveUp: loadGaveUp(gate) };
+}
+
+export function noVerdictReasons({ analyses, visits, gaveUp = null, verdicts }) {
+  const reasons = [];
+  if (gaveUp) reasons.push(gaveUp);
+  const sampled = new Set(analyses.filter((a) => !a.analysis.error).map((a) => `${a.side}:${a.analysis.sampled}`));
+  const bySide = (side) => [...sampled].filter((x) => x.startsWith(`${side}:`)).map((x) => x.split(":")[1]);
+  if (bySide("baseline").length && (bySide("baseline").join() !== bySide("candidate").join() || bySide("candidate").length > 1)) {
+    reasons.push("the sides were not sampled alike (one without the drop sampler): their costs differ");
+  }
+  // On mains for some runs and on battery for others (unplugged mid-batch),
+  // or within a run: the runs are from two machines, as far as speed goes.
+  const powers = powerSourcesOf(analyses);
+  if (powers.length > 1 || powers.includes("mixed")) reasons.push(`runs on ${powers.join(" and ")}: the power source changed during the batch`);
+  for (let v = 1; v <= visits; v += 1) {
+    const vv = verdicts[v];
+    if (!vv) continue;
+    for (const side of ["baseline", "candidate"]) {
+      const usable = analyses.filter((a) => a.visit === v && a.side === side && !a.analysis.error && !a.analysis.overloaded && !a.analysis.contaminated && !a.analysis.powerDrained && !a.analysis.integrityFailed).length;
+      if (usable < VERDICT_MIN_RUNS) reasons.push(`visit ${v}: ${usable} usable ${side} run(s) (errors, overloaded, GPU-contaminated and power-draining runs left out), ${VERDICT_MIN_RUNS} needed`);
+    }
+    if (vv.inconclusive) reasons.push(`visit ${v}: a metric or a phase has no verdict`);
+  }
+  return reasons.length ? [...new Set(reasons)] : null;
+}
+
+function writeSummary(outDir, meta, analyses, visits, { noise = null, confirm = null } = {}) {
+  const summary = { ...meta, analysisVersion: ANALYSIS_VERSION, visitSummary: [] };
+  const verdicts = {};
+  for (let v = 1; v <= visits; v += 1) {
+    const of = (side) => analyses.filter((a) => a.visit === v && a.side === side).map((a) => a.analysis);
+    const candidate = summarizeVisits(of("candidate"));
+    const entry = { visit: v, candidate };
+    if (analyses.some((a) => a.side === "baseline")) {
+      entry.baseline = summarizeVisits(of("baseline"));
+      const ok = (xs) => xs.filter((a) => !a.error && !a.overloaded && !a.contaminated && !a.powerDrained && !a.integrityFailed);
+      entry.verdict = verdicts[v] = visitVerdict(ok(of("baseline")), ok(of("candidate")), noise?.[v] ?? null, { display: Boolean(meta.display) });
+    }
+    summary.visitSummary.push(entry);
+  }
+  // every batch, an A/A included: what --noise checks
+  summary.powerSources = powerSourcesOf(analyses);
+  // glitch-meter G2: every visit whose replay integrity broke, either side
+  summary.integrity = integrityFailures(analyses);
+  summary.displayFilterCost = displayFilterCostSummary(analyses, visits);
+  if (analyses.some((a) => a.side === "baseline")) {
+    summary.noVerdict = noVerdictReasons({ analyses, visits, gaveUp: meta.gaveUp, verdicts });
+    if (meta.staleNoise) summary.noVerdict = [meta.staleNoise, ...(summary.noVerdict ?? [])];
+    if (confirm) summary.confirmation = confirm;
+  }
+  summary.human = humanSummary(summary);
+  writeFileSync(path.join(outDir, "summary.json"), JSON.stringify(summary, null, 1) + "\n");
+  return summary;
+}
+
+// One file per side, run and visit: a run played again (-retry) replaces
+// its failed first attempt (pure).
+export function runFiles(names, re) {
+  const best = new Map();
+  for (const f of names) {
+    const m = f.match(re);
+    if (!m) continue;
+    const key = `${m[1]}-${m[2]}-${m[3]}`;
+    if (!best.has(key) || m[4]) best.set(key, f);
+  }
+  return [...best.values()].sort();
+}
+
+// The sha256 a tree's core lock names, or null.
+export function coreOf(root) {
+  try {
+    return JSON.parse(readFileSync(path.join(root, "cores", "dolphin", "core.lock.json"), "utf8")).sha256 ?? null;
+  } catch {
+    return null;
+  }
+}
+// The core an A/A summary measured (its candidate side), or null.
+export function noiseCoreOf(file) {
+  const s = JSON.parse(readFileSync(file, "utf8"));
+  return s.cores?.candidate ?? null;
+}
+
+// "visit|phase:metric" of every gating regression of a summary (pure).
+export function regressionKeys(summary) {
+  return summary.visitSummary.flatMap((v) => (v.verdict?.regressions ?? []).map((r) => `${v.visit}|${r.where}:${r.metric}`));
+}
+
+export function exitCodeOf(summary, { compared, failed }) {
+  // a picture known wrong (glitch-meter G2) fails the batch, compared or not
+  if (summary.integrity?.length) return 2;
+  if (!compared) return failed ? 1 : 0;
+  if (summary.noVerdict || summary.confirmation?.noVerdict) return 3;
+  if (summary.confirmation) return summary.confirmation.confirmed ? 2 : 0;
+  if (regressionKeys(summary).length) return 2;
+  return failed ? 1 : 0;
+}
+
+// The visits whose replay integrity broke (fatal counters moved), any side:
+// [{ side, run, visit, fatal }].
+export function integrityFailures(analyses) {
+  return analyses.filter((a) => a.analysis?.integrityFailed).map((a) => ({ side: a.side, run: a.run, visit: a.visit, fatal: a.analysis.integrity.fatal }));
+}
+
+// The A/A noise of a previous summary.json, per visit number.
+// It must come from the same measure: scenario, savestate, query, sampling.
+export function readNoise(file, expect = null) {
+  const s = JSON.parse(readFileSync(file, "utf8"));
+  if (s.probe !== "drop-meter") throw new Error(`--noise ${file}: not a drop-meter summary`);
+  if ((s.analysisVersion ?? 1) !== ANALYSIS_VERSION) throw new Error(`--noise ${file}: analysed with analysis version ${s.analysisVersion ?? 1}, this probe judges with ${ANALYSIS_VERSION}: re-analyse it (drop-meter.mjs --analyze <its dir>) or rerun the A/A`);
+  if (expect) {
+    // unset in a summary from before the option: the default (false, 0)
+    const unset = { display: false, pipeline: false, stateDelayMs: 0 };
+    const differ = ["probeVersion", "scenario", "state", "stateDelayMs", "query", "sampleMs", "display", "pipeline"].filter((k) => (s[k] ?? unset[k] ?? null) !== (expect[k] ?? unset[k] ?? null));
+    const named = { cpuModel: [s.machine?.cpuModel, expect.cpuModel], browser: [s.browser, expect.browser] };
+    // the same machine, and the same browser when both runs say which
+    if (expect.cpuModel && s.machine?.cpuModel && s.machine.cpuModel !== expect.cpuModel) differ.push("cpuModel");
+    if (expect.browser && s.browser && s.browser !== expect.browser) differ.push("browser");
+    // on mains vs on battery: another machine, as far as noise goes; an A/A
+    // whose runs mixed both (or a run that did) is no noise for either.
+    // AC and UPS are both mains.
+    const kind = (x) => (x == null ? null : x === "battery" || x === "mixed" ? x : "mains");
+    const kinds = [...new Set((s.powerSources ?? []).map(kind))];
+    const power = kinds.length === 1 ? kinds[0] : kinds.length ? kinds.join("+") : kind(s.machine?.power?.source ?? null);
+    if (kinds.length > 1 || kinds.includes("mixed")) differ.push("power");
+    else if (expect.powerSource && power && power !== kind(expect.powerSource)) differ.push("power");
+    named.power = [power, kind(expect.powerSource ?? null)];
+    if (differ.length) throw new Error(`--noise ${file}: another measure (${differ.map((k) => `${k} ${named[k]?.[0] ?? s[k] ?? unset[k]} vs ${named[k]?.[1] ?? expect[k] ?? unset[k]}`).join("; ")})`);
+  }
+  return Object.fromEntries(s.visitSummary.map((v) => [v.visit, { run: (v.candidate ?? v).noise, phases: (v.candidate ?? v).phases ?? {} }]));
+}
+
+// RENDER-STARVED: the GPU thread busy over the run (≥ the content margin,
+// ATTRIBUTION_CONTENT_BUSY: a run mean, lower than its seconds' peaks) and
+// the core rendering (XFB copies) under half the presents' rate per guest
+// second (the VI rate; ATTRIBUTION_STARVED_SHARE, 0.475, so a 30 fps scene at
+// 60 Hz, or 25 at 50 Hz, is not flagged), as attributeSecond judges a second. Speed and pictures per VI cannot see it. A CPU-decoded
+// movie (few copies, quiet GPU thread) is not flagged.
+export function renderStarvedBrief(s) {
+  const r = s?.renderedPerGuestSec, p = s?.presentsPerGuestSec, g = s?.gpuBusyShare;
+  return Number.isFinite(r) && p > 0 && g >= ATTRIBUTION_CONTENT_BUSY && r < ATTRIBUTION_STARVED_SHARE * p ? ` RENDER-STARVED (${r} rendered for ${p} presented per guest s, GPU thread ${Math.round(g * 100)} % busy)` : "";
+}
+const audioQueueBrief = (q) => (!q || q.unavailable ? "" : `, audio skips ${q.overflowSkips ?? "–"} fills ${q.underrunFills ?? "–"}${q.phaseLock ? `, vilock ${q.phaseLock.on ? "on" : "off"}${q.phaseLock.why ? ` (${q.phaseLock.why})` : ""} ppm ${q.phaseLock.ppm ?? "–"} locks ${q.phaseLock.locks ?? "–"} lost ${q.phaseLock.lost ?? "–"}` : ""}`);
+
+function logRun(log, tag, a) {
+  if (a.error) return log(`${tag}: ${a.error}`);
+  const s = a.summary;
+  log(`${tag}: lost ${s.lostMs} ms, <95 % ${s.pctBelow95} %, <90 % ${s.pctBelow90} %, worst 1 s ${s.worstSecond} %, hitches >50 ${s.hitches50} >100 ${s.hitches100}, p99 ${s.presentP99} ms, new frames ${s.newFramesPerSec ?? "–"}/s, rendered ${s.renderedPerGuestSec ?? "–"}/guest s${renderStarvedBrief(s)}, ${s.loads} loads +${s.loadExcessMs} ms, underruns ${s.underruns}, audio ${s.audioLatencyMs ?? "–"} ms (mixer ${s.audioMixerMs ?? "–"}), load1 ${a.load1.median}${a.regionsDoneBeforeLoad === false ? ", LOADED BEFORE REGIONS DONE" : a.regionsDoneBeforeLoad ? ", regions done before load" : ""}${audioQueueBrief(a.audioQueue)}${a.overloaded ? " OVERLOADED" : ""}${a.contaminated ? ` CONTAMINATED (GPU: ${a.gpuForeignBy} at ${a.gpuForeignMax} %)` : ""}${a.powerDrained ? ` POWER (charge fell or under ${MIN_BATTERY_PERCENT} %)` : ""}${integrityBrief(a.integrity)}`);
+  for (const d of a.worst.slice(0, 3)) log(`   drop ${d.label} @${round(d.guestStart, 1)} gs: ${d.durationMs} ms, lost ${d.lostMs} ms, min ${d.minSpeed} %, cause ${d.cause}, ${d.jitBlocks} new blocks (${d.defers} deferred), causes ${JSON.stringify(d.causesMs)}`);
+}
+
+// A visit is judged against its gate's limit (on the bench, computed per gate
+// by lib/bench-load.mjs and kept in raw.gate), else --max-load.
+export const visitLimit = (raw, maxLoad) => raw?.gate?.limit ?? loadLimit(maxLoad);
+// GPU samples every this many 1 s drains (nvidia-smi pmon takes ~1 s)
+export const GPU_SAMPLE_EVERY = 5;
+// CONTAMINATED: another user's process on the GPU during the visit
+// (lib/bench-load.mjs gpuContaminated); left out like an overloaded run.
+// { contaminated, gpuForeignMax, gpuForeignBy } from raw.gpu; false without samples.
+export async function visitGpu(raw) {
+  const s = Array.isArray(raw?.gpu) ? raw.gpu : [];
+  if (!s.length) return { contaminated: false, gpuForeignMax: null, gpuForeignBy: null, gpuTotalMax: null };
+  const { gpuContaminated } = await import("../lib/bench-load.mjs");
+  const top = s.reduce((m, x) => (Number.isFinite(x[1]) && x[1] > (m?.[1] ?? -1) ? x : m), null);
+  const totals = s.map((x) => x[3]).filter(Number.isFinite);
+  return { contaminated: gpuContaminated(s.map((x) => x[1])), gpuForeignMax: top?.[1] ?? null, gpuForeignBy: top?.[2] ?? null, gpuTotalMax: totals.length ? Math.max(...totals) : null };
+}
+
+async function analyzeDir(dir, native, log, noiseFile = null, { attribute = false } = {}) {
+  const meta = JSON.parse(readFileSync(path.join(dir, "summary.json"), "utf8"));
+  const noise = noiseFile ? readNoise(noiseFile, { ...meta, cpuModel: meta.machine?.cpuModel, powerSource: meta.machine?.power?.source }) : null;
+  const analyses = [];
+  for (const f of runFiles(readdirSync(dir), /^raw-(candidate|baseline)-(\d+)-v(\d+)(-retry)?\.json\.gz$/)) {
+    const [, side, run, visit] = f.match(/raw-(\w+)-(\d+)-v(\d+)/);
+    const raw = JSON.parse(gunzipSync(readFileSync(path.join(dir, f))));
+    const analysis = analyzeVisit(raw, { native });
+    analysis.overloaded = analysis.load1?.median > visitLimit(raw, meta.maxLoad);
+    Object.assign(analysis, await visitGpu(raw));
+    analysis.powerDrained = visitPowerDrained(raw);
+    analyses.push({ side, run: Number(run), visit: Number(visit), analysis });
+    writeFileSync(path.join(dir, f.replace(/^raw-/, "").replace(/\.json\.gz$/, ".json")), JSON.stringify(analysis) + "\n");
+    logRun(log, f, analysis);
+  }
+  const summary = writeSummary(dir, { ...meta, reanalyzedAt: new Date().toISOString(), native: Boolean(native) }, analyses, meta.visits ?? 1, { noise });
+  for (const l of summary.human) log(l);
+  if (attribute) {
+    if (!analyses.some((a) => a.analysis?.attribution)) throw new Error(`--attribute: no run of ${dir} has the pictures displayed (record it with --display)`);
+    const out = attributionAcross(analyses);
+    writeFileSync(path.join(dir, "attribution.json"), JSON.stringify(out, null, 1) + "\n");
+    for (const g of out) {
+      log(`attribution ${g.side} visit ${g.visit} (${g.runs} runs, ${g.seconds} s, ${g.dips} dip seconds, ${g.hitches} hitches; beat ${g.beat}):`);
+      for (const l of attributionLines({ table: g.table })) log(`  ${l}`);
+    }
+    const np = noPresentAcross(analyses);
+    writeFileSync(path.join(dir, "no-present.json"), JSON.stringify(np, null, 1) + "\n");
+    for (const g of np) {
+      log(`no-present ${g.side} visit ${g.visit} ${g.phase} (${g.pipeline ? "pipeline recorded" : g.runsLostRings || g.swapsLost || g.pipelineLost ? `pipeline ring losses: ${g.runsLostRings} run(s) left out` : "VI phase only: record with --pipeline"}):`);
+      for (const l of noPresentLines(g)) log(`  ${l}`);
+    }
+  }
+}
+
+// The dips and hitches of every usable run (no error, not overloaded nor on
+// a draining battery), per side and visit, in one table each.
+export function attributionAcross(analyses) {
+  const groups = new Map();
+  for (const { side, visit, analysis: a } of analyses) {
+    if (!a?.attribution || a.error || a.overloaded || a.contaminated || a.powerDrained) continue;
+    const key = `${side}|${visit}`;
+    if (!groups.has(key)) groups.set(key, { side, visit, runs: 0, seconds: 0, dips: [], hitches: [], beats: [] });
+    const g = groups.get(key);
+    g.runs += 1;
+    g.beats.push(a.attribution.beat?.reason ?? `proven ${a.attribution.beat?.proven} (boundary ${a.attribution.beat?.boundaryMs} ms, share ${a.attribution.beat?.share}, refresh ${round(a.attribution.beat?.refreshHz, 3)} Hz, VI ${round(a.attribution.beat?.viHz, 3)} Hz)`);
+    g.seconds += a.attribution.seconds;
+    g.dips.push(...a.attribution.dips);
+    g.hitches.push(...a.attribution.hitches);
+  }
+  return [...groups.values()].map((g) => ({ side: g.side, visit: g.visit, runs: g.runs, seconds: g.seconds, dips: g.dips.length, hitches: g.hitches.length, beat: g.beats.join("; "), table: attributionTable(g.dips, g.hitches) }));
+}
+
+// The guard's false-positive rate, from real runs of ONE tree: random
+// disjoint draws of VERDICT_MIN_RUNS runs as "baseline" and as "candidate"
+// (the same run id for both visits), judged by the guard's own verdict.
+// Sources: "dir" (every side) or "dir:side". Confirmed: a second,
+// independent draw must regress on the same metric (--confirm).
+export function falsePositiveRate(pool, { visits, noise = null, draws = 2000, n = VERDICT_MIN_RUNS, random = Math.random }) {
+  const ids = [...new Set(pool.map((a) => a.id))];
+  if (ids.length < 2 * n) throw new Error(`${ids.length} runs: ${2 * n} needed for a ${n} against ${n} draw`);
+  const pick = () => {
+    const order = ids.map((id) => [random(), id]).sort((a, b) => a[0] - b[0]).map((x) => x[1]);
+    return [order.slice(0, n), order.slice(n, 2 * n)];
+  };
+  const keysOf = ([b, c]) => {
+    const out = [];
+    for (let v = 1; v <= visits; v += 1) {
+      const of = (set) => pool.filter((a) => a.visit === v && set.includes(a.id)).map((a) => a.analysis);
+      const vv = visitVerdict(of(b), of(c), noise?.[v] ?? null);
+      out.push(...vv.regressions.map((r) => `${v}|${r.where}:${r.metric}`));
+    }
+    return out;
+  };
+  let single = 0, confirmed = 0;
+  const byKey = {};
+  for (let d = 0; d < draws; d += 1) {
+    const k1 = keysOf(pick());
+    if (!k1.length) continue;
+    single += 1;
+    for (const k of k1) byKey[k] = (byKey[k] ?? 0) + 1;
+    const k2 = keysOf(pick());
+    if (k1.some((k) => k2.includes(k))) confirmed += 1;
+  }
+  return { draws, runs: ids.length, singleBatch: round(single / draws, 4), confirmed: round(confirmed / draws, 4),
+    byMetric: Object.entries(byKey).sort((a, b) => b[1] - a[1]).slice(0, 12).map(([k, c]) => [k, round(c / draws, 4)]) };
+}
+
+async function falsePositives(sources, { noiseFile, draws, log }) {
+  const pool = [];
+  let meta = null;
+  for (const src of sources) {
+    const [dir, side] = src.split(":");
+    meta ??= JSON.parse(readFileSync(path.join(dir, "summary.json"), "utf8"));
+    for (const f of runFiles(readdirSync(dir), /^(candidate|baseline)-(\d+)-v(\d+)(-retry)?\.json$/)) {
+      const [, s, run, visit] = f.match(/^(\w+)-(\d+)-v(\d+)/);
+      if (side && s !== side) continue;
+      const analysis = JSON.parse(readFileSync(path.join(dir, f), "utf8"));
+      if (analysis.error || analysis.overloaded || analysis.contaminated || analysis.powerDrained || analysis.integrityFailed || !analysis.phases?.[0] || analysis.summary?.dropLostMs === undefined) continue;
+      pool.push({ id: `${dir}:${s}:${run}`, visit: Number(visit), analysis });
+    }
+  }
+  // The noise must come from other runs than the ones drawn: an sd taken
+  // from the pool itself makes the rate look lower than it is.
+  const noiseDir = noiseFile ? path.resolve(path.dirname(noiseFile)) : null;
+  if (noiseDir && sources.some((src) => path.resolve(src.split(":")[0]) === noiseDir)) throw new Error(`--noise ${noiseFile}: from a directory of the pool; take it from another A/A`);
+  const noise = noiseFile ? readNoise(noiseFile, { ...meta, cpuModel: meta.machine?.cpuModel, powerSource: meta.machine?.power?.source }) : null;
+  const r = falsePositiveRate(pool, { visits: meta.visits ?? 2, noise, draws });
+  log(`false positives over ${r.draws} A-against-A draws of ${VERDICT_MIN_RUNS} runs (${r.runs} runs of one tree): one batch ${(100 * r.singleBatch).toFixed(1)} %, confirmed by a second batch ${(100 * r.confirmed).toFixed(1)} %`);
+  for (const [k, f] of r.byMetric) log(`   ${k}: ${(100 * f).toFixed(1)} %`);
+  return r;
+}
+
+async function main() {
+  const { values } = parseArgs({
+    options: {
+      iso: { type: "string" }, scenario: { type: "string", default: path.join(REPO_ROOT, "harness", "probes", "drop-scenario.json") },
+      runs: { type: "string", default: "6" }, visits: { type: "string", default: "2" },
+      candidate: { type: "string" }, baseline: { type: "string" }, noise: { type: "string" }, trend: { type: "string" }, "no-confirm": { type: "boolean", default: false }, display: { type: "boolean", default: false }, pipeline: { type: "boolean", default: false }, "noise-stale-ok": { type: "boolean", default: false },
+      "false-positives": { type: "string", multiple: true }, draws: { type: "string", default: "2000" },
+      config: { type: "string", default: "product" }, query: { type: "string" }, "baseline-query": { type: "string" }, "sample-ms": { type: "string", default: "50" },
+      native: { type: "string" }, analyze: { type: "string" }, attribute: { type: "boolean", default: false }, trace: { type: "string" }, state: { type: "string" }, "state-delay-ms": { type: "string", default: "0" }, browser: { type: "string", default: "chrome" }, shots: { type: "boolean", default: false },
+      "region-counters": { type: "boolean", default: false }, "audio-trace": { type: "boolean", default: false }, "audio-pulls": { type: "boolean", default: false }, "pc-window": { type: "string" }, "integrity-allow": { type: "string" },
+      "max-load": { type: "string" }, "load-wait": { type: "string", default: "300" }, "lock-wait": { type: "string", default: "14400" }, "calm-wait": { type: "string" }, "no-lock": { type: "boolean", default: false },
+      port: { type: "string", default: process.env.HARNESS_PORT }, out: { type: "string" }
+    }
+  });
+  const log = (m) => console.log(`[drops] ${m}`);
+  const native = values.native ? JSON.parse(readFileSync(values.native, "utf8")) : null;
+  if (values.attribute && !values.analyze) throw new Error("--attribute works on recorded runs: drop-meter.mjs --analyze <dir> --attribute (record them with --display)");
+  if (values.analyze) return analyzeDir(path.resolve(values.analyze), native, log, values.noise ?? null, { attribute: values.attribute });
+  if (values["false-positives"]) return falsePositives(values["false-positives"], { noiseFile: values.noise ?? null, draws: num(values, "draws", { min: 10, int: true }), log });
+  // A trace the site's drop HUD recorded (salon, ?engine.drophud=1): a
+  // player's real session through the same analysis.
+  if (values.trace) {
+    const raw = JSON.parse(readFileSync(path.resolve(values.trace), "utf8"));
+    if (raw.format !== "salon-drop-trace-v1") throw new Error(`${values.trace}: not a salon drop trace (format ${raw.format})`);
+    const analysis = analyzeVisit(raw, { native });
+    const out = path.resolve(values.trace).replace(/\.json$/, "") + ".analysis.json";
+    writeFileSync(out, JSON.stringify(analysis) + "\n");
+    logRun(log, path.basename(values.trace), analysis);
+    log(`-> ${out}`);
+    return;
+  }
+  if (!values.iso) throw new Error("usage: drop-meter.mjs --iso disc.iso --port N [--runs 6] [--visits 2] [--candidate ref|dir] [--baseline ref|dir] [--noise aa/summary.json] [--trend file.jsonl] | --analyze dir");
+  // the browser is checked before the disc (a CI run refuses the local-only
+  // disc, and a wrong --browser must say so first)
+  if (!["chrome", "firefox"].includes(values.browser)) throw new Error(`--browser ${values.browser}: chrome or firefox`);
+  const iso = path.resolve(values.iso);
+  if (isLocalOnly(iso) && process.env.CI) throw new Error("this disc is local-only and must never run in CI");
+  const scenario = validateScenario(JSON.parse(readFileSync(values.scenario, "utf8")));
+  const query = new URLSearchParams(values.query ?? (values.config === "product" ? PRODUCT_QUERY : values.config));
+  query.set("metrics", "1");
+  // --baseline-query: the baseline side boots with its own query (the same
+  // tree with and without a switch, as race-perf's); --noise is then an A/A
+  // of the baseline's query.
+  const baselineQuery = values["baseline-query"] ? new URLSearchParams(values["baseline-query"]) : null;
+  baselineQuery?.set("metrics", "1");
+  if (baselineQuery && !values.baseline) throw new Error("--baseline-query needs --baseline");
+  // Every drop the meter counts is a frame it saw: no decoded XFB, no meter.
+  const visual = visualProbeCheck([query.toString(), baselineQuery?.toString()], { "drop-meter": true });
+  if (visual) throw new Error(visual);
+  const o = {
+    iso, scenario, query: query.toString(), baselineQuery: baselineQuery?.toString() ?? null, runs: num(values, "runs", { min: 1, int: true }), visits: num(values, "visits", { min: 1, int: true }),
+    sampleMs: num(values, "sample-ms", { min: 10 }), port: num(values, "port", { min: 1, int: true }),
+    state: values.state ? path.resolve(values.state) : null, stateDelayMs: num(values, "state-delay-ms", { min: 0, int: true }),
+    // --browser firefox: headless Firefox (lib/browser.mjs launchFirefox)
+    browser: values.browser,
+    regionCounters: values["region-counters"], audioTrace: values["audio-trace"] || values["audio-pulls"], audioPulls: values["audio-pulls"], display: values.display || values.pipeline, pipeline: values.pipeline, pcWindow: values["pc-window"] ? values["pc-window"].split("-").map(Number) : null,
+    maxLoad: values["max-load"] ? num(values, "max-load", { min: 0.1 }) : defaultMaxLoad(), loadWait: num(values, "load-wait", { min: 0 }),
+    integrityAllow: parseIntegrityAllow(values["integrity-allow"])
+  };
+  // The noise's measure checked before the lock; its power source once the
+  // lock is held (the lock waits for mains: on battery now is no mismatch).
+  const machine = machineSnapshot();
+  const noiseExpect = { probeVersion: PROBE_VERSION, scenario: path.basename(values.scenario), state: o.state ? path.basename(o.state) : null, stateDelayMs: o.state ? o.stateDelayMs : 0, display: o.display, pipeline: o.pipeline, query: o.baselineQuery ?? o.query, sampleMs: o.sampleMs, cpuModel: machine.cpuModel };
+  const noise = values.noise ? readNoise(values.noise, noiseExpect) : null;
+  const noiseCore = values.noise ? noiseCoreOf(values.noise) : null;
+  const sides = { candidate: resolveSide("candidate", values.candidate) };
+  if (values.baseline) sides.baseline = resolveSide("baseline", values.baseline);
+  // The core each side serves (its lock): an A/A's noise holds for that core only.
+  const cores = Object.fromEntries(Object.entries(sides).map(([k, side]) => [k, coreOf(side.root)]));
+  const measuredBase = cores.baseline ?? cores.candidate;
+  let staleNoise = null;
+  // Unknown on either side is stale too (null === null proves nothing).
+  if (noise && (!noiseCore || !measuredBase || noiseCore !== measuredBase)) {
+    staleNoise = `--noise ${values.noise}: its A/A ran on core ${noiseCore ? noiseCore.slice(0, 12) : "unknown (an A/A before the core was recorded)"}, the base measured here is ${measuredBase ? measuredBase.slice(0, 12) : "unknown"}`;
+    // Before any run: a comparison that cannot give a verdict is not played.
+    if (!values["noise-stale-ok"] && sides.baseline) {
+      log(`${staleNoise}: no verdict possible, nothing measured (exit 3); --noise-stale-ok for a study`);
+      for (const side of Object.values(sides)) if (side.temp) rmSync(side.root, { recursive: true, force: true });
+      process.exitCode = 3;
+      return;
+    }
+  }
+  const lockWait = num(values, "lock-wait", { min: 0 });
+  const lock = await calmLock({
+    maxLoad: o.maxLoad, calmWait: values["calm-wait"] == null ? lockWait : num(values, "calm-wait", { min: 0 }), log: (m) => log(`before the lock: ${m}`),
+    acquire: values["no-lock"] ? null : () => acquirePerfLock({ requireMains: true, name: `harness drop-meter (${REPO_ROOT})`, waitSec: lockWait, log })
+  });
+  const outDir = probeOutDir("drop-meter", iso, values.out);
+  const meta = {
+    probe: "drop-meter", at: new Date().toISOString(), locked: !values["no-lock"], browserName: o.browser, machine: machineSnapshot(), chrome: chromeInfo(), iso: path.basename(iso),
+    probeVersion: PROBE_VERSION, scenario: path.basename(values.scenario), state: o.state ? path.basename(o.state) : null, stateDelayMs: o.state ? o.stateDelayMs : 0, display: o.display, pipeline: o.pipeline, query: o.query, ...(o.baselineQuery ? { baselineQuery: o.baselineQuery } : {}), sampleMs: o.sampleMs, runs: o.runs, visits: o.visits, maxLoad: o.maxLoad,
+    sides: Object.fromEntries(Object.entries(sides).map(([k, s]) => [k, s.label])), cores, noise: values.noise ?? null, noiseCore,
+    definition: "windows of 100 ms from the scenario's first step; speed = guest/host time (VI ticks); drops: windows < 90 % or a present gap > 50 ms, merged; loads: disc reads ≥ 2.5 MiB/s (0.5 s average), merged within 1 s, excess = host − guest ms; time under 95/90 %: 1 s sliding windows; verdict: median moved the worse way beyond the A/A noise"
+  };
+  const analyses = [];
+  let gaveUp = null;
+  // One batch: o.runs runs, the sides alternating; run numbers go on.
+  const runBatch = async (batch) => {
+    const first = analyses.length ? Math.max(...analyses.map((a) => a.run)) + 1 : 1;
+    for (let run = first; run < first + o.runs && !gaveUp; run += 1) {
+      gaveUp = await runSides(sideOrder(run).filter((n) => sides[n]), {
+        gate: async () => {
+          const gate = await lock.waitCalmUnlocked({ waitSec: o.loadWait, log });
+          return { gate, gaveUp: loadGaveUp(gate) };
+        },
+        play: async (name, gate) => {
+        let sideGaveUp = null;
+        const server = await ensureServer({ port: o.port, root: sides[name].root });
+        meta.served ??= {};
+        meta.served[name] ??= server.identity;
+        try {
+          // A run with an invalid visit (a crash, a timeline with holes) is
+          // played once more on a new profile, so one bad run does not cost
+          // the comparison its verdict; the failed one is kept as evidence.
+          for (let attempt = 1; attempt <= 2; attempt += 1) {
+            const profileDir = mkdtempSync(path.join(os.tmpdir(), "gc-harness-drops-"));
+            const releaseProfile = claim(profileDir, REPO_ROOT, "chrome-profile");
+            const tries = [];
+            try {
+              for (let visit = 1; visit <= o.visits; visit += 1) {
+                const tag = attempt === 1 ? `${name}-${run}-v${visit}` : `${name}-${run}-v${visit}-retry`;
+                const raw = await playVisit({ ...(name === "baseline" && o.baselineQuery ? { ...o, query: o.baselineQuery } : o), integrityExpected: treeHasIntegrity(sides[name].root) }, server, profileDir, values.shots ? path.join(outDir, `shots-${tag}`) : null, visit);
+                raw.gate = gate;
+                raw.batch = batch;
+                writeFileSync(path.join(outDir, `raw-${tag}.json.gz`), gzipSync(JSON.stringify(raw)));
+                const analysis = analyzeVisit(raw, { native });
+                analysis.overloaded = analysis.load1?.median > visitLimit(raw, o.maxLoad);
+                Object.assign(analysis, await visitGpu(raw));
+                analysis.powerDrained = visitPowerDrained(raw);
+                analysis.batch = batch;
+                // unplugged (or plugged in) during the visit: not a measure, the run is played again
+                if (analysis.power === "mixed" && !analysis.error) analysis.error = "the power source changed during the visit (mains/battery)";
+                tries.push({ side: name, run, visit, batch, analysis });
+                writeFileSync(path.join(outDir, `${tag}.json`), JSON.stringify(analysis) + "\n");
+                logRun(log, `${name} run ${run} visit ${visit}${attempt > 1 ? " (retry)" : ""}`, analysis);
+                if (analysis.error) break;
+              }
+            } finally {
+              releaseProfile();
+              rmSync(profileDir, { recursive: true, force: true });
+            }
+            if (tries.every((x) => !x.analysis.error) || attempt === 2) { analyses.push(...tries); break; }
+            log(`${name} run ${run}: ${tries.find((x) => x.analysis.error).analysis.error}; played again`);
+            // through the gate first: unplugged, the lock waits for mains (and the load)
+            const again = await gateBeforeReplay(lock, { waitSec: o.loadWait, log });
+            if (again.gaveUp) { sideGaveUp = again.gaveUp; analyses.push(...tries); break; }
+          }
+        } finally {
+          await server.stop();
+        }
+        return { gaveUp: sideGaveUp };
+        }
+      });
+      if (gaveUp) log(gaveUp);
+    }
+  };
+  let confirm = null;
+  try {
+    // the noise's power source, now that the lock (on mains) is held
+    if (values.noise) readNoise(values.noise, { ...noiseExpect, powerSource: machineSnapshot().power?.source });
+    await runBatch(1);
+    meta.browser = analyses.find((a) => a.analysis.browser)?.analysis.browser ?? null;
+    // A regression fails the guard only if a second batch, judged on its
+    // own, regresses on the same metric (review of #261: ~24 tests a run).
+    if (sides.baseline && !gaveUp && !values["no-confirm"]) {
+      const first = writeSummary(outDir, { ...meta, gaveUp }, analyses, o.visits, { noise });
+      const found = regressionKeys(first);
+      if (found.length && !first.noVerdict) {
+        log(`regression on the first batch (${found.join(", ")}): a second batch to confirm`);
+        await runBatch(2);
+        const second = writeSummary(outDir, { ...meta, gaveUp }, analyses.filter((a) => a.batch === 2), o.visits, { noise });
+        const again = regressionKeys(second);
+        confirm = { first: found, second: again, metrics: found.filter((k) => again.includes(k)), confirmed: found.some((k) => again.includes(k)), noVerdict: second.noVerdict };
+      }
+    }
+  } finally {
+    lock.release();
+    for (const s of Object.values(sides)) if (s.temp) rmSync(s.root, { recursive: true, force: true });
+  }
+  const summary = writeSummary(outDir, { ...meta, gaveUp, staleNoise: values["noise-stale-ok"] ? null : staleNoise, staleNoiseAccepted: values["noise-stale-ok"] ? staleNoise : undefined }, confirm ? analyses.filter((a) => a.batch === 1) : analyses, o.visits, { noise, confirm });
+  if (values.trend) {
+    const commit = meta.served?.candidate?.commit ?? execFileSync("git", ["-C", REPO_ROOT, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    const file = path.resolve(values.trend);
+    mkdirSync(path.dirname(file), { recursive: true });
+    appendFileSync(file, JSON.stringify({ ...trendLine({ at: meta.at, commit, visitSummary: summary.visitSummary.map((v) => ({ visit: v.visit, ...v.candidate })) }), out: outDir }) + "\n");
+    const lines = readFileSync(file, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    writeFileSync(file.replace(/\.jsonl$/, "") + ".md", `# Drop meter, nightly on main\n\n${trendTable(lines)}`);
+  }
+  for (const l of summary.human) log(l);
+  log(`-> ${outDir}`);
+  // 0 no regression, 2 regression (reproduced when --confirm), 3 no verdict
+  // (gave up, too few usable runs, a metric or phase without one, sides
+  // sampled differently, a confirmation without one), 1 a run failed and
+  // nothing else could be said.
+  process.exitCode = exitCodeOf(summary, { compared: Boolean(sides.baseline), failed: analyses.some((a) => a.analysis.error) });
+}
+
+if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) await main();

@@ -23,21 +23,70 @@ export async function browserInfo(page) {
   });
 }
 
+// A probe's --max-load when none is given: a quarter of the cores (at least
+// 2), or none on the bench, where the gate computes its own (bench-load.mjs)
+// and an explicit --max-load only caps it.
+export function defaultMaxLoad(env = process.env) {
+  return env.SPARK_LANE_CPUS ? null : Math.max(2, os.cpus().length / 4);
+}
+
 export function loadLimit(maxLoad) {
   return Number.isFinite(maxLoad) && maxLoad > 0 ? maxLoad : os.cpus().length;
 }
 
-// Wait (bounded) for the 1-minute load average to drop under the limit.
-export async function waitForLoad({ maxLoad, waitSec = 60, pollSec = 5, log = () => {} }) {
-  const limit = loadLimit(maxLoad);
-  const end = Date.now() + waitSec * 1000;
-  let load = os.loadavg()[0];
-  while (load > limit && Date.now() < end) {
-    log(`load ${load.toFixed(1)} > ${limit}, waiting`);
-    await new Promise((r) => setTimeout(r, pollSec * 1000));
-    load = os.loadavg()[0];
+// The gate's reading: { load, limit, ok }. Off the bench, the 1-minute load
+// average against --max-load. On the DGX Spark bench (spark-race.sh exports
+// SPARK_LANE_CPUS), the lane's own cores free of other people's threads and
+// the machine under fixed bounds (lib/bench-load.mjs: a reference background
+// plus 5 per granted lane, an explicit --max-load only capping it): two lanes
+// at once made a fixed --max-load wrong.
+export function gateReader({ maxLoad, load = null, env = process.env } = {}) {
+  if (!load && env.SPARK_LANE_CPUS) {
+    // an explicit --max-load caps the computed limit (defaultMaxLoad: null on the bench)
+    return async () => (await import("./bench-load.mjs")).benchRead({ cap: maxLoad });
   }
-  return { load: Math.round(load * 100) / 100, limit, ok: load <= limit };
+  const limit = loadLimit(maxLoad);
+  const read = load ?? (() => os.loadavg()[0]);
+  return async () => {
+    const now = read();
+    return { load: Math.round(now * 100) / 100, limit, ok: now <= limit };
+  };
+}
+
+const why = (g) => `${g.over?.length ? g.over.join(", ") : `load ${g.load} > ${g.limit}`}${g.laneBusy?.length ? `, lane ${g.lane} cores busy (${g.laneBusy.map((b) => `${b.comm} ${b.pct} % on ${b.cpu}`).join(", ")})` : ""}`;
+
+// Wait (bounded) for the gate to open: the load under the limit (and, on the
+// bench, the lane's cores free).
+// Once the gate has seen another user's process on the GPU, it opens only on
+// a calm stretch: GPU_CALM_READS readings in a row, calmPollSec apart. A job
+// that works in bursts (a vLLM, 2026-11-04: 10 readings at 50-86 %, then one
+// dip under 20 %) let a run start on a single dip and measure at 96 %.
+export const GPU_CALM_READS = 3;
+export const GPU_CALM_POLL_SEC = 10;
+const gpuOver = (g) => Array.isArray(g?.over) && g.over.some((s) => String(s).startsWith("GPU:"));
+export async function waitForLoad({ maxLoad, waitSec = 60, pollSec = 5, calmPollSec = GPU_CALM_POLL_SEC, log = () => {}, read = gateReader({ maxLoad }) }) {
+  const end = Date.now() + waitSec * 1000;
+  const sleep = (s) => new Promise((r) => setTimeout(r, s * 1000));
+  let g = await read();
+  let gpuSeen = gpuOver(g);
+  let streak = g.ok ? 1 : 0;
+  while (Date.now() < end) {
+    if (g.ok && (!gpuSeen || streak >= GPU_CALM_READS)) break;
+    if (g.ok) {
+      // calm after foreign GPU use: confirm the stretch
+      log(`GPU calm ${streak}/${GPU_CALM_READS}, confirming`);
+      await sleep(calmPollSec);
+    } else {
+      log(`${why(g)}, waiting`);
+      await sleep(pollSec);
+    }
+    g = await read();
+    gpuSeen ||= gpuOver(g);
+    streak = g.ok ? streak + 1 : 0;
+  }
+  // the stretch not reached within waitSec: still closed
+  if (g.ok && gpuSeen && streak < GPU_CALM_READS) return { ...g, ok: false, over: [...(g.over ?? []), `GPU calm for ${streak} of ${GPU_CALM_READS} readings only`] };
+  return g;
 }
 
 // Waits for a calm machine first, then takes the perf lock (`acquire`):
@@ -57,15 +106,24 @@ export async function calmThenLock({ maxLoad, calmWait, acquire, log = () => {},
 // `waitSec`), then the lock is taken again in its turn (`acquire`). Returns
 // the lock now held (null: never calm, given up, no lock held), the gate,
 // and whether the lock was let go meanwhile (the run is then played again).
-export async function calmUnderLock({ lock, maxLoad, waitSec, acquire, log = () => {}, load = () => os.loadavg()[0], wait = waitForLoad }) {
-  const limit = loadLimit(maxLoad);
-  const now = load();
-  const gate = { load: Math.round(now * 100) / 100, limit, ok: true };
+export async function calmUnderLock({ lock, maxLoad, waitSec, acquire, log = () => {}, load = null, wait = waitForLoad }) {
+  // A measure's lock (requireMains) on battery now: given back, and taken
+  // again in turn once on mains (acquire waits for it); the run is played
+  // again (relocked), never measured on battery.
+  if (lock?.powerChanged?.()) {
+    log("on battery: perf lock released until mains power");
+    lock();
+    // taken again on mains (acquire waits for it), then the load gate as usual
+    const again = await calmUnderLock({ lock: await acquire(), maxLoad, waitSec, acquire, log, load, wait });
+    return { ...again, relocked: true };
+  }
+  const read = gateReader({ maxLoad, load });
+  const gate = await read();
   // Calm. No lock held (a gate gave up before): taken again in its turn.
-  if (now <= limit) return lock ? { lock, gate, relocked: false } : { lock: await acquire(), gate, relocked: true };
-  log(`load ${now.toFixed(1)} > ${limit}: ${lock ? "perf lock released while waiting for calm" : "waiting for calm before taking the perf lock again"}`);
+  if (gate.ok) return lock ? { lock, gate, relocked: false } : { lock: await acquire(), gate, relocked: true };
+  log(`${why(gate)}: ${lock ? "perf lock released while waiting for calm" : "waiting for calm before taking the perf lock again"}`);
   lock?.();
-  const calm = await wait({ maxLoad, waitSec, pollSec: 30, log });
+  const calm = await wait({ maxLoad, waitSec, pollSec: 30, log, read });
   if (!calm.ok) return { lock: null, gate: calm, relocked: false };
   return { lock: await acquire(), gate: calm, relocked: true };
 }
@@ -99,7 +157,7 @@ export async function calmLock({ maxLoad, calmWait, acquire, log = () => {}, wai
 
 // Under the lock, a load gate that did not open (still loaded after
 // --load-wait): the remaining runs are given up, the lock goes back.
-export const loadGaveUp = (gate) => (gate && gate.ok === false ? `load ${gate.load} > ${gate.limit} after --load-wait: remaining runs given up, lock released` : null);
+export const loadGaveUp = (gate) => (gate && gate.ok === false ? `${why(gate)} after --load-wait: remaining runs given up, lock released` : null);
 
 // A run is overloaded when the median 1-minute load during it exceeds the limit.
 export function isOverloaded(cpuSamples, maxLoad) {

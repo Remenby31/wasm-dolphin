@@ -4,7 +4,7 @@ Status: approved architecture; implementation not yet promoted.
 
 This plan targets the remaining hardware-WGPU smoothness problem without
 changing emulator or renderer defaults until repeated fixed-scene evidence
-passes. The current fixed Kirby-versus-Link campaign reached `99.716%` game
+passes. The current fixed reference-battle campaign reached `99.716%` game
 speed once, but adjacent repeats reached `81.894%` and `82.277%`. Stable
 realtime has not been demonstrated.
 
@@ -20,8 +20,6 @@ realtime has not been demonstrated.
 - An upload-only nested worker was previously slower. A full renderer worker is
   justified to isolate unavoidable browser/Dawn stalls from disc, audio, input,
   and control work; it is not assumed to improve throughput.
-- Current retained evidence is indexed in
-  [melee-wgpu-realtime-followup-2026-07-14.json](perf-results/melee-wgpu-realtime-followup-2026-07-14.json).
 
 ## Target topology
 

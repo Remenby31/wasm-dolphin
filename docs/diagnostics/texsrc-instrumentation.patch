@@ -34,7 +34,7 @@ index bbcd1140b4..2508121074 100644
        CheckTempSize(total_texture_size);
        dst_buffer = m_temp;
 +      // wasm-dolphin DIAGNOSTIC (vendor/ is gitignored; not part of the patch
-+      // series). Mario Kart Wii's large world textures upload as correctly
++      // series). A Wii racing game's large world textures upload as correctly
 +      // sized but entirely zero, and never get filled by a copy or a blit. If
 +      // the source span is empty the data pointer is null, and decoding from
 +      // wasm address 0 reads the zero page rather than faulting -- which
@@ -107,8 +107,8 @@ index bbcd1140b4..2508121074 100644
    uniforms.clamp_bottom = (static_cast<float>(bottom_coord) + .5f) * rcp_efb_height;
    uniforms.pixel_height = g_ActiveConfig.bCopyEFBScaled ? rcp_efb_height : 1.0f / EFB_HEIGHT;
    uniforms.padding = 0;
-+  // DIAG (wasm-dolphin): the EFB->XFB copy SOURCE rect, normalised. Mario Kart
-+  // Wii presents an XFB entry of the right size and format whose content is a
++  // DIAG (wasm-dolphin): the EFB->XFB copy SOURCE rect, normalised. A Wii racing
++  // game presents an XFB entry of the right size and format whose content is a
 +  // magnified patch of ground, while the EFB itself holds the correct scene --
 +  // which is what sampling a small source rect and stretching it looks like.
 +  if (dst_format == EFBCopyFormat::XFB)
@@ -198,7 +198,7 @@ index bbcd1140b4..2508121074 100644
        CheckTempSize(total_texture_size);
        dst_buffer = m_temp;
 +      // wasm-dolphin DIAGNOSTIC (vendor/ is gitignored; not part of the patch
-+      // series). Mario Kart Wii's large world textures upload as correctly
++      // series). A Wii racing game's large world textures upload as correctly
 +      // sized but entirely zero, and never get filled by a copy or a blit. If
 +      // the source span is empty the data pointer is null, and decoding from
 +      // wasm address 0 reads the zero page rather than faulting -- which
@@ -271,8 +271,8 @@ index bbcd1140b4..2508121074 100644
    uniforms.clamp_bottom = (static_cast<float>(bottom_coord) + .5f) * rcp_efb_height;
    uniforms.pixel_height = g_ActiveConfig.bCopyEFBScaled ? rcp_efb_height : 1.0f / EFB_HEIGHT;
    uniforms.padding = 0;
-+  // DIAG (wasm-dolphin): the EFB->XFB copy SOURCE rect, normalised. Mario Kart
-+  // Wii presents an XFB entry of the right size and format whose content is a
++  // DIAG (wasm-dolphin): the EFB->XFB copy SOURCE rect, normalised. A Wii racing
++  // game presents an XFB entry of the right size and format whose content is a
 +  // magnified patch of ground, while the EFB itself holds the correct scene --
 +  // which is what sampling a small source rect and stretching it looks like.
 +  if (dst_format == EFBCopyFormat::XFB)

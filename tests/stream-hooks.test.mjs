@@ -124,3 +124,65 @@ test("a rejected write closes the frame and stops the capture", async () => {
   capture.offerBytes(new Uint8Array(64), 4, 4, 2);
   assert.equal(capture.stats.frames, 1);
 });
+
+// Internal resolution N (patch 0168) makes the canvas 640N x 480N: the stream
+// keeps 640x480, scaled in the capture before the VideoFrame exists, and
+// follows a switch to another scale.
+test("a canvas larger than the stream is scaled down to 640x480 (4:3) before the frame; a native one goes as is", () => {
+  const written = [];
+  const writer = { desiredSize: 1, write: async (f) => written.push(f), close: async () => {}, closed: new Promise(() => {}) };
+  const draws = [];
+  const created = [];
+  const createCanvas = (width, height) => {
+    const c = { width, height, getContext: () => ({ drawImage: (src, x, y, w, h) => draws.push([src.width, src.height, w, h]) }) };
+    created.push(c);
+    return c;
+  };
+  const capture = new StreamCapture({ now: () => 10, VideoFrameImpl: FakeFrame, createCanvas });
+  capture.attach({ getWriter: () => writer });
+  const native = { width: 640, height: 480 };
+  capture.offerCanvas(native, 1);
+  assert.equal(written[0].source, native);
+  for (const n of [4, 2, 2]) capture.offerCanvas({ width: 640 * n, height: 480 * n }, 2);
+  assert.deepEqual(written.slice(1).map((f) => [f.source.width, f.source.height]), [[640, 480], [640, 480], [640, 480]]);
+  assert.deepEqual(draws, [[2560, 1920, 640, 480], [1280, 960, 640, 480], [1280, 960, 640, 480]]);
+  assert.equal(created.length, 1, "one scaler canvas, reused across scales");
+  assert.deepEqual([capture.stats.width, capture.stats.height], [640, 480]);
+});
+
+// 16:9 (patch 0178): the stream keeps 480 lines, its width follows the
+// picture (854x480), never wider than 854; a 16:9 canvas already at 480
+// lines goes as is.
+test("a 16:9 canvas is brought down to 854x480, 4:3 still to 640x480", () => {
+  const written = [];
+  const writer = { desiredSize: 1, write: async (f) => written.push(f), close: async () => {}, closed: new Promise(() => {}) };
+  const createCanvas = (width, height) => ({ width, height, getContext: () => ({ drawImage: () => {} }) });
+  const capture = new StreamCapture({ now: () => 10, VideoFrameImpl: FakeFrame, createCanvas });
+  capture.attach({ getWriter: () => writer });
+  for (const c of [{ width: 2560, height: 1440 }, { width: 2100, height: 1180 }, { width: 1920, height: 1440 }, { width: 3000, height: 480 }]) capture.offerCanvas(c, 1);
+  const native = { width: 854, height: 480 };
+  capture.offerCanvas(native, 2);
+  assert.deepEqual(written.slice(0, 4).map((f) => [f.source.width, f.source.height]), [[854, 480], [854, 480], [640, 480], [854, 136]]);
+  assert.equal(written[4].source, native);
+});
+
+// Follow-up of 0168, point 5: one capture at 4x ended at 320x240. The size
+// really sent is counted over the whole capture, per source and size.
+test("the capture counts every size it sent (min/max, per source:WxH) and the widest canvas offered", () => {
+  const writer = { desiredSize: 1, write: async () => {}, close: async () => {}, closed: new Promise(() => {}) };
+  const createCanvas = (width, height) => ({ width, height, getContext: () => ({ drawImage: () => {} }) });
+  let t = 0;
+  const capture = new StreamCapture({ now: () => (t += 1), VideoFrameImpl: FakeFrame, createCanvas });
+  capture.attach({ getWriter: () => writer });
+  capture.offerCanvas({ width: 2560, height: 1920 }, 5);
+  capture.offerCanvas({ width: 320, height: 240 }, 6);
+  capture.offerBytes(new Uint8Array(640 * 480 * 4), 640, 480, 7);
+  capture.offerCanvas({ width: 2560, height: 1920 }, 8);
+  const s = capture.stats;
+  assert.deepEqual([s.minWidth, s.maxWidth, s.minHeight, s.maxHeight, s.inputMaxWidth], [320, 640, 240, 480, 2560]);
+  assert.deepEqual(Object.fromEntries(Object.entries(s.sizes).map(([k, v]) => [k, [v.frames, v.lastCoreFrame]])),
+    { "canvas:640x480": [2, 8], "canvas:320x240": [1, 6], "bytes:640x480": [1, 7] });
+  for (let i = 1; i <= 10; i += 1) capture.offerCanvas({ width: 10 * i, height: 10 }, 9);
+  assert.equal(Object.keys(capture.stats.sizes).length, 9, "8 sizes, then 'other'");
+  assert.equal(capture.stats.sizes.other.frames, 5);
+});

@@ -1,8 +1,8 @@
 # Current status
 
 wasm-dolphin is a research prototype built around upstream Dolphin compiled to
-WebAssembly with Emscripten. The only best-supported target today is **Super
-Smash Bros. Melee**.
+WebAssembly with Emscripten. The only best-supported target today is one
+fighting game, used as the reference workload (a fixed battle save).
 
 The recommended configuration is:
 
@@ -24,7 +24,7 @@ software rasterization is `fastsw=0`.
 
 The true WebGPU hardware renderer is selected with `video=wgpu`. It remains
 experimental and is not the recommended path. On the current validation
-machine it applies the direct-loaded Kirby-versus-Link save and produces a
+machine it applies the direct-loaded reference-battle save and produces a
 changing canvas plus nonzero XFB/backbuffer readbacks; battle-image identity is
 headed/operator validation. A generation-qualified capture now proves a
 bounded post-load command prefix:
@@ -38,7 +38,7 @@ and broader GameCube compatibility are not the current focus.
 
 | Area | Current status | Confidence |
 | --- | --- | --- |
-| Melee boot/gameplay | Playable on software-hybrid path | High, if locally validated |
+| Reference game boot/gameplay | Playable on software-hybrid path | High, if locally validated |
 | Core/game speed | Near 100% on modern desktop Chrome | Needs machine-specific metrics |
 | Unique visual FPS | Software-raster limited | Known limitation |
 | Audio | Worker-fed/tuned, but validate per run | Medium |
@@ -46,8 +46,5 @@ and broader GameCube compatibility are not the current focus.
 | General compatibility | Unverified | Low |
 
 Record machine-specific evidence in
-[the hardware WebGPU audit](performance-audit-2026-07-13.md),
-[the latest Melee evidence package](perf-results/melee-performance-evidence-2026-07-10.md)
-and [software-raster phase result](perf-results/melee-software-raster-phases-2026-07-10.md)
-and [final optimization evidence](perf-results/melee-final-optimization-evidence-2026-07-10.md)
+[the hardware WebGPU audit](performance-audit-2026-07-13.md)
 rather than treating these status statements as universal benchmark results.

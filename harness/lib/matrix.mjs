@@ -30,8 +30,26 @@ export const FRAME_FIELDS = Object.freeze({
   p95: "presentationP95IntervalMs",
   max: "presentationMaxIntervalMs",
   pc: "ppcPc",
-  audioUnderruns: "causalTelemetry.audio.underrunCount"
+  audioUnderruns: "causalTelemetry.audio.underrunCount",
+  // Patch 0208: new XFBs on the canvas, per second (the worker's 500 ms
+  // window) and since boot; null without frame tags (an older core).
+  newFps: "newFramesPerSec",
+  // new XFBs the core produced per second (0208; null with video=null: the
+  // tag rides on the WebGPU present only)
+  newProduced: "newFramesProducedPerSec",
+  newShown: "newFramesShown"
 });
+
+// New frames shown per second between two readFrameInfo readings: the
+// smoothness reference (a duplicate VI swap is not a new picture, unlike a
+// present; visualChangeFps stays the diagnostic). null when either reading
+// has no frame tags or a boot came between them.
+export function newFramesRate(start, end) {
+  const n = end?.newShown - start?.newShown;
+  const secs = (end?.t - start?.t) / 1000;
+  if (start?.newShown == null || end?.newShown == null || !(n >= 0) || !(secs > 0)) return null;
+  return Math.round((n / secs) * 10) / 10;
+}
 
 export const SUMMARY_FIELDS = Object.freeze([
   "speed", "speedP5", "speedMin", "vis", "pres", "frameP50", "frameP95", "frameP99", "frameMax",
@@ -47,6 +65,19 @@ export const SCENE_NATIVE_FRAMES_PER_VI = Object.freeze({
   "heavy-intro-13s.sav": { framesPerVi: 1.0, measured: "measures/headroom/20261023/heavy-headroom-wgpu-aot-vs-off: wgpu, xfbCopiesPerVi 1.00 at 60-62 % (coupled: per VI, not per second)" }
 });
 export const VI_PER_SECOND = 60;
+
+// ?xfbdecode=0 under video=null (#299): the core no longer decodes the XFB,
+// so nothing visual exists to read (game fps 0, no input-to-image latency,
+// no unique frames, no displayed frames). A visual probe refuses it.
+export function xfbDecodeOff(query) {
+  const q = new URLSearchParams(PRESETS[query] ?? query ?? "");
+  return q.get("video") === "null" && q.get("xfbdecode") === "0";
+}
+export function visualProbeCheck(queries, uses) {
+  const off = queries.filter(Boolean).filter(xfbDecodeOff);
+  const used = Object.entries(uses).filter(([, on]) => on).map(([name]) => name);
+  return off.length && used.length ? `${used.join(", ")} read the decoded XFB, which video=null&xfbdecode=0 turns off (${off[0]})` : null;
+}
 
 // Measurement protocol pinned per KPI scene (judge, 2026-10-23). The heavy
 // intro is a short phase: from this state, ~9 guest seconds of the heavy

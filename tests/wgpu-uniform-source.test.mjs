@@ -11,7 +11,14 @@ import { readVendorFileSync, sourceContractTest } from "./helpers/source-contrac
 const root = resolve(import.meta.dirname, "..");
 const nativeRoot = join(root, "vendor/dolphin/Source/Core");
 const nativeFile = "VideoBackends/WebGPU/WebGPUGfx.cpp";
-const gfx = readVendorFileSync(join(nativeRoot, nativeFile)).replace(/\r\n/g, "\n");
+// 0207's integrity counters (abort sites, draws skipped for want of a
+// pipeline) are not this test's subject: taken out, so the extracted
+// functions compile against the harness and the earlier patch's hunks apply.
+const without0207 = (text) => text
+  .replace(/AbortRecordedPass\(GfxAbortSite::\w+\)/g, "AbortRecordedPass()")
+  .replace(/\n\s+if \(m_cur_pipeline_id == 0\)\n\s+s_draw_skipped_no_pipeline\.fetch_add\(1, std::memory_order_relaxed\);/g, "")
+  .replace(/\n\s+s_draw_skipped_no_pipeline\.fetch_add\(1, std::memory_order_relaxed\);/g, "");
+const gfx = without0207(readVendorFileSync(join(nativeRoot, nativeFile)).replace(/\r\n/g, "\n"));
 const patch = readFileSync(join(root,
   "patches/dolphin-wasm/snapshot/0065-webgpu-select-uniforms-by-pipeline-usage.patch"), "utf8");
 const compiler = process.platform === "win32"
@@ -40,6 +47,13 @@ function functionBody(text, signature) {
 function previousSource(current) {
   // Reconstruct the real pre-fix functions from the checked-in patch. The
   // negative control uses those functions, not an imitation of their policy.
+  // 0203 (later) rewrote the skipped-draw returns this patch's hunks carry as
+  // context: put them back as they were first.
+  current = current.replaceAll(
+    "    // 0203: only this draw is skipped. Its bytes stay in the pending\n" +
+    "    // geometry range, read by no draw (as with the range off); aborting the\n" +
+    "    // pass here dropped every draw already recorded in it.\n    return;",
+    "    DiscardOrAbortPendingGeometryRange();\n    return;");
   const section = patch.split("diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.h")[0];
   for (const hunk of section.split(/^@@[^\n]*\n/m).slice(1)) {
     const lines = hunk.split("\n");
@@ -171,7 +185,7 @@ int main() {
     WebGPUGfx::kUboRingSize, kUsageUniform, BufferResourceRole::UboRing);
   const auto selected = [&] { return renderer.m_cmd_stream.bound.back()[0]; };
 
-  // Actual Sunshine trigger: ImGui uploads, emits zero draws, then GX resumes.
+  // Actual trigger seen in a platformer: ImGui uploads, emits zero draws, then GX resumes.
   renderer.SetPipeline(&utility);
   renderer.UploadUtilityUniforms(ui.data(), sizeof(ui));
   renderer.SetPipeline(&gx);

@@ -1,4 +1,10 @@
+import { defaultWgpuBindGroupCache, requestedWgpuBindGroupCache } from "./wgpu-bind-group-cache.js";
 import { aotCompilerRequested, jitOffThreadRequested } from "./aot-compiler-worker.js";
+import { aotAssemblerRequested } from "./aot-assembler-worker.js";
+import { aotSamplePeriodRequested } from "./aot-hot-sampler.js";
+import { wasmEngine } from "./wasm-engine.js";
+import { anisotropyToCore, clampInternalResolution, internalResolutionCeiling, requestedEnhancements } from "./wgpu-enhancements.js";
+import { displayFilterFits, normalizeDisplayFilter, requestedDisplayFilter } from "./wgpu-display-filter.js";
 import { parseCustomRtc } from "./custom-rtc.js";
 import { DolphinCoreAdapter, dolphinBundleAvailable } from "./dolphin-adapter.js";
 import { buttonMaskFromPressed, isPadPort } from "./input.js";
@@ -8,9 +14,9 @@ import {
   DEFAULT_UPSTREAM_CORE_URL,
   requestedLegacyOneWayAck,
   requestedSoftwareTevHotCaseMode,
-  requestedXfbFastPaths,
-  requestedUpstreamCoreBuild
+  requestedXfbFastPaths
 } from "./upstream-worker-protocol.js";
+import { requestedUpstreamCoreBuild } from "./default-core.js";
 import {
   requestedWgpuAtomicPassReplay,
   requestedWgpuDeepReplayDiagnostics,
@@ -28,9 +34,14 @@ import {
   requestedWgpuStateCache,
   requestedWgpuGeometryPack,
   requestedWgpuGeometryRange,
+  wgpuGeometryCacheModeFor,
   requestedWgpuMappedStageTimingStride,
   requestedWgpuMappedStagingSlotCount,
+  defaultWgpuMappedStagingSlotCount,
+  requestedWgpuMappedStagingSlotMib,
+  defaultWgpuMappedStagingSlotMib,
   requestedWgpuUploadArenaMiB,
+  defaultWgpuUploadTransport,
   requestedWgpuUploadTransport,
   requestedWgpuMappedStageFast,
   requestedWgpuMappedDrainCoalescing,
@@ -38,7 +49,8 @@ import {
   requestedWgpuUboMetrics,
   requestedWgpuVpDiag,
   requestedWgpuUniformFast,
-  requestedWgpuUboPack
+  requestedWgpuUboPack,
+  defaultWgpuUboPack
 } from "./wgpu-replay-diagnostics.js";
 import { instantiateDemoCore } from "./wasm/demo-core.js";
 import { createCausalTelemetry, deepMerge } from "./causal-telemetry.js";
@@ -59,6 +71,8 @@ import { requestedInputPhotonMarkerConfig } from "./input-visual-marker.js";
 import { requestedWgpuVisualCadence } from "./wgpu-visual-cadence.js";
 import { requestedWgpuPipelinePrewarm } from "./wgpu-pipeline-prewarm.js";
 import { requestedWgpuSparseUbo } from "./wgpu-sparse-ubo-copy-forward.js";
+import { captureSessionAfterDeviceLoss, requestedWgpuSessionRecover } from "./wgpu-session-recovery.js";
+import { wgpuAdapterProblem } from "./wgpu-adapter-check.js";
 
 const DEMO_WIDTH = 320;
 const DEMO_HEIGHT = 240;
@@ -70,11 +84,22 @@ const SAFE_JIT_WARMUP_FRAMES = 5000;
 const DEFAULT_JIT_WARMUP_FRAMES = 60;
 
 export class EmulatorHost {
-  constructor({ canvas, onFrame = () => {}, onStatus = () => {}, onMode = () => {} }) {
+  constructor({ canvas, onFrame = () => {}, onStatus = () => {}, onMode = () => {}, onGpuDeviceLost = () => {}, onGpuRecovering = () => {} }) {
     this.canvas = canvas;
     this.onFrame = onFrame;
     this.onStatus = onStatus;
     this.onMode = onMode;
+    // { internalResolution, fallback, reason, detail, cause }: the WebGPU
+    // renderer stopped (the picture would freeze): cause "device-lost"
+    // (fallback 1 when it was above 1x: the next boot of this host and every
+    // setEnhancements stay at 1x) or "renderer-error" (fallback null, restart
+    // at the same scale). With ?wgpurecover=1 it comes once the core is
+    // paused and saved, with { paused, pauseChanged, state, stateGameId,
+    // stateError }, after onGpuRecovering({ internalResolution, fallback,
+    // reason }) at the start of the save (docs/wgpu-session-fallback.md).
+    this.onGpuDeviceLost = onGpuDeviceLost;
+    this.onGpuRecovering = onGpuRecovering;
+    this.wgpuSessionRecover = requestedWgpuSessionRecover(window.location.search);
 
     this.demo = null;
     this.coreKind = requestedCoreKind();
@@ -96,6 +121,7 @@ export class EmulatorHost {
     this.gpuSpinMicros = requestedGpuSpinMicros();
     this.cpuOverclock = requestedCpuOverclock();
     this.emulationSpeed = requestedEmulationSpeed();
+    this.audioBufferMs = requestedAudioBufferMs();
     this.presentationScale = requestedPresentationScale();
     this.presentationQueueSize = requestedPresentationQueueSize();
     this.presenterBackend = requestedPresenterBackend();
@@ -107,17 +133,51 @@ export class EmulatorHost {
     this.softwareTevHotCaseMode = requestedSoftwareTevHotCaseMode(window.location.search);
     this.xfbFastPaths = requestedXfbFastPaths(window.location.search);
     this.correctTimeDrift = requestedCorrectTimeDrift();
+    this.pacing = requestedPacing();
     this.coreLog = requestedCoreLog();
     this.memcardSlotB = new URLSearchParams(window.location.search).get("memcardb") === "1";
+    // ?ir=1-4 and ?aniso=1|2|4|8|16 (patch 0168, WebGPU path); setEnhancements
+    // changes them while a game runs.
+    this.enhancements = requestedEnhancements(window.location.search);
+    // ?fsr=off|light|strong, ?displayfit=1 (WebGPU path with presentvsync):
+    // the canvas at the display's pixels, scaled and sharpened at the
+    // present; setDisplayFilter changes it while a game runs.
+    this.displayFilter = requestedDisplayFilter(window.location.search);
+    this.displayBoxObserver = null;
+    this.displayBoxObserved = null;
+    if (displayFilterFits(this.displayFilter)) this.watchDisplayBox();
+    // 1 once a device was lost above 1x (internalResolutionCeiling()).
+    this.scaleLostCeiling = 4;
+    this.scaleCeilingPromise = null;
+    // The worker's own adapter's ceiling, once its presenter took it.
+    this.workerScaleCeiling = null;
     // CPU reads of the EFB (peeks), off by default as in Dolphin (EFBAccessEnable).
     this.efbAccess = new URLSearchParams(window.location.search).get("efbaccess") === "1";
+    // Bench: ?xfbdecode=0 skips the XFB's YUV->RGBA decode on the CPU thread,
+    // honoured by the core under video=null only (WebGPU never decodes).
+    this.xfbNoDecode = new URLSearchParams(window.location.search).get("xfbdecode") === "0";
     // Harness: FIFO logs (.dff) may boot. Off for the app (FifoPlayer trusts the log).
     this.fifoLog = new URLSearchParams(window.location.search).get("fifolog") === "1";
     // EFB copies written to guest RAM too (Dolphin's EFBToTextureEnable=False).
     this.efbCopyRam = new URLSearchParams(window.location.search).get("efbcopyram") === "1";
+    // EFB copies to RAM not deferred (Dolphin's DeferEFBCopies=False).
+    this.efbNoDefer = new URLSearchParams(window.location.search).get("efbdefer") === "0";
     // Harness: optional WebGPU features withheld from the device, comma-separated
     // (e.g. Safari 26 has no dual-source-blending). Empty for the app.
     this.wgpuMask = new URLSearchParams(window.location.search).get("wgpumask") ?? "";
+    // Harness: accept a CPU fallback WebGPU adapter (SwiftShader), refused for
+    // the app as no usable GPU (the Windows CI lane has nothing else).
+    this.wgpuFallback = new URLSearchParams(window.location.search).get("wgpufallback") === "1";
+    // ?dstalpha2pass=0 (patch 0149): the dst-alpha second pass (0136) off.
+    this.dstAlphaTwoPass = new URLSearchParams(window.location.search).get("dstalpha2pass") !== "0";
+    // ?discreadahead=0: the disc read exactly as asked (no read-ahead).
+    this.discReadahead = new URLSearchParams(window.location.search).get("discreadahead") !== "0";
+    // ?discprefetch=1: the background prefetch of the next segment (0155),
+    // off by default (within noise on Chromium; to be measured on WebKit).
+    this.discPrefetch = new URLSearchParams(window.location.search).get("discprefetch") === "1";
+    // Harness: keep a software WebGL presenter (SwiftShader), which the app
+    // refuses for the 2D canvas (cheaper on a CPU).
+    this.webglSoftware = new URLSearchParams(window.location.search).get("webglsw") === "1";
     this.savesMode = new URLSearchParams(window.location.search).get("saves") === "off" ? "off" : "";
     this.efbDiag = requestedEfbDiag();
     this.jitVerbose = new URLSearchParams(window.location.search).get("jitverbose") === "1";
@@ -138,8 +198,21 @@ export class EmulatorHost {
     this.aotCompiler = aotCompilerRequested(window.location.search);
     // ?aot=1: first-launch optimisation of the disc (P7), off by default.
     this.aotFirstLaunch = new URLSearchParams(window.location.search).get("aot") === "1";
+    // With aot=1, the local profile's guest-PC sampler: ?aotsample=N ms, 0 off.
+    this.aotSampleMs = aotSamplePeriodRequested(window.location.search);
+    // The wasm engine (src/wasm-engine.js), resolved here once: a worker's
+    // location is its own script's, so ?wasmengine= reaches it only this way.
+    this.wasmEngine = wasmEngine({ search: window.location.search });
+    this.codeSpaceMiB = requestedCodeSpaceMiB(window.location.search, this.wasmEngine);
+    // ?regioncap=N|0: the region function cap forced (tests, benches); by
+    // default the worker takes it from the engine (JSC only).
+    const regionCap = new URLSearchParams(window.location.search).get("regioncap");
+    this.regionCap = regionCap !== null && /^\d+$/.test(regionCap) ? Number(regionCap) : null;
     // With aot=1, regions tail-call the next region (patch 0102); ?regionchain=0 turns it off.
     this.regionChain = new URLSearchParams(window.location.search).get("regionchain") !== "0";
+    // First-launch regions assembled off the discio worker (aot-assembler-worker.js);
+    // ?aotasm=0 / =1 forces it, absent: the worker's default by engine (null).
+    this.aotAssembler = aotAssemblerRequested(window.location.search);
     // Where relaxed_madd is fused the JIT's FMA uses it (patch 0129); ?fusedmadd=0
     // keeps the exact plain-f64 path (A/B on one core).
     this.fusedMadd = new URLSearchParams(window.location.search).get("fusedmadd") !== "0";
@@ -153,6 +226,8 @@ export class EmulatorHost {
     // window.  Repeated fixed-battle A/B runs showed substantially lower
     // replay age and higher presentation cadence for the real WGPU backend.
     // `wgpupump=0` remains the explicit rollback; other backends stay off.
+    // With the default 4 ms replay budget it only stops the polling: the old
+    // pump-off replay is `wgpupump=0&wgpureplayms=0`.
     this.wgpuReplayPump = requestedWgpuReplayPump(
       window.location.search,
       this.videoBackend === "WebGPU-Real"
@@ -161,6 +236,10 @@ export class EmulatorHost {
     this.wgpuPowerPreference = requestedWgpuPowerPreference(window.location.search);
     this.wgpuAtomicPassReplay = requestedWgpuAtomicPassReplay(window.location.search);
     this.wgpuDiagnosticQuiet = requestedWgpuDiagnosticQuiet(window.location.search);
+    // ?stalllog=1 turns on the [main-stall] (rAF loop, here) and [signal-stall]
+    // (worker frame-signal wait) console loggers. The stall counters main-profiler
+    // reads are kept either way; only the logging is opt-in.
+    this.stallLog = new URLSearchParams(window.location.search).get("stalllog") === "1";
     this.wgpuProducerProfile = this.collectMetrics &&
       requestedWgpuProducerProfile(window.location.search);
     this.wgpuDrawProfile = requestedWgpuDrawProfile(window.location.search);
@@ -172,15 +251,37 @@ export class EmulatorHost {
     this.wgpuUboMetrics = requestedWgpuUboMetrics(window.location.search);
     this.wgpuVpDiag = requestedWgpuVpDiag(window.location.search);
     this.wgpuUniformFast = requestedWgpuUniformFast(window.location.search);
-    this.wgpuUboPack = requestedWgpuUboPack(window.location.search);
+    this.wgpuUboPack = requestedWgpuUboPack(window.location.search, defaultWgpuUboPack(this.wasmEngine));
+    this.wgpuBindGroupCache = requestedWgpuBindGroupCache(
+      window.location.search,
+      defaultWgpuBindGroupCache(this.wasmEngine)
+    );
     this.wgpuSparseUbo = requestedWgpuSparseUbo(window.location.search);
-    this.wgpuGeometryPack = requestedWgpuGeometryPack(window.location.search);
+    // Geometry merged into ranges (one VERTEX|INDEX buffer, a pass's batches
+    // published as uploads of up to 256 KiB) by default since 2026-10-29:
+    // vertex+index uploads 882 -> 12 per race frame, replay worker 405 -> 288
+    // ms/s (Chrome); ?wgpugeompack=0 / ?wgpugeomrange=0 turn them off.
+    this.wgpuGeometryPack = requestedWgpuGeometryPack(window.location.search, true);
     this.wgpuGeometryRange =
-      this.wgpuGeometryPack && requestedWgpuGeometryRange(window.location.search);
+      this.wgpuGeometryPack && requestedWgpuGeometryRange(window.location.search, true);
+    // The geometry content cache (0204): on by default under V8,
+    // ?wgpugeomcache=0|1|2 forces it; needs the pack, never with the fence.
+    this.wgpuGeometryCacheMode = wgpuGeometryCacheModeFor({
+      search: window.location.search, engine: this.wasmEngine,
+      pack: this.wgpuGeometryPack, loadFence: this.wgpuLoadEpochFence
+    });
     this.wgpuUploadArenaMiB = requestedWgpuUploadArenaMiB(window.location.search);
-    this.wgpuUploadTransport = requestedWgpuUploadTransport(window.location.search);
+    this.wgpuUploadTransport = requestedWgpuUploadTransport(
+      window.location.search,
+      defaultWgpuUploadTransport(this.wasmEngine)
+    );
     this.wgpuMappedStagingSlotCount = requestedWgpuMappedStagingSlotCount(
-      window.location.search
+      window.location.search,
+      defaultWgpuMappedStagingSlotCount(this.wasmEngine)
+    );
+    this.wgpuMappedStagingSlotMib = requestedWgpuMappedStagingSlotMib(
+      window.location.search,
+      defaultWgpuMappedStagingSlotMib(this.wasmEngine)
     );
     this.wgpuMappedStageFast = requestedWgpuMappedStageFast(window.location.search);
     this.wgpuMappedStageTimingStride = requestedWgpuMappedStageTimingStride(
@@ -309,6 +410,27 @@ export class EmulatorHost {
     // captureStream to the original canvas, permanently locking it from
     // transfer. Swapping in a fresh canvas element severs any such binding
     // because the new element has none of that history.
+    // A fresh canvas element in place of the current one (its attributes
+    // copied), transferred to the worker. Also used once the worker's WebGL
+    // presenter lost its context for good: a canvas that had a WebGL context
+    // can never get a 2D one.
+    const replaceCanvasForWorker = () => {
+      const replacement = document.createElement("canvas");
+      replacement.id = canvas.id;
+      replacement.width = canvas.width;
+      replacement.height = canvas.height;
+      for (const cls of canvas.classList) replacement.classList.add(cls);
+      replacement.setAttribute("aria-label", canvas.getAttribute("aria-label") || "");
+      if (canvas.parentNode) canvas.parentNode.replaceChild(replacement, canvas);
+      // Re-point the host's reference and the elements registry.
+      canvas = replacement;
+      this.canvas = replacement;
+      // The display filter's box is the new element's.
+      this.observeDisplayCanvas();
+      const off = replacement.transferControlToOffscreen();
+      off.id = "canvas";
+      return off;
+    };
     const transferCanvasToOffscreen = () => {
       if (!this.usesAdapterCanvas || typeof canvas.transferControlToOffscreen !== "function") {
         return null;
@@ -323,20 +445,8 @@ export class EmulatorHost {
         try {
           // Replace the DOM canvas with a freshly-created one. The new
           // element has no captureStream history, no extension hooks, no
-          // compositor binding. Copy across the relevant attributes.
-          const replacement = document.createElement("canvas");
-          replacement.id = canvas.id;
-          replacement.width = canvas.width;
-          replacement.height = canvas.height;
-          for (const cls of canvas.classList) replacement.classList.add(cls);
-          replacement.setAttribute("aria-label", canvas.getAttribute("aria-label") || "");
-          if (canvas.parentNode) canvas.parentNode.replaceChild(replacement, canvas);
-          // Re-point the host's reference and the elements registry.
-          canvas = replacement;
-          this.canvas = replacement;
-          const off = replacement.transferControlToOffscreen();
-          off.id = "canvas";
-          return off;
+          // compositor binding.
+          return replaceCanvasForWorker();
         } catch (err2) {
           console.warn("[host] canvas-replacement transferControlToOffscreen also failed:", err2);
           return null;
@@ -360,8 +470,10 @@ export class EmulatorHost {
             ppcWasmJitWarmupFrames: this.ppcWasmJitWarmupFrames,
             ppcProfile: this.ppcProfile,
             gpuSpinMicros: this.gpuSpinMicros,
+            codeSpaceMiB: this.codeSpaceMiB,
             cpuOverclock: this.cpuOverclock,
             emulationSpeed: this.emulationSpeed,
+            audioBufferMs: this.audioBufferMs,
             presentationScale: this.presentationScale,
             oglTestClear: this.oglTestClear,
             fastSoftwareRaster: this.fastSoftwareRaster,
@@ -389,6 +501,13 @@ export class EmulatorHost {
                 this.oglSabEnabled || this.usesDetachedWgpu
                 ? null
                 : transferCanvasToOffscreen,
+            // After a lost WebGL context: a new element, so whoever captures
+            // the canvas (captureStream) must re-capture: "presentercanvas".
+            replacePresenterCanvas: () => {
+              const off = replaceCanvasForWorker();
+              window.dispatchEvent(new CustomEvent("presentercanvas", { detail: { canvas: this.canvas } }));
+              return off;
+            },
             visibleCanvas:
               (this.videoBackend === "OGL" && this.oglProxyMode === "worker") ||
                 this.oglSabEnabled || this.usesDetachedWgpu
@@ -408,8 +527,10 @@ export class EmulatorHost {
             ppcWasmJitWarmupFrames: this.ppcWasmJitWarmupFrames,
             ppcProfile: this.ppcProfile,
             gpuSpinMicros: this.gpuSpinMicros,
+            codeSpaceMiB: this.codeSpaceMiB,
             cpuOverclock: this.cpuOverclock,
             emulationSpeed: this.emulationSpeed,
+            audioBufferMs: this.audioBufferMs,
             presentationScale: this.presentationScale,
             presentationQueueSize: this.presentationQueueSize,
             presenterBackend: this.presenterBackend,
@@ -421,12 +542,35 @@ export class EmulatorHost {
             softwareTevHotCaseMode: this.softwareTevHotCaseMode,
             xfbFastPaths: this.xfbFastPaths,
             correctTimeDrift: this.correctTimeDrift,
+            rushPresentation: this.pacing.rushPresentation,
+            syncOnSkipIdle: this.pacing.syncOnSkipIdle,
+            dupXfbRearmsThrottle: this.pacing.dupXfbRearmsThrottle,
+            smoothEarly: this.pacing.smoothEarly,
+            sleepMarginUs: this.pacing.sleepMarginUs,
+            sleepStepUs: this.pacing.sleepStepUs,
+            sleepK: this.pacing.sleepK,
+            sleepSpinUs: this.pacing.sleepSpinUs,
+            presentVsync: this.pacing.presentVsync,
+            presentGamePace: this.pacing.presentGamePace,
+            presentPaceStats: this.pacing.presentPaceStats,
+            viLock: this.pacing.viLock,
             coreLog: this.coreLog,
             memcardSlotB: this.memcardSlotB,
+            internalResolution: this.enhancements.internalResolution,
+            maxAnisotropy: this.enhancements.maxAnisotropy,
+            widescreen: this.enhancements.widescreen,
+            displayFilter: this.displayFilter,
             efbAccess: this.efbAccess,
+            xfbNoDecode: this.xfbNoDecode,
             fifoLog: this.fifoLog,
             efbCopyRam: this.efbCopyRam,
+            efbNoDefer: this.efbNoDefer,
             wgpuMask: this.wgpuMask,
+            wgpuFallback: this.wgpuFallback,
+            dstAlphaTwoPass: this.dstAlphaTwoPass,
+            discReadahead: this.discReadahead,
+            discPrefetch: this.discPrefetch,
+            webglSoftware: this.webglSoftware,
             savesMode: this.savesMode,
             efbDiag: this.efbDiag,
             jitVerbose: this.jitVerbose,
@@ -437,7 +581,11 @@ export class EmulatorHost {
             jitOffThread: this.jitOffThread,
             aotCompiler: this.aotCompiler,
             aotFirstLaunch: this.aotFirstLaunch,
+            aotSampleMs: this.aotSampleMs,
+            wasmEngine: this.wasmEngine,
+            regionCap: this.regionCap,
             regionChain: this.regionChain,
+            aotAssembler: this.aotAssembler,
             fusedMadd: this.fusedMadd,
             collectMetrics: this.collectMetrics,
             legacyOneWayAck: this.legacyOneWayAck,
@@ -450,6 +598,7 @@ export class EmulatorHost {
             wgpuPowerPreference: this.wgpuPowerPreference,
             wgpuAtomicPassReplay: this.wgpuAtomicPassReplay,
             wgpuDiagnosticQuiet: this.wgpuDiagnosticQuiet,
+            stallLog: this.stallLog,
             wgpuProducerProfile: this.wgpuProducerProfile,
             wgpuDrawProfile: this.wgpuDrawProfile,
             wgpuTailGate: this.wgpuTailGate,
@@ -459,17 +608,21 @@ export class EmulatorHost {
             wgpuVpDiag: this.wgpuVpDiag,
             wgpuUniformFast: this.wgpuUniformFast,
             wgpuUboPack: this.wgpuUboPack,
+            wgpuBindGroupCache: this.wgpuBindGroupCache,
             wgpuSparseUbo: this.wgpuSparseUbo,
             wgpuGeometryPack: this.wgpuGeometryPack,
             wgpuGeometryRange: this.wgpuGeometryRange,
+            wgpuGeometryCacheMode: this.wgpuGeometryCacheMode,
             wgpuUploadArenaMiB: this.wgpuUploadArenaMiB,
             wgpuUploadTransport: this.wgpuUploadTransport,
             wgpuMappedStagingSlotCount: this.wgpuMappedStagingSlotCount,
+            wgpuMappedStagingSlotMib: this.wgpuMappedStagingSlotMib,
             wgpuMappedStageFast: this.wgpuMappedStageFast,
             wgpuMappedStageTimingStride: this.wgpuMappedStageTimingStride,
             wgpuMappedDrainCoalescing: this.wgpuMappedDrainCoalescing,
             wgpuRendererWorkerProbe: this.wgpuRendererWorkerProbe,
             wgpuVisualCadence: this.wgpuVisualCadence,
+            wgpuSessionRecover: this.wgpuSessionRecover,
             wgpuPipelinePrewarm: this.wgpuPipelinePrewarm,
             gpuCompletionDiagnostics: this.gpuCompletionDiagnostics,
             wgpuDirtyRangeProjection: this.wgpuDirtyRangeProjection,
@@ -482,7 +635,9 @@ export class EmulatorHost {
             inputLatencyDiagnostics: this.inputLatencyDiagnostics,
             inputReadbackDiagnostics: this.inputReadbackDiagnostics,
             inputPhotonDiagnostics: this.inputPhotonMarker.enabled,
-            inputPhotonMarker: this.inputPhotonMarker
+            inputPhotonMarker: this.inputPhotonMarker,
+            onGpuDeviceLost: (event) => this.handleGpuDeviceLost(event),
+            onScaleCeiling: (ceiling) => { this.workerScaleCeiling = ceiling; }
           })
         : new DolphinCoreAdapter({ canvas, onStatus });
     this.mode = "demo";
@@ -591,6 +746,7 @@ export class EmulatorHost {
 
     if (await this.adapterAvailable()) {
       try {
+        await this.fallBackWithoutWgpuAdapter();
         const mounted = await this.adapter.mountGame(file);
         this.mode = "dolphin";
         this.game.name = mounted.title || file.name;
@@ -609,6 +765,8 @@ export class EmulatorHost {
         this.game.rootEntryCount = mounted.rootEntryCount;
         this.game.rootEntries = mounted.rootEntries ?? [];
         this.game.bootProbe = mounted.bootProbe ?? null;
+        // Before the boot: what the disc's settings ask of the renderer.
+        this.game.needs = mounted.needs ?? { boundingBox: false };
         this.game.fullCore = mounted.fullCore;
         this.game.coreBoot = mounted.coreBoot;
         this.game.coreState = mounted.coreState;
@@ -634,6 +792,31 @@ export class EmulatorHost {
     }
 
     return this.game;
+  }
+
+  // video=wgpu with no usable WebGPU adapter (a blocklist, no GPU, a CPU
+  // adapter, no answer): boot the software renderer instead, and say why
+  // (videoFallback, in the frame info and the status line), rather than let
+  // the worker refuse the core and the page wait without a picture. The
+  // detached presenter has already given its canvas away: there, an explicit
+  // error. Once per host, before the core loads.
+  async fallBackWithoutWgpuAdapter() {
+    if (this.videoBackend !== "WebGPU-Real" || this.adapter?.loaded || this.videoFallback) return null;
+    const problem = await wgpuAdapterProblem({
+      powerPreference: this.wgpuPowerPreference ?? "high-performance",
+      acceptFallback: this.wgpuFallback
+    });
+    if (!problem) return null;
+    if (this.usesDetachedWgpu) {
+      const message = `video=wgpu needs a usable WebGPU adapter (${problem}); the detached presenter cannot fall back`;
+      console.error(`[wgpu] ${message}`);
+      throw new Error(message);
+    }
+    this.applyVideoBackend("Software Renderer");
+    this.videoFallback = { from: "WebGPU-Real", to: "Software Renderer", reason: problem };
+    console.warn(`[wgpu] no usable WebGPU adapter (${problem}): booting the software renderer`);
+    this.onStatus(`No usable WebGPU adapter (${problem}): software renderer`);
+    return this.videoFallback;
   }
 
   async adapterAvailable() {
@@ -857,6 +1040,161 @@ export class EmulatorHost {
     });
   }
 
+  // Internal resolution (1-4) and maximum anisotropy (1, 2, 4, 8, 16; 0 =
+  // the game's), the units of ?ir= and ?aniso=, applied at the core's next
+  // frame. Resolves { applied, internalResolution } (applied false before the
+  // core runs, or with a core without patch 0168); the values are kept for
+  // the next boot.
+  // widescreen: true for 16:9 (patch 0178, Dolphin's generic widescreen
+  // hack: the 3D view widened; 2D elements stretched, some objects cut at the
+  // edges), false for 4:3. The canvas follows the core's backbuffer.
+  async setEnhancements({ internalResolution, anisotropy, widescreen } = {}) {
+    if (internalResolution !== undefined) {
+      const { ceiling } = await this.internalResolutionCeiling();
+      this.enhancements.internalResolution = clampInternalResolution(internalResolution, ceiling);
+    }
+    if (anisotropy !== undefined) this.enhancements.maxAnisotropy = anisotropyToCore(anisotropy);
+    if (widescreen !== undefined) {
+      this.enhancements.widescreen = widescreen === true;
+      this.announceAspect();
+    }
+    if (this.mode !== "dolphin" || typeof this.adapter?.setEnhancements !== "function") {
+      return { applied: false, reason: "core-not-loaded" };
+    }
+    return this.adapter.setEnhancements(this.enhancements);
+  }
+
+  // The picture's aspect, for the page's layout (app.js follows it): 16:9
+  // with widescreen (patch 0178), else 4:3. A "wgpuaspect" event on window.
+  announceAspect() {
+    const [w, h] = this.enhancements.widescreen ? [16, 9] : [4, 3];
+    globalThis.dispatchEvent?.(new CustomEvent("wgpuaspect", { detail: { w, h } }));
+  }
+
+  // Display filter: sharpness "off" | "light" | "strong" (FSR1 RCAS after an
+  // EASU upscale to the display), fit true to size the canvas to the display
+  // without sharpening (an internal resolution above the display is then
+  // area-filtered down: supersampling). Kept for the next boot. Resolves the
+  // worker's answer ({ applied, active, sharpness, fit, box }).
+  async setDisplayFilter({ sharpness, fit } = {}) {
+    this.displayFilter = normalizeDisplayFilter({
+      ...this.displayFilter,
+      ...(sharpness !== undefined ? { sharpness } : {}),
+      ...(fit !== undefined ? { fit } : {})
+    });
+    if (displayFilterFits(this.displayFilter)) this.watchDisplayBox();
+    if (typeof this.adapter?.setDisplayFilter !== "function") return { applied: false, reason: "core-not-loaded" };
+    return this.adapter.setDisplayFilter(this.displayFilter);
+  }
+
+  // The canvas element's size in device pixels, for the display filter's
+  // canvas (devicePixelContentBoxSize: exact, follows zoom and moves between
+  // screens).
+  // contain: the element is laid out with object-fit: contain (the picture
+  // keeps its aspect inside the box), else the canvas is stretched to it.
+  watchDisplayBox() {
+    if (this.displayBoxObserver || typeof ResizeObserver !== "function" || !this.canvas) return;
+    this.displayBoxObserver = new ResizeObserver((entries) => {
+      const entry = entries.at(-1);
+      const device = entry?.devicePixelContentBoxSize?.[0];
+      const ratio = globalThis.devicePixelRatio || 1;
+      const contain = globalThis.getComputedStyle?.(entry.target)?.objectFit === "contain";
+      const box = device
+        ? { width: device.inlineSize, height: device.blockSize, contain }
+        : { width: Math.round(entry.contentRect.width * ratio), height: Math.round(entry.contentRect.height * ratio), contain };
+      this.displayFilter = normalizeDisplayFilter({ ...this.displayFilter, box });
+      if (displayFilterFits(this.displayFilter)) this.adapter?.setDisplayFilter?.({ box: this.displayFilter.box })?.catch?.(() => {});
+    });
+    this.observeDisplayCanvas();
+  }
+
+  // (Re)observe this.canvas: after replaceCanvasForWorker the old element is
+  // gone from the page.
+  observeDisplayCanvas() {
+    const observer = this.displayBoxObserver;
+    if (!observer || !this.canvas || this.displayBoxObserved === this.canvas) return;
+    if (this.displayBoxObserved) observer.unobserve(this.displayBoxObserved);
+    this.displayBoxObserved = this.canvas;
+    try {
+      observer.observe(this.canvas, { box: "device-pixel-content-box" });
+    } catch {
+      observer.observe(this.canvas);
+    }
+  }
+
+  // The highest internal resolution this machine is trusted with:
+  // { ceiling, reason } (src/wgpu-enhancements.js): the worker's adapter's
+  // once its presenter took it (wgpu-scale-ceiling), before that the same
+  // rule on an adapter the page asks with the worker's power preference;
+  // 1 after a device loss above 1x. setEnhancements holds every scale to
+  // it, the worker too. Ask it before offering a scale, again after the boot.
+  async internalResolutionCeiling() {
+    this.scaleCeilingPromise ??= (async () => {
+      const gpu = globalThis.navigator?.gpu;
+      const adapter = await gpu?.requestAdapter?.({ powerPreference: this.wgpuPowerPreference ?? "high-performance" }).catch(() => null);
+      let info = adapter?.info ?? null;
+      if (adapter && !info && typeof adapter.requestAdapterInfo === "function") {
+        info = await adapter.requestAdapterInfo().catch(() => null);
+      }
+      return internalResolutionCeiling(adapter ? { info, limits: adapter.limits, isFallbackAdapter: adapter.isFallbackAdapter } : null,
+        { deviceMemory: globalThis.navigator?.deviceMemory });
+    })();
+    const adapter = this.workerScaleCeiling ?? await this.scaleCeilingPromise;
+    return this.scaleLostCeiling < adapter.ceiling
+      ? { ceiling: this.scaleLostCeiling, reason: "device-lost" }
+      : adapter;
+  }
+
+  // cause "device-lost": the GPU went (memory may be why), the scale falls
+  // to 1x. "renderer-error": a fatal replay error on a live device (the
+  // scale is not why): the page restarts at the same scale, fallback null.
+  handleGpuDeviceLost({ internalResolution = 1, reason = "unknown", detail = "", cause = "device-lost", pause = null } = {}) {
+    const deviceLost = cause !== "renderer-error";
+    const fallback = deviceLost && internalResolution > 1 ? 1 : null;
+    if (fallback) {
+      this.scaleLostCeiling = fallback;
+      this.enhancements.internalResolution = fallback;
+    }
+    this.onStatus(deviceLost
+      ? `WebGPU device lost at ${internalResolution}x (${reason})${fallback ? "; internal resolution back to 1x" : ""}`
+      : `WebGPU renderer failed at ${internalResolution}x (${reason}); restart at the same scale`);
+    const event = { internalResolution, fallback, reason, detail, cause: deviceLost ? "device-lost" : "renderer-error" };
+    if (!this.wgpuSessionRecover || this.mode !== "dolphin") {
+      this.onGpuDeviceLost(event);
+      return null;
+    }
+    return this.recoverSessionAfterDeviceLoss(event, pause);
+  }
+
+  // ?wgpurecover=1: tell the page a recovery runs, keep the paused session,
+  // then always hand the loss to the page, whatever failed on the way.
+  async recoverSessionAfterDeviceLoss(event, workerPause) {
+    const describe = (error) => (error instanceof Error ? error.message : String(error));
+    this.onStatus("WebGPU device lost: keeping the session (pause, save state)");
+    try {
+      this.onGpuRecovering({ internalResolution: event.internalResolution, fallback: event.fallback, reason: event.reason });
+    } catch (error) {
+      this.onStatus(`Device loss recovery handler failed: ${describe(error)}`);
+    }
+    let session = { paused: false, pauseChanged: false, state: null, stateGameId: "", stateError: "" };
+    try {
+      session = await captureSessionAfterDeviceLoss(this.adapter, { workerPause });
+      this.onStatus(session.state
+        ? `Session kept after the device loss (${session.state.byteLength} bytes)`
+        : `Session not kept after the device loss: ${session.stateError}`);
+    } catch (error) {
+      session = { ...session, stateError: describe(error) };
+      this.onStatus(`Session not kept after the device loss: ${session.stateError}`);
+    } finally {
+      try {
+        this.onGpuDeviceLost({ ...event, ...session });
+      } catch (error) {
+        this.onStatus(`Device loss handler failed: ${describe(error)}`);
+      }
+    }
+    return session;
+  }
+
   setAudioMuted(muted) {
     if (this.mode === "dolphin") {
       this.adapter.setAudioMuted?.(muted);
@@ -899,7 +1237,7 @@ export class EmulatorHost {
       this.hostCausalStats.renderLastMs = renderEndedAt - loopStartedAt;
       this.hostCausalStats.publishLastMs = loopEndedAt - renderEndedAt;
     }
-    if (!this._mainStallFirstLogged && loopMs > 0) {
+    if (this.stallLog && !this._mainStallFirstLogged && loopMs > 0) {
       this._mainStallFirstLogged = true;
       // eslint-disable-next-line no-console
       console.log(`[main-stall:first] loop=${loopMs.toFixed(2)}ms frame=${this.frame} mode=${this.mode}`);
@@ -908,7 +1246,7 @@ export class EmulatorHost {
       this._mainStallCount = (this._mainStallCount || 0) + 1;
       const isNewWorst = loopMs > (this._mainStallWorstMs || 0);
       if (isNewWorst) this._mainStallWorstMs = loopMs;
-      if (isNewWorst || this._mainStallCount % 5 === 0) {
+      if (this.stallLog && (isNewWorst || this._mainStallCount % 5 === 0)) {
         // eslint-disable-next-line no-console
         console.log(
           `[main-stall#${this._mainStallCount}${isNewWorst ? "*" : ""}] ` +
@@ -1112,6 +1450,26 @@ export class EmulatorHost {
         this.mode === "dolphin" ? this.adapter.presentationIntervalHistogramBuckets : null,
       presentationFrameLag: this.mode === "dolphin" ? this.adapter.presentationFrameLag : 0,
       presentationQueueAgeMs: this.mode === "dolphin" ? this.adapter.presentationQueueAgeMs : 0,
+      // Patch 0208: new XFBs shown / queued per second, shown since boot,
+      // older pictures shown after newer ones (lifetime); null without tags.
+      newFramesPerSec: this.mode === "dolphin" ? this.adapter.newFramesPerSec ?? null : null,
+      newFramesProducedPerSec: this.mode === "dolphin" ? this.adapter.newFramesProducedPerSec ?? null : null,
+      // video=wgpu asked, no usable adapter: the renderer it fell back to, and why
+      videoFallback: this.videoFallback ?? null,
+      newFramesShown: this.mode === "dolphin" ? this.adapter.newFramesShown ?? null : null,
+      framesOutOfOrder: this.mode === "dolphin" ? this.adapter.framesOutOfOrder ?? null : null,
+      // presents of a new frame showing a texture not rewritten since it was
+      // last shown: the scene jumping back (lifetime); null without tags.
+      stalePresents: this.mode === "dolphin" ? this.adapter.stalePresents ?? null : null,
+      // Occupancy of the last 500 ms window, 0..1 or null: the emulated CPU
+      // thread busy (not in its throttle sleep), the emulated GPU thread
+      // working, the replay worker busy (src/occupancy-stats.js).
+      cpuThreadBusy: this.mode === "dolphin" ? this.adapter.cpuThreadBusy ?? null : null,
+      gpuThreadBusy: this.mode === "dolphin" ? this.adapter.gpuThreadBusy ?? null : null,
+      replayBusy: this.mode === "dolphin" ? this.adapter.replayBusy ?? null : null,
+      // EFB-to-XFB copies per second of the same window: the game images
+      // made, with any renderer (the software one has no newFramesPerSec).
+      xfbCopiesPerSec: this.mode === "dolphin" ? this.adapter.xfbCopiesPerSec ?? null : null,
       visualChangeFps:
         this.mode === "dolphin"
           ? this.visibleSamplerEnabled &&
@@ -1287,7 +1645,7 @@ function requestedVideoBackend() {
   }
   // Day-16: `?video=webgpu` keeps the Software→WebGPU-presenter hybrid
   // (real game pixels reach the canvas through a wgpuRenderPass blit,
-  // CPU does the rasterisation). Stable, plays Melee.
+  // CPU does the rasterisation). Stable, plays a full game.
   //
   // Day-17+: `?video=wgpu` selects the real WebGPU video backend that's
   // under construction — no Software bridge, the C++ side owns the
@@ -1415,6 +1773,18 @@ export function parseGpuSpinMicros(raw) {
   console.warn(`?gpuspin=${JSON.stringify(raw)} ignored: expected -1 or an integer from 0 to ${MAX_GPU_SPIN_MICROS} (microseconds); using ${DEFAULT_GPU_SPIN_MICROS}`);
   return DEFAULT_GPU_SPIN_MICROS;
 }
+// The CachedInterpreter code space (patch 0138), in MiB. Its whole size is
+// dirtied at boot (Emscripten's mmap zeroes it). Under JSC (iOS) that memory
+// counts for jetsam and 32 MiB hold the working set (peak 4 to 9 MiB measured):
+// 32. Elsewhere (V8) a smaller space moved the later heap allocations and
+// cost up to 1 % (measured): 128, as before. ?codespace=<4..128> overrides.
+export const CODE_SPACE_MIB_JSC = 32;
+export const CODE_SPACE_MIB_DEFAULT = 128;
+export function requestedCodeSpaceMiB(search, engine) {
+  const raw = new URLSearchParams(search).get("codespace");
+  if (raw != null && /^\d{1,3}$/.test(raw) && Number(raw) >= 4 && Number(raw) <= 128) return Number(raw);
+  return engine === "jsc" ? CODE_SPACE_MIB_JSC : CODE_SPACE_MIB_DEFAULT;
+}
 function requestedGpuSpinMicros() {
   return parseGpuSpinMicros(new URLSearchParams(window.location.search).get("gpuspin"));
 }
@@ -1425,6 +1795,27 @@ function requestedCpuOverclock() {
     return requested;
   }
   return 1;
+}
+
+// ?audiobuffer=N (ms, 16-200): the core mixer's queue (Dolphin's
+// AudioBufferSize), part of the audio latency; the core takes it before the
+// boot only. 40 ms by default when the AudioWorklet can run (pairs on mains
+// 2026-10-28, mixer queue counted: total latency 118-124 -> 80-85 ms from
+// the title on, 0 underruns, no drop regression); otherwise 0, the core's
+// 80 ms: ?audiotransport=legacy, or a page without cross-origin isolation,
+// SharedArrayBuffer or AudioWorkletNode, which falls back to legacy anyway.
+// A fallback decided after the boot (worklet init or stall) keeps 40 ms.
+// A value in range overrides all of it.
+export const DEFAULT_WORKLET_AUDIO_BUFFER_MS = 40;
+export function workletPossibleBeforeBoot(g = globalThis) {
+  return g.crossOriginIsolated === true && typeof g.SharedArrayBuffer === "function" && typeof g.AudioWorkletNode === "function";
+}
+export function requestedAudioBufferMs(search = window.location.search, g = globalThis) {
+  const params = new URLSearchParams(search);
+  const n = Number.parseInt(params.get("audiobuffer") || "", 10);
+  if (Number.isInteger(n) && n >= 16 && n <= 200) return n;
+  if (params.get("audiotransport") === "legacy" || !workletPossibleBeforeBoot(g)) return 0;
+  return DEFAULT_WORKLET_AUDIO_BUFFER_MS;
 }
 
 function requestedEmulationSpeed() {
@@ -1484,14 +1875,14 @@ function requestedPresentationPacing(videoBackend = "Software Renderer") {
   const requested = new URLSearchParams(window.location.search).get("pacing");
   // §28cl pacing modes:
   //   direct — paint immediately when a new frame arrives (lowest latency,
-  //            but canvas only updates as often as Melee produces unique
+  //            but canvas only updates as often as the game produces unique
   //            frames, which is often only 10-15 Hz despite 60fps core)
   //   smooth — buffer N frames + paint on a steady 60Hz cadence (smoother
   //            visual but adds latency from the buffer depth)
   //   tick   — §28cl best-of-both: present immediately on new frames (zero
   //            buffer, zero added latency, like direct) AND also re-paint
   //            the LAST KNOWN frame on a steady 16.7ms tick so the canvas
-  //            keeps refreshing even when Melee renders duplicates. Visual
+  //            keeps refreshing even when the game renders duplicates. Visual
   //            cadence stays at 60Hz like a real GameCube on a CRT.
   if (requested === "tick") return "tick";
   if (videoBackend === "OGL") {
@@ -1559,6 +1950,65 @@ function requestedEfbDiag() {
   return raw === "2" ? 2 : (raw === "1" ? 1 : false);
 }
 
+// Pacing switches (patch 0150): Rush Frame Presentation is off by default
+// (upstream's default), ?rush=1 turns it on. For measurement: ?synconidle=1
+// turns SyncOnSkipIdle on, ?dupvsync=1 makes a duplicated XFB rearm the
+// throttle; ?smoothearly=0 (patch 0153) makes the video thread present on
+// arrival: SmoothEarlyPresentation off and no sleep to the present's time
+// (off alone, with Rush off, it would still sleep to the intended time);
+// ?sleepmargin=<us> (patch 0165, 0..8000) sleeps the throttle to its target
+// minus the margin, then spins to it; ?sleepstep=<us> (0..4000) sleeps in
+// short steps inside the margin before the spin. The throttle's sleep is the
+// cascade by default (research/deep-precise-sleep.md §6 D, measured
+// 2026-10-25/26): each wait k x the time left, ?sleepk=<permille> (0..950,
+// default 750, 0: the plain sleep), until ?sleepspin=<us> (50..2000, default
+// 150) is left, then a spin.
+// Absent: the shipped pacing.
+// ?presentpace=game (the default), observe or off (0, false, no).
+function presentPaceMode(params) {
+  const v = (params.get("presentpace") ?? "").toLowerCase();
+  if (["off", "0", "false", "no"].includes(v)) return "off";
+  return v === "observe" ? "observe" : "game";
+}
+
+export function requestedPacing(search = window.location.search) {
+  const params = new URLSearchParams(search);
+  return {
+    rushPresentation: params.get("rush") === "1",
+    syncOnSkipIdle: params.get("synconidle") === "1",
+    dupXfbRearmsThrottle: params.get("dupvsync") === "1",
+    smoothEarly: params.get("smoothearly") !== "0",
+    sleepMarginUs: /^\d{1,4}$/.test(params.get("sleepmargin") ?? "") && Number(params.get("sleepmargin")) <= 8000 ? Number(params.get("sleepmargin")) : 0,
+    sleepStepUs: /^\d{1,4}$/.test(params.get("sleepstep") ?? "") && Number(params.get("sleepstep")) <= 4000 ? Number(params.get("sleepstep")) : 0,
+    // 0 turns the cascade off; otherwise 500-950 (a lower k leaves most of
+    // each wait to the spin, review of #292)
+    sleepK: /^\d{1,3}$/.test(params.get("sleepk") ?? "") && Number(params.get("sleepk")) <= 950 ? (Number(params.get("sleepk")) === 0 ? 0 : Math.max(500, Number(params.get("sleepk")))) : 750,
+    sleepSpinUs: /^\d{2,4}$/.test(params.get("sleepspin") ?? "") && Number(params.get("sleepspin")) >= 50 && Number(params.get("sleepspin")) <= 2000 ? Number(params.get("sleepspin")) : 150,
+    // At most one wgpu present per BeginFrame (the worker's rAF), on by
+    // default since 2026-10-26: ~58 distinct pictures shown a second instead
+    // of ~56 and half the on-screen repeats on the race (12 pairs, --display).
+    // ?presentvsync=0 (or false, off, no) presents as the ring drains.
+    presentVsync: !["0", "false", "off", "no"].includes((params.get("presentvsync") ?? "").toLowerCase()),
+    // The vsync presenter shows frames at the game's own pace on a screen
+    // faster than the game (src/wgpu-game-pacer.js), on by default since
+    // 2026-10-28: 60 fps on a 120 Hz screen judders 36.7 -> 21.0 % (Spark,
+    // 6/6), 30 fps on 60 Hz 13.8 -> 2.0 % of frames off cadence (Mac), no
+    // cost at 1:1. The price: under arrival jitter, a median wait 1-3 ms
+    // longer and a p99 up to a refresh longer on screens faster than the game.
+    // ?presentpace=off (or 0, false, no) shows the oldest frame at every
+    // BeginFrame as before; =observe keeps the refresh histogram (HUD) and
+    // the game's period without pacing. Off: none of it runs.
+    presentGamePace: presentPaceMode(params) === "game",
+    presentPaceStats: presentPaceMode(params) !== "off",
+    // The VI phase lock (src/wgpu-vi-phase-lock.js): the emulated VI locked in
+    // phase on the screen's refresh (the speed nudged by at most 0.2 %), so
+    // the 59.94/60 Hz drift no longer crosses a BeginFrame every ~16.7 s. On
+    // by default at 1:1 only ("auto"); ?vilock=1 forces it (2:1 too),
+    // ?vilock=0 turns it off.
+    viLock: params.get("vilock") === "1" ? "on" : params.get("vilock") === "0" ? "off" : "auto"
+  };
+}
+
 function requestedCorrectTimeDrift() {
   return new URLSearchParams(window.location.search).get("timedrift") === "1";
 }
@@ -1568,10 +2018,8 @@ function requestedCorrectTimeDrift() {
 // Accepts comma-separated category names, a raw 0xHEX value, or a decimal int.
 // Unknown category names are logged and ignored (so a typo doesn't pretend to
 // disable things it isn't actually disabling).
+// Bits 0, 1 and 2 are unused (patch 0196 removed the helpers they gated).
 const CACHED_INTERPRETER_DISABLE_BITS = {
-  meleeloop:   1 << 0,
-  meleecall:   1 << 1,
-  osinterrupt: 1 << 2,
   dcbxloop:    1 << 3,
   fastbranch:  1 << 4,
   fastfp:      1 << 5,
@@ -1589,12 +2037,14 @@ const CACHED_INTERPRETER_DISABLE_BITS = {
   regalloc:        1 << 20, // §28by GPR regalloc / dead-store-skip (default-off; ?regalloc=1 to enable)
   shortprefix:     1 << 21, // §28ca lower JIT min-prefix 4→2 (default-off; ?shortprefix=1 to enable)
   smearcompile:    1 << 22, // §28ce cap JIT compiles/slice (default-off; ?smearcompile=1 to enable)
-  fastmemhoist:    1 << 23, // §28cz per-block fastmem bounds-check hoist (ENABLE polarity; default-off; ?fastmemhoist=1)
   inlinefma:       1 << 26, // inline exact FMA; set: the FMA family calls the interpreter's NI_madd_msub
+  regionmtmsr:     1 << 27, // 0183 regions go on past a mtmsr that changes only EE (ENABLE polarity; default-on; ?regionmtmsr=0 turns it off)
+  regionfragments: 1 << 16, // 0189 region chaining enters the fragment, not the module's dispatcher (ENABLE polarity; default-on; ?regionfragments=0 turns it off)
+  regionchaincache: 1 << 18, // 0187 region chaining looks the next region up in one cache line (ENABLE polarity; default-on; ?regionchaincache=0 turns it off)
+  regshape:        1 << 28, // 0184 x64 register shape: at most 4 GPRs per block in locals (ENABLE polarity; default-off; ?regshape=x64)
   // Aliases the plan / TL;DR uses interchangeably:
-  fastinputpoll: 1 << 1, // legacy synonym for meleecall (input-poll lives there)
   fastmem:       1 << 7, // legacy synonym for fastsystem (load/store-ish helpers)
-  all:           0x47fffff
+  all:           0x47ffff8
 };
 
 // The WebGPU backend emits partial and independent-channel EFB clears as a
@@ -1636,10 +2086,15 @@ function requestedCachedInterpreterDisableMask() {
         }
       }
     }
+    // 0183's and 0184's bits are ENABLE bits: a raw ?disable= mask (or the
+    // name) must not turn them on by accident; only ?regionmtmsr=1 and
+    // ?regshape=x64 do.
+    mask &= ~(CACHED_INTERPRETER_DISABLE_BITS.regionmtmsr | CACHED_INTERPRETER_DISABLE_BITS.regshape |
+      CACHED_INTERPRETER_DISABLE_BITS.regionchaincache | CACHED_INTERPRETER_DISABLE_BITS.regionfragments);
   }
   // §28bt block re-dispatch: DEFAULT-ON. Rigorously verified +11% warm
   // (4-run non-overlapping same-binary A/B, correctness-clean on battle);
-  // it is the evidence-backed JIT-core speed win for the >50% of hot Melee
+  // it is the evidence-backed JIT-core speed win for the >50% of hot game
   // code that runs short interpreted blocks. The earlier "cutscene stall"
   // was the unrelated NKit/reload OOM artifact, not §28bt (which is a CPU
   // dispatch-loop change, gated, with all per-block state writeback intact).
@@ -1684,13 +2139,28 @@ function requestedCachedInterpreterDisableMask() {
   if (params.get("smearcompile") === "0") {
     mask |= CACHED_INTERPRETER_DISABLE_BITS.smearcompile;
   }
-  // §28cz fastmem bounds-check hoist: DEFAULT-OFF, ENABLE polarity (the bit is
-  // an enable bit in the core: feature is ON only when the bit is SET). Opt in
-  // with ?fastmemhoist=1; any other state leaves the bit clear so codegen is
-  // byte-identical to today. Correctness-critical (a wrong hoisted check = an
-  // unchecked OOB WASM load) — kept off until A/B + correctness verified.
-  if (params.get("fastmemhoist") === "1") {
-    mask |= CACHED_INTERPRETER_DISABLE_BITS.fastmemhoist;
+  // 0183: ENABLE polarity, default-on since its measures (Mac race
+  // +1.55 % warm / +1.85 % cold over 8 pairs; drop-meter guard clean): a
+  // region goes on past a mtmsr that only turns interrupts off or on.
+  // ?regionmtmsr=0 turns it off (its regions have their own cache keys).
+  if (params.get("regionmtmsr") !== "0") {
+    mask |= CACHED_INTERPRETER_DISABLE_BITS.regionmtmsr;
+  }
+  // 0187 + 0189: default-on since their measures (#340: Mac race both bits
+  // vs none +8.0 % cold / +8.5 % warm over 9 pairs; off vs main no cost;
+  // drop-meter guard clean). Region chaining enters the next fragment through
+  // a cached table slot instead of the module's dispatcher.
+  // ?regionfragments=0 and ?regionchaincache=0 turn each off.
+  if (params.get("regionfragments") !== "0") {
+    mask |= CACHED_INTERPRETER_DISABLE_BITS.regionfragments;
+  }
+  if (params.get("regionchaincache") !== "0") {
+    mask |= CACHED_INTERPRETER_DISABLE_BITS.regionchaincache;
+  }
+  // 0184: the x64 register shape, default-off until the CI bench and a real
+  // PC decide (?regshape=x64; automatic detection comes after).
+  if (params.get("regshape") === "x64") {
+    mask |= CACHED_INTERPRETER_DISABLE_BITS.regshape;
   }
   return mask >>> 0;
 }

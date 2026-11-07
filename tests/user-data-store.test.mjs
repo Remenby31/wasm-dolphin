@@ -217,8 +217,8 @@ test("stored entries without a valid copy are an error, not an empty card", asyn
 });
 
 test("only Dolphin's temporaries and backups are left out", () => {
-  assert.equal(isPersistentUserPath("StateSaves/GM4E01.s01"), true);
-  assert.equal(isPersistentUserPath("StateSaves/GM4E01.s01.tmp4242"), false);
+  assert.equal(isPersistentUserPath("StateSaves/GXXE01.s01"), true);
+  assert.equal(isPersistentUserPath("StateSaves/GXXE01.s01.tmp4242"), false);
   assert.equal(isPersistentUserPath("StateSaves/lastState.sav"), false);
   assert.equal(isPersistentUserPath("StateSaves/.staging-1.sav"), false);
   assert.equal(isPersistentUserPath("GC/USA/Card A/01-GM4E-save.gci"), true);

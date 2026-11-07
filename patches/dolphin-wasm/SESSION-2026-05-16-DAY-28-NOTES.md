@@ -89,7 +89,7 @@ DRAW) is the same pattern widened — no new architecture.
 
 ## State
 
-No regression: `?video=webgpu` hybrid untouched (ships Melee).
+No regression: `?video=webgpu` hybrid untouched (ships the reference game).
 `?video=wgpu` shows the Day-27 cycling clear + now also builds real
 shader modules in the background. WIP toward the single big
 GPU-pipeline commit; checkpoint at `7a7b322`.

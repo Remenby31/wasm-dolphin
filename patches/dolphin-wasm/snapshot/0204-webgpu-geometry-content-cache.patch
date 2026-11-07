@@ -1,0 +1,801 @@
+diff --git a/Source/Core/VideoBackends/WebGPU/CMakeLists.txt b/Source/Core/VideoBackends/WebGPU/CMakeLists.txt
+--- a/Source/Core/VideoBackends/WebGPU/CMakeLists.txt
++++ b/Source/Core/VideoBackends/WebGPU/CMakeLists.txt
+@@ -19,6 +19,9 @@ PUBLIC
+   common
+   videocommon
+   videosoftware
++PRIVATE
++  # 0204: the geometry content cache keys packets by XXH3-128.
++  xxhash::xxhash
+ )
+ 
+ # Day-30 probe: SPIRV-Tools disassembler (now vendored under glslang
+diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp b/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp
+--- a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp
++++ b/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp
+@@ -127,6 +127,9 @@ std::atomic<bool> s_ubo_packet_enabled{false};
+ std::atomic<bool> s_geometry_upload_pack_enabled{false};
+ std::atomic<u64> s_geometry_upload_pack_epoch{0};
+ std::atomic<bool> s_geometry_upload_range_enabled{false};
++// 0204: the geometry content cache (bit 0 on, bit 1 the sampled comparison).
++std::atomic<u32> s_geometry_cache_mode{0};
++std::atomic<u64> s_geometry_cache_epoch{0};
+ std::atomic<u64> s_geometry_upload_range_epoch{0};
+ }
+ 
+@@ -164,6 +167,15 @@ extern "C" EMSCRIPTEN_KEEPALIVE void SetWebGpuGeometryRangeEnabled(int enabled)
+   InvalidateGeometryUploadRange();
+ }
+ 
++// 0204: set at init and after a device loss only, never around a save load:
++// the cache's content stays valid there. Each call empties the cache (its
++// buffer is retired and destroyed at a pass end).
++extern "C" EMSCRIPTEN_KEEPALIVE void SetWebGpuGeometryCacheEnabled(int mode)
++{
++  s_geometry_cache_mode.store(static_cast<u32>(mode) & 3u, std::memory_order_relaxed);
++  s_geometry_cache_epoch.fetch_add(1, std::memory_order_release);
++}
++
+ extern "C" EMSCRIPTEN_KEEPALIVE void SetWebGpuUboPackEnabled(int enabled)
+ {
+   s_ubo_packet_enabled.store(enabled != 0, std::memory_order_relaxed);
+@@ -242,6 +254,23 @@ bool IsGeometryUploadRangeEnabled()
+          s_geometry_upload_range_enabled.load(std::memory_order_relaxed);
+ }
+ 
++bool IsGeometryCacheEnabled()
++{
++  // The cache places packets of the single-buffer packed layout only.
++  return IsGeometryUploadPackEnabled() &&
++         (s_geometry_cache_mode.load(std::memory_order_relaxed) & 1u) != 0;
++}
++
++bool IsGeometryCacheCompareEnabled()
++{
++  return (s_geometry_cache_mode.load(std::memory_order_relaxed) & 2u) != 0;
++}
++
++u64 GetGeometryCacheEpoch()
++{
++  return s_geometry_cache_epoch.load(std::memory_order_acquire);
++}
++
+ u64 GetGeometryUploadRangeEpoch()
+ {
+   return s_geometry_upload_range_epoch.load(std::memory_order_acquire);
+diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.cpp b/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.cpp
+--- a/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.cpp
++++ b/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.cpp
+@@ -5,10 +5,14 @@
+ 
+ #include <algorithm>
+ #include <cstring>
++#include <optional>
+ #include <iterator>
+ #include <limits>
+ 
+ #include <emscripten/emscripten.h>
++// 0204: XXH3_state_t is defined only for static linking.
++#define XXH_STATIC_LINKING_ONLY
++#include <xxhash.h>
+ 
+ #include "VideoBackends/WebGPU/WebGPUCommandStream.h"
+ #include "VideoBackends/WebGPU/WebGPUGfx.h"
+@@ -21,6 +25,7 @@ namespace WebGPU
+ {
+ extern "C" void SetWebGpuGeometryPackEnabled(int enabled);
+ extern "C" void SetWebGpuGeometryRangeEnabled(int enabled);
++extern "C" void SetWebGpuGeometryCacheEnabled(int mode);
+ 
+ // GPUBufferUsage numeric flags (DESIGN doc): VERTEX 0x20, INDEX 0x10,
+ // COPY_DST 0x8.
+@@ -28,6 +33,31 @@ static constexpr u32 kUsageVertex = 0x20 | 0x8;
+ static constexpr u32 kUsageIndex = 0x10 | 0x8;
+ static constexpr u32 kUsageGeometry = 0x20 | 0x10 | 0x8;
+ static constexpr u32 kGeometryRangeMaxGap = 64;
++
++// 0204: what the geometry content cache did, cumulative (DolphinWeb_
++// GeometryCacheStats). switches: commits whose buffer (cache or stream)
++// differs from the previous commit's, each one SET_VERTEX_BUFFER and
++// SET_INDEX_BUFFER more in the pass.
++struct GeometryCacheStats
++{
++  double hits = 0, hit_bytes = 0, inserts = 0, insert_bytes = 0, misses = 0, miss_bytes = 0;
++  double blocked = 0, cap_skips = 0, failed = 0, switches = 0, compares = 0, collisions = 0;
++  double resets = 0;
++};
++static GeometryCacheStats s_geometry_cache_stats;
++
++// [hits, hit bytes, inserts, inserted bytes, misses, missed bytes, blocked,
++// insert-cap skips, failed inserts, buffer switches, sampled comparisons,
++// collisions, resets]: 13 doubles at `out`; returns how many.
++extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_GeometryCacheStats(double* out)
++{
++  const GeometryCacheStats& s = s_geometry_cache_stats;
++  const double values[] = {s.hits,     s.hit_bytes, s.inserts,  s.insert_bytes, s.misses,
++                           s.miss_bytes, s.blocked, s.cap_skips, s.failed,      s.switches,
++                           s.compares, s.collisions, s.resets};
++  std::memcpy(out, values, sizeof(values));
++  return static_cast<int>(std::size(values));
++}
+ // 0203: the consumer's OP_DESTROY tag for a buffer (0201: 1 buffer, 2 texture,
+ // 3 bind group).
+ static constexpr u32 kDestroyTagGeometryBuffer = 1;
+@@ -59,6 +89,199 @@ void VertexManager::EnsureLegacyBuffers()
+     m_index_buffer_id = cs.PushCreateBuffer(kIndexBufferSize, kUsageIndex);
+ }
+ 
++void VertexManager::ResetGeometryCache()
++{
++  if (m_cache_buffer_id != 0)
++    m_retired_geometry_buffers.push_back(m_cache_buffer_id);
++  m_cache_buffer_id = 0;
++  m_cache_write = 0;
++  m_cache_inserted_this_frame = 0;
++  m_cache_inserts = 0;
++  m_draw_from_cache = false;
++  m_cache_entries.clear();
++  m_cache_order.clear();
++  m_cache_seen_previous.clear();
++  m_cache_seen_current.clear();
++  s_geometry_cache_stats.resets += 1;
++}
++
++// Room in the ring for packet_bytes at vertex_stride (base_vertex needs the
++// offset aligned to it), wrapping to 0; the entries in the way are evicted,
++// oldest first, unless the current submit uses one (then nothing is evicted
++// further and the packet is not cached: nullopt). The ring holds the current
++// lap below m_cache_write and the previous lap's leftovers at or past it, the
++// oldest first in m_cache_order. In the way (#370 review, twice):
++//  - at a wrap: every leftover, then this lap's entries under the new slot;
++//  - otherwise: every leftover that starts before the slot's end, including
++//    one inside the alignment gap [m_cache_write, slot), which overlaps
++//    nothing but stands before the entries the slot does overlap.
++std::optional<u32> VertexManager::ReserveGeometryCacheSlot(u32 packet_bytes, u32 vertex_stride,
++                                                          u64 submit_serial)
++{
++  const u64 aligned_64 =
++      (static_cast<u64>(m_cache_write) + vertex_stride - 1) / vertex_stride * vertex_stride;
++  const bool wraps = aligned_64 + packet_bytes > m_cache_size;
++  const u32 offset = wraps ? 0 : static_cast<u32>(aligned_64);
++  while (!m_cache_order.empty())
++  {
++    const auto oldest = m_cache_entries.find(m_cache_order.front());
++    if (oldest == m_cache_entries.end())
++    {
++      m_cache_order.pop_front();
++      continue;
++    }
++    const GeometryCacheEntry& entry = oldest->second;
++    const bool leftover = entry.offset >= m_cache_write;
++    const bool in_the_way =
++        wraps ? (leftover || entry.offset < offset + packet_bytes) :
++                (leftover && entry.offset < offset + packet_bytes);
++    if (!in_the_way)
++      break;
++    if (entry.used_submit == submit_serial)
++      return std::nullopt;
++    m_cache_entries.erase(oldest);
++    m_cache_order.pop_front();
++  }
++  return offset;
++}
++
++VertexManager::GeometryCacheResult
++VertexManager::TryGeometryCache(u32 vertex_bytes, u32 index_bytes, u32 packet_bytes,
++                                u32 vertex_stride, u32* out_base_vertex, u32* out_base_index)
++{
++  WebGPUCommandStream& cs = GetCommandStream();
++  const u64 cache_epoch = GetGeometryCacheEpoch();
++  if (cache_epoch != m_cache_epoch)
++  {
++    ResetGeometryCache();
++    m_cache_epoch = cache_epoch;
++  }
++  // A frame ends at SUBMIT_PRESENT: what it saw becomes "the frame before".
++  const u64 submit_serial = cs.GetSubmitSerial();
++  if (submit_serial != m_cache_submit)
++  {
++    m_cache_seen_previous.swap(m_cache_seen_current);
++    m_cache_seen_current.clear();
++    m_cache_inserted_this_frame = 0;
++    m_cache_submit = submit_serial;
++  }
++
++  // The packet as the stream path would upload it: vertices, then indices.
++  XXH3_state_t state;
++  XXH3_128bits_reset(&state);
++  if (vertex_bytes != 0)
++    XXH3_128bits_update(&state, m_base_buffer_pointer, vertex_bytes);
++  if (index_bytes != 0)
++    XXH3_128bits_update(&state, m_cpu_index_buffer.data(), index_bytes);
++  const XXH128_hash_t hash = XXH3_128bits_digest(&state);
++  const GeometryCacheKey key{hash.low64, hash.high64, packet_bytes, vertex_stride};
++  const bool seen_before = m_cache_seen_previous.contains(key);
++  m_cache_seen_current.insert(key);
++
++  const auto place = [&](u32 offset) {
++    m_draw_from_cache = true;
++    m_last_vertex_byte = offset;
++    m_last_index_byte = offset + vertex_bytes;
++    *out_base_vertex = offset / vertex_stride;
++    *out_base_index = (offset + vertex_bytes) / sizeof(u16);
++    if (!m_last_draw_from_cache)
++      s_geometry_cache_stats.switches += 1;
++    m_last_draw_from_cache = true;
++  };
++
++  if (const auto hit = m_cache_entries.find(key); hit != m_cache_entries.end())
++  {
++    GeometryCacheEntry& entry = hit->second;
++    entry.used_submit = submit_serial;
++    if (!entry.sample.empty() && IsGeometryCacheCompareEnabled())
++    {
++      // Diagnostics: a hash collision would draw other bytes. Compare the
++      // sampled entries' bytes with this packet's.
++      s_geometry_cache_stats.compares += 1;
++      const bool same =
++          entry.sample.size() >= vertex_bytes + index_bytes &&
++          std::memcmp(entry.sample.data(), m_base_buffer_pointer, vertex_bytes) == 0 &&
++          std::memcmp(entry.sample.data() + vertex_bytes, m_cpu_index_buffer.data(),
++                      index_bytes) == 0;
++      if (!same)
++        s_geometry_cache_stats.collisions += 1;
++    }
++    s_geometry_cache_stats.hits += 1;
++    s_geometry_cache_stats.hit_bytes += packet_bytes;
++    place(entry.offset);
++    return GeometryCacheResult::Served;
++  }
++
++  const auto miss = [&] {
++    s_geometry_cache_stats.misses += 1;
++    s_geometry_cache_stats.miss_bytes += packet_bytes;
++    return GeometryCacheResult::Miss;
++  };
++  if (!seen_before || packet_bytes > m_cache_size)
++    return miss();
++  if (m_cache_inserted_this_frame + packet_bytes > kGeometryCacheInsertCapPerFrame)
++  {
++    s_geometry_cache_stats.cap_skips += 1;
++    return miss();
++  }
++
++  const std::optional<u32> slot = ReserveGeometryCacheSlot(packet_bytes, vertex_stride, submit_serial);
++  if (!slot)
++  {
++    s_geometry_cache_stats.blocked += 1;
++    return miss();
++  }
++  const u32 offset = *slot;
++
++  if (m_cache_buffer_id == 0)
++  {
++    m_cache_buffer_id = cs.PushCreateBuffer(m_cache_size, kUsageGeometry);
++    if (m_cache_buffer_id == 0)
++      return miss();
++  }
++  // Through the public FIFO at once, as a range flush: published ahead of the
++  // pass that draws from it, and valid even if that pass is aborted later.
++  const UploadPacket packet = cs.UploadAllocTwoSegments(
++      m_base_buffer_pointer, vertex_bytes, m_cpu_index_buffer.data(), index_bytes, 4, 4);
++  if (packet.src_heap_ptr == 0)
++  {
++    s_geometry_cache_stats.failed += 1;
++    return GeometryCacheResult::Failed;
++  }
++  if (packet.second_offset != vertex_bytes || packet.total_size != packet_bytes)
++  {
++    cs.FailLastUpload(packet.src_heap_ptr, packet.total_size);
++    s_geometry_cache_stats.failed += 1;
++    return GeometryCacheResult::Failed;
++  }
++  if (!cs.PushUploadBuffer(m_cache_buffer_id, offset, packet.src_heap_ptr, packet.total_size,
++                           BufferUploadRole::Geometry))
++  {
++    s_geometry_cache_stats.failed += 1;
++    return GeometryCacheResult::Failed;
++  }
++
++  GeometryCacheEntry entry;
++  entry.offset = offset;
++  entry.packet_bytes = packet_bytes;
++  entry.used_submit = submit_serial;
++  // Diagnostics: one insertion in 64 keeps its bytes for the comparison.
++  if (IsGeometryCacheCompareEnabled() && (m_cache_inserts++ % 64) == 0)
++  {
++    entry.sample.resize(vertex_bytes + index_bytes);
++    std::memcpy(entry.sample.data(), m_base_buffer_pointer, vertex_bytes);
++    std::memcpy(entry.sample.data() + vertex_bytes, m_cpu_index_buffer.data(), index_bytes);
++  }
++  m_cache_entries.emplace(key, std::move(entry));
++  m_cache_order.push_back(key);
++  m_cache_write = offset + packet_bytes;
++  m_cache_inserted_this_frame += packet_bytes;
++  s_geometry_cache_stats.inserts += 1;
++  s_geometry_cache_stats.insert_bytes += packet_bytes;
++  place(offset);
++  return GeometryCacheResult::Served;
++}
++
+ void VertexManager::DestroyRetiredGeometryBuffers()
+ {
+   // Called between passes only (WebGPUGfx): the OP_DESTROY lands after the
+@@ -262,6 +485,23 @@ void VertexManager::CommitBuffer(u32 num_vertices, u32 vertex_stride, u32 num_in
+       return;
+     }
+ 
++    // 0204: the content cache first; a hit or an insertion uploads nothing to
++    // the stream buffer (and never enters the pending range).
++    if (!IsGeometryCacheEnabled() && m_cache_epoch != GetGeometryCacheEpoch())
++    {
++      // Turned off (or never on): an existing cache buffer is retired.
++      ResetGeometryCache();
++      m_cache_epoch = GetGeometryCacheEpoch();
++    }
++    if (IsGeometryCacheEnabled())
++    {
++      const GeometryCacheResult cached = TryGeometryCache(
++          vertex_bytes, index_bytes, packet_bytes, vertex_stride, out_base_vertex, out_base_index);
++      if (cached != GeometryCacheResult::Miss)
++        return;
++      m_draw_from_cache = false;
++    }
++
+     const u64 submit_serial = cs.GetSubmitSerial();
+     // 0203: a buffer created below and never published (a failed upload or
+     // range append after its create, with the range on or off) is retired
+@@ -362,6 +602,11 @@ void VertexManager::CommitBuffer(u32 num_vertices, u32 vertex_stride, u32 num_in
+       m_retired_geometry_buffers.push_back(m_geometry_buffer_id);
+     created.kept = candidate_buffer_id;
+     m_geometry_buffer_id = candidate_buffer_id;
++    // 0204: this batch draws from the stream buffer.
++    m_draw_from_cache = false;
++    if (m_last_draw_from_cache)
++      s_geometry_cache_stats.switches += 1;
++    m_last_draw_from_cache = false;
+     m_geometry_offset = packet_offset + packet_bytes;
+     m_geometry_generations_since_submit = candidate_generations;
+     m_geometry_submit_serial = submit_serial;
+@@ -566,6 +811,51 @@ struct VertexManagerTestPeer
+   {
+     return static_cast<u32>(manager.m_retired_geometry_buffers.size());
+   }
++  static u32 CacheBufferId(const VertexManager& manager) { return manager.m_cache_buffer_id; }
++  static bool DrawFromCache(const VertexManager& manager) { return manager.m_draw_from_cache; }
++  static void SetCacheSize(VertexManager& manager, u32 bytes) { manager.m_cache_size = bytes; }
++  // The ring alone (no upload), for the randomized check.
++  static std::optional<u32> Reserve(VertexManager& manager, u32 bytes, u32 stride, u64 submit)
++  {
++    return manager.ReserveGeometryCacheSlot(bytes, stride, submit);
++  }
++  static void Place(VertexManager& manager, u64 id, u32 offset, u32 bytes, u64 submit)
++  {
++    const VertexManager::GeometryCacheKey key{id, 0, bytes, 0};
++    VertexManager::GeometryCacheEntry entry;
++    entry.offset = offset;
++    entry.packet_bytes = bytes;
++    entry.used_submit = submit;
++    manager.m_cache_entries.emplace(key, std::move(entry));
++    manager.m_cache_order.push_back(key);
++    manager.m_cache_write = offset + bytes;
++  }
++  static bool Use(VertexManager& manager, u64 id, u32 bytes, u64 submit)
++  {
++    const auto it = manager.m_cache_entries.find(VertexManager::GeometryCacheKey{id, 0, bytes, 0});
++    if (it == manager.m_cache_entries.end())
++      return false;
++    it->second.used_submit = submit;
++    return true;
++  }
++  // Every live entry inside the ring, no two overlapping.
++  static bool LiveEntriesDisjoint(const VertexManager& manager)
++  {
++    std::vector<std::pair<u32, u32>> ranges;
++    for (const auto& [key, entry] : manager.m_cache_entries)
++    {
++      if (entry.offset + entry.packet_bytes > manager.m_cache_size)
++        return false;
++      ranges.emplace_back(entry.offset, entry.offset + entry.packet_bytes);
++    }
++    std::sort(ranges.begin(), ranges.end());
++    for (size_t k = 1; k < ranges.size(); ++k)
++    {
++      if (ranges[k].first < ranges[k - 1].second)
++        return false;
++    }
++    return true;
++  }
+ };
+ 
+ extern "C" EMSCRIPTEN_KEEPALIVE int RunWebGpuVertexManagerGeometryParitySmoke(int indexed,
+@@ -820,6 +1110,271 @@ extern "C" EMSCRIPTEN_KEEPALIVE int RunWebGpuVertexManagerGeometryLifecycleSmoke
+         VertexManagerTestPeer::RetiredGeometryBuffers(oversized_manager) != 1)
+       return FailVertexManagerSmoke(516, "an unpublished candidate buffer was not retired");
+   }
++
++  // The guard's other branches (#369 review): a failure after a rotation
++  // retires the new generation and keeps the published one...
++  if (!s_vertex_manager_smoke_fixture.Reset())
++    return FailVertexManagerSmoke(517, "rotation-failure fixture reset failed");
++  SetWebGpuGeometryPackEnabled(1);
++  SetWebGpuGeometryRangeEnabled(1);
++  {
++    VertexManager rotated_manager;
++    VertexManagerTestPeer::Seed(rotated_manager, vertices, sizeof(vertices), indices,
++                                static_cast<u32>(std::size(indices)), stride);
++    VertexManagerTestPeer::SeedPackedWrap(rotated_manager);
++    const std::vector<u8> oversized(260u * 1024u, 0);
++    VertexManagerTestPeer::Seed(rotated_manager, oversized.data(),
++                                static_cast<u32>(oversized.size()), indices,
++                                static_cast<u32>(std::size(indices)), stride);
++    VertexManagerTestPeer::Commit(rotated_manager, static_cast<u32>(oversized.size()) / stride,
++                                  stride, static_cast<u32>(std::size(indices)), &base_vertex,
++                                  &base_index);
++    if (VertexManagerTestPeer::VertexId(rotated_manager) != 91 ||
++        VertexManagerTestPeer::RetiredGeometryBuffers(rotated_manager) != 1)
++      return FailVertexManagerSmoke(518, "a rotation that failed did not retire its new buffer");
++  }
++  // ...and an upload that fails with the range off retires the fresh buffer
++  // (the fixture's 1 KiB upload arena refuses a 2 KiB packet).
++  if (!s_vertex_manager_smoke_fixture.Reset())
++    return FailVertexManagerSmoke(519, "upload-failure fixture reset failed");
++  SetWebGpuGeometryPackEnabled(1);
++  SetWebGpuGeometryRangeEnabled(0);
++  {
++    VertexManager failed_upload_manager;
++    const std::vector<u8> large(2048u, 7);
++    VertexManagerTestPeer::Seed(failed_upload_manager, large.data(),
++                                static_cast<u32>(large.size()), indices,
++                                static_cast<u32>(std::size(indices)), stride);
++    VertexManagerTestPeer::Commit(failed_upload_manager, static_cast<u32>(large.size()) / stride,
++                                  stride, static_cast<u32>(std::size(indices)), &base_vertex,
++                                  &base_index);
++    if (VertexManagerTestPeer::VertexId(failed_upload_manager) != 0 ||
++        VertexManagerTestPeer::RetiredGeometryBuffers(failed_upload_manager) != 1)
++      return FailVertexManagerSmoke(520, "a failed upload (range off) did not retire its buffer");
++  }
++
++  // 0204: the geometry content cache. Packet P (40 bytes) missed, then
++  // inserted on its second frame, then hit with no record; an insertion that
++  // would overwrite an entry used in this submit is refused, and evicts it in
++  // the next; a placement epoch (save load) keeps the cache, its own setter
++  // empties it.
++  if (!s_vertex_manager_smoke_fixture.Reset())
++    return FailVertexManagerSmoke(521, "cache fixture reset failed");
++  SetWebGpuGeometryPackEnabled(1);
++  SetWebGpuGeometryRangeEnabled(0);
++  SetWebGpuGeometryCacheEnabled(1);
++  {
++    double before[13] = {};
++    double after[13] = {};
++    DolphinWeb_GeometryCacheStats(before);
++    constexpr u8 vertices_r[32] = {9, 9, 9, 9, 8, 8, 8, 8, 7, 7, 7, 7, 6, 6, 6, 6,
++                                   5, 5, 5, 5, 4, 4, 4, 4, 3, 3, 3, 3, 2, 2, 2, 2};
++    VertexManager cache_manager;
++    VertexManagerTestPeer::SetCacheSize(cache_manager, 48);
++    const auto commit = [&](const u8* data) {
++      VertexManagerTestPeer::Seed(cache_manager, data, 32, indices,
++                                  static_cast<u32>(std::size(indices)), stride);
++      VertexManagerTestPeer::Commit(cache_manager, 2, stride,
++                                    static_cast<u32>(std::size(indices)), &base_vertex,
++                                    &base_index);
++    };
++    commit(vertices);    // frame 1: P, first sighting
++    commit(vertices_r);  // frame 1: R, first sighting
++    if (VertexManagerTestPeer::CacheBufferId(cache_manager) != 0 ||
++        VertexManagerTestPeer::DrawFromCache(cache_manager))
++      return FailVertexManagerSmoke(522, "a first sighting was cached");
++    if (!stream.PushSubmitPresent())
++      return FailVertexManagerSmoke(523, "cache fixture could not end frame 1");
++    commit(vertices);  // frame 2: P inserted
++    const u32 cache_id = VertexManagerTestPeer::CacheBufferId(cache_manager);
++    if (cache_id == 0 || !VertexManagerTestPeer::DrawFromCache(cache_manager) ||
++        VertexManagerTestPeer::VertexId(cache_manager) != cache_id || base_vertex != 0 ||
++        base_index != 16)
++      return FailVertexManagerSmoke(524, "a second sighting was not inserted at offset 0");
++    const u32 write_after_insert =
++        s_vertex_manager_smoke_fixture.header.write.load(std::memory_order_acquire);
++    commit(vertices);  // frame 2: P again, a hit
++    if (s_vertex_manager_smoke_fixture.header.write.load(std::memory_order_acquire) !=
++            write_after_insert ||
++        !VertexManagerTestPeer::DrawFromCache(cache_manager) || base_vertex != 0)
++      return FailVertexManagerSmoke(525, "a hit recorded something or drew elsewhere");
++    commit(vertices_r);  // frame 2: R seen before, but the room is P's, used now
++    if (VertexManagerTestPeer::DrawFromCache(cache_manager) ||
++        VertexManagerTestPeer::VertexId(cache_manager) == cache_id)
++      return FailVertexManagerSmoke(526, "an entry used in this submit was overwritten");
++    if (!stream.PushSubmitPresent())
++      return FailVertexManagerSmoke(527, "cache fixture could not end frame 2");
++    commit(vertices_r);  // frame 3: R inserted, evicting P (not used in this submit)
++    if (!VertexManagerTestPeer::DrawFromCache(cache_manager) || base_vertex != 0)
++      return FailVertexManagerSmoke(528, "an old entry was not evicted for a seen packet");
++    SetWebGpuGeometryPackEnabled(1);  // a save load's placement epoch
++    commit(vertices_r);
++    if (!VertexManagerTestPeer::DrawFromCache(cache_manager) ||
++        VertexManagerTestPeer::CacheBufferId(cache_manager) != cache_id)
++      return FailVertexManagerSmoke(529, "a placement epoch emptied the content cache");
++    DolphinWeb_GeometryCacheStats(after);
++    // hits: P once, R once after the epoch; inserts: P, R; blocked: R in frame 2
++    if (after[0] - before[0] != 2 || after[2] - before[2] != 2 || after[6] - before[6] != 1)
++      return FailVertexManagerSmoke(530, "cache statistics disagree with the sequence");
++    const u32 retired_before = VertexManagerTestPeer::RetiredGeometryBuffers(cache_manager);
++    SetWebGpuGeometryCacheEnabled(1);  // init / device loss: emptied
++    commit(vertices_r);
++    if (VertexManagerTestPeer::DrawFromCache(cache_manager) ||
++        VertexManagerTestPeer::RetiredGeometryBuffers(cache_manager) != retired_before + 1)
++      return FailVertexManagerSmoke(531, "the cache setter did not retire the cache");
++  }
++  // #370 review: two laps, the second wrapping earlier than the first ended.
++  // 160-byte ring, stride 16: P1-P3 (40 B) at 0/48/96 (lap 1 ends at 136);
++  // P4, P5 at 0/48 (lap 2, write at 88); P6 (72 B) wraps: the leftover P3 at
++  // 96 must go first, then P4 and P5 (they overlap [0, 72)), once no longer
++  // used in the submit. Before the fix the loop stopped at P3 (no overlap)
++  // and P6 overwrote P4/P5, still in the table: P6 then hit stale bytes.
++  if (!s_vertex_manager_smoke_fixture.Reset())
++    return FailVertexManagerSmoke(532, "two-lap fixture reset failed");
++  SetWebGpuGeometryPackEnabled(1);
++  SetWebGpuGeometryRangeEnabled(0);
++  SetWebGpuGeometryCacheEnabled(1);
++  {
++    u8 packets[6][64] = {};
++    for (u32 p = 0; p < 6; ++p)
++    {
++      for (u32 b = 0; b < 64; ++b)
++        packets[p][b] = static_cast<u8>(p * 31 + b + 1);
++    }
++    VertexManager lap_manager;
++    VertexManagerTestPeer::SetCacheSize(lap_manager, 160);
++    const auto commit = [&](u32 p) {
++      const u32 bytes = p == 5 ? 64 : 32;  // P6: 64 + 6 index bytes = 72
++      VertexManagerTestPeer::Seed(lap_manager, packets[p], bytes, indices,
++                                  static_cast<u32>(std::size(indices)), stride);
++      VertexManagerTestPeer::Commit(lap_manager, bytes / stride, stride,
++                                    static_cast<u32>(std::size(indices)), &base_vertex,
++                                    &base_index);
++    };
++    double s0[13] = {};
++    double s1[13] = {};
++    for (u32 p = 0; p < 6; ++p)
++      commit(p);  // frame 1: all seen
++    if (!stream.PushSubmitPresent())
++      return FailVertexManagerSmoke(533, "two-lap fixture could not end frame 1");
++    for (u32 p = 0; p < 6; ++p)
++      commit(p);  // frame 2: P1-P3 inserted (lap 1); P4-P6 blocked by P1, seen again
++    if (!stream.PushSubmitPresent())
++      return FailVertexManagerSmoke(534, "two-lap fixture could not end frame 2");
++    commit(3);  // frame 3: P4 at 0 (wraps; P1 evicted)
++    commit(4);  // frame 3: P5 at 48 (P2 evicted)
++    commit(5);  // frame 3: P6 wraps, P3 (leftover) evicted, then blocked by P4 (used now)
++    if (!stream.PushSubmitPresent())
++      return FailVertexManagerSmoke(535, "two-lap fixture could not end frame 3");
++    DolphinWeb_GeometryCacheStats(s0);
++    commit(5);  // frame 4: P6 wraps; P4 and P5 (no longer used) evicted
++    if (!VertexManagerTestPeer::DrawFromCache(lap_manager) || base_vertex != 0)
++      return FailVertexManagerSmoke(536, "the second lap's wrap did not insert at 0");
++    commit(4);  // P5 was overwritten: it must not hit, it is inserted again
++    DolphinWeb_GeometryCacheStats(s1);
++    if (s1[0] - s0[0] != 0 || s1[2] - s0[2] != 2)
++      return FailVertexManagerSmoke(537, "a wrap overwrote an entry without evicting it");
++    // the setter at 0 retires the cache buffer at the next commit
++    const u32 retired_before_off = VertexManagerTestPeer::RetiredGeometryBuffers(lap_manager);
++    SetWebGpuGeometryCacheEnabled(0);
++    commit(0);
++    if (VertexManagerTestPeer::CacheBufferId(lap_manager) != 0 ||
++        VertexManagerTestPeer::DrawFromCache(lap_manager) ||
++        VertexManagerTestPeer::RetiredGeometryBuffers(lap_manager) != retired_before_off + 1)
++      return FailVertexManagerSmoke(538, "turning the cache off did not retire its buffer");
++  }
++  // #370 review, second: a stride change leaves an alignment gap
++  // [write, aligned) where a small leftover can stand. 256-byte ring: A[0,40)
++  // B[40,60) C[60,200) D[200,240) (stride 4), E (36 B) wraps to [0,36), F
++  // (stride 64, 72 B) goes to [64,136): B, in the gap, and C, under the slot,
++  // must both go. The loop used to stop at B and overwrite C.
++  if (!s_vertex_manager_smoke_fixture.Reset())
++    return FailVertexManagerSmoke(539, "stride-change fixture reset failed");
++  SetWebGpuGeometryPackEnabled(1);
++  SetWebGpuGeometryRangeEnabled(0);
++  SetWebGpuGeometryCacheEnabled(1);
++  {
++    struct Packet { u32 vertex_bytes; u32 stride; };
++    constexpr Packet packets[6] = {{32, 4}, {12, 4}, {132, 4}, {32, 4}, {28, 4}, {64, 64}};
++    std::vector<u8> data(256);
++    VertexManager gap_manager;
++    VertexManagerTestPeer::SetCacheSize(gap_manager, 256);
++    const auto commit = [&](u32 p) {
++      for (u32 b = 0; b < data.size(); ++b)
++        data[b] = static_cast<u8>(p * 37 + b + 3);
++      VertexManagerTestPeer::Seed(gap_manager, data.data(), packets[p].vertex_bytes, indices,
++                                  static_cast<u32>(std::size(indices)), packets[p].stride);
++      VertexManagerTestPeer::Commit(gap_manager, packets[p].vertex_bytes / packets[p].stride,
++                                    packets[p].stride, static_cast<u32>(std::size(indices)),
++                                    &base_vertex, &base_index);
++    };
++    for (u32 p = 0; p < 6; ++p)
++      commit(p);  // frame 1: all seen
++    if (!stream.PushSubmitPresent())
++      return FailVertexManagerSmoke(540, "stride-change fixture could not end frame 1");
++    for (u32 p = 0; p < 6; ++p)
++      commit(p);  // frame 2: A-D inserted at 0/40/60/200; E, F blocked by A, seen again
++    if (!stream.PushSubmitPresent())
++      return FailVertexManagerSmoke(541, "stride-change fixture could not end frame 2");
++    double g0[13] = {};
++    double g1[13] = {};
++    DolphinWeb_GeometryCacheStats(g0);
++    commit(4);  // frame 3: E wraps to 0 (A evicted)
++    commit(5);  // frame 3: F at 64: B (gap) and C (under the slot) evicted
++    if (!VertexManagerTestPeer::DrawFromCache(gap_manager) || base_vertex != 1)
++      return FailVertexManagerSmoke(542, "the stride-64 packet was not placed at 64");
++    commit(2);  // C was overwritten by F: it must not hit
++    DolphinWeb_GeometryCacheStats(g1);
++    if (g1[0] - g0[0] != 0 || !VertexManagerTestPeer::LiveEntriesDisjoint(gap_manager))
++      return FailVertexManagerSmoke(543, "a stride change overwrote a live entry");
++  }
++  SetWebGpuGeometryCacheEnabled(0);
++  // The ring alone, randomized: mixed strides and sizes, submits ending every
++  // few packets, some entries used in the current submit. After each
++  // reservation no two live entries overlap, and none used in the current
++  // submit was evicted.
++  {
++    VertexManager ring_manager;
++    VertexManagerTestPeer::SetCacheSize(ring_manager, 1024);
++    u32 rng = 0x12345678u;
++    const auto next = [&rng] {
++      rng = rng * 1664525u + 1013904223u;
++      return rng >> 8;
++    };
++    u64 submit = 1;
++    std::vector<std::pair<u64, u32>> used_now;  // (id, bytes) used in this submit
++    u32 placed = 0;
++    for (u64 id = 1; id <= 20000; ++id)
++    {
++      if (next() % 6 == 0)
++      {
++        ++submit;
++        used_now.clear();
++      }
++      const u32 stride = 4u * (1u + next() % 16u);
++      const u32 bytes = 4u * (1u + next() % 48u);
++      const std::optional<u32> slot =
++          VertexManagerTestPeer::Reserve(ring_manager, bytes, stride, submit);
++      for (const auto& [used_id, used_bytes] : used_now)
++      {
++        if (!VertexManagerTestPeer::Use(ring_manager, used_id, used_bytes, submit))
++          return FailVertexManagerSmoke(544, "an entry used in this submit was evicted");
++      }
++      if (!slot)
++        continue;
++      if (*slot % stride != 0)
++        return FailVertexManagerSmoke(545, "a slot is not aligned to its stride");
++      VertexManagerTestPeer::Place(ring_manager, id, *slot, bytes, submit);
++      ++placed;
++      if (next() % 3 == 0)
++        used_now.emplace_back(id, bytes);
++      if (!VertexManagerTestPeer::LiveEntriesDisjoint(ring_manager))
++        return FailVertexManagerSmoke(546, "the ring overwrote a live entry");
++    }
++    if (placed < 10000)
++      return FailVertexManagerSmoke(547, "the randomized ring placed too few packets");
++  }
++  SetWebGpuGeometryCacheEnabled(0);
+   SetWebGpuGeometryRangeEnabled(0);
+ 
+   SetWebGpuGeometryPackEnabled(0);
+diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.h b/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.h
+--- a/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.h
++++ b/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.h
+@@ -3,6 +3,10 @@
+ 
+ #pragma once
+ 
++#include <deque>
++#include <optional>
++#include <unordered_map>
++#include <unordered_set>
+ #include <vector>
+ 
+ #include "Common/CommonTypes.h"
+@@ -16,6 +20,11 @@ void InvalidateGeometryUploadPack();
+ bool IsGeometryUploadRangeEnabled();
+ u64 GetGeometryUploadRangeEpoch();
+ void InvalidateGeometryUploadRange();
++// 0204: the geometry content cache (?wgpugeomcache=1; mode bit 1 adds the
++// sampled byte comparison of hits, diagnostics only).
++bool IsGeometryCacheEnabled();
++bool IsGeometryCacheCompareEnabled();
++u64 GetGeometryCacheEpoch();
+ 
+ // Day-33 A3: a real VertexManagerBase for the remote WebGPU backend.
+ //
+@@ -48,13 +57,19 @@ public:
+   // also owns pipeline/framebuffer/texture/UBO state). Draw recording
+   // therefore goes through the base DrawCurrentBatch → g_gfx->
+   // DrawIndexed path rather than being overridden here.
++  // 0204: the last committed batch is in the content cache's buffer (a hit or
++  // an insertion) or in the stream buffer.
+   u32 GetVertexBufferId() const
+   {
+-    return m_geometry_pack_active ? m_geometry_buffer_id : m_vertex_buffer_id;
++    if (!m_geometry_pack_active)
++      return m_vertex_buffer_id;
++    return m_draw_from_cache ? m_cache_buffer_id : m_geometry_buffer_id;
+   }
+   u32 GetIndexBufferId() const
+   {
+-    return m_geometry_pack_active ? m_geometry_buffer_id : m_index_buffer_id;
++    if (!m_geometry_pack_active)
++      return m_index_buffer_id;
++    return m_draw_from_cache ? m_cache_buffer_id : m_geometry_buffer_id;
+   }
+ 
+   // The range path keeps geometry bytes private until the owning render pass
+@@ -121,6 +136,68 @@ private:
+   bool m_geometry_pack_active = false;
+   PendingGeometryRange m_pending_geometry_range;
+   std::vector<u32> m_retired_geometry_buffers;
++
++  // 0204: the geometry content cache. A packet (vertex then index bytes, as
++  // uploaded) seen in the previous frame is copied once into a persistent
++  // buffer of its own; later commits of the same bytes draw from there and
++  // upload nothing. Keyed by XXH3-128, size and stride. The buffer is a ring:
++  // entries leave in insertion order, never one used in the current submit
++  // (the copy into it would land before that submit's draws). Content keeps
++  // its meaning across save loads and resets, so placement epochs do not
++  // touch it; only its own setter (init, device loss) clears it.
++  enum class GeometryCacheResult
++  {
++    Miss,    // not served: the stream path takes it
++    Served,  // a hit or an insertion: out_base_* point into the cache
++    Failed,  // the insertion's upload was refused: no placement
++  };
++  struct GeometryCacheKey
++  {
++    u64 lo = 0;
++    u64 hi = 0;
++    u32 bytes = 0;
++    u32 stride = 0;
++    bool operator==(const GeometryCacheKey& other) const
++    {
++      return lo == other.lo && hi == other.hi && bytes == other.bytes && stride == other.stride;
++    }
++  };
++  struct GeometryCacheKeyHash
++  {
++    size_t operator()(const GeometryCacheKey& key) const
++    {
++      return static_cast<size_t>(key.lo ^ (key.hi * 0x9E3779B97F4A7C15ull) ^ key.bytes ^
++                                 (static_cast<u64>(key.stride) << 32));
++    }
++  };
++  struct GeometryCacheEntry
++  {
++    u32 offset = 0;
++    u32 packet_bytes = 0;
++    u64 used_submit = 0;
++    std::vector<u8> sample;  // the bytes, for the sampled comparison
++  };
++  GeometryCacheResult TryGeometryCache(u32 vertex_bytes, u32 index_bytes, u32 packet_bytes,
++                                       u32 vertex_stride, u32* out_base_vertex,
++                                       u32* out_base_index);
++  void ResetGeometryCache();
++  std::optional<u32> ReserveGeometryCacheSlot(u32 packet_bytes, u32 vertex_stride,
++                                              u64 submit_serial);
++  static constexpr u32 kGeometryCacheSize = 32u * 1024u * 1024u;
++  static constexpr u32 kGeometryCacheInsertCapPerFrame = 1024u * 1024u;
++  u32 m_cache_size = kGeometryCacheSize;  // smaller in the smoke
++  u32 m_cache_buffer_id = 0;
++  u32 m_cache_write = 0;
++  u64 m_cache_epoch = 0;
++  u64 m_cache_submit = 0;
++  u32 m_cache_inserted_this_frame = 0;
++  u32 m_cache_inserts = 0;
++  bool m_draw_from_cache = false;
++  bool m_last_draw_from_cache = false;
++  std::unordered_map<GeometryCacheKey, GeometryCacheEntry, GeometryCacheKeyHash> m_cache_entries;
++  std::deque<GeometryCacheKey> m_cache_order;
++  std::unordered_set<GeometryCacheKey, GeometryCacheKeyHash> m_cache_seen_previous;
++  std::unordered_set<GeometryCacheKey, GeometryCacheKeyHash> m_cache_seen_current;
+ };
+ 
+ // Native wasm regression seams that exercise VertexManager::CommitBuffer

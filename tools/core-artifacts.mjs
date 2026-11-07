@@ -6,7 +6,7 @@
 // The committed core therefore always comes from CI, and main's history is the
 // index from a core hash to its exact bytes. See docs/repro-build.md.
 //
-//   node tools/core-artifacts.mjs status [--require-current]
+//   node tools/core-artifacts.mjs status [--checkout <dir>] [--require-current]
 //       Was cores/dolphin built from this checkout's sources and locks?
 //   node tools/core-artifacts.mjs check --base <ref> [--mode warn|enforce]
 //       Does this branch change core-derived content relative to <ref>?
@@ -152,14 +152,19 @@ export async function stagedCoreArtifactChanges({ cwd = root } = {}) {
 // Also usable in the middle of `git merge <base>`: the ABI manifest is then
 // read from the branch's side of the conflict (index stage 2), and the one
 // conflict this scheme itself creates in src/upstream-worker-protocol.js --
-// the branch's old hash declaration against base's core.lock.json import --
+// a branch's old hash declaration (from before the pin became data, 18/10)
+// against base's side, which now points to src/default-core.js (the page
+// module that imports core.lock.json; earlier, the protocol imported it) --
 // is resolved to base's side. Any other conflict there is left to the user.
 export const PROTOCOL_PATH = "src/upstream-worker-protocol.js";
 const OLD_PIN = /^export const DEFAULT_UPSTREAM_CORE_SHA256 = "[0-9a-f]{64}";\n$/;
+// What base's side of that hunk holds: the import of the data pin (main
+// from 18/10 to #303), or the pointer to the module that now holds it.
+const NEW_PIN_SIDE = /"\.\.\/cores\/dolphin\/core\.lock\.json"|\bsrc\/default-core\.js\b/;
 
 export function resolvePinConflict(text) {
   return text.replace(/^<<<<<<< [^\n]*\n([\s\S]*?)^=======\n([\s\S]*?)^>>>>>>> [^\n]*\n/gm, (hunk, ours, theirs) =>
-    OLD_PIN.test(ours) && theirs.includes('from "../cores/dolphin/core.lock.json" with { type: "json" }')
+    OLD_PIN.test(ours) && NEW_PIN_SIDE.test(theirs)
       ? theirs
       : hunk);
 }
@@ -402,7 +407,9 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   };
   try {
     if (command === "status") {
-      const status = await coreStatus();
+      // --checkout <dir>: another tree (an exported ref), judged by this
+      // tree's code (the CI bench: a ref never certifies its own core).
+      const status = await coreStatus(resolve(option("--checkout", root)));
       console.log(status.current
         ? `cores/dolphin (${status.coreId}) is the build of these sources.`
         : `cores/dolphin (${status.coreId}) is not the build of these sources:\n  ${status.reasons.join("\n  ")}`);

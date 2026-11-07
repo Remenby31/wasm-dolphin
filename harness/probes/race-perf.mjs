@@ -10,10 +10,10 @@
 //
 //   node harness/probes/race-perf.mjs --iso disc.iso --state scene.sav --port N
 //     [--baseline <git ref | dir>] [--candidate <git ref | dir>]   (default: this tree)
-//     [--config wgpu | --query "..."] [--warmup 25] [--secs 20]
+//     [--config wgpu | --query "..."] [--phase steady|postload] [--warmup 25] [--secs 20]
 //     [--runs 4 (even with --baseline)] [--min-pairs 4] [--hold KeyX] [--warm]
 //     [--max-load L] [--load-wait 300] [--lock-wait 1800]
-//     [--counters [--counter-events frontend|e1,e2 | macOS: delivery|discarded|discarded_indirect|bottlenecks]] [--pcsample [periodMs]] [--symbols functions.json] [--out dir]
+//     [--counters [--counter-events frontend|e1,e2 | macOS: delivery|discarded|discarded_indirect|bottlenecks]] [--pcsample [periodMs] [--pc-raw]] [--symbols functions.json] [--out dir]
 //     [--headroom [--frames-per-vi-ref R]] [--display] [--unique-frames secs] [--region-sample N [--region-secs 10]] [--mem-stats [--mem-warm 5]] [--baseline-query "..."]
 //     [--calm-wait S (default --lock-wait): wait for load ≤ --max-load before taking the lock]
 //     [--chrome-args "--flag …"] [--baseline-chrome-args "--flag …"]
@@ -56,6 +56,13 @@
 //   perKiloGuestCycles (host cycles, and the cycles each fraction stands
 //   for, per 1000 guest cycles), with perKiloChange in a pair. Each trace
 //   (~150 MB a second) is deleted once read.
+// - --run-timeout S (default 1800, 0 = none): a side's measure that has not
+//   ended after S host seconds fails its run (timedOut); the session closes,
+//   the window's counters stop, and two such runs in a row give up the rest.
+// - A homebrew (harness/homebrew/out or the committed fixtures, the only discs
+//   allowed in CI) needs no --state: it is measured from its boot.
+//   --pin-cpu-thread N (Linux) then moves the busiest renderer thread, the
+//   emulated CPU thread, alone onto vCPU N (.github/workflows/bench.yml).
 // - --emulated-window S: the window is S GUEST seconds instead of --secs host
 //   seconds. With a host-time window the faster side covers another stretch
 //   of the scene (another idle share), which biases the pair (PROGRAM.md,
@@ -72,7 +79,9 @@
 //   --region-sample N, after the speed window (never during it: the counters
 //   and their timers cost time), a separate stats window of --region-secs
 //   resets them (host time sampled on 1 call in N, 0 = counters only) and
-//   reads them. summary.json carries the pooled shares of the cold stats
+//   reads them. Since 0215 the tops and gauges in them (topMiss, the miss
+//   table, regionsQueued, entriesMapped...) can be up to 250 ms old; the
+//   times and cycles are current (lib/jit-region-stats.mjs). summary.json carries the pooled shares of the cold stats
 //   windows as p4 (candidate) and baselineP4; a core without the export
 //   gives p4: null with the reason (p4Why), never a failure. A core with the
 //   256-byte struct also gives the idle-skipped cycles, taken out of
@@ -80,6 +89,29 @@
 //   (idleTimeShare), and its diagnostics (p4.diagnostics). The speed
 //   windows are identical with or without it; p4 is compared between sides
 //   only when both have it (p4Compare).
+// - --worker-read a,b: worker requests (cumulative counters, e.g. a patch's
+//   validationRead* export) called just before and just after the speed
+//   window; each window carries workerReads[name] = { start, end, delta }
+//   (delta: end - start per numeric field but the reply's id). A request the core lacks gives
+//   its error, never a failure.
+// - Integrity (glitch-meter G2, lib/integrity.mjs): every window reads the
+//   replay's validationReadIntegrity before and after; a fatal counter that
+//   moved (a pass lost to an upload timeout, a skipped draw, a dropped
+//   record, a missing resource, an uncaptured error...) makes the run
+//   invalid ("integrity: ..."). --integrity-allow a,b tolerates named
+//   counters; a worker without the request is reported, never failed. Until
+//   0207, a postload window reports batchAborts without failing on it.
+// - Liveness: in a steady window at speed >= 95 %, a picture that changes
+//   fewer than --frozen-fps times a second (default 10; median of
+//   visualChangeFps read at the start, middle and end) is FROZEN, the run
+//   invalid: the emulator runs but the screen does not move.
+// - --worker-set 'name={json}' (candidate) / --baseline-worker-set (baseline,
+//   default none): validationSet* worker requests sent once the side's page
+//   is open, before its windows, e.g. a diagnosis perturbation on one side
+//   only ('validationSetWgpuPerturbation={"readbackNoMap":true}'); several
+//   separated by ';'. Each reply is kept in the run (workerSets).
+// - --headless: Chrome headless even when HARNESS_DISPLAY says x11 (the
+//   summary's chrome.display and chrome.displayArgs give the mode used).
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -89,24 +121,65 @@ import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 
 import { exportRef } from "../cli.mjs";
-import { ensureServer, loadHarnessState, readCoreProgress, readFrameInfo, readTimeline, REPO_ROOT, workerRequest } from "../lib/browser.mjs";
-import { PRESETS, SCENE_PROTOCOLS, sceneProtocolCheck } from "../lib/matrix.mjs";
+import { defaultDisplay, ensureServer, loadHarnessState, readCoreProgress, readFrameInfo, readTimeline, REPO_ROOT, workerRequest, X11_ARGS } from "../lib/browser.mjs";
+import { newFramesRate, PRESETS, SCENE_PROTOCOLS, sceneProtocolCheck, visualProbeCheck, xfbDecodeOff } from "../lib/matrix.mjs";
 import { claim, release } from "../lib/ownership.mjs";
 import { acquirePerfLock } from "../lib/perf-lock.mjs";
+import { MIN_BATTERY_PERCENT, powerDrained, powerSnapshot } from "../lib/system.mjs";
 import { openSession, rebootSession } from "../lib/session.mjs";
-import { calmThenLock, calmUnderLock, loadGaveUp } from "../lib/env.mjs";
+import { calmThenLock, calmUnderLock, defaultMaxLoad, loadGaveUp } from "../lib/env.mjs";
+import { benchLane, gpuGateApplies } from "../lib/bench-load.mjs";
 import { describe, median, percentile, round } from "../lib/stats.mjs";
 import { coreStats, displayStats, hitchList, mergeTimeline, presentationStats } from "../lib/timeline.mjs";
 import { consistentRead, decodeRegionStats, poolStats, regionShares, topMisses } from "../lib/jit-region-stats.mjs";
 import { consistentMemRead, decodeMemStats, memAccessShares, poolMemStats } from "../lib/mem-access-stats.mjs";
-import { consistentHeadroomRead, decodeHeadroomStats, headroomOf, invalidReasons, querySpeed, unlimitedAllowed } from "../lib/headroom.mjs";
+import { consistentHeadroomRead, decodeHeadroomStats, FROZEN_FPS, frozenReason, headroomOf, invalidReasons, pacingExpectation, querySpeed, unlimitedAllowed } from "../lib/headroom.mjs";
+import { runSteps, validateSteps } from "../lib/steps.mjs";
 import { summarizePcSamples } from "../../src/harness-pc-sampler.js";
-import { checkPerfAccess, counterEvents, cyclesPerGuestCycle, instructionsPerGuestCycle, perfCounters } from "../lib/perf-counters.mjs";
-import { checkXctrace, freeDiskGB, perKiloGuestCycles, XCTRACE_MIN_FREE_GB, xctraceCounters } from "../lib/xctrace-counters.mjs";
+import { busiestThread, checkPerfAccess, counterEvents, counterSanity, cyclesPerGuestCycle, instructionsPerGuestCycle, perfCounters } from "../lib/perf-counters.mjs";
+import { checkXctrace, freeDiskGB, perKiloGuestCycles, xctraceCounters, xctraceNeedGB } from "../lib/xctrace-counters.mjs";
 import { emulatedStart } from "../lib/emulated-window.mjs";
+import { integrityBrief, integrityOf, parseIntegrityAllow, readIntegrity, treeHasIntegrity } from "../lib/integrity.mjs";
 
 const HOMEBREW_OUT = path.join(REPO_ROOT, "harness", "homebrew", "out");
+// Our homebrews only (no game content): built locally (out/) or the
+// committed fixtures; the only discs race-perf runs in CI.
+const HOMEBREW_FIXTURES = path.join(REPO_ROOT, "harness", "homebrew", "fixtures");
+export const isHomebrew = (iso) => [HOMEBREW_OUT, HOMEBREW_FIXTURES].some((d) => iso.startsWith(d + path.sep));
 export const STATE_ROUTE = "**/__harness_state.sav";
+// What the engine under measure runs besides the game, as far as the numbers
+// go: an A/B or a noise reading compares only results of the same version.
+// Unset in a summary (1): before #386. 2: the product turns the 0113
+// headroom counters on in every run (a clock read per Throttle and per GPU
+// pass with work, present sleeps timed) and times the worker's entry points
+// (occupancy stats), --headroom or not.
+export const PROBE_VERSION = 2;
+
+// The host CPU model (Linux: lscpu "Model name"), read with each window of a
+// pinned run: the CI bench pairs only windows of the same model (a runner
+// can be live-migrated).
+export function cpuModel() {
+  try {
+    return /^Model name:\s*(.+)$/m.exec(execFileSync("lscpu", { encoding: "utf8" }))?.[1]?.trim() ?? null;
+  } catch {
+    return null;
+  }
+}
+
+// The busiest renderer thread (the emulated CPU thread once the game runs)
+// moved alone onto `cpu` (taskset -p); { tid, cpu } or { error }.
+export async function pinBusiestThread(profileDir, cpu) {
+  if (process.platform !== "linux") return { error: "--pin-cpu-thread: Linux only" };
+  try {
+    const best = await busiestThread(profileDir, 1500, { withShare: true });
+    if (!best) return { error: "no renderer thread" };
+    execFileSync("taskset", ["-p", "-c", String(cpu), String(best.tid)], { stdio: "ignore" });
+    const comm = readFileSync(`/proc/${best.tid}/comm`, "utf8").trim();
+    return { tid: Number(best.tid), thread: comm, busyPct: best.busyPct, cpu };
+  } catch (error) {
+    return { error: String(error?.message || error).slice(0, 200) };
+  }
+}
 
 export function sideOrder(run) {
   return run % 2 === 1 ? ["baseline", "candidate"] : ["candidate", "baseline"];
@@ -116,14 +189,43 @@ export function sideOrder(run) {
 // pair counts only when both sides measured; the conclusion needs at least
 // `minPairs` pairs, as many with trunk first as with head first (drift over
 // a campaign then hits both sides alike), otherwise it is withheld.
+// A pair whose ln(candidate / baseline) lies more than OUTLIER_MADS robust
+// standard deviations (1.4826 x the median absolute deviation) AND more than
+// OUTLIER_MIN (5 %) from the pairs' median is set aside, named in `excluded`
+// (layout A/A' 2026-10-24: one window at -25 % among pairs within 1 %); the
+// floor keeps ordinary noise in when a few pairs agree so closely that the
+// MAD is a fraction of a percent. The latest extra pairs of the larger order
+// then go too, so both orders stay equal.
+export const OUTLIER_MADS = 3;
+export const OUTLIER_MIN = 0.05;
+export function outlierPairs(pairs) {
+  if (pairs.length < 4) return [];
+  const lr = pairs.map((p) => Math.log1p(p.ratio));
+  const m = median(lr), mad = median(lr.map((x) => Math.abs(x - m)));
+  if (!(mad > 0)) return [];
+  return pairs.filter((p, i) => Math.abs(lr[i] - m) > Math.max(OUTLIER_MADS * 1.4826 * mad, OUTLIER_MIN));
+}
+
 export function pairedSpeedChange(runs, { metric = "speed", minPairs = 4, phase = "cold" } = {}) {
-  const pairs = [];
+  let pairs = [];
   for (const r of runs) {
     const b = r.baseline?.[phase]?.[metric], c = r.candidate?.[phase]?.[metric];
     if (Number.isFinite(b) && Number.isFinite(c) && b > 0) pairs.push({ run: r.run, first: sideOrder(r.run)[0], ratio: c / b - 1 });
   }
+  const perRun = pairs.map((p) => round(p.ratio * 100, 1));
+  const excluded = outlierPairs(pairs).map((p) => ({ run: p.run, pct: round(p.ratio * 100, 1), why: `outlier: more than ${OUTLIER_MADS} MAD and ${OUTLIER_MIN * 100} % from the pairs' median` }));
+  pairs = pairs.filter((p) => !excluded.some((x) => x.run === p.run));
+  if (excluded.length) {
+    for (;;) {
+      const ab = pairs.filter((p) => p.first === "baseline"), ba = pairs.filter((p) => p.first !== "baseline");
+      if (ab.length === ba.length) break;
+      const extra = (ab.length > ba.length ? ab : ba).at(-1);
+      excluded.push({ run: extra.run, pct: round(extra.ratio * 100, 1), why: "order balance after an outlier" });
+      pairs = pairs.filter((p) => p !== extra);
+    }
+  }
   const baseFirst = pairs.filter((p) => p.first === "baseline").length;
-  const out = { pairs: pairs.length, baselineFirst: baseFirst, candidateFirst: pairs.length - baseFirst, perRun: pairs.map((p) => round(p.ratio * 100, 1)), median: null, withheld: null };
+  const out = { pairs: pairs.length, baselineFirst: baseFirst, candidateFirst: pairs.length - baseFirst, perRun, ...(excluded.length ? { excluded } : {}), median: null, withheld: null };
   if (pairs.length < minPairs) out.withheld = `${pairs.length} valid pair(s), at least ${minPairs} needed`;
   else if (baseFirst !== pairs.length - baseFirst) out.withheld = `order unbalanced: trunk first in ${baseFirst} pair(s), head first in ${pairs.length - baseFirst}`;
   else out.median = round(median(pairs.map((p) => p.ratio)) * 100, 1);
@@ -144,13 +246,31 @@ function linuxThreadTicks(pid) {
 }
 let clockTicks = null;
 
-// %CPU of each thread of `pid` now: ps -M on macOS (the first row is the
-// process total); on Linux, /proc over 500 ms (ps -L reports a lifetime
-// average); null where there is no per-thread view (Windows).
+// System + user CPU seconds of each thread of `pid` (macOS ps -M: a header,
+// then one row per thread, the first being the main thread, not a total;
+// both times as [m]m:ss.ss).
+export function darwinThreadSeconds(pid, text = null) {
+  const sec = (t) => { const [m, r] = t.split(":"); return Number(m) * 60 + Number(r); };
+  const out = text ?? execFileSync("ps", ["-M", "-p", String(pid)], { encoding: "utf8" });
+  return out.split("\n").slice(1).filter(Boolean).map((l) => {
+    const t = l.match(/\d+:\d+\.\d+/g) ?? [];
+    return t.length >= 2 ? sec(t[0]) + sec(t[1]) : null;
+  }).filter((x) => x != null);
+}
+
+// %CPU of each thread of `pid` now, over 500 ms: on macOS from each thread's
+// system + user time (ps -M, in the kernel's order; its %cpu column is a
+// decaying average that still carries the boot: a thread at 18 % read 60 %,
+// review of #292); on Linux from /proc (ps -L reports a lifetime average);
+// null where there is no per-thread view (Windows).
 function threadCpus(pid) {
   if (process.platform === "darwin") {
-    return execFileSync("ps", ["-M", "-o", "%cpu=", "-p", pid], { encoding: "utf8" })
-      .split("\n").map((l) => Number(l.trim().split(/\s+/).at(-1))).filter(Number.isFinite).slice(1);
+    const a = darwinThreadSeconds(pid);
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 500);
+    const b = darwinThreadSeconds(pid);
+    // threads matched by row; a thread started or ended in between shifts the rows
+    if (a.length !== b.length) return null;
+    return b.map((t, i) => Math.round((1000 * (t - a[i])) / 0.5) / 10);
   }
   if (process.platform === "linux") {
     clockTicks ??= Number(execFileSync("getconf", ["CLK_TCK"], { encoding: "utf8" }).trim()) || 100;
@@ -164,10 +284,22 @@ function threadCpus(pid) {
 
 // The renderer of this profile and the CPU of its busiest threads.
 export function rendererThreads(profileDir) {
+  return processThreads(profileDir, "renderer");
+}
+
+// The same for Chrome's GPU process (Dawn's command execution and the
+// compositor that hands out BeginFrames): on the Spark the emulator's
+// presents finished ~11 ms late with the GPU itself at 17 %, whatever the
+// resolution or the GPU clock, where a blank WebGPU page had no lag.
+export function gpuProcessThreads(profileDir) {
+  return processThreads(profileDir, "gpu-process");
+}
+
+function processThreads(profileDir, type) {
   if (!["darwin", "linux"].includes(process.platform)) return { error: `no per-thread CPU on ${process.platform}` };
   try {
     const ps = execFileSync("ps", ["-A", "-o", "pid=,command="], { encoding: "utf8", maxBuffer: 32 << 20 });
-    const pids = ps.split("\n").filter((l) => l.includes(profileDir) && l.includes("--type=renderer")).map((l) => l.trim().split(/\s+/)[0]);
+    const pids = ps.split("\n").filter((l) => l.includes(profileDir) && l.includes(`--type=${type}`)).map((l) => l.trim().split(/\s+/)[0]);
     let best = null;
     for (const pid of pids) {
       const threads = threadCpus(pid).sort((a, b) => b - a);
@@ -182,8 +314,15 @@ export function rendererThreads(profileDir) {
 // Load the scene, hold the key, settle, then a window with no page call.
 export async function measure(session, o) {
   const { page } = session;
-  const loaded = await loadHarnessState(page, session.url);
-  if (!loaded?.loaded) throw new Error(`savestate load failed: ${JSON.stringify(loaded)}`);
+  // A homebrew (no savestate) is measured from its boot.
+  // --steps: a scene from input steps after the boot (e.g. menus → race).
+  if (o.steps) {
+    await runSteps(page, o.steps);
+  } else if (o.state) {
+    const loaded = await loadHarnessState(page, session.url);
+    if (!loaded?.loaded) throw new Error(`savestate load failed: ${JSON.stringify(loaded)}`);
+  }
+  let pinned = null;
   // --emulated-window: the key is pressed while the core is paused, and the
   // warmup and the window are counted in guest seconds (lib/emulated-window.mjs).
   if (o.hold && !o.emulatedWindow) await page.keyboard.down(o.hold);
@@ -196,43 +335,98 @@ export async function measure(session, o) {
     const sampling = Boolean(pcStart?.started);
     // o.onWindow (race-multi's hardware counters): called just before and
     // just after the window, from node only (no page call inside it).
+    // --pin-cpu-thread N (Linux): the emulated CPU thread alone on vCPU N
+    // (the CI bench leaves its SMT sibling idle and the rest of Chrome on
+    // the other core, through HARNESS_CHROME_PATH's taskset). After the
+    // warmup and over 1.5 s: right after boot a V8 compile thread can be
+    // the busiest (CI pilot, 2026-10-23).
+    if (o.pinCpuThread != null) pinned = await pinBusiestThread(session.profileDir, o.pinCpuThread);
     if (o.onWindow) await o.onWindow("start", session);
     await readTimeline(page); // drop everything before the window
     // --headroom (0113): the counters reset and the core ticks read just
     // before the window, both read again just after it.
     const hrStart = o.headroom ? await headroomRead(page, 0) : null;
+    // speed=unlimited with a renderer: the core's own pacing config (0150),
+    // the proof that SyncOnSkipIdle is what the side claims (pacingExpectation).
+    const pacingConfig = pacingExpectation(new URL(session.url).search, { decoupledUnlimited: o.decoupledUnlimited })
+      ? await workerRequest(page, "validationReadPacingConfig", {}, 10000).catch((e) => ({ error: String(e.message || e) }))
+      : undefined;
     // A scene whose region stats must cover the window itself (matrix.mjs
     // regionStatsInWindow): reset now, read just after the window.
     const regionInWindow = o.regionInWindow && o.regionSample != null;
+    const readsStart = await workerReads(page, o.workerRead);
+    const integrityStart = await readIntegrity(page, { expected: o.integrityExpected });
     if (regionInWindow) await workerRequest(page, "validationReadJitRegionStats", { sampleEvery: o.regionSample }, 10000);
     // The emulated time this host-time window covers (judge, 2026-10-22: a
     // faster side covers more of the scene): core ticks just before and just
     // after, outside the window.
     const ticksBefore = (await readCoreProgress(page).catch(() => null))?.coreTicks ?? null;
+    // Liveness: the picture's change rate (visualChangeFps) at the start, the
+    // middle and the end of the window (lib/headroom.mjs frozenReason). The
+    // same readings carry the new frames shown (patch 0208): their mean over
+    // the window, and the worker's 500 ms rate at each reading.
+    const infoStart = await readFrameInfo(page).catch(() => null);
+    const visualFps = [infoStart?.vis ?? null];
+    const newFps = [infoStart?.newFps ?? null];
+    const newProduced = [infoStart?.newProduced ?? null];
     const t0 = await page.evaluate(() => performance.timeOrigin + performance.now());
     // The window: node timers only. The rings (VI 8192, presents 16384)
     // hold far more than a window, so nothing is read until it ends.
-    const loads = [], threads = [];
-    // Emulated: node polls the guest ticks (one worker call per poll).
+    const loads = [], threads = [], gpuThreads = [];
+    // On the bench, the foreign runnable threads on Salon's cpus 10-19 with
+    // each load sample (lib/bench-load.mjs): the window is judged on them,
+    // load1 counting Excalibur's busy cpus 0-9 too.
+    // At most once a second: a /proc scan, and the emulated window polls
+    // every --emulated-poll-ms.
+    const salon = [];
+    let salonAt = -Infinity;
+    // and the GPU (shared, its memory the machine's) at the window's start
+    const gpuStart = o.benchGpu ? o.benchGpu() : null;
+    // and the memory (available, pressure, major faults, swap-ins)
+    const pressStart = o.benchMem ? o.benchMem() : null;
+    const sampleLoad = () => {
+      loads.push(os.loadavg()[0]);
+      if (!o.benchSalon || performance.now() - salonAt < 1000) return;
+      salonAt = performance.now();
+      salon.push(o.benchSalon());
+    };
+    // Emulated: node polls the guest ticks (one worker call per poll); its
+    // liveness has the start and end readings only.
     const emulated = emu && await emu.window(o.emulatedWindow, {
       poll: (t, fraction) => {
-        loads.push(os.loadavg()[0]);
-        if (fraction >= 0.5 && threads.length === 0) threads.push(rendererThreads(session.profileDir));
+        sampleLoad();
+        if (fraction >= 0.5 && threads.length === 0) {
+          threads.push(rendererThreads(session.profileDir));
+          gpuThreads.push(gpuProcessThreads(session.profileDir));
+        }
       }
     });
     for (let s = 0; !emu && s < o.secs; s += 1) {
       await new Promise((r) => setTimeout(r, 1000));
-      loads.push(os.loadavg()[0]);
-      if (s === Math.floor(o.secs / 2)) threads.push(rendererThreads(session.profileDir));
+      sampleLoad();
+      if (s === Math.floor(o.secs / 2)) {
+        threads.push(rendererThreads(session.profileDir));
+        gpuThreads.push(gpuProcessThreads(session.profileDir));
+        const mid = await readFrameInfo(page).catch(() => null);
+        visualFps.push(mid?.vis ?? null);
+        newFps.push(mid?.newFps ?? null);
+        newProduced.push(mid?.newProduced ?? null);
+      }
     }
+    const info = await readFrameInfo(page);
+    visualFps.push(info?.vis ?? null);
+    newFps.push(info?.newFps ?? null);
+    newProduced.push(info?.newProduced ?? null);
     const hrEnd = hrStart && !hrStart.error ? await headroomRead(page) : null;
+    const readsEnd = await workerReads(page, o.workerRead);
+    const integrityEnd = await readIntegrity(page, { expected: o.integrityExpected });
     const regionInWindowEnd = regionInWindow ? await workerRequest(page, "validationReadJitRegionStats", {}, 10000) : null;
     const counters = o.onWindow ? await o.onWindow("end", session) : undefined;
     const chunk = await readTimeline(page);
     const t1 = await page.evaluate(() => performance.timeOrigin + performance.now());
     const pc = sampling ? await workerRequest(page, "validationPcSampler", { action: "stop" }, 20000) : pcStart && { error: pcStart.error ?? "not started" };
     threads.push(rendererThreads(session.profileDir));
-    const info = await readFrameInfo(page);
+    gpuThreads.push(gpuProcessThreads(session.profileDir));
     const progress = await readCoreProgress(page);
     const ticksAfter = progress?.coreTicks ?? null;
     const timeline = mergeTimeline([chunk]);
@@ -240,7 +434,18 @@ export async function measure(session, o) {
     const pres = presentationStats(timeline);
     const viMs = timeline.vi.slice(1).map((v, i) => v.t - timeline.vi[i].t);
     const xfbDt = /xfb_dt:([\d.]+) avg:([\d.]+) max:([\d.]+)/.exec(String(info?.ppcWasmHelperStats ?? ""));
+    // CachedInterpreter code space (patch 0138): cache clears (all, and
+    // because the space was full) and the highest offset written, since boot.
+    // readFrameInfo keeps FRAME_FIELDS only: the helper stats string is read
+    // from the page's last frame info directly.
+    const helperStats = info?.ppcWasmHelperStats ?? await page.evaluate(() => window.__lastFrameInfo?.ppcWasmHelperStats ?? null).catch(() => null);
+    const code = /codeclears:(\d+) codefull:(\d+) codehighkib:(\d+) codesizemib:(\d+)/.exec(String(helperStats ?? ""));
     const medianLoad = median(loads);
+    // the GPU at the window's end (bench only)
+    const gpuEnd = o.benchGpu ? o.benchGpu() : null;
+    const pressEnd = o.benchMem ? o.benchMem() : null;
+    const memWhy = o.benchMem ? o.benchMemOver(pressStart, pressEnd) : [];
+    const memDelta = (a, b) => (Number.isFinite(a) && Number.isFinite(b) ? b - a : null);
     // Unique images (--unique-frames): a window of its own after the speed
     // window (its GPU readbacks never weigh on the speed), before the stats.
     let uniqueFrames = null;
@@ -285,12 +490,20 @@ export async function measure(session, o) {
     const relaxedMadd = await workerRequest(page, "validationReadRelaxedMadd", {}, 10000).catch(() => null);
     return {
       windowMs: Math.round(t1 - t0),
+      ...(pacingConfig ? { pacingConfig } : {}),
+      ...(o.workerRead.length ? { workerReads: workerReadDeltas(readsStart, readsEnd) } : {}),
+      // glitch-meter G2: the replay's integrity over the window (lib/integrity.mjs)
+      integrity: integrityOf(integrityStart, integrityEnd, { allow: o.integrityAllow, postload: o.phase === "postload" }),
       relaxedMadd: relaxedMadd?.mode ?? null, fusedMadd: relaxedMadd?.coreFused ?? null,
       // Guest seconds this window covered (core ticks / ticks per second);
       // the reads bracket the window, so a few host ms more than windowMs.
       guestCovered: guestCovered(ticksBefore, ticksAfter, progress?.coreTicksPerSecond),
       load1: { min: round(Math.min(...loads), 2), median: round(medianLoad, 2), max: round(Math.max(...loads), 2), limit: o.maxLoad },
-      overloaded: medianLoad > o.maxLoad,
+      ...(salon.length ? { salonForeign: { median: median(salon), max: Math.max(...salon), limit: o.benchSalonMax, samples: salon } } : {}),
+      ...(o.benchGpu ? { gpu: { start: gpuStart, end: gpuEnd, limit: o.benchGpuMax } } : {}),
+      ...(o.benchMem ? { mem: { start: pressStart, end: pressEnd, majFaults: memDelta(pressStart?.majFaults, pressEnd?.majFaults), swapIns: memDelta(pressStart?.swapIns, pressEnd?.swapIns), over: memWhy } } : {}),
+      overloaded: medianLoad > o.maxLoad || (salon.length > 0 && o.benchSalonOverloaded(salon)) ||
+        (o.benchGpuGate && [gpuStart, gpuEnd].some((g) => g && g.foreignSm > o.benchGpuMax)) || memWhy.length > 0,
       complete: timeline.complete,
       timelineLost: timeline.lost,
       ...(o.headroom ? { headroom: hrStart?.error ? { error: hrStart.error } : hrEnd?.error ? { error: hrEnd.error } : headroomOf(hrEnd.stats, { guestSeconds: (hrEnd.ticks - hrStart.ticks) / (hrEnd.tps || 1), ticksPerSecond: hrEnd.tps, viOutputs: timeline.vi.length }) } : {}),
@@ -299,6 +512,14 @@ export async function measure(session, o) {
       ...(emulated ? { ...emulated, speed: emulated.speed, speedVi: round(core.speed) } : { speed: round(core.speed) }),
       speedP5: round(core.speedP5), speedMin: round(core.speedMin),
       gameFps: info?.vis ?? null,
+      visualFps: visualFps.map((v) => (v == null ? null : round(v, 1))),
+      // The smoothness reference: new XFBs on the canvas per second (patch
+      // 0208; null without frame tags), its mean over the window and the
+      // median of the readings.
+      newFramesPerSec: { mean: newFramesRate(infoStart, info), median: newFps.some((v) => v != null) ? round(median(newFps.filter((v) => v != null)), 1) : null, readings: newFps },
+      // the new frames the core produced (0208), the liveness reading when
+      // the picture is not decoded (video=null&xfbdecode=0)
+      newFramesProducedPerSec: { readings: newProduced },
       presents: pres.presents, viOutputs: timeline.vi.length,
       // --display: what the screen showed (one worker rAF per BeginFrame).
       ...(o.display ? { display: displayStats(timeline) } : {}),
@@ -310,12 +531,17 @@ export async function measure(session, o) {
       // Where they happen (timeline.mjs): [ms into the window, interval ms, VI since load].
       hitchList: hitchList(timeline, { origin: t0 }),
       coreprofXfbDtMaxMs: xfbDt ? Number(xfbDt[3]) : null,
+      codeSpace: code ? { clears: Number(code[1]), fullClears: Number(code[2]), highKiB: Number(code[3]), sizeMiB: Number(code[4]) } : null,
       rendererThreads: threads,
+      gpuProcessThreads: gpuThreads,
       freezes: { core: core.freezes?.length ?? 0, present: pres.freezes.length },
       pc: pc && !pc.error ? summarizePcSamples(pc, { functions: o.functions }) : pc,
+      // --pc-raw: the whole window's histogram, not only its top 40.
+      ...(o.pcRaw && pc && !pc.error ? { pcHistogram: pcHistogramOf(pc) } : {}),
       ...regionRecord(regionEnd),
       ...(pipeline && !pipeline.error ? regionPipeline(pipeline) : {}),
       ...(counters ? { counters } : {}),
+      ...(pinned ? { pinned, cpuModel: cpuModel() } : {}),
       ...(o.memStats ? memRecord(memEnd) : {})
     };
   } finally {
@@ -325,6 +551,58 @@ export async function measure(session, o) {
 
 // Headroom counters (0113) and the core ticks, read together; reset >= 0
 // zeroes and turns the counters on.
+// The window's phase after the state load. On the DGX Spark the first
+// ~15-20 s after a load are a transient (regions installing, pipelines and
+// GPU caches cold, the replay pump busy): 5 s after the load it gave 23-38
+// pictures a second, ~200 ms holes and 11-21 ms of GPU per present, 20 s
+// after it 60, none and 3 ms (2026-10-28, x11-bis-oldnew-w20); a state load
+// 2.5 s earlier (#325) then looked like a 37 -> 24 regression. steady: the
+// window from STEADY_MIN_WARMUP s on (default warmup 25, window 20); postload:
+// the transient itself (default warmup 0, window 15). Without --phase, the
+// warmup says which (and --display under STEADY_MIN_WARMUP is warned about).
+export const STEADY_MIN_WARMUP = 20;
+export function windowPhase({ phase = null, warmup = null, secs = null, display = false, warn = () => {} } = {}) {
+  if (phase != null && !["steady", "postload"].includes(phase)) throw new Error(`--phase ${phase}: steady or postload`);
+  if (phase === "postload") return { phase, warmup: warmup ?? 0, secs: secs ?? 15 };
+  const w = warmup ?? 25;
+  if (phase === "steady" && w < STEADY_MIN_WARMUP) throw new Error(`--phase steady --warmup ${w}: the first ${STEADY_MIN_WARMUP} s after the load are the post-load transient (--phase postload measures it)`);
+  if (phase == null && w < STEADY_MIN_WARMUP && display) warn(`--warmup ${w} with --display: the window is in the post-load transient (the first ~${STEADY_MIN_WARMUP} s); --phase postload to measure it on purpose, --warmup ${STEADY_MIN_WARMUP}+ for the steady state`);
+  return { phase: w < STEADY_MIN_WARMUP ? "postload" : "steady", warmup: w, secs: secs ?? 20 };
+}
+
+// --worker-set / --baseline-worker-set: 'validationSetX={json};validationSetY={json}'.
+export function workerSetsOf(spec, flag) {
+  if (spec == null || spec === "") return [];
+  return String(spec).split(";").map((x) => x.trim()).filter(Boolean).map((item) => {
+    const eq = item.indexOf("=");
+    const name = eq < 0 ? item : item.slice(0, eq);
+    if (!/^validationSet[A-Za-z]+$/.test(name)) throw new Error(`--${flag} ${name}: expected a validationSet* worker request`);
+    let payload = {};
+    if (eq >= 0) {
+      try { payload = JSON.parse(item.slice(eq + 1)); } catch { throw new Error(`--${flag} ${name}: the payload is not JSON`); }
+    }
+    return { name, payload };
+  });
+}
+
+// --worker-read: each request's reply (or its error), in order.
+async function workerReads(page, names) {
+  const out = {};
+  for (const name of names) out[name] = await workerRequest(page, name, {}, 10000).catch((e) => ({ error: String(e.message || e) }));
+  return out;
+}
+
+// Start, end and end - start of each numeric field (cumulative counters).
+export function workerReadDeltas(start, end) {
+  return Object.fromEntries(Object.keys(start).map((name) => {
+    const a = start[name], b = end[name];
+    const delta = a && b && !a.error && !b.error
+      ? Object.fromEntries(Object.keys(b).filter((k) => k !== "id" && typeof b[k] === "number" && typeof a[k] === "number").map((k) => [k, b[k] - a[k]]))
+      : null;
+    return [name, { start: a, end: b, delta }];
+  }));
+}
+
 async function headroomRead(page, reset = -1) {
   const r = await workerRequest(page, "validationReadHeadroomStats", { reset }, 10000).catch((e) => ({ error: String(e.message || e) }));
   if (r?.error) return { error: /Unknown upstream worker message/.test(r.error) ? "engine without validationReadHeadroomStats" : r.error };
@@ -333,6 +611,13 @@ async function headroomRead(page, reset = -1) {
   const ticks = Number(p?.coreTicks), tps = Number(p?.coreTicksPerSecond);
   if (!Number.isFinite(ticks) || !(tps > 0)) return { error: "no core ticks" };
   return stats.error ? { error: stats.error } : { stats, ticks, tps };
+}
+
+// --pc-raw: every sampled guest PC of a window with its count, hottest
+// first ([pc hex, count]); the top 40 of summarizePcSamples left a flat race
+// 17 % covered (0139 sizing, 2026-10-24).
+export function pcHistogramOf({ counts }) {
+  return [...(counts ?? [])].sort((a, b) => b[1] - a[1]).map(([pc, c]) => [`0x${Number(pc).toString(16).padStart(8, "0")}`, c]);
 }
 
 // A change measured while another harness held the perf lock too is not a
@@ -363,7 +648,11 @@ export function regionRecord(reply) {
     // the host work per guest cycle with it, bench 2026-10-22), and the 0084
     // heap patches
     ...regionPipeline(reply),
-    ...(reply.regionChain ? { regionChain: reply.regionChain } : {})
+    ...(reply.regionChain ? { regionChain: reply.regionChain } : {}),
+    ...(reply.regionCalls ? { regionCalls: reply.regionCalls } : {}), // 0142
+    // 0156: the 64 block-start PCs with the most guest cycles outside the
+    // regions in this window (pc, cycles, why)
+    ...(Array.isArray(reply.missTop) && reply.missTop.length ? { missTop: reply.missTop } : {})
   };
   return p4.error ? { p4: null, p4Why: p4.error, ...samples } : { p4, p4Raw: stats, ...samples };
 }
@@ -473,25 +762,65 @@ const MAX_RELOCKS = 3;
 
 // loadGate: the load before the side (calmUnderLock, outside the lock when
 // loaded); the window is then judged on its median load.
+// `p`, or an error marked runTimeout once `ms` have passed (0: no limit);
+// a late rejection of `p` is swallowed.
+export function withRunTimeout(p, ms, what) {
+  if (!ms) return p;
+  let timer;
+  p.catch(() => {});
+  return Promise.race([p, new Promise((_, reject) => { timer = setTimeout(() => reject(Object.assign(new Error(`${what} timed out after ${ms / 1000} s (--run-timeout)`), { runTimeout: true })), ms); })])
+    .finally(() => clearTimeout(timer));
+}
+
 async function measureSide(side, o, loadGate) {
   const server = await ensureServer({ port: o.port, root: side.root, coreCandidates: o.coreCandidates });
+  // the side is judged against its gate's limit (on the bench, computed per
+  // gate by lib/bench-load.mjs), recorded with it in loadGate
+  if (loadGate?.limit != null) o = { ...o, maxLoad: loadGate.limit };
+  // the side's tree has the integrity counters: its worker must answer
+  o = { ...o, integrityExpected: treeHasIntegrity(side.root) };
+  // the bench (its gate read Salon's cpus): the window samples them too
+  if (loadGate?.salonForeignMax != null) {
+    const { salonForeignNow } = await import("../lib/bench-load.mjs");
+    const { GPU_FOREIGN_MAX, gpuGateApplies, gpuNow, memNow, memOver, salonOverloaded } = await import("../lib/bench-load.mjs");
+    o = { ...o, benchSalon: () => salonForeignNow(), benchSalonMax: loadGate.salonForeignMax, benchSalonOverloaded: salonOverloaded, benchGpu: () => gpuNow(), benchGpuMax: GPU_FOREIGN_MAX, benchGpuGate: gpuGateApplies({ display: o.browserDisplay, queries: [o.query, side.query] }), benchMem: () => memNow(), benchMemOver: memOver };
+  }
   try {
     const bootStart = performance.now();
-    const session = await openSession({ base: server.base, server, query: side.query ?? o.query, iso: o.iso, routes: { [STATE_ROUTE]: o.state }, chromeArgs: side.chromeArgs ?? [], harness: o.display ? { displayed: true } : {} });
+    const session = await openSession({ base: server.base, server, query: side.query ?? o.query, iso: o.iso, display: o.browserDisplay, routes: o.state ? { [STATE_ROUTE]: o.state } : {}, chromeArgs: side.chromeArgs ?? [], harness: o.display ? { displayed: true } : {} });
     const record = { url: session.url, served: server.identity, core: session.core, loadGate, bootMs: round(performance.now() - bootStart, 0) };
+    if (side.workerSets?.length) {
+      record.workerSets = [];
+      for (const { name, payload } of side.workerSets) {
+        record.workerSets.push({ name, payload, reply: await workerRequest(session.page, name, payload, 10000).catch((e) => ({ error: String(e.message || e) })) });
+      }
+    }
+    // --run-timeout: a measure that never ends (a hung page or a frozen
+    // core: 64 min under the lock, 2026-10-23) fails the run; the session
+    // closes and the window's counters (o.onWindow.abort) stop.
+    const timed = (p, what) => withRunTimeout(p, o.runTimeoutMs, what);
     try {
-      record.cold = await measure(session, o);
+      record.cold = await timed(measure(session, o), "cold window");
       if (o.warm) {
         record.warmCore = await rebootSession(session, server);
-        record.warm = await measure(session, o);
+        record.warm = await timed(measure(session, o), "warm window");
       }
       // Per guest cycle: host instructions, and host cycles (which decide
       // when a change moves the IPC), for the warm window too (--warm).
       // xctrace (macOS): per 1000 guest cycles, the host cycles and the cycles
       // each fraction stands for (I-cache, iTLB, …).
       for (const w of [record.cold, record.warm]) if (w?.counters) Object.assign(w, { instructionsPerGuestCycle: instructionsPerGuestCycle(w), cyclesPerGuestCycle: cyclesPerGuestCycle(w), ...(w.counters.tool === "xctrace" ? { perKiloGuestCycles: perKiloGuestCycles(w) } : {}) });
+      // Counters that cannot be the CPU thread's are kept but never paired.
+      for (const w of [record.cold, record.warm]) {
+        const why = w?.counters ? counterSanity(w) : null;
+        if (why) { Object.assign(w, { countersRejected: why, instructionsPerGuestCycle: null, cyclesPerGuestCycle: null }); console.warn(`[race-perf] ${side.name}: counters rejected, ${why}`); }
+      }
     } catch (error) {
       record.error = String(error?.message || error).slice(0, 300);
+      if (error?.runTimeout) {
+        record.timedOut = true;
+        await o.onWindow?.abort?.(session);
+      }
       // The harness lost Chrome (CDP pipe fault, lib/browser.mjs): infra.
       if (session.pipeFault()) record.infraCrash = session.pipeFault().message;
     }
@@ -530,7 +859,7 @@ function resolveSide(name, spec) {
   return { name, label: spec, root: exportRef(spec), temp: true };
 }
 
-const brief = (m) => m && `speed ${m.speed} % (p5 ${m.speedP5}) game ${m.gameFps} fps vi p99 ${m.viIntervalMs.p99} ms hitches ${m.hitchesPerMin}/min busiest thread ${m.rendererThreads.at(-1)?.busiest} % load ${m.load1.median}${m.overloaded ? " OVERLOADED" : ""}${m.pc?.samples ? ` pc ${m.pc.samples} samples` : ""}${m.layoutRefused > 0 ? ` REGIONS REFUSED FOR THE HEAP LAYOUT ${m.layoutRefused}` : ""}${m.heapPatched > 0 ? ` heap-patched ${m.heapPatched}` : ""}`;
+const brief = (m) => m && `speed ${m.speed} % (p5 ${m.speedP5}) game ${m.gameFps} fps new ${m.newFramesPerSec?.mean ?? "–"}/s vi p99 ${m.viIntervalMs.p99} ms hitches ${m.hitchesPerMin}/min busiest thread ${m.rendererThreads.at(-1)?.busiest} % load ${m.load1.median}${m.overloaded ? " OVERLOADED" : ""}${m.pc?.samples ? ` pc ${m.pc.samples} samples` : ""}${m.layoutRefused > 0 ? ` REGIONS REFUSED FOR THE HEAP LAYOUT ${m.layoutRefused}` : ""}${m.heapPatched > 0 ? ` heap-patched ${m.heapPatched}` : ""}${integrityBrief(m.integrity)}`;
 
 async function main() {
   const { values } = parseArgs({
@@ -538,22 +867,26 @@ async function main() {
       iso: { type: "string" }, state: { type: "string" },
       baseline: { type: "string" }, candidate: { type: "string" },
       config: { type: "string", default: "wgpu" }, query: { type: "string" },
-      runs: { type: "string", default: "4" }, "min-pairs": { type: "string" }, "load-wait": { type: "string", default: "300" }, "calm-wait": { type: "string" }, warmup: { type: "string", default: "25" }, secs: { type: "string", default: "20" },
+      runs: { type: "string", default: "4" }, "min-pairs": { type: "string" }, "load-wait": { type: "string", default: "300" }, "calm-wait": { type: "string" }, warmup: { type: "string" }, secs: { type: "string" }, phase: { type: "string" },
       "emulated-window": { type: "string" }, "emulated-warmup": { type: "string" }, "emulated-poll-ms": { type: "string", default: "100" },
       hold: { type: "string", default: "KeyX" }, warm: { type: "boolean", default: false },
       "max-load": { type: "string" }, "lock-wait": { type: "string", default: "1800" },
-      pcsample: { type: "string" }, symbols: { type: "string" }, "region-sample": { type: "string" }, "region-secs": { type: "string", default: "10" }, counters: { type: "boolean", default: false }, "counter-events": { type: "string" }, "unique-frames": { type: "string" }, display: { type: "boolean", default: false }, "mem-stats": { type: "boolean", default: false }, "mem-warm": { type: "string", default: "5" }, headroom: { type: "boolean", default: false }, "frames-per-vi-ref": { type: "string" }, "baseline-query": { type: "string" }, "chrome-args": { type: "string" }, "baseline-chrome-args": { type: "string" },
+      pcsample: { type: "string" }, "pc-raw": { type: "boolean", default: false }, symbols: { type: "string" }, "region-sample": { type: "string" }, "worker-read": { type: "string" }, "integrity-allow": { type: "string" }, "frozen-fps": { type: "string" }, "region-secs": { type: "string", default: "10" }, counters: { type: "boolean", default: false }, steps: { type: "string" }, "counter-events": { type: "string" }, "pin-cpu-thread": { type: "string" }, "run-timeout": { type: "string", default: "1800" }, "unique-frames": { type: "string" }, display: { type: "boolean", default: false }, "mem-stats": { type: "boolean", default: false }, "mem-warm": { type: "string", default: "5" }, headroom: { type: "boolean", default: false }, "frames-per-vi-ref": { type: "string" }, "baseline-query": { type: "string" }, "decoupled-unlimited": { type: "boolean", default: false }, "chrome-args": { type: "string" }, "baseline-chrome-args": { type: "string" }, "worker-set": { type: "string" }, "baseline-worker-set": { type: "string" }, headless: { type: "boolean", default: false },
       "core-candidate": { type: "string", multiple: true, default: [] },
       port: { type: "string", default: process.env.HARNESS_PORT }, out: { type: "string" }
     },
     allowPositionals: false
   });
-  if (!values.iso || !values.state || !values.port) {
-    throw new Error("usage: race-perf.mjs --iso disc.iso --state scene.sav --port N (or HARNESS_PORT) [--baseline ref|dir] [--candidate ref|dir] [--runs 4] [--warmup 25] [--secs 20] [--warm] [--max-load L] [--pcsample 0.25]");
+  // A homebrew boots into its workload: no savestate needed (CI bench).
+  if (!values.iso || !values.port || (!values.state && !isHomebrew(path.resolve(values.iso)))) {
+    throw new Error("usage: race-perf.mjs --iso disc.iso --state scene.sav --port N (or HARNESS_PORT) [--baseline ref|dir] [--candidate ref|dir] [--runs 4] [--phase steady|postload] [--warmup 25] [--secs 20] [--warm] [--max-load L] [--pcsample 0.25]");
   }
-  const iso = path.resolve(values.iso), state = path.resolve(values.state);
-  for (const f of [iso, state]) if (!existsSync(f)) throw new Error(`not found: ${f}`);
-  const localOnly = !iso.startsWith(HOMEBREW_OUT);
+  const iso = path.resolve(values.iso), state = values.state ? path.resolve(values.state) : null;
+  for (const f of [iso, state].filter(Boolean)) if (!existsSync(f)) throw new Error(`not found: ${f}`);
+  const localOnly = !isHomebrew(iso);
+  // --steps replaces the savestate as the scene.
+  const steps = values.steps ? JSON.parse(readFileSync(path.resolve(values.steps), "utf8")) : null;
+  if (steps) validateSteps(steps);
   if (localOnly && process.env.CI) throw new Error("this disc is local-only and must never run in CI");
   const query = `${values.query ?? PRESETS[values.config] ?? values.config}&metrics=1`;
   // --baseline-query: the baseline side boots with its own query (same tree
@@ -561,37 +894,57 @@ async function main() {
   const baselineQuery = values["baseline-query"] ? `${values["baseline-query"]}&metrics=1` : null;
   // speed=unlimited decouples emulated time from the rendering while the
   // core leaves SyncOnSkipIdle off (research/deep-headroom-kpi.md §1): refused
-  // unless the query turns it on (synconidle=1).
+  // unless the query turns it on (synconidle=1) or renders nothing
+  // (video=null); with a renderer, each run is then invalid unless the core
+  // itself reports it on (pacingExpectation, validationReadPacingConfig).
   for (const q of [query, baselineQuery].filter(Boolean)) {
-    if (querySpeed(q) === "unlimited" && !unlimitedAllowed(q)) throw new Error("speed=unlimited without synconidle=1: emulated time runs ahead of the rendering (research/deep-headroom-kpi.md); measure the headroom at speed=1 with --headroom");
+    if (querySpeed(q) === "unlimited" && !unlimitedAllowed(q, { decoupledUnlimited: values["decoupled-unlimited"] === true })) throw new Error("speed=unlimited without synconidle=1 (or video=null): emulated time runs ahead of the rendering (research/deep-headroom-kpi.md); measure the headroom at speed=1 with --headroom");
   }
   if (baselineQuery && !values.baseline) throw new Error("--baseline-query needs --baseline");
-  // A coreid would pin both sides to one core: trunk against head would
-  // then compare a core with itself.
-  if (values.baseline && [query, baselineQuery].some((q) => q && new URLSearchParams(q).has("coreid"))) throw new Error("--baseline compares the two sides' own cores: no coreid in --query or --baseline-query");
+  // A coreid on both sides would pin them to one core (trunk against head
+  // would compare a core with itself): with --baseline, a coreid only on
+  // the candidate side, the baseline keeping its own core (a lever's PR core
+  // against trunk's, the CI bench's candidate_core_run).
+  if (values.baseline && baselineQuery && new URLSearchParams(baselineQuery).has("coreid")) throw new Error("--baseline compares the two sides' own cores: no coreid in --baseline-query");
+  if (values.baseline && !baselineQuery && new URLSearchParams(query).has("coreid")) throw new Error("--baseline compares the two sides' own cores: a coreid in --query needs a --baseline-query without it (else both sides load it)");
   const chromeArgs = chromeArgsOf(values["chrome-args"], "chrome-args");
   const baselineChromeArgs = values["baseline-chrome-args"] == null ? chromeArgs : chromeArgsOf(values["baseline-chrome-args"], "baseline-chrome-args");
+  const workerSets = workerSetsOf(values["worker-set"], "worker-set");
+  const baselineWorkerSets = workerSetsOf(values["baseline-worker-set"], "baseline-worker-set");
   if (values["baseline-chrome-args"] != null && !values.baseline) throw new Error("--baseline-chrome-args needs --baseline");
   const runs = num(values, "runs", { min: 1, int: true });
   if (values["counter-events"] && !values.counters) throw new Error("--counter-events needs --counters");
   if (values.baseline && runs % 2) throw new Error(`--runs ${runs}: with --baseline the runs must be even, so trunk goes first as often as head`);
   const o = {
-    iso, state, port: num(values, "port", { min: 1, int: true }), query, runs,
+    // Chrome's display mode: HARNESS_DISPLAY (x11: spark-run --headed),
+    // else headless; --headless forces headless whatever the environment.
+    browserDisplay: values.headless ? "headless" : defaultDisplay(),
+    iso, state, steps, port: num(values, "port", { min: 1, int: true }), query, runs,
+    // --decoupled-unlimited: speed=unlimited without synconidle=1 on purpose
+    // (the cost of the CPU<->GPU coupling); an upper bound, never a KPI.
+    decoupledUnlimited: values["decoupled-unlimited"] === true,
     minPairs: values["min-pairs"] ? num(values, "min-pairs", { min: 2, int: true }) : Math.min(runs, 4),
-    warmup: num(values, "warmup", { min: 0 }), secs: num(values, "secs", { min: 2, int: true }),
+    ...windowPhase({ phase: values.phase, warmup: values.warmup == null ? null : num(values, "warmup", { min: 0 }), secs: values.secs == null ? null : num(values, "secs", { min: 2, int: true }), display: values.display, warn: (m) => console.warn(`[race-perf] ${m}`) }),
     // --emulated-window S: S guest seconds after --emulated-warmup W guest
     // seconds (default: --warmup), ticks polled every --emulated-poll-ms.
     ...(values["emulated-window"] ? {
       emulatedWindow: num(values, "emulated-window", { min: 1 }),
-      emulatedWarmup: values["emulated-warmup"] == null ? num(values, "warmup", { min: 0 }) : num(values, "emulated-warmup", { min: 0 }),
+      emulatedWarmup: values["emulated-warmup"] == null ? (values.warmup == null ? 25 : num(values, "warmup", { min: 0 })) : num(values, "emulated-warmup", { min: 0 }),
       emulatedPollMs: num(values, "emulated-poll-ms", { min: 10, int: true })
     } : {}),
     hold: values.hold || null, warm: values.warm,
-    maxLoad: values["max-load"] ? num(values, "max-load", { min: 0.1 }) : Math.max(2, os.cpus().length / 4),
+    maxLoad: values["max-load"] ? num(values, "max-load", { min: 0.1 }) : defaultMaxLoad(),
     loadWait: num(values, "load-wait", { min: 0 }),
     pcsample: values.pcsample ? num(values, "pcsample", { min: 0.05 }) : null,
+    pcRaw: values["pc-raw"],
     // --mem-stats needs the region counters (its region estimates ride on
     // them): on without timers (0) unless --region-sample says otherwise.
+    integrityAllow: parseIntegrityAllow(values["integrity-allow"]),
+    frozenFps: values["frozen-fps"] == null ? FROZEN_FPS : num(values, "frozen-fps", { min: 0 }),
+    workerRead: (values["worker-read"] ?? "").split(",").map((x) => x.trim()).filter(Boolean).map((x) => {
+      if (!/^validationRead[A-Za-z]+$/.test(x)) throw new Error(`--worker-read ${x}: expected a validationRead* worker request`);
+      return x;
+    }),
     regionSample: values["region-sample"] == null ? (values["mem-stats"] ? 0 : null) : num(values, "region-sample", { min: 0, int: true }),
     regionSecs: num(values, "region-secs", { min: 1 }),
     // --counters (Linux perf): host instructions per guest cycle of the
@@ -604,23 +957,31 @@ async function main() {
       ? (checkXctrace(), { xctrace: true, onWindow: xctraceCounters({ mode: values["counter-events"] ?? "delivery", pidOf: (session) => rendererThreads(session.profileDir)?.pid }) })
       : values.counters ? (checkPerfAccess(), { onWindow: perfCounters(undefined, { extra: counterEvents(values["counter-events"]) }) }) : {}),
     uniqueFrames: values["unique-frames"] == null ? null : num(values, "unique-frames", { min: 2 }),
+    pinCpuThread: values["pin-cpu-thread"] == null ? null : num(values, "pin-cpu-thread", { min: 0, int: true }),
+    runTimeoutMs: num(values, "run-timeout", { min: 0 }) * 1000,
     memStats: values["mem-stats"],
     memWarm: num(values, "mem-warm", { min: 0 }),
     headroom: values.headroom,
     // A KPI scene's pinned protocol (matrix.mjs SCENE_PROTOCOLS): region
     // stats over the window itself where the scene asks for it.
-    regionInWindow: Boolean(SCENE_PROTOCOLS[path.basename(state)]?.regionStatsInWindow),
+    regionInWindow: Boolean(state && SCENE_PROTOCOLS[path.basename(state)]?.regionStatsInWindow),
     framesPerViRef: values["frames-per-vi-ref"] == null ? null : num(values, "frames-per-vi-ref", { min: 0.01 }),
     display: values.display,
     functions: values.symbols ? JSON.parse(readFileSync(values.symbols, "utf8")).sort((a, b) => a[0] - b[0]) : null,
     coreCandidates: values["core-candidate"]
   };
-  const sceneCheck = sceneProtocolCheck(path.basename(state), {
+  // The bench's GPU gate (lib/bench-load.mjs) only when a side is on the GPU:
+  // headed, or video=wgpu. The gate reads it from the environment.
+  if (benchLane() && !gpuGateApplies({ display: o.browserDisplay, queries: [o.query, baselineQuery] })) process.env.SPARK_GPU_GATE = "0";
+  const sceneCheck = sceneProtocolCheck(state ? path.basename(state) : null, {
     warmup: o.emulatedWindow ? o.emulatedWarmup : o.warmup, window: o.emulatedWindow ?? o.secs, emulated: Boolean(o.emulatedWindow),
     hold: o.hold, regionSample: o.regionSample, regionStatsInWindow: o.regionInWindow
   });
   if (sceneCheck.errors.length) throw new Error(`scene protocol: ${sceneCheck.errors.join("; ")}`);
   for (const w of sceneCheck.warnings) console.warn(`[race-perf] scene protocol: ${w}`);
+  const visual = visualProbeCheck([query, baselineQuery], { "--display": o.display, "--unique-frames": o.uniqueFrames != null });
+  if (visual) throw new Error(visual);
+  if (xfbDecodeOff(query) || xfbDecodeOff(baselineQuery)) console.warn("[race-perf] xfbdecode=0: game fps reads 0 (no decoded XFB), speed and headroom are unaffected");
   const lockWait = num(values, "lock-wait", { min: 0 });
 
   const sides = {};
@@ -628,11 +989,11 @@ async function main() {
   // lock's signal handler exits the process, which runs this).
   const dropExports = () => { for (const s of Object.values(sides)) if (s.temp && existsSync(s.root)) { release(s.root); rmSync(s.root, { recursive: true, force: true }); } };
   process.once("exit", dropExports);
-  sides.candidate = { ...resolveSide("candidate", values.candidate), chromeArgs };
-  if (values.baseline) sides.baseline = { ...resolveSide("baseline", values.baseline), query: baselineQuery, chromeArgs: baselineChromeArgs };
+  sides.candidate = { ...resolveSide("candidate", values.candidate), chromeArgs, workerSets };
+  if (values.baseline) sides.baseline = { ...resolveSide("baseline", values.baseline), query: baselineQuery, chromeArgs: baselineChromeArgs, workerSets: baselineWorkerSets };
   // A calm machine first (--calm-wait, default --lock-wait), then the lock.
   const calmWait = values["calm-wait"] == null ? lockWait : num(values, "calm-wait", { min: 0 });
-  const acquire = () => acquirePerfLock({ name: `harness race-perf (${REPO_ROOT})`, waitSec: lockWait, log: (m) => console.log(`[race-perf] ${m}`) });
+  const acquire = () => acquirePerfLock({ requireMains: true, name: `harness race-perf (${REPO_ROOT})`, waitSec: lockWait, log: (m) => console.log(`[race-perf] ${m}`) });
   let releaseLock = await calmThenLock({ maxLoad: o.maxLoad, calmWait, log: (m) => console.log(`[race-perf] before the lock: ${m}`), acquire });
   // A local-only disc never writes into the repo.
   const stamp = `${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}-${process.pid}-${randomBytes(3).toString("hex")}`;
@@ -655,13 +1016,13 @@ async function main() {
   checkLock("taken");
   try {
     // Times each run was played again after the lock went back for the load.
-    let relocks = 0;
+    let relocks = 0, timeouts = 0, powerCounted = false;
     const loadRetries = new Map();
     for (let run = 1; run <= o.runs && !gaveUp; run += 1) {
       checkLock(`before run ${run}`);
       // xctrace traces are large: the campaign stops before the disk fills.
-      if (o.xctrace && freeDiskGB() < XCTRACE_MIN_FREE_GB) {
-        gaveUp = `disk: ${round(freeDiskGB(), 1)} GB free < ${XCTRACE_MIN_FREE_GB} GB (xctrace): remaining runs given up`;
+      if (o.xctrace && freeDiskGB() < xctraceNeedGB()) {
+        gaveUp = `disk: ${round(freeDiskGB(), 1)} GB free < ${xctraceNeedGB()} GB (xctrace): remaining runs given up`;
         console.warn(`[race-perf] ${gaveUp}`);
         break;
       }
@@ -675,15 +1036,47 @@ async function main() {
         gaveUp = loadGaveUp(g.gate);
         if (gaveUp) { console.warn(`[race-perf] run ${run} ${name}: ${gaveUp}`); break; }
         if (g.relocked) {
-          relocks += 1;
+          // an unplug already counted when it was seen (below): once, not twice
+          if (powerCounted) powerCounted = false;
+          else relocks += 1;
           checkLock(`taken again in run ${run}`);
-          if (relocks > MAX_RELOCKS) { gaveUp = `the lock was let go for the load ${relocks} times: remaining runs given up`; console.warn(`[race-perf] ${gaveUp}`); break; }
+          if (relocks > MAX_RELOCKS) { gaveUp = `unplugged or loaded ${relocks} times (the lock let go for power or load): remaining runs given up`; console.warn(`[race-perf] ${gaveUp}`); break; }
           replay = true;
           break;
         }
+        powerCounted = false; // back on mains without a relock: nothing left to discount
+        const powerStart = powerSnapshot();
+        const powerAtStart = powerStart?.source ?? null;
         record[name] = await measureSide(sides[name], o, g.gate);
         const r = record[name];
+        // On mains but the charge fell during the side, or ended under
+        // MIN_BATTERY_PERCENT (the charger not keeping up, 2026-10-29): kept
+        // in the record, left out of the speeds like an overloaded run.
+        const powerEnd = powerSnapshot();
+        if (r && powerDrained(powerStart, powerEnd)) {
+          r.powerDrained = { start: powerStart?.percent ?? null, end: powerEnd?.percent ?? null };
+          console.log(`[race-perf] run ${run} ${name}: POWER, charge ${powerStart?.percent ?? "?"} -> ${powerEnd?.percent ?? "?"} % (fell or under ${MIN_BATTERY_PERCENT} %): not counted`);
+        }
+        // Unplugged during the side: played again, both sides, once on mains
+        // (the next gate gives the lock back while on battery). A failed
+        // reading (null) or AC <-> UPS is no change.
+        if (powerSnapshot()?.source === "battery" && powerAtStart !== "battery") {
+          console.log(`[race-perf] run ${run} ${name}: on battery during the side (${powerAtStart} → battery): not a measure`);
+          // measured partly on battery: never kept, whatever comes next
+          delete record[name];
+          relocks += 1;
+          powerCounted = true;
+          if (relocks > MAX_RELOCKS) { gaveUp = `unplugged or loaded ${relocks} times (the lock let go for power or load): remaining runs given up`; console.warn(`[race-perf] ${gaveUp}`); break; }
+          replay = true;
+          break;
+        }
         console.log(`[race-perf] run ${run} ${name}: ${r.error ?? brief(r.cold)}${r.warm ? ` | warm: ${brief(r.warm)}` : ""}`);
+        // Two runs in a row that timed out: the campaign stops (the lock goes).
+        timeouts = r.timedOut ? timeouts + 1 : 0;
+        if (timeouts >= 2) { gaveUp = `${timeouts} runs in a row timed out (--run-timeout ${o.runTimeoutMs / 1000} s): remaining runs given up`; console.warn(`[race-perf] ${gaveUp}`); break; }
+        // A window xctrace refused for the disk: the campaign stops there.
+        const disk = [r.cold, r.warm].map((w) => w?.counters?.error).find((e) => /^disk:/.test(e ?? ""));
+        if (o.xctrace && disk) { gaveUp = `${disk}: remaining runs given up`; console.warn(`[race-perf] ${gaveUp}`); break; }
       }
       if (replay) { loadRetries.set(run, (loadRetries.get(run) ?? 0) + 1); console.log(`[race-perf] run ${run} played again (lock taken back)`); run -= 1; continue; }
       if (gaveUp && !Object.keys(sides).some((n) => record[n])) break;
@@ -707,10 +1100,13 @@ async function main() {
   for (const r of records) for (const n of Object.keys(sides)) {
     const c = r[n]?.cold;
     if (!c) continue;
-    const why = invalidReasons(c, { target: querySpeed(sides[n].query ?? o.query) === "unlimited" ? null : querySpeed(sides[n].query ?? o.query), framesPerViRef: o.framesPerViRef });
+    const why = invalidReasons(c, { target: querySpeed(sides[n].query ?? o.query) === "unlimited" ? null : querySpeed(sides[n].query ?? o.query), framesPerViRef: o.framesPerViRef, pacing: pacingExpectation(sides[n].query ?? o.query, { decoupledUnlimited: o.decoupledUnlimited }) });
+    if (c.integrity?.fatal?.length) why.push(`integrity: ${c.integrity.fatal.join(", ")}`);
+    const frozen = o.phase === "steady" ? frozenReason(c, { minFps: o.frozenFps, query: sides[n].query ?? o.query }) : null;
+    if (frozen) why.push(frozen);
     if (why.length) c.invalid = why;
   }
-  const good = (r) => r && !r.error && !r.fatal?.length && !r.cold?.overloaded && !r.warm?.overloaded && !r.cold?.invalid?.length;
+  const good = (r) => r && !r.error && !r.fatal?.length && !r.powerDrained && !r.cold?.overloaded && !r.warm?.overloaded && !r.cold?.invalid?.length;
   const summarize = (name, phase) => {
     const m = runsDone.map((r) => r[name]).filter(good).map((r) => r[phase]).filter(Boolean);
     if (!m.length) return null;
@@ -719,6 +1115,7 @@ async function main() {
       viP99Ms: describe(m.map((x) => x.viIntervalMs.p99)), presentP99Ms: describe(m.map((x) => x.presentIntervalMs.p99)),
       hitchesPerMin: describe(m.map((x) => x.hitchesPerMin)), busiestThread: describe(m.map((x) => x.rendererThreads.at(-1)?.busiest)),
       presentsPerSecond: describe(m.map((x) => x.presentsPerSecond)),
+      newFramesPerSec: describe(m.map((x) => x.newFramesPerSec?.mean)),
       // --counters with xctrace: per 1000 guest cycles, and the fractions.
       ...(m.some((x) => x.perKiloGuestCycles) ? {
         perKiloGuestCycles: Object.fromEntries(Object.keys(m.find((x) => x.perKiloGuestCycles).perKiloGuestCycles).map((k) => [k, describe(m.map((x) => x.perKiloGuestCycles?.[k]), 3)])),
@@ -729,6 +1126,7 @@ async function main() {
         maxSpeedCpu: describe(m.map((x) => x.headroom?.maxSpeedCpu), 4),
         maxSpeedGpu: describe(m.map((x) => x.headroom?.maxSpeedGpu), 4),
         throttleSleepShare: describe(m.map((x) => x.headroom?.throttleSleepShare), 4),
+        presentSleepShare: describe(m.map((x) => x.headroom?.presentSleepShare), 4),
         xfbCopiesPerVi: describe(m.map((x) => x.headroom?.xfbCopiesPerVi), 4),
         gameFramesPerSecond: describe(m.map((x) => x.headroom?.gameFramesPerSecond), 2),
         headroomApplies: m.every((x) => x.headroom?.headroomApplies),
@@ -758,18 +1156,22 @@ async function main() {
   const pcSides = o.pcsample ? Object.keys(sides).filter((n) => runsDone.some((r) => r[n]?.cold?.pc?.samples)) : [];
   const pcNote = o.pcsample && pcSides.length < Object.keys(sides).length ? `guest PC sampled on ${pcSides.join(", ") || "no side"} only` : null;
   if (pcNote) console.warn(`[race-perf] warning: ${pcNote}`);
-  const failed = Object.keys(sides).flatMap((n) => runsDone.filter((r) => !good(r[n])).map((r) => ({ run: r.run, side: n, why: r[n]?.infraCrash ? "infra" : r[n]?.error ?? (r[n]?.fatal?.length ? "crash" : r[n]?.cold?.invalid?.length ? `invalid: ${r[n].cold.invalid.join("; ")}` : "overloaded") })));
+  const failed = Object.keys(sides).flatMap((n) => runsDone.filter((r) => !good(r[n])).map((r) => ({ run: r.run, side: n, why: r[n]?.infraCrash ? "infra" : r[n]?.error ?? (r[n]?.fatal?.length ? "crash" : r[n]?.powerDrained ? `power: charge ${r[n].powerDrained.start ?? "?"} -> ${r[n].powerDrained.end ?? "?"} %` : r[n]?.cold?.invalid?.length ? `invalid: ${r[n].cold.invalid.join("; ")}` : "overloaded") })));
   // Which Chrome ran: a wrapper (HARNESS_CHROME_PATH, e.g. the E-core one) or
   // extra flags left exported would otherwise pass for a regression.
   const sideArgs = Object.fromEntries(Object.entries(sides).filter(([, s]) => s.chromeArgs?.length).map(([n, s]) => [n, s.chromeArgs.join(" ")]));
-  const chrome = { path: process.env.HARNESS_CHROME_PATH || "chrome stable", args: process.env.HARNESS_CHROME_ARGS || "", ...(Object.keys(sideArgs).length ? { sideArgs } : {}) };
+  // The display mode and the flags it adds (x11: X11_ARGS), with the result.
+  const chrome = { path: process.env.HARNESS_CHROME_PATH || "chrome stable", args: process.env.HARNESS_CHROME_ARGS || "", display: o.browserDisplay, displayArgs: o.browserDisplay === "x11" ? [...X11_ARGS] : [], ...(Object.keys(sideArgs).length ? { sideArgs } : {}) };
   if (process.env.HARNESS_CHROME_PATH || process.env.HARNESS_CHROME_ARGS) console.warn(`[race-perf] Chrome: ${chrome.path}${chrome.args ? ` ${chrome.args}` : ""}`);
   for (const [n, a] of Object.entries(sideArgs)) console.warn(`[race-perf] Chrome flags on the ${n}: ${a}`);
   const summary = {
-    sceneProtocol: sceneCheck.protocol ? { state: path.basename(state), ...sceneCheck.protocol, warnings: sceneCheck.warnings } : null,
-    probe: "race-perf", at: new Date().toISOString(),
+    sceneProtocol: sceneCheck.protocol ? { state: state && path.basename(state), ...sceneCheck.protocol, warnings: sceneCheck.warnings } : null,
+    probe: "race-perf", probeVersion: PROBE_VERSION, at: new Date().toISOString(),
+    // --decoupled-unlimited: the sides it decoupled (harness/lib/kpi.mjs
+    // refuses such a result: an upper bound, not a KPI).
+    ...(o.decoupledUnlimited ? { decoupledUnlimited: Object.keys(sides).filter((n) => pacingExpectation(sides[n].query ?? o.query, { decoupledUnlimited: true }) === "decoupled") } : {}),
     chrome,
-    iso: path.basename(iso), state: path.basename(state), query: o.query, baselineQuery: sides.baseline?.query ?? null, warmupSec: o.warmup, secs: o.secs,
+    iso: path.basename(iso), state: steps ? null : state && path.basename(state), steps: steps ? path.basename(values.steps) : null, query: o.query, baselineQuery: sides.baseline?.query ?? null, phase: o.phase, warmupSec: o.warmup, secs: o.secs,
     // Window in guest seconds (null: host seconds, --secs).
     emulatedWindow: o.emulatedWindow ? { secs: o.emulatedWindow, warmup: o.emulatedWarmup, pollMs: o.emulatedPollMs } : null, hold: o.hold, maxLoad: o.maxLoad,
     sides: Object.fromEntries(Object.entries(sides).map(([n, s]) => [n, s.label])),
@@ -777,11 +1179,24 @@ async function main() {
     ...(xctraceCleanup ? { xctraceCleanup } : {}),
     // Runs played again after the lock went back for the load: { run: times }.
     loadRetries: Object.fromEntries(runsDone.filter((r) => r.loadRetries).map((r) => [r.run, r.loadRetries])),
+    // Every window's load, failed ones included, for the reading (the Spark:
+    // load1 counts Excalibur's cpus 0-9, salonForeign Salon's 10-19).
+    windowLoads: runsDone.flatMap((r) => Object.keys(sides).flatMap((name) => ["cold", "warm"].map((phase) => {
+      const w = r[name]?.[phase];
+      return w ? { run: r.run, side: name, phase, speed: w.speed ?? null, load1: w.load1?.median ?? null, ...(w.salonForeign ? { salonForeign: w.salonForeign } : {}), ...(w.gpu ? { gpuForeignSm: Math.max(w.gpu.start?.foreignSm ?? 0, w.gpu.end?.foreignSm ?? 0), memAvailMB: w.gpu.end?.memAvailMB ?? null } : {}), ...(w.mem ? { memPressure: w.mem.end?.psiSome10 ?? null, majFaults: w.mem.majFaults, swapIns: w.mem.swapIns, memOver: w.mem.over } : {}), overloaded: Boolean(w.overloaded) } : null;
+    }))).filter(Boolean),
     candidate: { cold: summarize("candidate", "cold"), warm: summarize("candidate", "warm") },
     baseline: sides.baseline ? { cold: summarize("baseline", "cold"), warm: summarize("baseline", "warm") } : null,
     change: sides.baseline ? withheldOnOverlap(pairedSpeedChange(runsDone.filter((r) => good(r.baseline) && good(r.candidate)), { minPairs: o.minPairs }), lockOverlap) : null,
     // Checks of the perf lock that found another holder (empty: none).
     lockOverlap,
+    // --headroom: the same pairing on maxSpeedCpu, the number a speed=1 A/B
+    // decides on (the speed itself sits at 100 %), cold and, with --warm, warm.
+    ...(o.headroom && sides.baseline ? { headroomChange: Object.fromEntries(["cold", ...(o.warm ? ["warm"] : [])].map((phase) => {
+      const as = (r, side) => ({ [phase]: { v: r[side]?.[phase]?.headroom?.maxSpeedCpu } });
+      const pairs = runsDone.filter((r) => good(r.baseline) && good(r.candidate));
+      return [phase, pairedSpeedChange(pairs.map((r) => ({ run: r.run, baseline: as(r, "baseline"), candidate: as(r, "candidate") })), { metric: "v", minPairs: o.minPairs, phase })];
+    })) } : {}),
     // --counters: the same pairing on host instructions per guest cycle (lower is better).
     ...(o.onWindow && sides.baseline ? { counterChange: pairedSpeedChange(runsDone.filter((r) => good(r.baseline) && good(r.candidate)), { metric: "instructionsPerGuestCycle", minPairs: o.minPairs }) } : {}),
     // Host cycles per guest cycle: they decide when the instructions and the
@@ -809,7 +1224,8 @@ async function main() {
   };
   writeFileSync(path.join(outDir, "summary.json"), JSON.stringify(summary, null, 1) + "\n");
   const med = (n) => summary[n]?.cold?.speed?.median ?? "-";
-  console.log(`[race-perf] ${sides.baseline ? `baseline ${med("baseline")} % → candidate ${med("candidate")} %, paired change ${summary.change.median ?? `withheld (${summary.change.withheld})`}${summary.change.median != null ? ` % over ${summary.change.pairs} pairs` : ""}` : `speed median ${med("candidate")} %`}${failed.length ? `; ${failed.length} failed run(s): ${failed.map((f) => `r${f.run} ${f.side} ${f.why}`).join(", ")}` : ""} -> ${outDir}`);
+  const newMed = (n) => summary[n]?.cold?.newFramesPerSec?.median ?? "-";
+  console.log(`[race-perf] ${sides.baseline ? `baseline ${med("baseline")} % → candidate ${med("candidate")} %, paired change ${summary.change.median ?? `withheld (${summary.change.withheld})`}${summary.change.median != null ? ` % over ${summary.change.pairs} pairs` : ""}` : `speed median ${med("candidate")} %`}; new frames ${sides.baseline ? `${newMed("baseline")} → ${newMed("candidate")}` : newMed("candidate")}/s${failed.length ? `; ${failed.length} failed run(s): ${failed.map((f) => `r${f.run} ${f.side} ${f.why}`).join(", ")}` : ""} -> ${outDir}`);
   process.exitCode = failed.length || summary.change?.withheld || lockOverlap.length ? 1 : 0;
 }
 

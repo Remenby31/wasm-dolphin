@@ -7,7 +7,7 @@
   "minimumEffectPercent": 0,
   "hypothesis": "The sampled draw-detail suite adds less than 2% incremental fixed-work overhead on top of the producer profiler.",
   "invalidationRules": [
-    "use the verified Kirby-vs-Link fixed battle with SAVE_STATE_AT=0 and no gameplay input",
+    "use the verified reference-battle fixed battle with SAVE_STATE_AT=0 and no gameplay input",
     "both arms require metrics=1 and wgpuprodprofile=1 with otherwise identical settings",
     "the reference arm must expose wgdraw v1 disabled with zero counters",
     "the detail arm must expose wgdraw v1 enabled with stable epoch, phase order, periods, stratified cadence, and monotonic counters",

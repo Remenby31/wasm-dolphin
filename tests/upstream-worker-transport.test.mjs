@@ -2,10 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { UpstreamWorkerAdapter } from "../src/upstream-worker-adapter.js";
-import {
-  DEFAULT_UPSTREAM_CORE_SHA256,
-  DEFAULT_UPSTREAM_CORE_URL
-} from "../src/upstream-worker-protocol.js";
+import { DEFAULT_UPSTREAM_CORE_SHA256 } from "../src/default-core.js";
+import { DEFAULT_UPSTREAM_CORE_URL } from "../src/upstream-worker-protocol.js";
 
 test("adapter marks only known fire-and-forget calls as one-way", () => {
   const posted = [];

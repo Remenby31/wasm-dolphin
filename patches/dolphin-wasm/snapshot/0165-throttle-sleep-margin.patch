@@ -1,0 +1,279 @@
+diff --git a/Source/Core/Core/CoreTiming.cpp b/Source/Core/Core/CoreTiming.cpp
+index cc77842..9be7f5a 100644
+--- a/Source/Core/Core/CoreTiming.cpp
++++ b/Source/Core/Core/CoreTiming.cpp
+@@ -75,6 +75,94 @@ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_SetPresentOnArrival(int on)
+   DolphinWeb::g_present_on_arrival.store(on != 0, std::memory_order_relaxed);
+ }
+ 
++namespace DolphinWeb
++{
++// Patch 0165 (?sleepmargin=<us>): the CPU thread's throttle sleeps until its
++// target minus this margin, then spins to the target. The worker's timed
++// Atomics.wait wakes ~2.5 ms late (0162: p50 2.5, p99 5 ms), so two thirds of
++// the throttles found their target already passed. 0: the plain sleep.
++std::atomic<u32> g_sleep_margin_us{0};
++// ?sleepstep=<us>: inside the margin, short sleeps of this length while more
++// than one step is left, before the final spin (fewer spun microseconds if a
++// short wait wakes closer to its time than a long one). 0: spin the margin.
++std::atomic<u32> g_sleep_step_us{0};
++// ?sleepk=<permille>: the geometric cascade (research/deep-precise-sleep.md
++// §6 D): each wait is k x the time left, until at most ?sleepspin=<us> is
++// left, then a spin. macOS wakes a wait of d at most ~d/4 late (timer
++// coalescing), so with k = 0.75 each wake lands before the target and the
++// time left shrinks by >= 4x per wait. 0: off (takes precedence over the margin).
++std::atomic<u32> g_sleep_k_permille{750};
++std::atomic<u32> g_sleep_spin_us{150};
++
++// One timed wait of the CPU thread's throttle, with its requested length and
++// lateness counted (0162/0165 histograms) while the counters are on.
++static void ThrottleWaitUntil(std::chrono::steady_clock::time_point target)
++{
++  if (!PresentCadence::g_on)
++  {
++    std::this_thread::sleep_until(target);
++    return;
++  }
++  const auto start = std::chrono::steady_clock::now();
++  if (target <= start)
++    return;
++  std::this_thread::sleep_until(target);
++  PresentCadence::OnWait(target - start, std::chrono::steady_clock::now() - target);
++}
++
++// The steady clock's tick, measured once: performance.now() can be coarse
++// (16.7 ms steps under Firefox's resist-fingerprinting or Tor), too coarse
++// to time a spin (review of #292). A clock that never moves counts as an
++// hour.
++static std::chrono::steady_clock::duration ClockTick()
++{
++  static const std::chrono::steady_clock::duration tick = [] {
++    const auto a = std::chrono::steady_clock::now();
++    auto b = a;
++    for (int i = 0; i < 100000000 && b == a; ++i)
++      b = std::chrono::steady_clock::now();
++    return b == a ? std::chrono::steady_clock::duration{std::chrono::hours{1}} : b - a;
++  }();
++  return tick;
++}
++}  // namespace DolphinWeb
++
++extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_SetThrottleSleepMarginUs(int us)
++{
++  DolphinWeb::g_sleep_margin_us.store(static_cast<u32>(std::clamp(us, 0, 8000)),
++                                      std::memory_order_relaxed);
++}
++
++extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_SetThrottleSleepStepUs(int us)
++{
++  DolphinWeb::g_sleep_step_us.store(static_cast<u32>(std::clamp(us, 0, 4000)),
++                                    std::memory_order_relaxed);
++}
++
++extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_ThrottleSleepStepUs()
++{
++  return DolphinWeb::g_sleep_step_us.load(std::memory_order_relaxed);
++}
++
++extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_SetThrottleSleepCascade(int k_permille, int spin_us)
++{
++  // 0 turns it off; a low k would leave most of each wait to the spin
++  // (review of #292): at least 500.
++  DolphinWeb::g_sleep_k_permille.store(
++      static_cast<u32>(k_permille <= 0 ? 0 : std::clamp(k_permille, 500, 950)),
++      std::memory_order_relaxed);
++  DolphinWeb::g_sleep_spin_us.store(static_cast<u32>(std::clamp(spin_us, 50, 2000)),
++                                    std::memory_order_relaxed);
++}
++
++// The cascade's k (permille, 0: off) in the low 16 bits, its spin limit (us)
++// in the high 16 bits.
++extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_ThrottleSleepCascade()
++{
++  return DolphinWeb::g_sleep_k_permille.load(std::memory_order_relaxed) |
++         (DolphinWeb::g_sleep_spin_us.load(std::memory_order_relaxed) << 16);
++}
++
+ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_SetDupXfbRearmsThrottle(int on)
+ {
+   DolphinWeb::g_dup_xfb_rearms_throttle.store(on != 0, std::memory_order_relaxed);
+@@ -83,8 +171,9 @@ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_SetDupXfbRearmsThrottle(int on)
+ // The pacing settings the core runs with, from its effective config: bit 0
+ // SyncOnSkipIdle, bit 1 Rush Frame Presentation, bit 2 the 0150 rearm, bit 3
+ // the video thread's present sleep (0153: SmoothEarlyPresentation on and not
+-// presenting on arrival; ?smoothearly=0 clears it). The harness reads it
+-// (validationReadPacingConfig) to know a switch was applied.
++// presenting on arrival; ?smoothearly=0 clears it), bits 16-28 the 0165 sleep
++// margin in us. The harness reads it (validationReadPacingConfig) to know a
++// switch was applied.
+ extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_PacingConfig()
+ {
+   return (Config::Get(Config::MAIN_SYNC_ON_SKIP_IDLE) ? 1u : 0u) |
+@@ -93,7 +182,8 @@ extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_PacingConfig()
+          (Config::Get(Config::MAIN_SMOOTH_EARLY_PRESENTATION) &&
+                   !DolphinWeb::g_present_on_arrival.load(std::memory_order_relaxed) ?
+               8u :
+-              0u);
++              0u) |
++         (DolphinWeb::g_sleep_margin_us.load(std::memory_order_relaxed) << 16);
+ }
+ #endif
+ 
+@@ -608,10 +698,72 @@ void CoreTimingManager::SleepUntil(TimePoint time_point)
+     // pacing). Busy-spin burned that 41ms of CPU on the pthread which
+     // starved the main-thread audio worklet → underruns. Sleep releases
+     // the CPU so audio/render can use it during throttle.
++#ifdef __EMSCRIPTEN__
++    // Patch 0165: the margin when asked (?sleepmargin, with ?sleepstep: an
++    // explicit choice wins over the default cascade), else the cascade
++    // (?sleepk), then a spin to the target (nothing when a wait overran).
++    const u32 k_permille = DolphinWeb::g_sleep_k_permille.load(std::memory_order_relaxed);
++    const u32 margin_us = DolphinWeb::g_sleep_margin_us.load(std::memory_order_relaxed);
++    if (k_permille != 0 || margin_us != 0)
++    {
++      bool spin = true;
++      if (margin_us == 0)
++      {
++        const auto spin_limit =
++            std::chrono::microseconds{DolphinWeb::g_sleep_spin_us.load(std::memory_order_relaxed)};
++        // At most 8 waits: under a coarse timer (Windows on battery) a wait
++        // shorter than the quantum still lasts a quantum and overruns.
++        for (int waits = 0; waits < 8; ++waits)
++        {
++          const TimePoint now = Clock::now();
++          const auto left = time_point - now;
++          if (left <= spin_limit)
++            break;
++          DolphinWeb::ThrottleWaitUntil(now + left * k_permille / 1000);
++        }
++        // The spin is bounded by ?sleepspin (review of #292): more time left
++        // (the 8 waits used up), or a clock too coarse to time a spin
++        // (performance.now() in 16.7 ms steps under resist-fingerprinting),
++        // and the rest is a plain sleep, never a busy wait of a frame (the
++        // busy throttle that starved the audio worklet, §28cr3).
++        if (time_point - Clock::now() > spin_limit || DolphinWeb::ClockTick() > spin_limit)
++        {
++          DolphinWeb::ThrottleWaitUntil(time_point);
++          spin = false;
++        }
++      }
++      else
++      {
++        const TimePoint coarse = time_point - std::chrono::microseconds{margin_us};
++        if (coarse > time)
++          DolphinWeb::ThrottleWaitUntil(coarse);
++        const u32 step_us = DolphinWeb::g_sleep_step_us.load(std::memory_order_relaxed);
++        if (step_us != 0)
++        {
++          const auto step = std::chrono::microseconds{step_us};
++          while (time_point - Clock::now() > step)
++            DolphinWeb::ThrottleWaitUntil(Clock::now() + step);
++        }
++      }
++      if (spin)
++      {
++        const TimePoint spin_start = Clock::now();
++        TimePoint now = spin_start;
++        while (now < time_point)
++          now = Clock::now();
++        DolphinWeb::PresentCadence::AddSpin(now - spin_start);
++      }
++    }
++    else
++#endif
+     if (use_precision_timer)
+       m_precision_cpu_timer.SleepUntil(time_point);
+     else
++#ifdef __EMSCRIPTEN__
++      DolphinWeb::ThrottleWaitUntil(time_point);
++#else
+       std::this_thread::sleep_until(time_point);
++#endif
+ 
+     // Count amount of time sleeping for analytics
+     const TimePoint time_after_sleep = Clock::now();
+diff --git a/Source/Core/Core/WasmPresentCadence.h b/Source/Core/Core/WasmPresentCadence.h
+index cdcbf1e..10caf18 100644
+--- a/Source/Core/Core/WasmPresentCadence.h
++++ b/Source/Core/Core/WasmPresentCadence.h
+@@ -31,15 +31,20 @@
+ 
+ namespace DolphinWeb::PresentCadence
+ {
+-// Layout v1 (1344 bytes, little-endian u32s), agreed with the harness.
++// Layout v2 (1872 bytes, little-endian u32s), agreed with the harness: v1's
++// 1344 bytes unchanged, then (patch 0165) the throttle's timed waits: their
++// count, their requested length and their lateness over that length
++// (research/deep-precise-sleep.md §8.1: macOS wakes ~length/4 late).
+ constexpr u32 SLEEP_BIN_US = 250;   // (1) wake-up lateness, 64 bins, last = overflow
+ constexpr u32 BEHIND_BIN_US = 500;  // (1) target already passed, 64 bins
+ constexpr u32 BURST_BIN_US = 500;   // (2) Throttle return -> OutputXFB, 64 bins
+ constexpr u32 ARRIVAL_BIN_US = 500; // (3) signed, 128 bins, bin 64 = [0, 500 us)
++constexpr u32 WAIT_REQ_BIN_US = 500; // 0165: a wait's requested length, 64 bins
++constexpr u32 WAIT_RATIO_BINS = 64;  // 0165: lateness / length, bins of 1/64
+ struct Stats
+ {
+-  u32 version = 1;
+-  u32 size_bytes = 1344;
++  u32 version = 2;
++  u32 size_bytes = 1872;
+   u32 on = 0;  // 0 off, 1 on, 2 resetting (CPU section half zeroed)
+   u32 generation = 0;
+   // CPU thread
+@@ -53,13 +58,19 @@ struct Stats
+   u32 presents = 0;
+   u32 arrival_late_max_us = 0;
+   u32 video_generation = 0;  // the generation the video section was zeroed for
+-  u32 reserved[3] = {};
++  u32 spin_us = 0;           // CPU thread: 0165's throttle spin, in total
++  u32 reserved[2] = {};
+   u32 sleep_late_hist[64] = {};
+   u32 behind_hist[64] = {};
+   u32 burst_hist[64] = {};
+   u32 arrival_hist[128] = {};
++  // v2 (patch 0165), CPU thread
++  u32 waits = 0;  // timed waits of the throttle (several per throttle in a cascade)
++  u32 reserved2[3] = {};
++  u32 wait_req_hist[64] = {};
++  u32 wait_ratio_hist[64] = {};
+ };
+-static_assert(sizeof(Stats) == 1344);
++static_assert(sizeof(Stats) == 1872);
+ 
+ using Clock = std::chrono::steady_clock;
+ alignas(8) inline Stats g_stats;
+@@ -87,7 +98,9 @@ inline void OnThrottle()
+     g_stats.on = 2;
+     const u32 generation = g_stats.generation + 1;
+     // The CPU section only: the video thread zeroes its own.
+-    g_stats.throttles = g_stats.sleeps = g_stats.outputs = 0;
++    g_stats.throttles = g_stats.sleeps = g_stats.outputs = g_stats.spin_us = g_stats.waits = 0;
++    std::fill(std::begin(g_stats.wait_req_hist), std::end(g_stats.wait_req_hist), 0u);
++    std::fill(std::begin(g_stats.wait_ratio_hist), std::end(g_stats.wait_ratio_hist), 0u);
+     g_stats.sleep_late_max_us = g_stats.behind_max_us = g_stats.burst_max_us = 0;
+     std::fill(std::begin(g_stats.sleep_late_hist), std::end(g_stats.sleep_late_hist), 0u);
+     std::fill(std::begin(g_stats.behind_hist), std::end(g_stats.behind_hist), 0u);
+@@ -121,6 +134,23 @@ inline void OnThrottleSleep(Clock::time_point entry, Clock::time_point target,
+   g_last_throttle_return = woke;
+   g_have_return = true;
+ }
++// CPU thread, patch 0165: one timed wait, its requested length and lateness.
++inline void OnWait(Clock::duration requested, Clock::duration late)
++{
++  if (!g_on) [[likely]]
++    return;
++  const u32 req = Micros(requested);
++  g_stats.waits += 1;
++  Bin(g_stats.wait_req_hist, 64, WAIT_REQ_BIN_US, req);
++  const u64 ratio = req ? static_cast<u64>(Micros(late)) * WAIT_RATIO_BINS / req : 0;
++  g_stats.wait_ratio_hist[std::min<u64>(ratio, WAIT_RATIO_BINS - 1)] += 1;
++}
++// CPU thread, patch 0165: the time a throttle spun to its target.
++inline void AddSpin(Clock::duration d)
++{
++  if (g_on) [[unlikely]]
++    g_stats.spin_us += Micros(d);
++}
+ // CPU thread, at Video_OutputXFB.
+ inline void OnOutputXfb()
+ {

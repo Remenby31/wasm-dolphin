@@ -84,7 +84,7 @@ export async function validateWgpuUboScreening({ outDir, configPath }) {
       screenshot: run.screenshot.path,
       sha256: run.screenshot.sha256,
       instruction:
-        "Open final.png and confirm it shows the loaded Kirby-vs-Link battle rather than a menu, black frame, or green frame.",
+        "Open final.png and confirm it shows the loaded reference-battle battle rather than a menu, black frame, or green frame.",
     })),
   };
 }
@@ -223,7 +223,7 @@ function validateFixture({ manifest, issue }) {
   check(fixture.isoVerified === true && fixture.saveStateVerified === true,
     "FIXTURE_UNVERIFIED", "ISO or save-state hash was not verified", issue);
   check(fixture.saveStateLoaded === true && fixture.battleCheckpoint?.verified === true,
-    "CHECKPOINT_UNVERIFIED", "Kirby-vs-Link fixed checkpoint was not loaded and verified", issue);
+    "CHECKPOINT_UNVERIFIED", "reference-battle fixed checkpoint was not loaded and verified", issue);
   check(manifest.benchmark?.timingStartsAfterVerifiedLoad === true,
     "TIMING_BOUNDARY", "Timing did not start after the verified save load", issue);
   check(manifest.benchmark?.inputScriptMode === "none",

@@ -6,9 +6,10 @@ import path from "node:path";
 import test from "node:test";
 import { REQUIRED_WGPU_OWNERSHIP_TRACE_EXPORTS } from "../tools/dolphin-provenance.mjs";
 import { CAUSAL_TELEMETRY_SCHEMA_VERSION } from "../src/causal-telemetry.js";
+import { JSC_STAGING_SLOT_COUNT, JSC_STAGING_SLOT_MIB } from "../src/wgpu-replay-diagnostics.js";
 
 import {
-  FIXED_MELEE_BATTLE_FIXTURE,
+  FIXED_BATTLE_FIXTURE,
   WGPU_PRODUCER_PROFILE_PHASE_ORDER,
   WGPU_DRAW_PROFILE_PHASE_ORDER,
   assertBattleCheckpoint,
@@ -442,6 +443,13 @@ test("geometry range evidence requires both activation and the producer ABI", ()
     requested: "1",
     telemetry: null,
   }).failures[0], /active=unavailable/);
+  // The range needs the pack (geomrange=1 with geompack=0 is inactive), and a
+  // non-canonical value is the default (on), as the product reads them.
+  const off = { geometryRangeEnabled: false, producerGeometryRangeAvailable: true };
+  const on = { geometryRangeEnabled: true, producerGeometryRangeAvailable: true };
+  assert.deepEqual(evaluateWgpuGeometryRangeEvidence({ requested: "1", packRequested: "0", telemetry: off }).failures, []);
+  assert.match(evaluateWgpuGeometryRangeEvidence({ requested: "1", packRequested: "0", telemetry: on }).failures[0], /requested=0/);
+  assert.deepEqual(evaluateWgpuGeometryRangeEvidence({ requested: "yes", telemetry: on }).failures, []);
 });
 
 test("metrics-off WGPU evidence requires a matching static runtime config", () => {
@@ -510,6 +518,48 @@ test("metrics-off WGPU evidence requires a matching static runtime config", () =
       runtimeConfig: { ...runtimeConfig, [field]: value },
     }).failures.join("\n"), pattern);
   }
+  // Unforced, the engine's defaults are expected: under JavaScriptCore,
+  // mapped staging with JSC's slot count and size; an artifact without the
+  // engine reads as V8.
+  const { wgpuuploadtransport: _t, wgpustagingslots: _s, ...unforced } = params;
+  const jsc = { ...runtimeConfig, wasmEngine: "jsc", uploadTransport: "mapped", mappedStaging: { ...runtimeConfig.mappedStaging, slotCount: JSC_STAGING_SLOT_COUNT, slotBytes: JSC_STAGING_SLOT_MIB * 1024 * 1024 } };
+  assert.match(evaluateWgpuRuntimeConfigEvidence({
+    required: true, params: unforced,
+    runtimeConfig: { ...jsc, mappedStaging: { ...jsc.mappedStaging, slotBytes: 16 * 1024 * 1024 } },
+  }).failures.join("\n"), /slot bytes mismatch/);
+  assert.deepEqual(evaluateWgpuRuntimeConfigEvidence({ required: true, params: unforced, runtimeConfig: jsc }).failures, []);
+  assert.match(evaluateWgpuRuntimeConfigEvidence({
+    required: true, params: unforced, runtimeConfig: { ...jsc, wasmEngine: "v8" },
+  }).failures.join("\n"), /upload transport mismatch/);
+  assert.match(evaluateWgpuRuntimeConfigEvidence({
+    required: true, params: unforced, runtimeConfig: { ...jsc, wasmEngine: undefined },
+  }).failures.join("\n"), /upload transport mismatch/);
+  // Geometry merging is on by default since 2026-10-29: without the
+  // parameters both are expected on; =0 turns each off.
+  const { wgpugeompack: _pack, wgpugeomrange: _range, ...noGeometryParams } = params;
+  const geometryOn = { ...runtimeConfig, geometryPackEnabled: true, geometryRangeEnabled: true };
+  assert.deepEqual(evaluateWgpuRuntimeConfigEvidence({
+    required: true, params: noGeometryParams, runtimeConfig: geometryOn,
+  }).failures, []);
+  assert.match(evaluateWgpuRuntimeConfigEvidence({
+    required: true, params: noGeometryParams, runtimeConfig,
+  }).failures.join("\n"), /geometry pack mismatch/);
+  assert.deepEqual(evaluateWgpuRuntimeConfigEvidence({
+    required: true, params: { ...noGeometryParams, wgpugeomrange: "0" },
+    runtimeConfig: { ...geometryOn, geometryRangeEnabled: false },
+  }).failures, []);
+  // Every slot count the engine accepts (3 to 8) is accepted here too.
+  const sixSlots = { ...runtimeConfig, mappedStaging: { ...runtimeConfig.mappedStaging, slotCount: 6 } };
+  assert.deepEqual(evaluateWgpuRuntimeConfigEvidence({
+    required: true,
+    params: { ...params, wgpustagingslots: "6" },
+    runtimeConfig: sixSlots,
+  }).failures, []);
+  assert.match(evaluateWgpuRuntimeConfigEvidence({
+    required: true,
+    params: { ...params, wgpustagingslots: "6" },
+    runtimeConfig,
+  }).failures.join("\n"), /slot/i);
 });
 
 test("WGPU semantic qualification requires complete post-load evidence", () => {
@@ -1210,12 +1260,12 @@ test("fixture verification rejects missing and hash-mismatched files", async () 
       verifyFileFixture(fixturePath, { label: "battle save", expectedSha256: "0".repeat(64) }),
       /Missing battle save/
     );
-    await writeFile(fixturePath, "Kirby versus Link");
+    await writeFile(fixturePath, "reference battle");
     await assert.rejects(
       verifyFileFixture(fixturePath, { label: "battle save", expectedSha256: "0".repeat(64) }),
       /SHA-256 mismatch/
     );
-    const expectedSha256 = createHash("sha256").update("Kirby versus Link").digest("hex");
+    const expectedSha256 = createHash("sha256").update("reference battle").digest("hex");
     const verified = await verifyFileFixture(fixturePath, { label: "battle save", expectedSha256 });
     assert.equal(verified.verified, true);
     assert.equal(verified.sha256, expectedSha256);
@@ -1316,11 +1366,11 @@ test("post-load input metadata hashes the canonical script before provenance che
     saveStatePath: "unused.sav",
     saveStateAt: 0,
     inputScript,
-    sceneLabel: FIXED_MELEE_BATTLE_FIXTURE.sceneLabel,
+    sceneLabel: FIXED_BATTLE_FIXTURE.sceneLabel,
     artifactDescriptions: {
-      rom: { sha256: FIXED_MELEE_BATTLE_FIXTURE.isoSha256 },
+      rom: { sha256: "2".repeat(64) },
       core: { sha256: "1".repeat(64) },
-      saveState: { sha256: FIXED_MELEE_BATTLE_FIXTURE.saveStateSha256 },
+      saveState: { sha256: "3".repeat(64) },
     },
   });
   assert.equal(
@@ -2491,14 +2541,14 @@ function validManifest() {
     browser: { version: "143.0", headed: false },
     benchmark: {
       url: "http://127.0.0.1:8082/?video=software",
-      sceneLabel: FIXED_MELEE_BATTLE_FIXTURE.sceneLabel,
+      sceneLabel: FIXED_BATTLE_FIXTURE.sceneLabel,
       saveStateAt: 0,
       inputScriptMode: "none",
     },
     artifacts: {
-      rom: { sha256: FIXED_MELEE_BATTLE_FIXTURE.isoSha256 },
+      rom: { sha256: "2".repeat(64) },
       core: { sha256: "1".repeat(64) },
-      saveState: { sha256: FIXED_MELEE_BATTLE_FIXTURE.saveStateSha256 },
+      saveState: { sha256: "3".repeat(64) },
     },
     fixture: {
       isoVerified: true,
@@ -2574,3 +2624,26 @@ function makeRuns(config, valuesByBlock) {
     }));
   });
 }
+
+test("the worker's WGPU runtime config names the engine whose defaults applied", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const worker = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
+  const payload = worker.slice(worker.indexOf("function wgpuRuntimeConfigPayload()"));
+  assert.match(payload.slice(0, 800), /schema: "wasm-dolphin\.wgpu-runtime-config\.v1",[\s\S]*?wasmEngine: wasmEngineName,/);
+});
+
+test("the reference disc hash comes from the environment or an untracked config, never the tree", async () => {
+  const { referenceIsoSha256, requireReferenceIsoSha256 } = await import("../tools/perf-artifacts.mjs");
+  const h = "a".repeat(64);
+  assert.equal(referenceIsoSha256({}), null);
+  assert.equal(referenceIsoSha256({ REFERENCE_ISO_SHA256: h.toUpperCase() }), h);
+  assert.equal(referenceIsoSha256({ REFERENCE_FIXTURE: "/x/ref.json" }, () => JSON.stringify({ isoSha256: h })), h);
+  assert.throws(() => referenceIsoSha256({ REFERENCE_FIXTURE: "/x/ref.json" }, () => "{}"), /no isoSha256/);
+  assert.throws(() => referenceIsoSha256({ REFERENCE_FIXTURE: "/x/missing.json" }, () => { throw new Error("ENOENT"); }), /ENOENT/);
+  assert.throws(() => requireReferenceIsoSha256({}), /reference disc SHA-256 not configured/);
+  const { referenceSha256, requireReferenceSha256 } = await import("../tools/perf-artifacts.mjs");
+  assert.equal(referenceSha256("state", { REFERENCE_STATE_SHA256: h }), h);
+  assert.equal(referenceSha256("state", { REFERENCE_FIXTURE: "/x/ref.json" }, () => JSON.stringify({ isoSha256: "b".repeat(64), stateSha256: h })), h);
+  assert.equal(referenceSha256("state", { REFERENCE_ISO_SHA256: h }), null);
+  assert.throws(() => requireReferenceSha256("state", {}), /reference savestate SHA-256 not configured: set REFERENCE_STATE_SHA256/);
+});

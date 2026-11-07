@@ -61,6 +61,7 @@
                   <span><strong id="hudUnderDrop">0/0</strong> u/d</span>
                   <span><strong id="hudQueue">0/0</strong> q</span>
                   <span><strong id="hudJitCache">0/0</strong> jitc</span>
+                  <span title="Refreshes each game frame stayed on screen (1/2/3/4+), refreshes beyond its share, screen rate, game pace"><strong id="hudRefresh">-</strong> refresh</span>
                   <span><strong id="hudRunloop">-/-</strong>us runloop</span>
                   <span><strong id="hudWgx">-</strong> wgx</span>
                   <span id="hudStatus" style="opacity:.7"></span>
@@ -264,15 +265,11 @@
                               <input id="settingMetrics" type="checkbox">
                               <span>Collect Metrics</span>
                             </label>
-                            <label class="switch-line tip" data-tip="Pick the renderer from measured per-game results">
-                              <input id="settingAutoProfile" type="checkbox" checked>
-                              <span>Auto per-game</span>
-                            </label>
                             </div>
                             
                             <div class="settings-actions">
                             <button id="settingsApplyButton" type="submit">Apply restart</button>
-                            <button id="settingsPresetButton" type="button">Melee preset</button>
+                            <button id="settingsPresetButton" type="button">Playable preset</button>
                             </div>
                             </form>
                             

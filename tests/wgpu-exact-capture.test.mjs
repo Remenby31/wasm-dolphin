@@ -190,13 +190,13 @@ test("the worker routes video=wgpu captures to the tagged presents", async () =>
   assert.match(worker, /const WGPU_CMD_OP_PRESENT_SOURCE = 27;/);
   assert.match(worker, /generation: u32\[recWord \+ 5\]/);
   assert.match(worker, /wgpuExactCapture\.arm\(index, fromLoad, generation\)/);
-  assert.match(worker, /setTimeout\(\(\) => wgpuExactCapture\.cancel\(id, /);
+  assert.match(worker, /const timer = setTimeout\(\(\) => \{[\s\S]{0,800}?wgpuExactCapture\.cancel\(id, /);
   // Both savestate paths drop waiting captures before the core loads.
   assert.equal(worker.match(/wgpuExactCapture\.onLoad\(\);/g)?.length, 2);
   // The copy starts at the presented rectangle's origin.
   assert.match(worker, /copyTextureToBuffer\(\{ texture: entry\.tex, origin: \{ x: rect\.x, y: rect\.y, z: 0 \} \}/);
   assert.match(worker, /wgpuPresentedSource = \{\n\s*textureId: wgpuLastBackbufferSourceTextureId, rect: wgpuNextPresentSource\n\s*\};\n\s*wgpuNextPresentSource = null;\n\s*wgpuExactCapture\.onPresent\(readbackWgpuPresentSource\);/);
-  assert.match(worker, /\(\(harnessEnabled \|\| DIAG_TEX_READBACK/);
+  assert.match(worker, /usage: u32\[recWord \+ 5\] \|\n\s*\(harnessEnabled \? 0x1 : 0\)/);
   const patch = await readFile(new URL(
     "../patches/dolphin-wasm/snapshot/0069-webgpu-tag-presents-with-vi-output.patch", import.meta.url), "utf8");
   assert.match(patch, /\+  ViTag = 26,/);

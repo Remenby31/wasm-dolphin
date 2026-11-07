@@ -1,7 +1,7 @@
 # PPC-to-WASM JIT flags
 
 These URL parameters control the experimental PowerPC-to-WebAssembly JIT and
-its diagnostic/bisection features. Defaults favor the known-good Melee
+its diagnostic/bisection features. Defaults favor the known-good
 software-hybrid configuration. Several optimizations stay off until their
 correctness is established.
 
@@ -19,11 +19,11 @@ correctness is established.
 | `smearcompile=0` | Disable default-on compile smearing and compile eagerly. |
 | `blockmerge=1` | Opt into adjacent-block merging. Default-off because it is correctness-sensitive. |
 | `shortprefix=1` | Compile shorter PPC prefixes. Default-off pending stronger correctness evidence. |
-| `fastmemhoist=1` | Hoist per-block fastmem bounds checks. Default-off because a bad proof could permit an out-of-bounds access. |
 | `disable=...` | Disable named JIT helper/optimization categories, or pass a decimal/hex mask, for bisection. |
 | `nojitcache=1` | Skip the browser-side compiled JIT cache/prewarm path for a cold-cache comparison. |
 | `jitoffthread=0` | **On by default** (user decision, 2026-10-19); `jitoffthread=0` turns it off and the CPU thread compiles misses in place. When on, the CPU thread does not compile a missed block first: it zeroes the key's byte in a shared ready table (`DolphinWeb_JitReadyBitsPtr()`, slot = first 16 SHA bits of the key), posts `dolphin-jit-compile-request {key, bytes, kind, readyPtr, readySlot}` once, and interprets the block. discio stores 1 in that byte once the compiler worker has compiled, warmed and retained the module, or failed; the block is then recompiled synchronously, which hits V8's per-process module cache for the same bytes (or raises the same engine error and is blacklisted). A retried block whose bytes changed compiles in place. The pthread never needs to receive a message (it does not return to its event loop). Needs the JIT cache (ignored with `nojitcache=1`); with `aotcompiler=0` the modules come back from discio unwarmed. |
 | `aotcompiler=0` | **On by default** (user decision, 2026-10-19); `aotcompiler=0` turns it off and modules compile in place on discio, unwarmed. When on, cached and requested JIT modules compile in a dedicated compiler worker (`src/aot-compiler-worker.js`) that warms them on scratch memory, and stay alive so the CPU thread's own compile of the same bytes hits V8's cache. Measured cost on the race, as the default (aotcompiler and jitoffthread on, campaign mem7 of 2026-10-20): about +57 MB median phys_footprint at the end of the window (+51 to +126 MB, peak +50 to +94 MB), worst menu frame about −33 % median. |
+| `aotasm=0` | **On by default except under JavaScriptCore**; `aotasm=0` turns it off (`aotasm=1` forces it on, JSC included). When on, a first launch's region modules are assembled in their own worker (`src/aot-assembler-worker.js`), not on discio, which also replays and presents: each assembly took 30-60 ms there and held back presents on the boot screens (#405). A failure of that worker (load, clone, no reply) assembles in place for the rest of the session and never refuses a region. Off by default under JSC until an iPhone measures the extra worker's memory. |
 | `metrics=1` | Enable on-screen and validation metrics used to judge behavior and performance. |
 
 ## Defaults and safety
@@ -31,8 +31,6 @@ correctness is established.
 - Block merge is default-off; enable it only with `blockmerge=1`.
 - Short-prefix compilation is default-off; enable it only with
   `shortprefix=1`.
-- Fastmem bounds-check hoisting is default-off; enable it only with
-  `fastmemhoist=1`.
 - Register allocation/GPR caching is default-on. `regalloc=0` is the immediate
   escape hatch.
 - Compile smearing is default-on. `smearcompile=0` restores eager compilation.
@@ -62,13 +60,12 @@ decimal bitmask, or a `0x` hexadecimal bitmask. Unknown names are logged and
 ignored. Current named categories include:
 
 ```text
-meleeloop meleecall osinterrupt dcbxloop fastbranch fastfp fastinteger
-fastsystem wasmblock wasmcarry wasmaddc wasmsubfc wasmadde wasmsubfe
-wasmaddze blockredispatch blockmerge regalloc shortprefix smearcompile
-fastmemhoist inlinefma all
+dcbxloop fastbranch fastfp fastinteger fastsystem wasmblock wasmcarry
+wasmaddc wasmsubfc wasmadde wasmsubfe wasmaddze blockredispatch blockmerge
+regalloc shortprefix smearcompile inlinefma all
 ```
 
-Aliases include `fastinputpoll` for `meleecall` and `fastmem` for
+Bits 0, 1 and 2 are unused since core patch 0196. The alias `fastmem` stands for
 `fastsystem`. Because this surface is for controlled experiments, always save
 the complete URL alongside results.
 

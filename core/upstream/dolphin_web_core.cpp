@@ -9,15 +9,26 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <mutex>
 #include <chrono>
+#include <condition_variable>
+#include <deque>
+#include <thread>
+#include <unordered_map>
+#include <unordered_set>
 #include <functional>
 #include <memory>
 #include <span>
 #include <string>
 #include <string_view>
 #include <vector>
+
+#ifdef __EMSCRIPTEN__
+#include <malloc.h>
+#include <unistd.h>
+#endif
 
 #include "AudioCommon/AudioCommon.h"
 #include "AudioCommon/SoundStream.h"
@@ -64,6 +75,11 @@ extern "C" std::uint32_t DolphinWeb_SetCachedInterpreterDisableMask(std::uint32_
 extern "C" std::uint32_t DolphinWeb_GetCachedInterpreterDisableMask();
 extern "C" unsigned int DolphinWeb_SetRendererFeatureMask(unsigned int mask);
 extern "C" unsigned int DolphinWeb_GetRendererFeatureMask();
+extern "C" void DolphinWeb_SetDupXfbRearmsThrottle(int on);  // patch 0150
+extern "C" void DolphinWeb_SetPresentOnArrival(int on);       // patch 0153
+extern "C" void DolphinWeb_SetThrottleSleepMarginUs(int us);  // patch 0165
+extern "C" void DolphinWeb_SetThrottleSleepStepUs(int us);    // patch 0165
+extern "C" void DolphinWeb_SetThrottleSleepCascade(int k_permille, int spin_us);  // patch 0165
 extern "C" void NotifyWebGpuOwnershipTraceLoadRequested();
 
 #ifdef __EMSCRIPTEN__
@@ -73,6 +89,8 @@ extern "C" void NotifyWebGpuOwnershipTraceLoadRequested();
 // §27d: defined in VideoCommon/Fifo.cpp — the after-load callback (CPU
 // pthread) stores a sentinel; the GPU-thread gate reads it back.
 namespace Fifo { extern std::atomic<std::uint32_t> g_s27_sentinel; }
+// Patch 0211: defined in VideoCommon/Present.cpp.
+namespace DolphinWeb { extern std::atomic<std::uint32_t> g_stale_xfb_held; extern std::atomic<std::uint32_t> g_stale_xfb_held_preload; }
 
 extern "C" const char* DolphinWeb_GetAudioCommonStats();
 
@@ -496,6 +514,9 @@ std::uint32_t s_custom_rtc_value = 0;
 bool s_cpu_thread = false;
 float s_cpu_overclock = 1.0f;
 float s_emulation_speed = 1.0f;
+// The mixer's granule queue (Dolphin's AudioBufferSize, ms): 0 keeps its
+// default (80). Part of the audio latency, with the page's AudioWorklet ring.
+int s_audio_buffer_ms = 0;
 constexpr int AUDIO_PULL_MAX_FRAMES = 4096;
 std::array<s16, AUDIO_PULL_MAX_FRAMES * 2> s_audio_pull_buffer{};
 std::string s_audio_stats = "audio:unavailable";
@@ -652,6 +673,41 @@ void CreateDirectoryIfNeeded(const std::string& path)
     File::CreateFullPath(path);
 }
 
+// Patch 0168. Internal resolution: 1 to 4 times native (the EFB, the EFB and
+// XFB copies, the backbuffer); any other value is native, as the page's
+// normalizeInternalResolution says. The software renderer has a single
+// resolution, so other backends stay at 1. Anisotropic filtering: log2 of the
+// maximum (0 = 1x .. 4 = 16x); any other value is -1, what the game asks for
+// (src/wgpu-enhancements.js anisotropyToCore). Base layer only: the video
+// thread applies a change at its next frame (VideoConfig::CheckForConfigChanges
+// recreates the EFB, WebGPUGfx resizes the backbuffer and tells the page).
+// Returns the scale in effect.
+static int ApplyEnhancements(int efb_scale, int anisotropy)
+{
+  const int scale =
+      s_video_backend == "WebGPU" && efb_scale >= 1 && efb_scale <= 4 ? efb_scale : 1;
+  Config::SetBase(Config::GFX_EFB_SCALE, scale);
+  Config::SetBase(Config::GFX_ENHANCE_MAX_ANISOTROPY,
+                  static_cast<AnisotropicFilteringMode>(anisotropy >= 0 && anisotropy <= 4 ?
+                                                            anisotropy : -1));
+  return scale;
+}
+
+// Patch 0178. Widescreen: Dolphin's generic widescreen hack (the 3D
+// projection widened to the backbuffer's aspect, no per-game code);
+// WebGPUGfx makes the backbuffer 16:9 and tells the page. The aspect stays
+// Stretch: the picture fills the backbuffer, and the hack widens the view to
+// it. ForceWide would draw the analog 16:9 width (~38 px of black on each
+// side of 854). WebGPU only (the software renderer ignores the hack's
+// projection). Base layer, applied by the video thread at its next frame.
+// Returns 1 when on.
+static int ApplyWidescreen(int on)
+{
+  const bool wide = s_video_backend == "WebGPU" && on == 1;
+  Config::SetBase(Config::GFX_WIDESCREEN_HACK, wide);
+  return wide ? 1 : 0;
+}
+
 void EnsureRuntime()
 {
   if (s_runtime_initialized)
@@ -721,6 +777,8 @@ void EnsureRuntime()
   Config::SetBase(Config::MAIN_DSP_THREAD, false);
   Config::SetBase(Config::MAIN_FAST_DISC_SPEED, true);
   Config::SetBase(Config::MAIN_EMULATION_SPEED, s_emulation_speed);
+  if (s_audio_buffer_ms > 0)
+    Config::SetBase(Config::MAIN_AUDIO_BUFFER_SIZE, s_audio_buffer_ms);
   // §28cz play-speed sync. When the browser CPU falls more than MaxFallback
   // (100ms) behind in a heavy scene, Dolphin's throttle normally CONCEDES that
   // time (slides the reference clock forward) and never catches up, so the
@@ -735,9 +793,50 @@ void EnsureRuntime()
   Config::SetBase(Config::MAIN_OVERCLOCK_ENABLE, true);
   Config::SetBase(Config::MAIN_OVERCLOCK, s_cpu_overclock);
   Config::SetBase(Config::MAIN_PRECISION_FRAME_TIMING, false);
-  Config::SetBase(Config::MAIN_RUSH_FRAME_PRESENTATION, true);
-  Config::SetBase(Config::MAIN_SMOOTH_EARLY_PRESENTATION, true);
-  Config::SetBase(Config::MAIN_SYNC_ON_SKIP_IDLE, false);
+  // Pacing switches (patch 0150): Rush Frame Presentation is off, as
+  // upstream's default (with it, heavy scenes ran up to 40 ms ahead of the
+  // presents: VI p99 ~60 ms); ?rush=1 (Module['dolphinRushPresentation'] true)
+  // turns it back on. For measurement: ?synconidle=1 turns Dolphin's
+  // SyncOnSkipIdle on, ?dupvsync=1 makes a duplicated XFB rearm the throttle.
+  const bool rush_presentation =
+      EM_ASM_INT({ return (typeof Module !== 'undefined' &&
+                           Module['dolphinRushPresentation'] === true) ? 1 : 0; }) != 0;
+  const bool sync_on_skip_idle =
+      EM_ASM_INT({ return (typeof Module !== 'undefined' &&
+                           Module['dolphinSyncOnSkipIdle'] === true) ? 1 : 0; }) != 0;
+  DolphinWeb_SetDupXfbRearmsThrottle(
+      EM_ASM_INT({ return (typeof Module !== 'undefined' &&
+                           Module['dolphinDupXfbRearmsThrottle'] === true) ? 1 : 0; }));
+  // ?smoothearly=0 (patch 0153, Module['dolphinSmoothEarly'] false): the
+  // video thread presents on arrival, with no sleep to the present's time
+  // (Present.cpp, 0094). SmoothEarlyPresentation off alone would not remove
+  // it: with Rush off, GetUpdatedPresentationTime returns the intended time.
+  const bool smooth_early =
+      EM_ASM_INT({ return (typeof Module !== 'undefined' &&
+                           Module['dolphinSmoothEarly'] === false) ? 0 : 1; }) != 0;
+  DolphinWeb_SetPresentOnArrival(smooth_early ? 0 : 1);
+  // ?sleepmargin=<us> (patch 0165, Module['dolphinSleepMarginUs']): the
+  // throttle sleeps to its target minus the margin, then spins (0: off).
+  DolphinWeb_SetThrottleSleepMarginUs(
+      EM_ASM_INT({ return (typeof Module !== 'undefined' &&
+                           Number.isInteger(Module['dolphinSleepMarginUs'])) ?
+                              Module['dolphinSleepMarginUs'] : 0; }));
+  // ?sleepstep=<us>: short sleeps inside the margin before the final spin.
+  DolphinWeb_SetThrottleSleepStepUs(
+      EM_ASM_INT({ return (typeof Module !== 'undefined' &&
+                           Number.isInteger(Module['dolphinSleepStepUs'])) ?
+                              Module['dolphinSleepStepUs'] : 0; }));
+  // ?sleepk=<permille>&sleepspin=<us>: the geometric cascade (0: off).
+  DolphinWeb_SetThrottleSleepCascade(
+      EM_ASM_INT({ return (typeof Module !== 'undefined' &&
+                           Number.isInteger(Module['dolphinSleepK'])) ?
+                              Module['dolphinSleepK'] : 750; }),
+      EM_ASM_INT({ return (typeof Module !== 'undefined' &&
+                           Number.isInteger(Module['dolphinSleepSpinUs'])) ?
+                              Module['dolphinSleepSpinUs'] : 150; }));
+  Config::SetBase(Config::MAIN_RUSH_FRAME_PRESENTATION, rush_presentation);
+  Config::SetBase(Config::MAIN_SMOOTH_EARLY_PRESENTATION, smooth_early);
+  Config::SetBase(Config::MAIN_SYNC_ON_SKIP_IDLE, sync_on_skip_idle);
   Config::SetBase(Config::MAIN_ACCURATE_FMADDS, false);
   Config::SetBase(Config::MAIN_ENABLE_CHEATS, false);
   Config::SetBase(Config::MAIN_OSD_MESSAGES, false);
@@ -764,29 +863,57 @@ void EnsureRuntime()
   // layer: only the base layer is set here.
   const bool hardware_xfb = s_video_backend == "OGL" || s_video_backend == "WebGPU";
   Config::SetBase(Config::GFX_HACK_SKIP_XFB_COPY_TO_RAM, hardware_xfb);
-  s_skip_xfb_decode = s_video_backend == "WebGPU";
+  // ?xfbdecode=0 (Module['dolphinXfbNoDecode']), benches only: under the
+  // null backend the decode is the only CPU-thread cost WebGPU does not pay
+  // (6.9 % of the CPU thread on the heavy scene, Spark, 2026-10-27).
+  // Ignored by every other backend, whose XFB is their only image.
+  const bool xfb_no_decode = EM_ASM_INT({ return (typeof Module !== 'undefined' &&
+                                                  Module['dolphinXfbNoDecode']) ? 1 : 0; }) != 0;
+  s_skip_xfb_decode =
+      s_video_backend == "WebGPU" || (s_video_backend == "Null" && xfb_no_decode);
   // Without the RAM copy, an XFB texture keeps its id until the game copies a
   // new one, so Dolphin's duplicate check starts skipping the presents of
   // fields that repeat a frame (with the RAM copy every field reloaded a new
   // texture). Keep one present per VI field, as before and as OGL does.
   if (s_video_backend == "WebGPU")
     Config::SetBase(Config::GFX_HACK_SKIP_DUPLICATE_XFBS, false);
-  Config::SetBase(Config::GFX_HACK_COPY_EFB_SCALED, false);
+  // Internal resolution and anisotropic filtering (patch 0168), from the page
+  // (?ir= sets Module['dolphinEfbScale'], ?aniso= Module['dolphinMaxAnisotropy'])
+  // and later from DolphinWeb_SetEnhancements. EFB copies to textures follow
+  // the internal resolution, Dolphin's default: render-to-texture effects
+  // (shadows, reflections, split screens, blur) would otherwise stay native
+  // and look blurrier than the frame. At 1x a scaled copy is the native one.
+  Config::SetBase(Config::GFX_HACK_COPY_EFB_SCALED, true);
+  ApplyEnhancements(
+      EM_ASM_INT({ return (typeof Module !== 'undefined') ? (Module['dolphinEfbScale'] | 0) : 1; }),
+      EM_ASM_INT({
+        const n = (typeof Module !== 'undefined') ? Module['dolphinMaxAnisotropy'] : undefined;
+        return typeof n === 'number' ? (n | 0) : -1;
+      }));
   // ?efbaccess=1 (Module['dolphinEfbAccess']): CPU reads and writes of the
-  // EFB, off by default as in Dolphin; upstream turns them on per game
-  // (GameINI), which this build does not ship yet.
+  // EFB, off by default as in Dolphin. A base-layer value: the disc's
+  // GameINI (tools/gamesettings-allowlist.json) turns it on above it.
   const bool efb_access = EM_ASM_INT({ return (typeof Module !== 'undefined' &&
                                                Module['dolphinEfbAccess']) ? 1 : 0; }) != 0;
   Config::SetBase(Config::GFX_HACK_EFB_ACCESS_ENABLE, efb_access);
   // ?efbcopyram=1 (Module['dolphinEfbCopyRam']): EFB copies also land in
-  // guest RAM, as upstream's GameINIs ask with EFBToTextureEnable=False.
+  // guest RAM. Base layer too: a GameINI's EFBToTextureEnable wins.
   const bool efb_copy_ram = EM_ASM_INT({ return (typeof Module !== 'undefined' &&
                                                  Module['dolphinEfbCopyRam']) ? 1 : 0; }) != 0;
   Config::SetBase(Config::GFX_HACK_SKIP_EFB_COPY_TO_RAM, !efb_copy_ram);
+  // ?efbdefer=0 (Module['dolphinEfbNoDefer']): EFB copies to RAM wait for
+  // the GPU one by one instead of at the next sync point, as a GameINI asks
+  // with DeferEFBCopies=False. Base layer too: a GameINI's value wins.
+  const bool efb_no_defer = EM_ASM_INT({ return (typeof Module !== 'undefined' &&
+                                                 Module['dolphinEfbNoDefer']) ? 1 : 0; }) != 0;
+  Config::SetBase(Config::GFX_HACK_DEFER_EFB_COPIES, !efb_no_defer);
   // Fill the canvas with the XFB, as the software presenter does. Dolphin's
   // default analog aspect pillarboxes a 640-wide XFB to ~583 pixels, so the
   // hardware path showed every game narrower than the software one.
   Config::SetBase(Config::GFX_ASPECT_RATIO, AspectMode::Stretch);
+  // ?widescreen=1 (Module['dolphinWidescreen'], patch 0178): 16:9 instead.
+  ApplyWidescreen(EM_ASM_INT({ return (typeof Module !== 'undefined' &&
+                                       Module['dolphinWidescreen']) ? 1 : 0; }));
   // §28cx: ubershaders DISCRIMINATOR (May-30). The UBO const-index fix made the
   // uber pixel shaders translate (fail 27->0) and 7195 draws execute, but the EFB
   // is still all-zero (nz=0/max=0) => draws write nothing. Flip WebGPU back to
@@ -831,14 +958,23 @@ void EnsureRuntime()
   // needed for this construct.
   State::SetOnAfterLoadCallback([]() {
     auto& system = Core::System::GetInstance();
-    const std::uint64_t loaded_ticks = system.GetCoreTiming().GetTicks();
-    s_last_loaded_ticks_low.store(static_cast<std::uint32_t>(loaded_ticks),
-                                  std::memory_order_relaxed);
-    s_last_loaded_ticks_high.store(static_cast<std::uint32_t>(loaded_ticks >> 32),
-                                   std::memory_order_relaxed);
-    s_last_loaded_ppc_pc.store(system.GetPPCState().pc, std::memory_order_relaxed);
-    s_last_loaded_checkpoint_generation.fetch_add(1, std::memory_order_release);
-    DolphinWeb_HarnessOnStateLoaded();
+    // Patch 0210: the callback runs whatever the outcome; only a load that
+    // applied the state counts as loaded (a file of another game or version,
+    // or a load undone after a failure, never reads "Loaded"). The epoch and
+    // the GPU wake below stay unconditional: needed after an undo, which
+    // replayed DoState too; for a file never read (no DoState ran), one more
+    // epoch and a wake of a running GPU loop, both harmless.
+    if (State::LastLoadApplied())
+    {
+      const std::uint64_t loaded_ticks = system.GetCoreTiming().GetTicks();
+      s_last_loaded_ticks_low.store(static_cast<std::uint32_t>(loaded_ticks),
+                                    std::memory_order_relaxed);
+      s_last_loaded_ticks_high.store(static_cast<std::uint32_t>(loaded_ticks >> 32),
+                                     std::memory_order_relaxed);
+      s_last_loaded_ppc_pc.store(system.GetPPCState().pc, std::memory_order_relaxed);
+      s_last_loaded_checkpoint_generation.fetch_add(1, std::memory_order_release);
+      DolphinWeb_HarnessOnStateLoaded();
+    }
     // Publish the semantic epoch only after State::Load has applied and the
     // checkpoint is observable. The GPU wake below then guarantees that the
     // first producer command in the new epoch belongs to the restored state.
@@ -1042,22 +1178,27 @@ int SetCpuThread(int enabled)
   return 1;
 }
 
-// Tests (patch 0097): the value Dolphin's game config gives an allowlisted
+// The value Dolphin's game config gives an allowlisted
 // setting (tools/gamesettings-allowlist.json) for a disc ID and revision from
 // the INIs under /dolphin-sys/GameSettings, as the game's boot reads it: MMU
-// (System::Initialize, IsMMUMode), FPRF (patch 0121), SafeTextureCacheColorSamples and
-// XFBToTextureEnable (GFX_HACK_SKIP_XFB_COPY_TO_RAM); booleans
+// (System::Initialize, IsMMUMode), FPRF (patch 0121), SafeTextureCacheColorSamples,
+// XFBToTextureEnable (GFX_HACK_SKIP_XFB_COPY_TO_RAM), EFBAccessEnable,
+// EFBToTextureEnable (GFX_HACK_SKIP_EFB_COPY_TO_RAM), BBoxEnable and
+// DeferEFBCopies; booleans
 // as 0/1. The global game layer is added for the read and removed after; -1
 // when a game's layer is already there (a game is running), which this must
-// not replace, -2 for a setting it does not know.
+// not replace, -2 for a setting it does not know. Read before the boot by
+// the worker (a disc that needs the bounding box, which video=wgpu does not
+// compute) and by the tests (patch 0097).
 #ifdef __EMSCRIPTEN__
 EMSCRIPTEN_KEEPALIVE
 #endif
-int GameConfigValueForTest(const char* game_id, int revision, const char* setting)
+int GameConfigValue(const char* game_id, int revision, const char* setting)
 {
   const std::string_view name = setting;
   if (name != "MMU" && name != "FPRF" && name != "SafeTextureCacheColorSamples" &&
-      name != "XFBToTextureEnable")
+      name != "XFBToTextureEnable" && name != "EFBAccessEnable" &&
+      name != "EFBToTextureEnable" && name != "BBoxEnable" && name != "DeferEFBCopies")
     return -2;
   if (Config::GetLayer(Config::LayerType::GlobalGame))
     return -1;
@@ -1066,9 +1207,22 @@ int GameConfigValueForTest(const char* game_id, int revision, const char* settin
       name == "MMU"                  ? (Config::Get(Config::MAIN_MMU) ? 1 : 0) :
       name == "FPRF"                 ? (Config::Get(Config::MAIN_FPRF) ? 1 : 0) :
       name == "XFBToTextureEnable"   ? (Config::Get(Config::GFX_HACK_SKIP_XFB_COPY_TO_RAM) ? 1 : 0) :
+      name == "EFBAccessEnable"      ? (Config::Get(Config::GFX_HACK_EFB_ACCESS_ENABLE) ? 1 : 0) :
+      name == "EFBToTextureEnable"   ? (Config::Get(Config::GFX_HACK_SKIP_EFB_COPY_TO_RAM) ? 1 : 0) :
+      name == "BBoxEnable"           ? (Config::Get(Config::GFX_HACK_BBOX_ENABLE) ? 1 : 0) :
+      name == "DeferEFBCopies"       ? (Config::Get(Config::GFX_HACK_DEFER_EFB_COPIES) ? 1 : 0) :
                                        Config::Get(Config::GFX_SAFE_TEXTURE_CACHE_COLOR_SAMPLES);
   Config::RemoveLayer(Config::LayerType::GlobalGame);
   return value;
+}
+
+// The first name of GameConfigValue (the ABI manifest lists it).
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int GameConfigValueForTest(const char* game_id, int revision, const char* setting)
+{
+  return GameConfigValue(game_id, revision, setting);
 }
 
 // The MMU only (the first 0097 test; kept: the ABI manifest lists it).
@@ -1167,6 +1321,54 @@ int SetEmulationSpeed(float factor)
   return 1;
 }
 
+// ?audiobuffer=N: the mixer's queue, before the boot (16-200 ms; the mixer
+// itself keeps 4 to 64 granules). 1 when taken, 0 otherwise.
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int DolphinWeb_SetAudioBufferMs(int ms)
+{
+  if (s_runtime_initialized || ms < 16 || ms > 200)
+    return 0;
+
+  s_audio_buffer_ms = ms;
+  return 1;
+}
+
+// 0186: what the mixer holds ahead of MixAudio, in ms (the longer of its DMA
+// and streaming granule queues); -1 before the boot or without a mixer.
+// Read-only: the page adds it to the audio latency it reports.
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+double DolphinWeb_AudioQueuedMs()
+{
+  if (!s_runtime_initialized)
+    return -1;
+  const SoundStream* sound_stream = Core::System::GetInstance().GetSoundStream();
+  const Mixer* mixer = sound_stream ? sound_stream->GetMixer() : nullptr;
+  return mixer ? static_cast<double>(mixer->GetQueuedMicroseconds()) / 1000.0 : -1;
+}
+
+// 0216: one FIFO's queue in ms, 0 the DMA and 1 the streaming (0186 reports
+// the longer); -1 before the boot, without a mixer or for another index.
+// Read-only: the AudioWorklet producer's rate control (?audiorate=1) sizes
+// its pulls on the shorter and its overflow guard on the longer.
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+double DolphinWeb_AudioQueuedFifoMs(int which)
+{
+  if (!s_runtime_initialized || (which != 0 && which != 1))
+    return -1;
+  const SoundStream* sound_stream = Core::System::GetInstance().GetSoundStream();
+  const Mixer* mixer = sound_stream ? sound_stream->GetMixer() : nullptr;
+  if (!mixer)
+    return -1;
+  const u64 us = which == 0 ? mixer->GetDMAQueuedMicroseconds() : mixer->GetStreamingQueuedMicroseconds();
+  return static_cast<double>(us) / 1000.0;
+}
+
 int SetFastSoftwareRaster(int mode)
 {
   DolphinWeb_SetFastSoftwareRaster(mode < 0 ? 0 : mode > 3 ? 3 : mode);
@@ -1256,10 +1458,29 @@ int BootDisc(const char* path)
   return booted ? 1 : 0;
 }
 
+// Host jobs run one dispatcher at a time: the worker pumps them
+// (PumpHostJobs), and Core::Stop dumps the left-over ones on whichever thread
+// stops the core (the control pthread, 0209). HostDispatchJobs runs each job
+// outside its queue lock, so two dispatchers would run jobs side by side. The
+// worker never waits for the other one: it skips a pump while a stop holds the
+// dispatch (the stop runs the jobs queued meanwhile), and keeps draining the
+// GPU ring, which the stop may be waiting for.
+std::mutex s_host_dispatch_mutex;
+
+void DispatchHostJobs()
+{
+  std::unique_lock lock(s_host_dispatch_mutex, std::try_to_lock);
+  if (lock.owns_lock())
+    Core::HostDispatchJobs(Core::System::GetInstance());
+}
+
 void StopCore()
 {
   if (s_runtime_initialized)
+  {
+    std::lock_guard dispatch(s_host_dispatch_mutex);
     Core::Stop(Core::System::GetInstance());
+  }
   SetCoreStatus("Stopped");
 }
 
@@ -1269,10 +1490,56 @@ int SetCorePaused(int paused)
     return 0;
 
   Core::SetState(Core::System::GetInstance(), paused ? Core::State::Paused : Core::State::Running);
-  Core::HostDispatchJobs(Core::System::GetInstance());
+  DispatchHostJobs();
   SetCoreStatus(paused ? "Paused" : "Running");
   return 1;
 }
+
+// Internal resolution (1 to 4) and anisotropic filtering (log2, -1 = game)
+// while a game runs (patch 0168). Returns the scale in effect, or 0 before
+// the runtime exists (nothing applied: the boot reads Module's fields).
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int DolphinWeb_SetEnhancements(int efb_scale, int anisotropy)
+{
+  if (!s_runtime_initialized)
+    return 0;
+  return ApplyEnhancements(efb_scale, anisotropy);
+}
+
+// Widescreen on (1) or off (0) while a game runs (patch 0178). Returns 1
+// when on, 0 when off, -1 before the runtime exists (nothing applied: the
+// boot reads Module's field).
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int DolphinWeb_SetWidescreen(int on)
+{
+  if (!s_runtime_initialized)
+    return -1;
+  return ApplyWidescreen(on);
+}
+
+// Heap use, for diagnostics only (the headroom at 4x, follow-up of 0168):
+// out[0] bytes malloc has handed out, out[1] free bytes inside its arena,
+// out[2] the sbrk top (the arena's end). The heap above the top plus the
+// free bytes is what a savestate or a texture can still take. mallinfo()
+// walks the arena under malloc's lock: call it on demand, never per frame.
+// Returns the words written (3), or 0 when `words` is too small.
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+int DolphinWeb_HeapStats(uint32_t* out, int words)
+{
+  if (!out || words < 3)
+    return 0;
+  const struct mallinfo info = mallinfo();
+  out[0] = static_cast<uint32_t>(info.uordblks);
+  out[1] = static_cast<uint32_t>(info.fordblks);
+  out[2] = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(sbrk(0)));
+  return 3;
+}
+#endif
 
 // Writes every inserted memory card's pending saves to /dolphin-user now,
 // so the page copies what the game has written instead of what Dolphin's
@@ -1313,7 +1580,7 @@ int ResetCore()
 
   Core::QueueHostJob(
       [](Core::System& system) { system.GetProcessorInterface().ResetButton_Tap(); });
-  Core::HostDispatchJobs(Core::System::GetInstance());
+  DispatchHostJobs();
   SetCoreStatus("Reset requested");
   return 1;
 }
@@ -1324,7 +1591,7 @@ int SaveCoreState(int slot)
     return 0;
 
   State::Save(Core::System::GetInstance(), slot);
-  Core::HostDispatchJobs(Core::System::GetInstance());
+  DispatchHostJobs();
   SetCoreStatus("Save state requested");
   return 1;
 }
@@ -1335,7 +1602,7 @@ int LoadCoreState(int slot)
     return 0;
 
   State::Load(Core::System::GetInstance(), slot);
-  Core::HostDispatchJobs(Core::System::GetInstance());
+  DispatchHostJobs();
   SetCoreStatus("Load state requested");
   return 1;
 }
@@ -1353,7 +1620,7 @@ int LoadStateFile(const char* path)
     return 0;
 
   State::LoadAs(Core::System::GetInstance(), std::string(path));
-  Core::HostDispatchJobs(Core::System::GetInstance());
+  DispatchHostJobs();
   SetCoreStatus("Load state from file requested");
   return 1;
 }
@@ -1375,7 +1642,7 @@ int SaveStateFile(const char* path)
   // wall-time under the worker poll (§23 size=0). Caller pumps frames
   // until the CPU thread runs the queued job; then the file is whole.
   State::SaveToFileSync(Core::System::GetInstance(), std::string(path));
-  Core::HostDispatchJobs(Core::System::GetInstance());
+  DispatchHostJobs();
   SetCoreStatus("Save state to file requested");
   return 1;
 }
@@ -1383,7 +1650,329 @@ int SaveStateFile(const char* path)
 void PumpHostJobs()
 {
   if (s_runtime_initialized)
-    Core::HostDispatchJobs(Core::System::GetInstance());
+    DispatchHostJobs();
+}
+
+// ---- 0209: requests that pause the CPU thread, off the caller's thread ----
+// Saving, loading, pausing and stopping all pause the CPU thread
+// (RunOnCPUThread / SetStepping / Stop wait for it to leave its loop, and
+// PauseAndLock then waits for the GPU thread to go idle). The caller here is
+// the worker, which is also the WebGPU replay consumer: while it waits inside
+// such a call nothing drains the command ring or the upload arena, the GPU
+// thread waits for room forever, and the game freezes for good (Spark: 3 slot
+// saves in 20 never answered). These requests therefore run on one control
+// pthread, in order, one at a time; the worker keeps draining meanwhile and
+// polls CoreControlResult(id).
+//
+// Results: 0 pending, 1 done, -1 failed or refused. Past its time a request
+// reads -2 (still running): the thread stays on it until it really ends,
+// then it reads 2 (done late) or -3 (failed late); the next request waits
+// behind it. A load is done when the core applied it (the after-load
+// callback bumped the checkpoint generation), a save when the CPU thread
+// wrote the file, a pause or stop when the core reached that state.
+namespace
+{
+enum class CoreControlOp : int
+{
+  SaveFile = 1,
+  LoadFile = 2,
+  Pause = 3,
+  Resume = 4,
+  Stop = 5,
+};
+
+struct CoreControlJob
+{
+  int id;
+  CoreControlOp op;
+  std::string path;
+};
+
+// A request's outcome so far, and when it is late: its own time counted from
+// when the thread starts it (never late while it waits its turn).
+struct CoreControlState
+{
+  int rc;
+  std::chrono::steady_clock::time_point deadline;
+};
+
+std::mutex s_control_mutex;
+std::condition_variable s_control_cv;
+std::deque<CoreControlJob> s_control_queue;
+std::unordered_map<int, CoreControlState> s_control_results;
+int s_control_next_id = 1;
+bool s_control_started = false;
+// The request the thread runs (0: none). Once the worker gave up on it
+// (CoreControlAbandon, past the worker's own 60 s), the thread is stuck and
+// new requests are refused at once (RequestCoreControl -1). A request only
+// late on the core's time is not stuck: it may still end (rc 2).
+int s_control_running_id = 0;
+// Requests the worker gave up on while they ran: their end is not kept.
+std::unordered_set<int> s_control_abandoned;
+
+int CoreControlTimeoutMs(CoreControlOp op)
+{
+  switch (op)
+  {
+  case CoreControlOp::SaveFile:
+    return 30000;
+  case CoreControlOp::LoadFile:
+    return 20000;
+  case CoreControlOp::Stop:
+    return 15000;
+  default:
+    return 10000;
+  }
+}
+
+// Runs one request on the control thread; true when it did what it asked.
+bool RunCoreControl(const CoreControlJob& job)
+{
+  auto& system = Core::System::GetInstance();
+  if (!s_runtime_initialized)
+    return false;
+  // Polls a condition the CPU thread or the core will make true. No limit:
+  // a late request reads -2 meanwhile, and this thread stays on it.
+  const auto wait_until = [](const auto& done) {
+    while (!done())
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  };
+  switch (job.op)
+  {
+  case CoreControlOp::SaveFile:
+  {
+    if (!Core::IsRunning(system))
+      return false;
+    SetCoreStatus("Saving state");
+    // The slot's previous file moves aside first: a save that writes nothing
+    // must not read as saved from the old file, and gets it back.
+    const std::string previous = job.path + ".prev";
+    const bool had_previous = File::Exists(job.path);
+    if (had_previous && !File::Rename(job.path, previous))
+    {
+      SetCoreStatus("Save state failed");
+      return false;
+    }
+    auto written = std::make_shared<std::atomic<bool>>(false);
+    // On the CPU thread, SaveToFileSync runs inline: the file is whole when
+    // the job returns.
+    Core::RunOnCPUThread(system, [&system, path = job.path, written] {
+      State::SaveToFileSync(system, path);
+      written->store(true, std::memory_order_release);
+    });
+    wait_until([&] { return written->load(std::memory_order_acquire); });
+    const bool saved = File::Exists(job.path) && File::GetSize(job.path) > 0;
+    if (had_previous)
+    {
+      if (saved)
+        File::Delete(previous);
+      else
+        File::Rename(previous, job.path);
+    }
+    SetCoreStatus(saved ? "State saved" : "Save state failed");
+    return saved;
+  }
+  case CoreControlOp::LoadFile:
+  {
+    if (!Core::IsRunning(system))
+      return false;
+    const std::uint32_t before =
+        s_last_loaded_checkpoint_generation.load(std::memory_order_acquire);
+    SetCoreStatus("Loading state");
+    auto ran = std::make_shared<std::atomic<bool>>(false);
+    // On the CPU thread, LoadAs runs LoadAsFromCore inline; the after-load
+    // callback runs at its end, and moves the generation only when the state
+    // was applied (patch 0210).
+    Core::RunOnCPUThread(system, [&system, path = job.path, ran] {
+      State::LoadAs(system, path);
+      ran->store(true, std::memory_order_release);
+    });
+    wait_until([&] { return ran->load(std::memory_order_acquire); });
+    const bool loaded =
+        s_last_loaded_checkpoint_generation.load(std::memory_order_acquire) != before;
+    SetCoreStatus(loaded ? "State loaded" : "Load state failed");
+    return loaded;
+  }
+  case CoreControlOp::Pause:
+  case CoreControlOp::Resume:
+  {
+    const bool pause = job.op == CoreControlOp::Pause;
+    const Core::State wanted = pause ? Core::State::Paused : Core::State::Running;
+    const Core::State state = Core::GetState(system);
+    if (state == wanted)
+    {
+      SetCoreStatus(pause ? "Paused" : "Running");
+      return true;
+    }
+    if (state != Core::State::Running && state != Core::State::Paused)
+      return false;
+    // SetStepping waits here (not on the worker) for the CPU thread to stop.
+    Core::SetState(system, wanted);
+    const bool reached = Core::GetState(system) == wanted;
+    if (reached)
+      SetCoreStatus(pause ? "Paused" : "Running");
+    return reached;
+  }
+  case CoreControlOp::Stop:
+  {
+    if (Core::GetState(system) == Core::State::Uninitialized)
+    {
+      SetCoreStatus("Stopped");
+      return true;
+    }
+    {
+      // Core::Stop runs the left-over host jobs here: never beside the
+      // worker's PumpHostJobs (DispatchHostJobs).
+      std::lock_guard dispatch(s_host_dispatch_mutex);
+      Core::Stop(system);
+    }
+    wait_until([&] { return Core::GetState(system) == Core::State::Uninitialized; });
+    SetCoreStatus("Stopped");
+    return true;
+  }
+  }
+  return false;
+}
+
+void CoreControlThread()
+{
+  for (;;)
+  {
+    CoreControlJob job;
+    {
+      std::unique_lock lock(s_control_mutex);
+      s_control_cv.wait(lock, [] { return !s_control_queue.empty(); });
+      job = std::move(s_control_queue.front());
+      s_control_queue.pop_front();
+      s_control_running_id = job.id;
+      s_control_results[job.id].deadline =
+          std::chrono::steady_clock::now() + std::chrono::milliseconds(CoreControlTimeoutMs(job.op));
+    }
+    const bool ok = RunCoreControl(job);
+    std::lock_guard lock(s_control_mutex);
+    s_control_running_id = 0;
+    if (s_control_abandoned.erase(job.id))
+    {
+      s_control_results.erase(job.id);
+      continue;
+    }
+    auto& state = s_control_results[job.id];
+    const bool late = std::chrono::steady_clock::now() >= state.deadline;
+    state.rc = late ? (ok ? 2 : -3) : (ok ? 1 : -1);
+  }
+}
+}  // namespace
+
+// Queues a request (op: 1 save to `path`, 2 load from `path`, 3 pause,
+// 4 resume, 5 stop) and returns its id at once; 0 when refused (no runtime,
+// unknown op, no path for a save or load); -1 when the thread is stuck on a
+// request the worker gave up on (nothing more can run: reload the page).
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int RequestCoreControl(int op, const char* path)
+{
+  if (!s_runtime_initialized || op < 1 || op > 5)
+    return 0;
+  const auto control_op = static_cast<CoreControlOp>(op);
+  const bool needs_path = control_op == CoreControlOp::SaveFile || control_op == CoreControlOp::LoadFile;
+  if (needs_path && (path == nullptr || *path == '\0'))
+    return 0;
+  std::lock_guard lock(s_control_mutex);
+  if (s_control_running_id != 0 && s_control_abandoned.count(s_control_running_id) != 0)
+    return -1;
+  if (!s_control_started)
+  {
+    std::thread(CoreControlThread).detach();
+    s_control_started = true;
+  }
+  const int id = s_control_next_id++;
+  // not late while queued: its time starts with it (CoreControlThread)
+  s_control_results[id] = {0, std::chrono::steady_clock::time_point::max()};
+  s_control_queue.push_back({id, control_op, needs_path ? std::string(path) : std::string()});
+  s_control_cv.notify_one();
+  return id;
+}
+
+// A Dolphin save slot (StateSaves/<game id>.sNN, as State::Save/Load name
+// it), for the page that runs the core without the worker
+// (upstream-main-thread-adapter.js): op 1 save, 2 load; the id as above.
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int RequestCoreControlSlot(int op, int slot)
+{
+  if (!s_runtime_initialized || slot < 0 || slot > 99 || (op != 1 && op != 2))
+    return 0;
+  char suffix[8];
+  std::snprintf(suffix, sizeof(suffix), ".s%02d", slot);
+  const std::string path =
+      File::GetUserPath(D_STATESAVES_IDX) + SConfig::GetInstance().GetGameID() + suffix;
+  return RequestCoreControl(op, path.c_str());
+}
+
+// A request's state (see above); an unknown id reads -1. A final result is
+// forgotten once read, or once given up (CoreControlAbandon).
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int CoreControlResult(int id)
+{
+  std::lock_guard lock(s_control_mutex);
+  const auto it = s_control_results.find(id);
+  if (it == s_control_results.end())
+    return -1;
+  const int rc = it->second.rc;
+  if (rc == 0)
+    return std::chrono::steady_clock::now() >= it->second.deadline ? -2 : 0;
+  s_control_results.erase(it);
+  return rc;
+}
+
+// The worker gave up on a request (its own time ran out): a queued one never
+// runs, a running one ends without keeping its result, a final one is
+// forgotten. Nothing is left behind in the results.
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+void CoreControlAbandon(int id)
+{
+  std::lock_guard lock(s_control_mutex);
+  const auto queued = std::find_if(s_control_queue.begin(), s_control_queue.end(),
+                                   [id](const CoreControlJob& job) { return job.id == id; });
+  if (queued != s_control_queue.end())
+    s_control_queue.erase(queued);
+  else if (id == s_control_running_id)
+    s_control_abandoned.insert(id);
+  s_control_results.erase(id);
+}
+
+// Patch 0211: dual-core swaps that showed the last picture again instead of
+// an XFB whose copy had not been replayed yet (lifetime).
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+std::uint32_t DolphinWeb_StaleXfbHeld()
+{
+#ifdef __EMSCRIPTEN__
+  return DolphinWeb::g_stale_xfb_held.load(std::memory_order_relaxed);
+#else
+  return 0;
+#endif
+}
+
+// Patch 0211: of those, holds that showed a picture from before the last
+// state load (0 unless the presenter's record outlived a load).
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+std::uint32_t DolphinWeb_StaleXfbHeldPreload()
+{
+#ifdef __EMSCRIPTEN__
+  return DolphinWeb::g_stale_xfb_held_preload.load(std::memory_order_relaxed);
+#else
+  return 0;
+#endif
 }
 
 int GetCoreState()

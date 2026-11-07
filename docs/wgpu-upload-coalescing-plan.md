@@ -6,7 +6,7 @@ measurement boundary and keeps all new renderer optimizations opt-in.
 
 ## Measured problem
 
-The fixed Kirby-versus-Link screen recorded 593,660-819,806
+The fixed reference-battle screen recorded 593,660-819,806
 `UPLOAD_BUFFER` calls and 833-1,161 MiB per eight emulated seconds. Upload
 replay consumed 4.47-5.28 seconds, while the measured shared-memory payload
 copy accounted for only 0.89-1.23 seconds. Three of eight runs stalled long

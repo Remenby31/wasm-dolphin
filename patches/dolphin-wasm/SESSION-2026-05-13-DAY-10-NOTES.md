@@ -59,7 +59,7 @@ updated generation.
 
 User-side live confirmation: the character-select screen now renders
 with full 3D textures, character portraits, UI overlays. First time
-the OGL backend has shown Melee content end-to-end through the SAB
+the OGL backend has shown game content end-to-end through the SAB
 pipeline.
 
 ## Stall loggers (left in place for follow-up)

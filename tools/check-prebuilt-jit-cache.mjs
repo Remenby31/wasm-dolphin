@@ -8,7 +8,7 @@
 //   node tools/check-prebuilt-jit-cache.mjs [file] [--core-sha256 <hex>]
 import { existsSync, readFileSync } from "node:fs";
 import { verifyPrebuiltCache } from "../src/prebuilt-jit-cache-format.js";
-import { DEFAULT_UPSTREAM_CORE_SHA256 } from "../src/upstream-worker-protocol.js";
+import { DEFAULT_UPSTREAM_CORE_SHA256 } from "../src/default-core.js";
 
 const args = process.argv.slice(2);
 const shaIndex = args.indexOf("--core-sha256");

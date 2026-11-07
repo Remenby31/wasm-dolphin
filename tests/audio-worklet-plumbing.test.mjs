@@ -23,7 +23,7 @@ test("reset and both save-state load paths fence stale worklet audio", async () 
   const worker = await read("../src/upstream-discio-worker.js");
   const reset = worker.slice(worker.indexOf('case "reset"'), worker.indexOf('case "bootProbe"'));
   const slotLoad = worker.slice(worker.indexOf('case "loadState"'), worker.indexOf('case "validationSetCorePaused"'));
-  const fileLoad = worker.slice(worker.indexOf('case "loadStateFile"'), worker.indexOf('case "saveStateFile"'));
+  const fileLoad = worker.slice(worker.indexOf("async function loadStateFileNow("), worker.indexOf("async function handleMessage("));
   assert.ok(reset.indexOf("workletAudioProducer.transition()") < reset.indexOf("api?.reset()"));
   assert.ok(slotLoad.indexOf("workletAudioProducer.transition()") < slotLoad.indexOf("api?.loadState"));
   assert.ok(fileLoad.indexOf("workletAudioProducer.transition()") < fileLoad.indexOf("api.loadStateFile"));

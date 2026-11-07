@@ -1,0 +1,52 @@
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -375,6 +375,14 @@
+ // block guards the other bits at run time and leaves as before when one
+ // changed. Off: regions are emitted byte for byte as before.
+ constexpr u32 DOLPHIN_WEB_ENABLE_REGION_MTMSR_EE = 1u << 27;
++// 0184: ENABLE polarity (default-off; ?regshape=x64). The x64 register shape:
++// a block keeps in locals only the GPRs it uses at least twice, at most
++// REGSHAPE_X64_GPR_CAP of them (most used first); the others go through the
++// guest state. Turboshaft x64 allocates 11 GP registers (24 on arm64): the
++// eager prologue of every used GPR spilled them (research/deep-x64-region-shape).
++// Off: blocks and regions are emitted byte for byte as before.
++constexpr u32 DOLPHIN_WEB_ENABLE_REGSHAPE_X64 = 1u << 28;
++constexpr u32 REGSHAPE_X64_GPR_CAP = 4;
+ // §28ce burst smearing: when ENABLED (gate bit CLEARED), TryWriteWasmBlock
+ // returns false (falls to interpret) once this many compiles OR this much
+ // compile wall time have happened in the current CoreTiming slice. Smears
+@@ -10023,6 +10031,33 @@
+     BitSet32 used_gprs;
+     for (const PPCAnalyst::CodeOp& op : ops)
+       used_gprs |= op.regsIn | op.regsOut;
++    // 0184: with the x64 shape, only the GPRs used twice or more (a read and
++    // a write each count), the REGSHAPE_X64_GPR_CAP most used; a GPR left out
++    // is read and written in the state, as with the cache off.
++    if ((DolphinWebDisableMask() & DOLPHIN_WEB_ENABLE_REGSHAPE_X64) != 0)
++    {
++      std::array<u32, 32> uses{};
++      for (const PPCAnalyst::CodeOp& op : ops)
++      {
++        for (int bit : op.regsIn)
++          if (bit >= 0 && bit < 32)
++            ++uses[bit];
++        for (int bit : op.regsOut)
++          if (bit >= 0 && bit < 32)
++            ++uses[bit];
++      }
++      std::vector<int> ranked;
++      for (int bit : used_gprs)
++        if (bit >= 0 && bit < 32 && uses[bit] >= 2)
++          ranked.push_back(bit);
++      std::stable_sort(ranked.begin(), ranked.end(),
++                       [&](int a, int b) { return uses[a] > uses[b]; });
++      if (ranked.size() > REGSHAPE_X64_GPR_CAP)
++        ranked.resize(REGSHAPE_X64_GPR_CAP);
++      used_gprs = BitSet32{};
++      for (int bit : ranked)
++        used_gprs[bit] = true;
++    }
+     for (int bit : used_gprs)
+     {
+       if (bit < 0 || bit >= 32)

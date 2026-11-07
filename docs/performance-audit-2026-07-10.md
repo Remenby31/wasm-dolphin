@@ -3,7 +3,7 @@
 ## Outcome
 
 The browser does not have one universal FPS bottleneck. The measured fixed
-Kirby-versus-Link battle separates into two materially different paths:
+reference battle separates into two materially different paths:
 
 1. On the recommended software-hybrid path, emulation and presentation can
    stay near 60 Hz while the software raster/XFB source changes much less
@@ -51,15 +51,11 @@ production-decoder comparisons. Three headed pairs improved unique cadence by
 qualified win. Atomic WGPU transactions are also retained; stable-state
 suppression remains default-off after its six-run diagnostic.
 
-The final raw paths, hashes, accepted results, and rejected qualifications are
-packaged in [the next-program evidence](perf-results/melee-next-program-2026-07-10.md).
 The later first-pass root-cause analysis is in
 [the WGPU post-load restore classification](perf-results/wgpu-post-load-restore-classification-2026-07-10.md).
 
-The final clean decision package is
-[the final optimization evidence](perf-results/melee-final-optimization-evidence-2026-07-10.md).
-Its 10-block TEV confirmation passed the primary statistical test but remained
-non-promotable after four presentation-floor misses. Its WGPU UBO screen was
+In the final clean decision package, the 10-block TEV confirmation passed the
+primary statistical test but remained non-promotable after four presentation-floor misses. Its WGPU UBO screen was
 rejected and exposed real upload timeouts. Both optimization flags therefore
 remain default-off.
 
@@ -75,15 +71,11 @@ remain default-off.
 | Historical next-program branch | `perf/next-program` |
 | Final clean branch | `perf/final-optimization` |
 | Upstream Dolphin | `e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1` |
-| Scene | Direct-loaded Melee Kirby vs Link fixed battle; no menu or character-select driving |
-| ROM/save | SHA-256 `1018b65a…7c67` / `620879e2…56d1` |
+| Scene | Direct-loaded fixed reference battle; no menu or character-select driving |
+| ROM/save | SHA-256 not tracked (local reference config) |
 
-The original software qualification evidence is in
-[the Melee performance package](perf-results/melee-performance-evidence-2026-07-10.md).
 Historical hardware evidence is in
-[the WGPU replay and latency package](perf-results/wgpu-replay-and-latency-2026-07-10.md);
-the final `f7ce…` candidate is in
-[the next-program package](perf-results/melee-next-program-2026-07-10.md).
+[the WGPU replay and latency package](perf-results/wgpu-replay-and-latency-2026-07-10.md).
 
 ## Bottleneck classification
 

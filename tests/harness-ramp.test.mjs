@@ -128,3 +128,37 @@ test("first-launch-ramp --visits: the local profile's size on disk per visit, an
   assert.equal(sum[0].withoutProfile, 1);
   assert.equal(sum[0].profileBytes, 12000);
 });
+
+test("first-launch-ramp --region-chain: the chaining counters of a stats reply, or why there are none", async () => {
+  const { regionChainOf, summarizeVisits } = await import("../harness/probes/first-launch-ramp.mjs");
+  const reply = { bytes: new Uint8Array(8), regionChain: { enabled: 1, chained: 900, outOfTime: 3, noRegion: 120, refused: 0, exitTargets: [["0x80001234", 50]], breakEntries: [] } };
+  assert.deepEqual(regionChainOf(reply), { enabled: 1, chained: 900, outOfTime: 3, noRegion: 120, refused: 0, exitTargets: [["0x80001234", 50]], breakEntries: [] });
+  assert.match(regionChainOf({ bytes: new Uint8Array(8) }).error, /without region chaining/);
+  assert.match(regionChainOf({ error: "timeout" }).error, /timeout/);
+  const sum = summarizeVisits([{ visits: [{ visit: 1, regionChain: { chained: 10, noRegion: 4, outOfTime: 0 } }] }, { visits: [{ visit: 1, regionChain: { chained: 20, noRegion: 6, outOfTime: 0 } }] }], 1);
+  assert.equal(sum[0].chained, 15);
+  assert.equal(sum[0].noRegion, 5);
+});
+
+test("first-launch-ramp --region-chain: the region cycle share per visit goes into the medians", async () => {
+  const { summarizeVisits } = await import("../harness/probes/first-launch-ramp.mjs");
+  const sum = summarizeVisits([{ visits: [{ visit: 1, regionShares: { regionCycleShare: 0.9, regionStops: 100 } }] }, { visits: [{ visit: 1, regionShares: { regionCycleShare: 0.8, regionStops: 300 } }] }], 1);
+  assert.equal(sum[0].regionCycleShare, 0.85);
+  assert.equal(sum[0].regionStops, 200);
+});
+
+test("first-launch-ramp waits until the core applied its XFB reset (counters may already be on)", async () => {
+  const { resetXfb } = await import("../harness/probes/first-launch-ramp.mjs");
+  const sleep = async () => {};
+  // On before (the engine's occupancy stats): applied once the window went back.
+  let reads = [{ on: true, windowUs: 9e6 }, { on: true, windowUs: 9e6 }, { on: true, windowUs: 9.1e6 }, { on: true, windowUs: 16000 }];
+  let read = async () => reads.shift();
+  assert.deepEqual(await resetXfb(read, { sleep }), { applied: true });
+  // Off before: on is enough.
+  reads = [{ on: false, windowUs: 0 }, { on: false, windowUs: 0 }, { on: true, windowUs: 16000 }];
+  read = async () => reads.shift();
+  assert.deepEqual(await resetXfb(read, { sleep }), { applied: true });
+  // Never applied: an error, not stale totals.
+  read = async () => ({ on: true, windowUs: 9e6 });
+  assert.match((await resetXfb(read, { sleep, timeoutMs: 100, stepMs: 50 })).error, /not applied/);
+});

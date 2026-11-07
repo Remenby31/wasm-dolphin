@@ -8,6 +8,8 @@
 
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -48,11 +50,11 @@ function setup() {
 }
 
 // Every region of the plan, queued as P7 would (members with the plan's hashes).
-function queueAll(plan, maxFunctions = 100, chain = false) {
+function queueAll(plan, maxFunctions = 100, chain = false, mask = undefined, fragmentEntries = false) {
   let entries = 0;
   for (const group of regionGroups(plan, maxFunctions)) {
-    const fragments = group.flatMap(functionFragments(core));
-    const { bytes, entries: mapped } = assembleRegion(fragments, { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages, chain });
+    const fragments = group.flatMap(functionFragments(core, mask === undefined ? {} : { mask }));
+    const { bytes, entries: mapped } = assembleRegion(fragments, { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages, chain, fragmentEntries });
     core.queueRegion(bytes, mapped.map(([pc]) => pc), group.map((f) => ({ ranges: f.ranges, hash: f.hash })));
     entries += mapped.length;
   }
@@ -116,14 +118,17 @@ test("queued regions install at the slice boundary and the dispatcher runs them 
   assert.ok(stats.regionCycles > 0);
 });
 
-test("regions run only with translation and FP on", { skip }, () => {
+// Before 0157 (compiler version 36) regions ran with MSR.FP on only; since,
+// a region without FPU ops runs with it off too (see FP_OFF_TEXT).
+const fpOffRuns = () => core?.has("DolphinWeb_AotKeyParts") && keyVersion() >= 36;
+test("regions run only with translation on; with FP off only before 0157", { skip }, () => {
   installed();
   core.reset(seedGprs(1), PROGRAM.labels.double, STOP, 400000);
   assert.equal(core.dispatchRegion(), 1);
   core.reset(seedGprs(1), PROGRAM.labels.double, STOP, 400000);
   const msr = core.state()[37];
   core.loadState(Uint32Array.from(core.state(), (v, i) => (i === 37 ? msr & ~0x2000 : v)), PROGRAM.labels.double);
-  assert.equal(core.dispatchRegion(), 0, "FP off: the block path");
+  assert.equal(core.dispatchRegion(), fpOffRuns() ? 1 : 0, fpOffRuns() ? "FP off, no FPU op: the region" : "FP off: the block path");
 });
 
 // Patch 0085: an invalidation over a region's code checks it again against
@@ -606,7 +611,13 @@ test("chained regions run a whole call in one dispatch, like the interpreter", {
     assert.equal(chained.ran, 1, "main, double, main, count, main: one dispatch");
     assert.ok(unchained.ran >= 4, `unchained dispatches (${unchained.ran})`);
     const chain = core.regionChainStats();
-    assert.equal(chain.chained, unchained.ran - 1, "one chain per dispatcher round trip saved");
+    if (keyVersion() >= 31) {
+      // 0142: calls go through the stub (chained), returns come back as wasm
+      // returns: fewer chains than dispatcher round trips saved.
+      assert.ok(chain.chained >= 1 && chain.chained <= unchained.ran - 1, `${chain.chained} chains for ${unchained.ran - 1} round trips saved`);
+    } else {
+      assert.equal(chain.chained, unchained.ran - 1, "one chain per dispatcher round trip saved");
+    }
     assert.equal(core.regionStats().regionCalls, 1);
   } finally {
     core.setRegionChaining(true);
@@ -759,10 +770,10 @@ const FPU = assemble(FPU_TEXT, [
   faddsRc(3, 1, 2), psMerge00(4, 1, 2), mffs(6),
   stfd(3, 5, 8), stfd(4, 5, 16), stfd(6, 5, 24), asm.addi(6, 6, 1), asm.blr()
 ]);
-const keyVersion = () => {
+function keyVersion() { // hoisted: an earlier test reads it (0157)
   const p = core.module._malloc(8);
   try { core.module._DolphinWeb_AotKeyParts(p); return new Uint32Array(core.module.HEAPU8.buffer, p, 2)[0]; } finally { core.module._free(p); }
-};
+}
 
 test("FPU ops outside the direct tier run inside the region, interpreted, like the interpreter (0105)", { skip: chainSkip || (core?.has("DolphinWeb_AotKeyParts") && keyVersion() < 6 && "core before 0105 (compiler version < 6)") }, () => {
   const dol = buildDol({ textAddr: FPU_TEXT, text: FPU.words, entry: FPU.labels.main });
@@ -788,6 +799,118 @@ test("FPU ops outside the direct tier run inside the region, interpreted, like t
   assert.equal(got.ran, 1);
   core.invalidate(FPU_TEXT, 4 * FPU.words.length);
 });
+
+// 0157: with MSR.FP clear (a thread that does not own the FPU, until its
+// first FPU op traps) regions run, but never a block holding an FPU op: the
+// fragment leaves at its start (returns 1, the frame written back) and the
+// block path raises FP unavailable there. One program per way in, each the
+// entry of its own DOL (so every function is in the plan); `fpu` names the
+// block the region must leave at.
+const FP_OFF_TEXT = 0x8001a100;
+const fadd = (d, a, b) => (63 << 26) | (d << 21) | (a << 16) | (b << 11) | (21 << 1);
+const SPARSE_GAP = 64;
+const FP_OFF_CASES = {
+  // A direct branch from a block without FPU ops (a later body).
+  branch: assemble(FP_OFF_TEXT, [
+    "main", asm.addi(3, 3, 1), asm.cmplwi(3, 0xffff), (pc, l) => asm.beq(pc, l.out),
+    "fpu", fadd(1, 1, 2), asm.addi(4, 4, 1),
+    "out", asm.blr()
+  ]),
+  // A call's continuation, the callee a wasm call in the same module.
+  continuation: assemble(FP_OFF_TEXT, [
+    "main", asm.mflr(0), asm.stwu(1, 1, -16), stw(0, 1, 20), (pc, l) => asm.bl(pc, l.leaf),
+    "fpu", fadd(3, 3, 4), lwz(0, 1, 20), asm.addi(1, 1, 16), mtlr(0), asm.blr(),
+    "leaf", asm.addi(5, 5, 2), asm.blr()
+  ]),
+  // The callee leaves (1) under the caller's wasm call, which passes it up.
+  callee: assemble(FP_OFF_TEXT, [
+    "main", asm.mflr(0), asm.stwu(1, 1, -16), stw(0, 1, 20), (pc, l) => asm.bl(pc, l.leaf),
+    lwz(0, 1, 20), asm.addi(1, 1, 16), mtlr(0), asm.blr(),
+    "leaf", asm.addi(5, 5, 2), asm.cmplwi(5, 0xffff), (pc, l) => asm.beq(pc, l.skip),
+    "fpu", fadd(1, 1, 2),
+    "skip", asm.blr()
+  ]),
+  // A back edge (to a body emitted earlier: through the head) into the FPU
+  // block: beq's target is discovered before its fall-through.
+  back: assemble(FP_OFF_TEXT, [
+    "main", asm.li(3, 5), asm.cmplwi(3, 0), (pc, l) => asm.beq(pc, l.fpu),
+    "fall", asm.addi(4, 4, 1), (pc, l) => asm.b(pc, l.fpu),
+    "fpu", fadd(1, 1, 2), asm.blr()
+  ]),
+  // Blocks spread over more than 4 words each: the head's compact br_if
+  // chain instead of its br_table (0133). A bc, not a b: never a tail call.
+  sparse: assemble(FP_OFF_TEXT, [
+    "main", asm.li(3, 5), asm.cmplwi(3, 0), (pc, l) => asm.bc(4, 2, pc, l.fpu), asm.blr(), // bne: taken
+    ...Array.from({ length: SPARSE_GAP }, () => asm.nop()),
+    "fpu", fadd(1, 1, 2), asm.blr()
+  ])
+};
+const fpOffSkip = chainSkip || (!fpOffRuns() && "core before 0157 (compiler version < 36)");
+function installFpOff(program) {
+  const dol = buildDol({ textAddr: FP_OFF_TEXT, text: program.words, entry: program.labels.main });
+  const { image, entryPoint } = imageFromDol(dol);
+  const plan = planDol({ image, entryPoint, gameId: "TEST01", dolBytes: dol, options: { gapFill: false } });
+  for (const seg of image.segments) core.load(seg.start, seg.bytes);
+  core.invalidate(FP_OFF_TEXT, 4 * program.words.length);
+  core.module._DolphinWeb_AotForgetRegionsForTest?.();
+  core.reset(seedGprs(program.labels.main), program.labels.main, STOP, 400000); // MSR.FP on while translating
+  core.setRegionsEnabled(true);
+  core.setRegionChaining(true);
+  queueAll(plan, 100, true); // caller and callee in one module: the call is a wasm call
+  serviceAll();
+}
+const withFp = (on) => {
+  const st = core.state();
+  core.loadState(Uint32Array.from(st, (v, i) => (i === 37 ? (on ? v | 0x2000 : v & ~0x2000) : v)), core.pc());
+};
+// From entry with MSR.FP off, until the FP unavailable exception is taken
+// (interpretOne returns 1 once MSR.IR is off) or STOP.
+function runFpOff(entry, { regions }) {
+  core.reset(seedGprs(entry), entry, STOP, 400000);
+  withFp(false);
+  const pcs = [];
+  for (let n = 0; n < 1000 && core.pc() !== STOP; n++) {
+    if (regions) {
+      const pc = core.pc();
+      const ran = core.dispatchRegion();
+      if (core.pc() !== pc) pcs.push(core.pc() >>> 0); // the region ran (1, or 0 having left at an FPU block)
+      if (ran) continue;
+    }
+    if (core.interpretOne()) break;
+  }
+  return { state: core.state(), downcount: core.downcount(), pcs };
+}
+
+for (const [name, program] of Object.entries(FP_OFF_CASES)) {
+  test(`with MSR.FP off a region runs up to a block with FPU ops and leaves at its start (${name}): the exception as the interpreter's (0157)`, { skip: fpOffSkip }, () => {
+    if (name === "sparse") assert.ok((program.labels.fpu - program.labels.main) / 4 + 1 > 4 * 3, "a compact head (3 blocks)");
+    installFpOff(program);
+    const reference = runFpOff(program.labels.main, { regions: false });
+    const got = runFpOff(program.labels.main, { regions: true });
+    assert.equal(reference.state[37] & 0x30, 0, "the exception was taken (IR, DR off)");
+    assert.deepEqual(got.state, reference.state);
+    assert.equal(got.downcount, reference.downcount);
+    assert.deepEqual(got.pcs, [program.labels.fpu], "the region left at the FPU block, nothing of it ran");
+    core.invalidate(FP_OFF_TEXT, 4 * program.words.length);
+  });
+}
+
+for (const name of ["branch", "sparse"]) {
+  test(`with MSR.FP off a region entered at a block with FPU ops does nothing; with FP on it runs it (${name} head, 0157)`, { skip: fpOffSkip }, () => {
+    const program = FP_OFF_CASES[name];
+    installFpOff(program);
+    core.reset(seedGprs(program.labels.fpu), program.labels.fpu, STOP, 400000);
+    withFp(false);
+    const before = core.state(), downcount = core.downcount();
+    assert.equal(core.dispatchRegion(), 0, "not run: the block path");
+    assert.deepEqual(core.state(), before);
+    assert.equal(core.downcount(), downcount);
+    withFp(true);
+    assert.equal(core.dispatchRegion(), 1, "FP on: the region");
+    assert.equal(core.pc(), STOP);
+    core.invalidate(FP_OFF_TEXT, 4 * program.words.length);
+  });
+}
 
 // 0111: region compares store their CR field as one i64 (SO clear) and a bc
 // on it decides on the compare's operands while they are intact. Unsigned
@@ -1030,6 +1153,278 @@ test("a large module's sleep wait counts from when it became installable; past i
   });
 });
 
+// Patch 0171: for 3 s after a state load, a ready module waits for a sleep
+// window only while windows long enough for it come. After a load the thread
+// runs behind (regions only until the block JIT's warmup is over again), the
+// throttle never sleeps long enough, and each module waited the whole 2 s
+// sleep wait (map v3: 0.7-1.8 s lost after an early load, warm and cold).
+// In the window a slice boundary installs them when no window long enough
+// came in the behind window (150 ms): the small ones up to the slice target,
+// a large one alone, one per behind window, within 6 ms. Outside the window
+// nothing changes (#277 forced at any time: a slow mode on the heavy scene).
+const behindSkip = largeSkip || (typeof core?.module._DolphinWeb_AotSetLoadWindowForTest !== "function" && "core without installs after a state load (0171)");
+// [forced installs, worst slice that did one x 100, those over the target,
+// measured overrun of large installs x 100, large modules the 6 ms bound kept
+// waiting, the largest estimate x overrun it refused x 100]
+function forcedCounters() {
+  const p = core.module._malloc(24);
+  try {
+    new Uint32Array(core.module.HEAPU8.buffer, p, 6).fill(0);
+    core.module._DolphinWeb_AotRegionForcedInstalls(p);
+    return Array.from(new Uint32Array(core.module.HEAPU8.buffer, p, 6));
+  } finally {
+    core.module._free(p);
+  }
+}
+// Every module estimated at `ms` or more (its sleep window must be longer);
+// `atMost`: every module at `ms` or less instead. `loaded`: a state load
+// opened the window (DolphinWeb_JitOnStateLoaded, as JitInterface::DoState
+// calls it), else none is open.
+function withModuleCost(plan, ms, fn, { atMost = false, loaded = true } = {}) {
+  const sizes = regionModules(plan).map((bytes) => bytes.length);
+  const saved = core.module._DolphinWeb_AotSetInstallCostForTest(ms / (atMost ? Math.max(...sizes) : Math.min(...sizes)));
+  core.module._DolphinWeb_AotSetSleepWaitForTest(2000); // the production wait
+  core.module._DolphinWeb_AotSetBehindWindowForTest(40); // 150 ms in production
+  core.module._DolphinWeb_AotSetLargeBehindWaitForTest(100); // 500 ms in production
+  // measured: large installs cost what they are estimated at
+  const overrun = core.module._DolphinWeb_AotSetLargeOverrunForTest(1);
+  if (loaded) {
+    core.module._DolphinWeb_AotSetLoadWindowForTest(60000); // 3 s in production
+    core.module._DolphinWeb_JitOnStateLoaded(); // pending: the next slice opens it
+  }
+  try {
+    return fn(sizes.length);
+  } finally {
+    core.module._DolphinWeb_AotSetInstallCostForTest(saved);
+    core.module._DolphinWeb_AotSetLargeOverrunForTest(overrun);
+    core.module._DolphinWeb_AotSetInstallDelayForTest(0);
+    core.module._DolphinWeb_AotSetForcedPeriodForTest(1000 / 60);
+    core.module._DolphinWeb_AotSetBehindWindowForTest(150);
+    core.module._DolphinWeb_AotSetLargeBehindWaitForTest(500);
+    core.module._DolphinWeb_AotSetLoadWindowForTest(0);
+    core.module._DolphinWeb_JitOnStateLoaded();
+    core.serviceRegions(); // a window of 0 from here: closed
+    core.module._DolphinWeb_AotSetLoadWindowForTest(3000);
+  }
+}
+function readyAll(requests, plan) {
+  const entries = queueAll(plan);
+  core.serviceRegions();
+  for (const r of requests()) Atomics.store(core.module.HEAPU8, r.readyPtr + r.readySlot, 1);
+  core.serviceRegions(); // installable from now
+  return entries;
+}
+
+test("after a state load, behind: a large ready module installs at a slice only when the throttle stops sleeping or after the large wait, one per behind window", { skip: behindSkip }, () => {
+  withOffThreadCompile((requests) => {
+    const plan = setup();
+    core.setRegionsEnabled(true);
+    withModuleCost(plan, 3, (modules) => {
+      const before = core.regionCount();
+      // Still sleeping (short), within the large wait: it waits. The behind
+      // window and the large wait are made long for this phase only, so that
+      // a host stall (a loaded machine preempting this test past 40 or
+      // 100 ms) cannot turn "still sleeping" into "behind": the decision is
+      // the core's, the time it is taken at is not the test's to rely on.
+      core.module._DolphinWeb_AotSetBehindWindowForTest(60000);
+      core.module._DolphinWeb_AotSetLargeBehindWaitForTest(60000);
+      const entries = readyAll(requests, plan);
+      spin(50);
+      core.module._DolphinWeb_AotRegionSleepWindowForTest(2); // too short for it, but a sleep
+      for (let slice = 0; slice < 20; slice++) core.serviceRegions();
+      assert.equal(core.regionCount(), before, "the throttle still sleeps: a large one waits on");
+      // Past the large wait (100 ms here; at least 110 ms have gone by), still
+      // sleeping short: one large module is forced. A stall that also lets the
+      // sleep fall out of the 40 ms behind window forces it too (no sleep at
+      // all), so the slices stop at the first forced install: "one per behind
+      // window" is checked without a later window opening meanwhile.
+      core.module._DolphinWeb_AotSetBehindWindowForTest(40);
+      core.module._DolphinWeb_AotSetLargeBehindWaitForTest(100);
+      spin(60);
+      core.module._DolphinWeb_AotRegionSleepWindowForTest(2);
+      for (let slice = 0; slice < 20 && forcedCounters()[0] === 0; slice++) core.serviceRegions();
+      const [forced, maxSlice, large] = forcedCounters();
+      assert.equal(forced, 1, "one module, not every ready one");
+      assert.equal(large, 1);
+      assert.ok(maxSlice > 0, "its slice is reported");
+      assert.ok(core.regionCount() > before);
+      if (modules > 1) assert.ok(core.regionCount() < before + entries, "the others wait another window");
+      for (let k = 0; k < modules && core.regionCount() < before + entries; k++) {
+        spin(50); // no sleep at all: behind
+        for (let slice = 0; slice < 20; slice++) core.serviceRegions();
+      }
+      assert.equal(core.regionCount(), before + entries, "all in well under the 2 s wait");
+      assert.equal(sleepCounters()[3], 0, "none waited the sleep wait out");
+      const reference = runCall(PROGRAM.labels.main, { regions: false });
+      assert.deepEqual(runCall(PROGRAM.labels.main, { regions: true }).state, reference.state);
+    });
+  });
+});
+
+test("after a state load, behind: a large module whose estimate times the overrun passes 6 ms is never forced", { skip: behindSkip }, () => {
+  withOffThreadCompile((requests) => {
+    const plan = setup();
+    core.setRegionsEnabled(true);
+    withModuleCost(plan, 5, () => { // 5 ms x 1.5 > 6 ms
+      core.module._DolphinWeb_AotSetLargeOverrunForTest(1.5);
+      const before = core.regionCount();
+      readyAll(requests, plan);
+      spin(150); // behind, and past the large wait
+      for (let slice = 0; slice < 20; slice++) core.serviceRegions();
+      assert.equal(core.regionCount(), before, "it waits for a sleep or the sleep wait");
+      const [forced, , , , refused, refusedMax] = forcedCounters();
+      assert.equal(forced, 0);
+      assert.ok(refused >= 1, "counted once per module the bound kept waiting");
+      assert.ok(refusedMax > 600, "the refused estimate x overrun, over 6 ms");
+    });
+  });
+});
+
+test("after a state load: small ready modules wait while long sleeps come, then install at the next slices up to the target", { skip: behindSkip }, () => {
+  withOffThreadCompile((requests) => {
+    const plan = setup();
+    core.setRegionsEnabled(true);
+    withModuleCost(plan, 0.4, (modules) => {
+      const before = core.regionCount();
+      // a long sleep just before they are ready: one is coming
+      core.module._DolphinWeb_AotRegionSleepWindowForTest(16);
+      const entries = readyAll(requests, plan);
+      for (let slice = 0; slice < 5; slice++) core.serviceRegions();
+      assert.equal(core.regionCount(), before, "long sleeps come: they wait for one");
+      spin(50); // none for a behind window: the thread is behind
+      core.serviceRegions();
+      assert.ok(core.regionCount() > before);
+      for (let slice = 0; slice < 20 && core.regionCount() < before + entries; slice++) core.serviceRegions();
+      assert.equal(core.regionCount(), before + entries, "all of them, without a cooldown");
+      const [forced, , large] = forcedCounters();
+      assert.equal(forced, modules);
+      assert.equal(large, 0);
+    }, { atMost: true });
+  });
+});
+
+test("no state load (a plain cache clear included): nothing changes, ready modules wait for a sleep window", { skip: behindSkip }, () => {
+  withOffThreadCompile((requests) => {
+    const plan = setup();
+    core.setRegionsEnabled(true);
+    withModuleCost(plan, 0.4, () => {
+      const before = core.regionCount();
+      clearCache(); // ClearOffThreadAndRegionState without a state load
+      readyAll(requests, plan);
+      spin(150); // no sleep at all, past every behind and large wait
+      for (let slice = 0; slice < 20; slice++) core.serviceRegions();
+      assert.equal(core.regionCount(), before, "as on main: the 2 s sleep wait");
+      assert.equal(forcedCounters()[0], 0);
+      core.module._DolphinWeb_AotRegionSleepWindowForTest(50);
+      assert.ok(core.regionCount() > before, "a sleep window installs them");
+    }, { atMost: true, loaded: false });
+  });
+});
+
+test("after a state load, not behind: a sleep window long enough seen within the behind window keeps the wait", { skip: behindSkip }, () => {
+  withOffThreadCompile((requests) => {
+    const plan = setup();
+    core.setRegionsEnabled(true);
+    // 20 ms per module: a 16 ms window (the last bucket, 15 ms or more,
+    // counts as long enough for any module) installs none of them.
+    withModuleCost(plan, 20, () => {
+      const before = core.regionCount();
+      readyAll(requests, plan);
+      spin(50);
+      core.module._DolphinWeb_AotRegionSleepWindowForTest(16);
+      assert.equal(core.regionCount(), before, "too large for that window");
+      for (let slice = 0; slice < 20; slice++) core.serviceRegions();
+      assert.equal(core.regionCount(), before, "long sleeps still come: it waits for one");
+      assert.equal(forcedCounters()[0], 0);
+    });
+  });
+});
+
+// A large install 9 ms slower than its 3 ms estimate: x 3 at least, at once.
+// Each test sets the cost after its own setup(): installs teach the core a
+// cost per byte (my delay is not in it), so a second batch would no longer
+// count as large.
+for (const [delay, check, what] of [
+  [9, (ratio) => ratio >= 3 && ratio <= 4, "up at once to the measured ratio"],
+  [60, (ratio) => ratio === 4, "bounded at 4"]
+]) {
+  test(`after a state load: the overrun is measured on installs that happened: ${what}`, { skip: behindSkip }, () => {
+    withOffThreadCompile((requests) => {
+      const plan = setup();
+      core.setRegionsEnabled(true);
+      withModuleCost(plan, 3, () => {
+        readyAll(requests, plan);
+        core.module._DolphinWeb_AotSetInstallDelayForTest(delay);
+        core.module._DolphinWeb_AotRegionSleepWindowForTest(500);
+        const ratio = forcedCounters()[3] / 100;
+        assert.ok(check(ratio), `${what} (${ratio})`);
+      });
+    });
+  });
+}
+
+test("after a state load: forced installs spend at most 4 ms per period, sliding, failed attempts included", { skip: behindSkip }, () => {
+  withOffThreadCompile((requests) => {
+    const plan = setup();
+    core.setRegionsEnabled(true);
+    withModuleCost(plan, 0.4, (modules) => {
+      const before = core.regionCount();
+      core.module._DolphinWeb_AotSetForcedPeriodForTest(60000); // nothing drains meanwhile
+      core.module._DolphinWeb_AotSetInstallDelayForTest(2.5); // each install takes 2.5 ms
+      readyAll(requests, plan); // its second slice may force already
+      for (let slice = 0; slice < 5; slice++) core.serviceRegions();
+      const first = forcedCounters()[0];
+      assert.ok(first >= 1 && first <= 2, `2.5 + 2.5 ms leave no room for another under 4 ms (${first})`);
+      if (modules > first) {
+        core.module._DolphinWeb_AotSetForcedPeriodForTest(10); // 4 ms drain per 10 ms
+        spin(20);
+        for (let slice = 0; slice < 5; slice++) core.serviceRegions();
+        assert.ok(forcedCounters()[0] > first, "the debt drained: more go");
+      }
+      assert.ok(core.regionCount() > before);
+    }, { atMost: true });
+  });
+});
+
+test("after a state load: the window closes", { skip: behindSkip }, () => {
+  withOffThreadCompile((requests) => {
+    const plan = setup();
+    core.setRegionsEnabled(true);
+    withModuleCost(plan, 0.4, () => {
+      core.module._DolphinWeb_AotSetLoadWindowForTest(30);
+      core.module._DolphinWeb_JitOnStateLoaded();
+      core.serviceRegions(); // this slice opens the 30 ms window
+      spin(60);
+      const before = core.regionCount();
+      readyAll(requests, plan);
+      for (let slice = 0; slice < 20; slice++) core.serviceRegions();
+      assert.equal(core.regionCount(), before, "closed: the sleep wait again");
+      assert.equal(forcedCounters()[0], 0);
+    }, { atMost: true });
+  });
+});
+
+test("0171: only a state load opens the window (JitInterface::DoState in read mode, not a save)", async () => {
+  const patch = await readFile(new URL("../patches/dolphin-wasm/snapshot/0072-jit-deterministic-engage-exception-oracle-inline-fma.patch", import.meta.url), "utf8");
+  assert.match(patch, / {3}if \(m_jit && p\.IsReadMode\(\)\)\n\+ {2}\{\n {5}m_jit->ClearCache\(\);\n\+#ifdef __EMSCRIPTEN__\n\+[^\n]*\n\+ {4}DolphinWeb_JitOnStateLoaded\(\);/);
+});
+
+test("0171 source: the window opens at a state load for 3 s, normal regime unchanged outside it", async () => {
+  const patch = await readFile(new URL("../patches/dolphin-wasm/snapshot/0171-region-installs-after-state-load.patch", import.meta.url), "utf8");
+  assert.match(patch, /\+std::chrono::milliseconds s_region_load_window\{3000\};/);
+  assert.match(patch, /\+ {2}OpenRegionLoadWindow\(\);  \/\/ patch 0171\n {3}if \(s_wasm_armed_policy/, "opened by the state-load hook, armed JIT or not");
+  assert.match(patch, /\+constexpr double REGION_FORCED_RATE_MS = 4\.0;\n\+double s_region_forced_period_ms = 1000\.0 \/ 60;/);
+  assert.match(patch, /\+ {4}if \(forced_one\)\n\+ {6}s_region_forced_debt_ms \+= took;\n\+ {4}if \(s_region_stats\.regions_installed > installed_now\)/, "failed forced attempts count in the debt");
+  assert.match(patch, /\+constexpr double REGION_LARGE_OVERRUN_START = 3\.0;\n\+constexpr double REGION_LARGE_OVERRUN_MAX = 4\.0;/);
+  assert.match(patch, /\+ {4}if \(s_region_stats\.regions_installed > installed_now\)/, "measured and counted on installs that happened");
+  assert.match(patch, /\+ {6}if \(!in_load_window\)\n\+ {8}return true;/, "outside the window: the sleep wait as before");
+  assert.match(patch, /\+std::chrono::milliseconds s_region_behind_window\{150\};/);
+  assert.match(patch, /\+ {6}const bool large = cost > REGION_SLICE_TARGET_MS;/);
+  assert.match(patch, /\+constexpr double REGION_FORCED_MAX_SLICE_MS = 6\.0;/);
+  assert.match(patch, /\+ {6}if \(large && cost \* s_region_large_overrun > REGION_FORCED_MAX_SLICE_MS\)/);
+  assert.match(patch, /\+\/\/ the judge \(2026-10-26\)/);
+});
+
 // Continuation fragments (2026-10-23): a function of more blocks than one
 // fragment holds (the 64-block cap) left the rest to the dispatcher and the
 // block JIT at every pass (2.2 M exits per 4 s in a CPU-bound intro scene).
@@ -1051,7 +1446,7 @@ for (const maxContinuations of [0, 7]) {
     core.invalidate(LONG, bytes.length);
     core.module._DolphinWeb_AotForgetRegionsForTest?.();
     const ranges = [[LONG, LONG + bytes.length]];
-    const translator = coreRegionTranslator(core.module, { mask: PRODUCTION_DISABLE_MASK, helperNames: coreAssembleOptions(core.module)?.helperNames, maxContinuations, yieldNow: async () => {} });
+    const translator = coreRegionTranslator(core.module, { mask: PRODUCTION_DISABLE_MASK, helperNames: coreAssembleOptions(core.module)?.helperNames, maxContinuations, now: () => 0, yieldNow: async () => {} });
     const [r] = await translator.translate([{ entry: LONG, ranges, hash: null }]);
     assert.ok(r.fragment, r.reason);
     assert.equal(r.fragment.entries.length, 64, "the first fragment is capped");
@@ -1098,7 +1493,10 @@ test("continuations: each under the byte cap (halved until it fits), within the 
   const one = await continuationsOf(program, { maxFragmentBytes: Math.floor(size / 3), maxContinuations: 1 });
   assert.equal(one.continuations.length, 1, "maxContinuations");
   const bytes = await continuationsOf(program, { maxFragmentBytes: Math.floor(size / 3), maxBytes: 1 });
-  assert.equal(bytes.continuations.length, 1, "the byte budget stops after the fragment that spends it");
+  // Never past the byte budget (review of #189): the first charged fragment
+  // would overshoot 1 byte, so none is kept, and it is refused.
+  assert.equal(bytes.continuations, undefined, "nothing kept past the byte budget");
+  assert.ok(bytes.budgetRefused >= 1 && bytes.resume, "refused, and resumable with more");
   const tiny = await continuationsOf(program, { maxFragmentBytes: 16 });
   assert.equal(tiny.continuations, undefined, "a single block over the cap is refused");
   assert.ok(tiny.oversize >= 1);
@@ -1129,8 +1527,12 @@ test("the region key changes with the formation", async () => {
   const f = [{ entry: 0x80003100, sha256: "a".repeat(64) }];
   const parts = { compilerVersion: 5, codegenMask: 0 };
   assert.notEqual(await regionModuleKey(f, { ...parts, formation: 1 }), await regionModuleKey(f, { ...parts, formation: 2 }));
-  assert.notEqual(await regionModuleKey(f, { ...parts, formation: 2 }), await regionModuleKey(f, { ...parts, formation: 3 }), "3: the frontier rule of #167");
-  assert.equal(await regionModuleKey(f, parts), await regionModuleKey(f, { ...parts, formation: 3 }), "3 by default");
+  assert.notEqual(await regionModuleKey(f, { ...parts, formation: 2 }), await regionModuleKey(f, { ...parts, formation: 3 }), "3: frontier rule and shared budget");
+  assert.notEqual(await regionModuleKey(f, { ...parts, formation: 3 }), await regionModuleKey(f, { ...parts, formation: 4 }), "4: continuations stop at held blocks");
+  assert.notEqual(await regionModuleKey(f, { ...parts, formation: 4 }), await regionModuleKey(f, { ...parts, formation: 5 }), "5: extra entries seed the frontier");
+  assert.notEqual(await regionModuleKey(f, { ...parts, formation: 5 }), await regionModuleKey(f, { ...parts, formation: 6 }), "6: continuations past an uncapped first fragment");
+  assert.notEqual(await regionModuleKey(f, { ...parts, formation: 6 }), await regionModuleKey(f, { ...parts, formation: 7 }), "7: past an uncapped first fragment only into a loop");
+  assert.equal(await regionModuleKey(f, parts), await regionModuleKey(f, { ...parts, formation: 7 }), "7 by default");
 });
 
 
@@ -1223,16 +1625,57 @@ test("hot/cold formation: the first fragment holds the hot blocks, the cold ones
   assert.equal(got.interpreted, 0, "everything ran in regions");
 });
 
-// #167: a branch is in held code when the nearest held entry before it
-// reaches it with no block end between (the core's block can run through a
-// leader it did not split at); after a block end it is not.
-test("frontier: a branch belongs to the nearest held entry unless a block end lies between", async () => {
-  const { frontier } = await import("../src/aot-orchestrator.js");
-  const branches = [[0x80000008, [0x80000100]], [0x80000020, [0x80000200]]];
-  branches.ends = [0x80000010];
-  // Entry 0x80000000 held; a leader at 0x80000004 not split; a blr at 0x10.
-  assert.deepEqual(frontier(branches, new Set([0x80000000])), [0x80000100], "the branch at 8 is in the entry's block; the one at 0x20 is past the blr");
-  assert.deepEqual(frontier(branches, new Set([0x80000000, 0x80000014])), [0x80000100, 0x80000200]);
+// 0135 (was 0128): a fragment keeps pc, npc and downcount in locals and writes them back
+// at its exits. A loop over memory with an FPU op kept in the region (a
+// helper call: downcount flushed and reloaded around it), run to the end and
+// stopped on downcount at every budget, against the interpreter.
+const FRAME_TEXT = 0x80015100;
+const bltFrame = (from, to) => asm.bc(12, 0, from, to);
+const FRAME = assemble(FRAME_TEXT, [
+  "main", asm.mflr(0), asm.stwu(1, 1, -16), stw(0, 1, 20), (pc, l) => asm.bl(pc, l.loop),
+  lwz(0, 1, 20), asm.addi(1, 1, 16), mtlr(0), asm.blr(),
+  "loop", asm.lis(5, DATA >>> 16), asm.ori(5, 5, DATA & 0xffff), asm.li(8, 0), asm.li(10, 0),
+  lfs(1, 5, 0), lfs(2, 5, 4),
+  "body", lwz(9, 5, 8), add(10, 10, 9), stw(10, 5, 12), faddsRc(3, 1, 2), asm.addi(8, 8, 1),
+  asm.addi(9, 9, 3), stw(9, 5, 8), asm.cmplwi(8, 5), (pc, l) => bltFrame(pc, l.body),
+  stfd(3, 5, 16), asm.blr()
+]);
+
+test("pc, npc and downcount in locals end like the interpreter, at the end and on downcount at every budget (0135)", { skip: chainSkip || (core?.has("DolphinWeb_AotKeyParts") && keyVersion() < 27 && "core before 0135 (compiler version < 27)") }, () => {
+  const dol = buildDol({ textAddr: FRAME_TEXT, text: FRAME.words, entry: FRAME.labels.main });
+  const { image, entryPoint } = imageFromDol(dol);
+  const plan = planDol({ image, entryPoint, gameId: "TEST01", dolBytes: dol, options: { gapFill: false } });
+  for (const seg of image.segments) core.load(seg.start, seg.bytes);
+  const data = new DataView(new ArrayBuffer(24));
+  data.setFloat32(0, 1.5); data.setFloat32(4, -3.25); data.setUint32(8, 7);
+  const loadData = () => core.load(DATA, new Uint8Array(data.buffer));
+  loadData();
+  core.reset(seedGprs(FRAME.labels.main), FRAME.labels.main, STOP, 400000);
+  core.setRegionsEnabled(true);
+  core.setRegionChaining(true);
+  queueAll(plan, 1, true);
+  serviceAll();
+  loadData();
+  const reference = runCall(FRAME.labels.main, { regions: false });
+  loadData();
+  const got = runCall(FRAME.labels.main, { regions: true });
+  assert.deepEqual(got.state, reference.state);
+  assert.equal(got.downcount, reference.downcount);
+  assert.equal(got.interpreted, 0, "no op left the region");
+  for (const budget of [1, 2, 4, 9, 17, 30, 47, 64]) {
+    loadData();
+    core.reset(seedGprs(FRAME.labels.main), FRAME.labels.main, STOP, budget);
+    core.dispatchRegion();
+    const stopped = { state: core.state(), downcount: core.downcount(), pc: core.pc() };
+    loadData();
+    core.reset(seedGprs(FRAME.labels.main), FRAME.labels.main, STOP, budget);
+    for (let n = 0; n < 100000 && core.downcount() > stopped.downcount; n++) assert.equal(core.interpretOne(), 0);
+    assert.equal(core.downcount(), stopped.downcount, `budget ${budget}`);
+    assert.equal(core.pc(), stopped.pc, `budget ${budget}: pc`);
+    assert.deepEqual(core.state(), stopped.state, `budget ${budget}`);
+  }
+  core.invalidate(FRAME_TEXT, 4 * FRAME.words.length);
+  core.module._DolphinWeb_AotForgetRegionsForTest?.();
 });
 
 // The local profile in a product build (harness hooks off): the sampler gets
@@ -1267,8 +1710,8 @@ test("without harness hooks the profile sampler gets the guest PC and a record w
   assert.deepEqual(saved.blocks.map((b) => [b[0], b[4]]), [[(TEXT + 0x40) >>> 0, 7]], "the profile file holds the weight");
 });
 
-// Review of 0130/#167: continuations that only hold what one uncut fragment
-// held before (the first fragment and them, up to maxBlocks blocks) spend no
+// Review of 0130: continuations that only hold what one uncut fragment held
+// before (the first fragment and them, up to maxBlocks blocks) spend no
 // budget; past that they do, and what the budget leaves out is counted.
 test("continuation budget: the old single fragment's blocks are free; refusals for lack of budget are counted", { skip: contSkip }, async () => {
   const program = longFunction(100);
@@ -1286,3 +1729,852 @@ test("continuation budget: the old single fragment's blocks are free; refusals f
   assert.ok(starved.budgetRefused >= 1, `refused ${starved.budgetRefused}`);
 });
 
+// The production path: a first fragment of maxBlocks (64) blocks, so nothing
+// is free, and continuations halved under the byte cap. Every continuation
+// byte is charged, and a budget below them refuses the rest, counted.
+test("continuation budget: past a full first fragment every continuation byte is charged, byte-capped ones too", { skip: contSkip }, async () => {
+  const program = longFunction(100);
+  const run = (options) => translateWithContinuations(core.module, { entry: LONG, ranges: loadWords(LONG, program.words), hash: null },
+    { mask: PRODUCTION_DISABLE_MASK, maxBlocks: 64, names: coreAssembleOptions(core.module)?.helperNames, ...options });
+  const bytesOf = (r) => (r.continuations ?? []).reduce((n, c) => n + c.code.length, 0);
+  const full = await run({});
+  assert.equal(full.fragment.entries.length, 64);
+  assert.ok(full.continuations?.length >= 1);
+  assert.equal(full.budgetCharged, bytesOf(full), "64 blocks first: no block is free");
+  const cap = Math.floor(full.fragment.code.length / 8);
+  const capped = await run({ maxFragmentBytes: cap });
+  assert.ok(capped.continuations.length > full.continuations.length, "halved under the byte cap");
+  assert.ok(capped.continuations.every((c) => c.code.length <= cap));
+  assert.equal(capped.budgetCharged, bytesOf(capped));
+  const short = await run({ maxFragmentBytes: cap, maxBytes: cap });
+  assert.ok(short.budgetCharged <= cap + Math.max(...capped.continuations.map((c) => c.code.length)), "stops once the budget is spent");
+  assert.ok(short.budgetRefused >= 1, `refused ${short.budgetRefused}`);
+});
+
+// A branch is in held code when the nearest held entry before it reaches it
+// with no block end between (the core's block can run through a leader it
+// did not split at); after a block end it is not.
+test("frontier: a branch belongs to the nearest held entry unless a block end lies between", async () => {
+  const { frontier } = await import("../src/aot-orchestrator.js");
+  const branches = [[0x80000008, [0x80000100]], [0x80000020, [0x80000200]]];
+  branches.ends = [0x80000010];
+  assert.deepEqual(frontier(branches, new Set([0x80000000])), [0x80000100], "the branch at 8 is in the entry's block; the one at 0x20 is past the blr");
+  assert.deepEqual(frontier(branches, new Set([0x80000000, 0x80000014])), [0x80000100, 0x80000200]);
+  // A leader the core did not split at (0x80000004, the head of a loop a
+  // later branch targets): the branch at 8 is still in the held entry's
+  // block. The old rule gave it to that leader, which no fragment holds,
+  // and left its target out (an exit to code with no region: 0x800f5fc4,
+  // the heavy scene's first one).
+  const loop = [[0x80000008, [0x80000100]], [0x80000030, [0x80000004]]];
+  loop.ends = [0x80000010, 0x80000030];
+  // Formation 4: 0x80000004 is also seeded, a leader the held block falls
+  // into (the bdnz at 0x30 enters there once its code is held).
+  assert.deepEqual(frontier(loop, new Set([0x80000000])), [0x80000004, 0x80000100]);
+});
+
+// A function refused continuations for lack of budget resumes its frontier
+// where it stopped: in two steps it holds what one step with the whole
+// budget holds, and nothing is translated twice.
+test("continuation budget: resume goes on from where the budget stopped", { skip: contSkip }, async () => {
+  const program = longFunction(100);
+  const f = { entry: LONG, ranges: loadWords(LONG, program.words), hash: null };
+  const options = { mask: PRODUCTION_DISABLE_MASK, maxBlocks: 16, names: coreAssembleOptions(core.module)?.helperNames };
+  const whole = await translateWithContinuations(core.module, f, options);
+  assert.ok(!whole.budgetRefused && !whole.resume);
+  const short = await translateWithContinuations(core.module, f, { ...options, maxBytes: 1 });
+  assert.ok(short.budgetRefused >= 1 && typeof short.resume === "function");
+  const more = await short.resume(1 << 20);
+  assert.equal(more.budgetRefused, 0);
+  const held = (fs) => new Set(fs.flatMap((x) => x.entries)).size;
+  assert.equal(held([short.fragment, ...(short.continuations ?? []), ...more.continuations]), held([whole.fragment, ...whole.continuations]));
+  assert.equal((short.budgetCharged ?? 0) + more.budgetCharged, whole.budgetCharged, "the same bytes charged");
+  const entries = [...(short.continuations ?? []), ...more.continuations].map((x) => x.entry);
+  assert.equal(new Set(entries).size, entries.length, "no continuation translated twice");
+});
+
+// A large member's share: what is left of the module's budget over the
+// large members left (largeLeft), so the first ones no longer take it all.
+test("continuation budget: a large member gets an even share of what the module has left", { skip: contSkip }, async () => {
+  const program = longFunction(100);
+  // a frozen clock: no 8 ms slice runs out under load (budget, not the case tested)
+  const t = coreRegionTranslator(core.module, { maxBlocks: 16, now: () => 0, yieldNow: async () => {} });
+  const f = { entry: LONG, ranges: loadWords(LONG, program.words), hash: null, flags: 0, extraEntries: [] };
+  const [alone] = await t.translate([{ ...f, continuationBytesUsed: 0, largeLeft: 1 }]);
+  const [shared] = await t.translate([{ ...f, continuationBytesUsed: t.unitContinuationBytes - 8000, largeLeft: 4 }]);
+  assert.ok(!alone.budgetRefused, "alone: the whole budget");
+  assert.ok(shared.budgetRefused >= 1, `a quarter of 8000 bytes is short of the ${alone.budgetCharged} it needs alone`);
+  const biggest = Math.max(...(shared.continuations ?? [{ code: [] }]).map((c) => c.code.length));
+  assert.ok(alone.budgetCharged > 2000);
+  assert.ok(shared.budgetCharged <= 2000 + biggest, `charged ${shared.budgetCharged}`);
+});
+
+// The plan's extra entries (jump-table targets, code pointers) seed the
+// frontier: a block only an indirect branch reaches (here, after a blr) is
+// held, and a bctr into it runs in the region like the interpreter. Without
+// them it was held by nothing, even in a function far from any cap (the race
+// scene's 0x80077044).
+test("continuations: code past an mtmsr is held even when the first fragment is not full", { skip: contSkip }, async () => {
+  // A small function whose loop follows an mtmsr: the core's discovery
+  // stops at it, so the first fragment holds a few blocks, far from the cap,
+  // and the loop ran outside regions (a scene's main loop, 35 % of cycles).
+  const MTMSR_R6 = 0x7cc00124;
+  const t = assemble(LONG, [
+    asm.addi(3, 3, 1), asm.cmplwi(3, 0xffff), (pc, l) => asm.beq(pc, l.out),
+    MTMSR_R6,
+    "loop", asm.addi(4, 4, 1), asm.cmplwi(4, 40), (pc, l) => asm.bc(4, 2, pc, l.loop),
+    "out", asm.blr()
+  ]);
+  // With 0183 off: the mtmsr ends its block, the case continuations exist for
+  // (a mtmsr that changes more than EE still does).
+  const r = await continuationsOf(t, { mask: PRODUCTION_DISABLE_MASK & ~(1 << 27) });
+  assert.ok(r.fragment.entries.length < 64 && !r.fragment.entries.includes(t.labels.loop), "the first fragment stops short of the loop");
+  const held = new Set([r.fragment, ...(r.continuations ?? [])].flatMap((x) => x.entries));
+  assert.ok(held.has(t.labels.loop), "the loop is held by a continuation");
+  assert.equal(r.budgetCharged ?? 0, 0, "within the old single fragment's free blocks");
+  // Production (0183 on, #322): the region goes on past the mtmsr, the loop
+  // is in the first fragment.
+  const on = await continuationsOf(t);
+  assert.ok(on.fragment.entries.includes(t.labels.loop), "0183 on: the loop is in the first fragment");
+});
+test("continuations: a straight tail past an mtmsr is left to the block path, the first fragment not full", { skip: contSkip }, async () => {
+  // An OS routine's shape: mtmsr, then a few blocks without a loop, run
+  // once per call. A continuation there was one more region entry per call
+  // and a broken block chain (race scene -1.3 %, review of #240).
+  const MTMSR_R6 = 0x7cc00124;
+  const t = assemble(LONG, [
+    asm.addi(3, 3, 1), asm.cmplwi(3, 0xffff), (pc, l) => asm.beq(pc, l.out),
+    MTMSR_R6,
+    asm.addi(4, 4, 1), asm.cmplwi(4, 40), (pc, l) => asm.beq(pc, l.tail),
+    asm.addi(5, 5, 1),
+    "tail", asm.addi(6, 6, 1),
+    "out", asm.blr()
+  ]);
+  // With 0183 off (the mtmsr ends its block), as above.
+  const r = await continuationsOf(t, { mask: PRODUCTION_DISABLE_MASK & ~(1 << 27) });
+  assert.ok(r.fragment.entries.length < 64 && !r.fragment.entries.includes(t.labels.tail), "the first fragment stops at the mtmsr");
+  assert.equal(r.continuations, undefined, "no continuation: nothing past the mtmsr loops");
+  // Production (0183 on): the tail is in the first fragment, no extra entry.
+  const on = await continuationsOf(t);
+  assert.ok(on.fragment.entries.includes(t.labels.tail), "0183 on: the tail is in the first fragment");
+  assert.equal(on.continuations, undefined);
+});
+test("continuations: an extra entry of the plan that no direct branch reaches is held, and runs like the interpreter", { skip: contSkip }, async () => {
+  const t = assemble(LONG, [
+    "entry", asm.addi(3, 3, 1), asm.blr(),
+    "extra", asm.addi(4, 4, 2), asm.cmplwi(4, 40), (pc, l) => asm.beq(pc, l.out), asm.addi(5, 5, 3), "out", asm.blr()
+  ]);
+  const ranges = loadWords(LONG, t.words);
+  const options = { mask: PRODUCTION_DISABLE_MASK, maxBlocks: 64, names: coreAssembleOptions(core.module)?.helperNames };
+  const held = (r) => new Set([r.fragment, ...(r.continuations ?? [])].flatMap((x) => x.entries));
+  const without = await translateWithContinuations(core.module, { entry: LONG, ranges, hash: null }, options);
+  assert.ok(!held(without).has(t.labels.extra), "a direct branch never reaches it");
+  const r = await translateWithContinuations(core.module, { entry: LONG, ranges, hash: null, extraEntries: [t.labels.extra] }, options);
+  assert.ok(held(r).has(t.labels.extra), "the extra entry is held");
+  const seedFragment = r.continuations.find((x) => x.entries.includes(t.labels.extra));
+  assert.equal(r.budgetCharged, seedFragment.code.length, "a seed's fragment is charged whole (review of #191)");
+  core.module._DolphinWeb_AotForgetRegionsForTest?.();
+  const { bytes: mod, entries } = assembleRegion(claimEntries([r.fragment, ...r.continuations]), { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages });
+  core.setRegionsEnabled(true);
+  core.queueRegion(mod, entries.map(([pc]) => pc), [{ ranges, hash: null }]);
+  core.serviceRegions();
+  const reference = runCall(t.labels.extra, { regions: false });
+  const got = runCall(t.labels.extra, { regions: true });
+  assert.deepEqual(got.state, reference.state);
+  assert.equal(got.interpreted, 0, "entered at the extra entry, all in the region");
+});
+
+// Review of #189: no continuation is kept past the budget it was given (a
+// fragment that would overshoot goes back to the frontier), in the first
+// pass and in a resume, so a module never ends past its budget.
+test("continuation budget: never charged past the limit, first pass or resume", { skip: contSkip }, async () => {
+  const program = longFunction(100);
+  const f = { entry: LONG, ranges: loadWords(LONG, program.words), hash: null };
+  const options = { mask: PRODUCTION_DISABLE_MASK, maxBlocks: 16, names: coreAssembleOptions(core.module)?.helperNames };
+  const whole = await translateWithContinuations(core.module, f, options);
+  const sizes = (whole.continuations ?? []).map((c) => c.code.length);
+  for (const limit of [1, Math.floor(whole.budgetCharged / 3), Math.floor(whole.budgetCharged / 2) + 1]) {
+    const r = await translateWithContinuations(core.module, f, { ...options, maxBytes: limit });
+    assert.ok((r.budgetCharged ?? 0) <= limit, `first pass: ${r.budgetCharged} <= ${limit}`);
+    assert.ok(r.budgetRefused >= 1 && r.resume);
+    const more = await r.resume(limit);
+    assert.ok(more.budgetCharged <= limit, `resume: ${more.budgetCharged} <= ${limit}`);
+  }
+  assert.ok(sizes.length > 1);
+  // A member whose own cap is reached is not offered more (no resume).
+  const capped = await translateWithContinuations(core.module, f, { ...options, maxContinuations: 1 });
+  assert.ok(capped.budgetRefused >= 1 && !capped.resume, "at its own cap: no resume");
+});
+
+// Formation 4: a continuation is translated over the function's ranges
+// without the first word of each held block, so it stops there instead of
+// translating it again; the frontier then also seeds what a held block
+// falls into and the return points of calls made from held code (before,
+// a continuation translated through them).
+test("withoutStarts: the ranges without the word at each start", async () => {
+  const { withoutStarts } = await import("../src/aot-orchestrator.js");
+  assert.deepEqual(withoutStarts([[0x100, 0x140]], [0x100, 0x110, 0x13c, 0x200]), [[0x104, 0x110], [0x114, 0x13c]]);
+  assert.deepEqual(withoutStarts([[0x100, 0x110], [0x200, 0x210]], []), [[0x100, 0x110], [0x200, 0x210]]);
+});
+
+test("frontier: a leader a held block falls into, and the return point of a call from held code", async () => {
+  const { frontier } = await import("../src/aot-orchestrator.js");
+  // 0x00 held; 0x08 a bctrl from held code (0x0c its return point); 0x10
+  // a loop head only a bdnz at 0x30 targets, past a blr at 0x20 (so that
+  // bdnz is in no held block).
+  const branches = [[0x80000030, [0x80000010, 0x80000034]]];
+  branches.ends = [0x80000008, 0x80000020, 0x80000040];
+  branches.calls = [0x80000008];
+  assert.deepEqual(frontier(branches, new Set([0x80000000])), [0x8000000c], "the call's return point; 0x10 is past the bctrl's end");
+  // Held through 0x0c: 0x10 is fallen into (no end between 0x0c and it).
+  assert.deepEqual(frontier(branches, new Set([0x80000000, 0x8000000c])), [0x80000010]);
+});
+
+test("loopsPast: a loop in the code the frontier leads to; not a branch back into held code, nor a literal after a blr (review of #243)", async () => {
+  const { loopsPast } = await import("../src/aot-orchestrator.js");
+  const at = (x) => (0x80000000 + x) >>> 0;
+  // A loop: the leader 0x10, a bdnz at 0x20 back to 0x18 (reached), blr 0x24.
+  const loop = [[at(0x20), [at(0x18), at(0x24)]]];
+  loop.ends = [at(0x24)];
+  assert.equal(loopsPast(loop, [at(0x10)], new Set([at(0)])), true);
+  // A straight tail from 0x10 that branches back to 0x00, held: no loop.
+  const back = [[at(0x18), [at(0x00)]]];
+  back.ends = [at(0x18)];
+  assert.equal(loopsPast(back, [at(0x10)], new Set([at(0)])), false, "a branch back into held code");
+  // A tail ending in a blr at 0x18; at 0x1c a literal that decodes as a
+  // branch back to 0x10: no walk reaches it.
+  const literal = [[at(0x1c), [at(0x10)]]];
+  literal.ends = [at(0x18), at(0x1c)];
+  assert.equal(loopsPast(literal, [at(0x10)], new Set([at(0)])), false, "a word past the blr");
+  // The leader's walk stops at a held entry: a loop past it is held code.
+  const heldLoop = [[at(0x30), [at(0x28), at(0x34)]]];
+  heldLoop.ends = [at(0x34)];
+  assert.equal(loopsPast(heldLoop, [at(0x10)], new Set([at(0), at(0x20)])), false, "a held loop after a straight tail");
+});
+
+test("continuations: no block in two fragments, and the module runs like the interpreter", { skip: contSkip }, async () => {
+  const program = longFunction(100);
+  const ranges = loadWords(LONG, program.words);
+  const r = await translateWithContinuations(core.module, { entry: LONG, ranges, hash: null },
+    { mask: PRODUCTION_DISABLE_MASK, maxBlocks: 16, names: coreAssembleOptions(core.module)?.helperNames });
+  const fragments = [r.fragment, ...r.continuations];
+  const listed = fragments.flatMap((x) => x.entries);
+  assert.equal(new Set(listed).size, listed.length, "every block in one fragment");
+  assert.equal(listed.length, 101);
+  core.module._DolphinWeb_AotForgetRegionsForTest?.();
+  const { bytes: mod, entries } = assembleRegion(claimEntries(fragments), { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages });
+  core.setRegionsEnabled(true);
+  core.queueRegion(mod, entries.map(([pc]) => pc), [{ ranges, hash: null }]);
+  core.serviceRegions();
+  const reference = runCall(LONG, { regions: false });
+  const got = runCall(LONG, { regions: true });
+  assert.deepEqual(got.state, reference.state);
+  assert.equal(got.interpreted, 0);
+});
+
+// Review of #205: carving with the plan's hash on. A first fragment capped
+// at 2 blocks holds `entry` and the loop head `L`; the continuation at `F`
+// is cut where it falls into L (a held start) and jumps there. The module
+// runs like the interpreter.
+test("continuations: a block cut where it falls into a held block, hash on, runs like the interpreter", { skip: contSkip }, async () => {
+  const { regionHash } = await import("../src/aot-plan.js");
+  const t = assemble(LONG, [
+    "entry", asm.li(3, 0), (pc, l) => asm.b(pc, l.L),
+    "F", asm.addi(4, 4, 1),
+    "L", asm.addi(3, 3, 1), asm.cmplwi(3, 10), (pc, l) => asm.bc(12, 0, pc, l.F), // blt F
+    "out", asm.blr()
+  ]);
+  const ranges = loadWords(LONG, t.words);
+  const read32 = (a) => new DataView(core.ram().buffer, core.ram().byteOffset).getUint32(a & 0x01ffffff, false);
+  const hash = regionHash(read32, ranges);
+  const r = await translateWithContinuations(core.module, { entry: LONG, ranges, hash },
+    { mask: PRODUCTION_DISABLE_MASK, maxBlocks: 2, names: coreAssembleOptions(core.module)?.helperNames });
+  assert.ok(r.fragment, r.reason);
+  assert.ok(!r.codeChanged);
+  const fragments = [r.fragment, ...(r.continuations ?? [])];
+  const listed = fragments.flatMap((x) => x.entries);
+  assert.equal(new Set(listed).size, listed.length, "no block in two fragments");
+  for (const pc of [t.labels.entry, t.labels.F, t.labels.L, t.labels.out]) assert.ok(listed.includes(pc), `${pc.toString(16)} held`);
+  const fFragment = fragments.find((x) => x.entry === t.labels.F);
+  assert.ok(fFragment && !fFragment.entries.includes(t.labels.L), "F's fragment stops at the held L");
+  core.module._DolphinWeb_AotForgetRegionsForTest?.();
+  const { bytes: mod, entries } = assembleRegion(claimEntries(fragments), { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages });
+  core.setRegionsEnabled(true);
+  core.queueRegion(mod, entries.map(([pc]) => pc), [{ ranges, hash: null }]);
+  core.serviceRegions();
+  const reference = runCall(LONG, { regions: false });
+  const got = runCall(LONG, { regions: true });
+  assert.deepEqual(got.state, reference.state);
+  assert.equal(got.interpreted, 0);
+});
+
+// Review of #205: code rewritten between two translations (an overlay
+// during a slice) refuses the continuation and stops the function's growth:
+// nothing translated from foreign bytes is kept.
+test("continuations: code rewritten during a slice refuses the fragment (plan hash checked after each)", { skip: contSkip }, async () => {
+  const { regionHash } = await import("../src/aot-plan.js");
+  const program = longFunction(100);
+  const ranges = loadWords(LONG, program.words);
+  const read32 = (a) => new DataView(core.ram().buffer, core.ram().byteOffset).getUint32(a & 0x01ffffff, false);
+  const hash = regionHash(read32, ranges);
+  const options = { mask: PRODUCTION_DISABLE_MASK, maxBlocks: 16, names: coreAssembleOptions(core.module)?.helperNames };
+  const clean = await translateWithContinuations(core.module, { entry: LONG, ranges, hash }, options);
+  assert.ok(clean.continuations?.length >= 2 && !clean.codeChanged, "unchanged code: continuations kept");
+  // The second slice rewrites a word of the function (an addi constant).
+  const at = LONG + 4 * 40;
+  const before = read32(at);
+  let slices = 0;
+  const slice = async () => {
+    if (++slices === 2) core.load(at, Uint8Array.of(before >>> 24, (before >>> 16) & 0xff, (before >>> 8) & 0xff, ((before & 0xff) ^ 1)));
+  };
+  try {
+    const r = await translateWithContinuations(core.module, { entry: LONG, ranges, hash }, { ...options, slice });
+    assert.equal(r.codeChanged, true);
+    assert.equal(r.continuations?.length ?? 0, 1, "only the continuation translated before the rewrite");
+    assert.ok(!r.resume, "no resume: the function grows no more");
+  } finally {
+    core.load(at, Uint8Array.of(before >>> 24, (before >>> 16) & 0xff, (before >>> 8) & 0xff, before & 0xff));
+  }
+});
+
+// 0142: a guest call made by a region is a wasm `call` (to the callee's
+// fragment in the module, else the exit stub, which chains on), its return a
+// wasm return (3) that the caller takes only at its continuation. Calls
+// within one module and across modules (one region per function), a
+// recursion past the 64-call cap, a return elsewhere than the continuation
+// (LR rewritten: passed up to the dispatcher), each against the interpreter,
+// to the end and at budgets that stop it mid-call.
+const callSkip = chainSkip || (core?.has("DolphinWeb_AotKeyParts") && keyVersion() < 31 && "core before 0142 (compiler version < 31)");
+const CALL_TEXT = 0x80016100;
+const BEQLR = 0x4d820020; // beqlr cr0
+const CALLS = assemble(CALL_TEXT, [
+  "main", asm.mflr(0), asm.stwu(1, 1, -16), stw(0, 1, 20), asm.li(3, 100), asm.li(4, 0), (pc, l) => asm.bl(pc, l.recA),
+  asm.li(3, 10), (pc, l) => asm.bl(pc, l.self),
+  asm.li(3, 0), (pc, l) => asm.bl(pc, l.cond), asm.li(3, 1), (pc, l) => asm.bl(pc, l.cond),
+  (pc, l) => asm.bl(pc, l.jumper), asm.li(6, 1),
+  "elsewhere", asm.li(7, 2), lwz(0, 1, 20), asm.addi(1, 1, 16), mtlr(0), asm.blr(),
+  // recA / recB (r3): a mutual recursion 100 deep, every call to the other
+  // function's fragment (past the 64 cap); r4 += 1 per level on the way back.
+  "recA", asm.mflr(0), asm.stwu(1, 1, -16), stw(0, 1, 20), asm.cmplwi(3, 0), (pc, l) => asm.beq(pc, l.recA_done),
+  asm.addi(3, 3, -1), (pc, l) => asm.bl(pc, l.recB), asm.addi(4, 4, 1),
+  "recA_done", lwz(0, 1, 20), asm.addi(1, 1, 16), mtlr(0), asm.blr(),
+  "recB", asm.mflr(0), asm.stwu(1, 1, -16), stw(0, 1, 20), asm.cmplwi(3, 0), (pc, l) => asm.beq(pc, l.recB_done),
+  asm.addi(3, 3, -1), (pc, l) => asm.bl(pc, l.recA), asm.addi(4, 4, 1),
+  "recB_done", lwz(0, 1, 20), asm.addi(1, 1, 16), mtlr(0), asm.blr(),
+  // self (r3): a self-recursion, its calls local jumps in its fragment: its
+  // inner returns stay in the fragment (the head), only the last one is 3.
+  "self", asm.mflr(0), asm.stwu(1, 1, -16), stw(0, 1, 20), asm.cmplwi(3, 0), (pc, l) => asm.beq(pc, l.self_done),
+  asm.addi(3, 3, -1), (pc, l) => asm.bl(pc, l.self), asm.addi(4, 4, 2),
+  "self_done", lwz(0, 1, 20), asm.addi(1, 1, 16), mtlr(0), asm.blr(),
+  // cond (r3): beqlr taken with r3 == 0, not taken (r5 += 1, then blr) else.
+  "cond", asm.cmplwi(3, 0), BEQLR, asm.addi(5, 5, 1), asm.blr(),
+  // jumper: returns to `elsewhere`, not to its call's continuation.
+  "jumper", (pc, l) => asm.lis(5, l.elsewhere >>> 16), (pc, l) => asm.ori(5, 5, l.elsewhere & 0xffff), mtlr(5), asm.blr()
+]);
+// The same without the deep recursion (no call past the cap), its own
+// program so its entry is a function of the plan.
+const SMALL_TEXT = 0x80019100;
+const SMALL = assemble(SMALL_TEXT, [
+  "main", asm.mflr(0), asm.stwu(1, 1, -16), stw(0, 1, 20), asm.li(3, 10), (pc, l) => asm.bl(pc, l.self),
+  asm.li(3, 0), (pc, l) => asm.bl(pc, l.cond), asm.li(3, 1), (pc, l) => asm.bl(pc, l.cond),
+  (pc, l) => asm.bl(pc, l.jumper), asm.li(6, 1),
+  "elsewhere", asm.li(7, 2), lwz(0, 1, 20), asm.addi(1, 1, 16), mtlr(0), asm.blr(),
+  "self", asm.mflr(0), asm.stwu(1, 1, -16), stw(0, 1, 20), asm.cmplwi(3, 0), (pc, l) => asm.beq(pc, l.self_done),
+  asm.addi(3, 3, -1), (pc, l) => asm.bl(pc, l.self), asm.addi(4, 4, 2),
+  "self_done", lwz(0, 1, 20), asm.addi(1, 1, 16), mtlr(0), asm.blr(),
+  "cond", asm.cmplwi(3, 0), BEQLR, asm.addi(5, 5, 1), asm.blr(),
+  "jumper", (pc, l) => asm.lis(5, l.elsewhere >>> 16), (pc, l) => asm.ori(5, 5, l.elsewhere & 0xffff), mtlr(5), asm.blr()
+]);
+function installCalls(maxFunctions, program = CALLS, text = CALL_TEXT) {
+  const dol = buildDol({ textAddr: text, text: program.words, entry: program.labels.main });
+  const { image, entryPoint } = imageFromDol(dol);
+  const plan = planDol({ image, entryPoint, gameId: "TEST01", dolBytes: dol, options: { gapFill: false } });
+  for (const s of image.segments) core.load(s.start, s.bytes);
+  core.invalidate(text, 4 * program.words.length);
+  core.module._DolphinWeb_AotForgetRegionsForTest?.();
+  core.setRegionsEnabled(true);
+  core.setRegionChaining(true);
+  queueAll(plan, maxFunctions, true);
+  serviceAll();
+  return plan;
+}
+test("guest calls as wasm calls, in one module and across modules, past the depth cap and returning elsewhere: like the interpreter (0142)", { skip: callSkip }, () => {
+  for (const maxFunctions of [100, 1]) {
+    installCalls(maxFunctions);
+    const reference = runCall(CALLS.labels.main, { regions: false });
+    const got = runCall(CALLS.labels.main, { regions: true });
+    const what = maxFunctions === 1 ? "across modules" : "in one module";
+    assert.deepEqual(got.state, reference.state, what);
+    assert.equal(got.downcount, reference.downcount, what);
+    // jumper's return to `elsewhere` (not an entry) unwinds to the CPU loop,
+    // which interprets up to the next entry: some ops, never the calls.
+    assert.ok(got.ran >= 1, `${what}: the regions ran`);
+    // Counters (harness): the cap (the recursion 100 deep: past it, calls
+    // are return_calls and the returns below unwind as "elsewhere")...
+    const stats = () => Array.from(new Uint32Array(core.module.HEAPU8.buffer, core.module._DolphinWeb_RegionCallStats(-1), 6));
+    core.module._DolphinWeb_RegionCallStats(1);
+    runCall(CALLS.labels.main, { regions: true });
+    const [calls, , , , capped, depthMax] = stats();
+    assert.ok(calls >= 64, `${what}: ${calls} calls made as wasm calls`);
+    assert.equal(depthMax, 64, `${what}: the cap is the deepest`);
+    assert.ok(capped >= 30, `${what}: ${capped} calls past the cap (recursion 100)`);
+    // ...and without it: self's inner returns stay in its fragment, cond's
+    // beqlr returns taken and not, only jumper's return is elsewhere.
+    installCalls(maxFunctions, SMALL, SMALL_TEXT);
+    core.module._DolphinWeb_RegionCallStats(1);
+    const small = runCall(SMALL.labels.main, { regions: true });
+    const smallReference = runCall(SMALL.labels.main, { regions: false });
+    const [smallCalls, , elsewhere, , smallCapped] = stats();
+    core.module._DolphinWeb_RegionCallStats(0);
+    assert.deepEqual(small.state, smallReference.state, `${what}: main_small`);
+    assert.equal(smallCapped, 0);
+    assert.ok(smallCalls >= 4, `${what}: ${smallCalls} calls`);
+    assert.equal(elsewhere, 1, `${what}: only jumper's return is elsewhere`);
+    installCalls(maxFunctions); // back to CALLS for the budgets
+    for (const budget of [1, 7, 40, 151, 400, 777, 1501]) {
+      core.reset(seedGprs(CALLS.labels.main), CALLS.labels.main, STOP, budget);
+      while (core.downcount() > 0 && core.pc() !== STOP) if (!core.dispatchRegion()) assert.equal(core.interpretOne(), 0);
+      assert.equal(core.module._DolphinWeb_RegionCallDepthForTest(-1), 0, `${what}, budget ${budget}: no call left counted`);
+      const stopped = { state: core.state(), downcount: core.downcount() };
+      core.reset(seedGprs(CALLS.labels.main), CALLS.labels.main, STOP, budget);
+      for (let n = 0; n < 1000000 && core.downcount() > stopped.downcount; n++) assert.equal(core.interpretOne(), 0);
+      assert.equal(core.downcount(), stopped.downcount, `${what}, budget ${budget}`);
+      assert.deepEqual(core.state(), stopped.state, `${what}, budget ${budget}`);
+    }
+  }
+});
+
+// 0142: the depth starts at 0 at every region run, whatever was left (here
+// set to the cap by hand): no call of the next run is made past the cap.
+test("a region run starts at call depth 0 (0142)", { skip: callSkip }, () => {
+  installCalls(100);
+  const stats = () => Array.from(new Uint32Array(core.module.HEAPU8.buffer, core.module._DolphinWeb_RegionCallStats(-1), 6));
+  core.module._DolphinWeb_RegionCallStats(1);
+  core.reset(seedGprs(PROGRAM.labels.main), PROGRAM.labels.main, STOP, 400000);
+  installedOnePerFunction();
+  core.module._DolphinWeb_RegionCallDepthForTest(64);
+  const got = runCall(PROGRAM.labels.main, { regions: true });
+  const [calls, , , , capped] = stats();
+  core.module._DolphinWeb_RegionCallStats(0);
+  assert.equal(got.interpreted, 0);
+  assert.ok(calls >= 2, `${calls} calls`);
+  assert.equal(capped, 0, "none past the cap: the run started at 0");
+});
+
+// 0142: a callee that rewrites its caller's continuation (stw, icbi,
+// isync) then returns. The translator does not take icbi: the callee's
+// region leaves before it (0), every call passes that up, and the caller
+// never goes on in code that is gone. As the interpreter.
+const PATCH_TEXT = 0x80017100;
+const icbi = (a, b) => (31 << 26) | (a << 16) | (b << 11) | (982 << 1);
+const ISYNC = 0x4c00012c;
+const LI_R9_2 = (14 << 26) | (9 << 21) | 2;
+const PATCHER = assemble(PATCH_TEXT, [
+  "main", asm.mflr(0), asm.stwu(1, 1, -16), stw(0, 1, 20), (pc, l) => asm.bl(pc, l.patcher),
+  "cont", asm.li(9, 1), lwz(0, 1, 20), asm.addi(1, 1, 16), mtlr(0), asm.blr(),
+  "patcher", asm.lis(5, LI_R9_2 >>> 16), asm.ori(5, 5, LI_R9_2 & 0xffff),
+  (pc, l) => asm.lis(6, l.cont >>> 16), (pc, l) => asm.ori(6, 6, l.cont & 0xffff),
+  stw(5, 6, 0), icbi(0, 6), ISYNC, asm.blr()
+]);
+test("a callee that rewrites its caller's continuation: the caller runs the new code, like the interpreter (0142)", { skip: callSkip }, () => {
+  const load = () => {
+    const dol = buildDol({ textAddr: PATCH_TEXT, text: PATCHER.words, entry: PATCHER.labels.main });
+    const { image, entryPoint } = imageFromDol(dol);
+    for (const seg of image.segments) core.load(seg.start, seg.bytes);
+    core.invalidate(PATCH_TEXT, 4 * PATCHER.words.length);
+    return planDol({ image, entryPoint, gameId: "TEST01", dolBytes: dol, options: { gapFill: false } });
+  };
+  load();
+  const reference = runCall(PATCHER.labels.main, { regions: false });
+  assert.equal(reference.state[9], 2, "the interpreter runs the new li r9, 2");
+  for (const maxFunctions of [100, 1]) {
+    const plan = load();
+    core.module._DolphinWeb_AotForgetRegionsForTest?.();
+    core.setRegionsEnabled(true);
+    core.setRegionChaining(true);
+    queueAll(plan, maxFunctions, true);
+    serviceAll();
+    const got = runCall(PATCHER.labels.main, { regions: true });
+    // The translator does not take icbi: the region leaves before it (its
+    // prefix ends, 0), every call passes that up, and the icbi, isync, blr
+    // and the rewritten continuation run outside: 8 ops at most, the stw
+    // and the calls in the region.
+    assert.ok(got.interpreted <= 8, `maxFunctions ${maxFunctions}: ${got.interpreted} ops interpreted`);
+    assert.deepEqual(got.state, reference.state, `maxFunctions ${maxFunctions}`);
+    assert.equal(got.downcount, reference.downcount, `maxFunctions ${maxFunctions}`);
+  }
+});
+
+// 0142: a callee that traps (tw: a program exception taken by its helper,
+// the fragment halts with 2) under two levels of wasm calls: 2 is passed up
+// through every call, and the state at the handler is the interpreter's.
+const TRAP_TEXT = 0x80018100;
+const TW = 0x7fe00008; // tw 31, r0, r0: always traps
+const TRAPPER = assemble(TRAP_TEXT, [
+  "main", asm.mflr(0), asm.stwu(1, 1, -16), stw(0, 1, 20), (pc, l) => asm.bl(pc, l.middle), lwz(0, 1, 20), asm.addi(1, 1, 16), mtlr(0), asm.blr(),
+  "middle", asm.mflr(0), asm.stwu(1, 1, -16), stw(0, 1, 20), (pc, l) => asm.bl(pc, l.trap), lwz(0, 1, 20), asm.addi(1, 1, 16), mtlr(0), asm.blr(),
+  "trap", asm.li(3, 5), TW, asm.blr()
+]);
+test("a trap in a callee two wasm calls deep: the handler sees the interpreter's state (0142)", { skip: callSkip }, () => {
+  const VECTOR = 0x700;
+  const load = () => {
+    const dol = buildDol({ textAddr: TRAP_TEXT, text: TRAPPER.words, entry: TRAPPER.labels.main });
+    const { image, entryPoint } = imageFromDol(dol);
+    for (const seg of image.segments) core.load(seg.start, seg.bytes);
+    core.invalidate(TRAP_TEXT, 4 * TRAPPER.words.length);
+    return planDol({ image, entryPoint, gameId: "TEST01", dolBytes: dol, options: { gapFill: false } });
+  };
+  const toVector = (regions) => {
+    core.reset(seedGprs(TRAPPER.labels.main), TRAPPER.labels.main, STOP, 400000);
+    for (let n = 0; n < 100000 && (core.pc() >>> 0) !== VECTOR; n++) if (!(regions && core.dispatchRegion())) core.interpretOne();
+    assert.equal(core.pc() >>> 0, VECTOR, "the program exception was taken");
+    return { state: core.state(), downcount: core.downcount() };
+  };
+  load();
+  core.setRegionsEnabled(false);
+  const reference = toVector(false);
+  for (const maxFunctions of [100, 1]) {
+    const plan = load();
+    core.module._DolphinWeb_AotForgetRegionsForTest?.();
+    core.setRegionsEnabled(true);
+    core.setRegionChaining(true);
+    queueAll(plan, maxFunctions, true);
+    serviceAll();
+    const got = toVector(true);
+    assert.deepEqual(got.state, reference.state, `maxFunctions ${maxFunctions}`);
+    assert.equal(core.module._DolphinWeb_RegionCallDepthForTest(-1), 0, "no call left counted");
+  }
+});
+
+// Review of #191: a real jump table. The plan finds its cases (extra
+// entries, reached only through the bctr); the region holds them and the
+// function, entered at its start, runs its table dispatch in the region
+// like the interpreter.
+test("seeds: the cases of a bctr jump table are held and reached through the table, like the interpreter", { skip: contSkip }, async () => {
+  const TABLE_TEXT = 0x8001c100, TABLE_DATA = 0x8001d100;
+  const ha = (x) => ((x + 0x8000) >>> 16) & 0xffff;
+  const t = assemble(TABLE_TEXT, [
+    "entry", asm.li(5, 2), asm.cmplwi(5, 4), (pc, l) => asm.bge(pc, l.dflt),
+    asm.lis(6, ha(TABLE_DATA)), asm.addi(6, 6, TABLE_DATA & 0xffff), asm.slwi2(5, 5), asm.lwzx(7, 6, 5), asm.mtctr(7), asm.bctr(),
+    "c0", asm.addi(4, 4, 1), asm.blr(),
+    "c1", asm.addi(4, 4, 2), asm.blr(),
+    "c2", asm.addi(4, 4, 3), asm.addi(3, 3, 7), asm.blr(),
+    "c3", asm.addi(4, 4, 4), asm.blr(),
+    "dflt", asm.blr()
+  ]);
+  const l = t.labels;
+  const dol = buildDol({ textAddr: TABLE_TEXT, text: t.words, dataAddr: TABLE_DATA, data: [l.c0, l.c1, l.c2, l.c3], entry: l.entry });
+  const { image, entryPoint } = imageFromDol(dol);
+  const plan = planDol({ image, entryPoint, gameId: "TEST01", dolBytes: dol, options: { gapFill: false } });
+  const f = plan.modules[0].functions.find((x) => x.entry === l.entry);
+  for (const c of [l.c0, l.c1, l.c2, l.c3]) assert.ok(f.extraEntries.includes(c), `${c.toString(16)} is an extra entry of the plan`);
+  for (const s of image.segments) core.load(s.start, s.bytes);
+  core.invalidate(TABLE_TEXT, 4 * t.words.length);
+  core.module._DolphinWeb_AotForgetRegionsForTest?.();
+  const r = await translateWithContinuations(core.module, { entry: f.entry, ranges: f.ranges, hash: f.hash, extraEntries: f.extraEntries },
+    { mask: PRODUCTION_DISABLE_MASK, maxBlocks: 64, names: coreAssembleOptions(core.module)?.helperNames });
+  assert.ok(r.fragment, r.reason);
+  const fragments = [r.fragment, ...(r.continuations ?? [])];
+  const held = new Set(fragments.flatMap((x) => x.entries));
+  for (const c of [l.c0, l.c1, l.c2, l.c3]) assert.ok(held.has(c), `${c.toString(16)} held`);
+  const { bytes: mod, entries } = assembleRegion(claimEntries(fragments), { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages });
+  core.setRegionsEnabled(true);
+  core.queueRegion(mod, entries.map(([pc]) => pc), [{ ranges: f.ranges, hash: null }]);
+  core.serviceRegions();
+  const reference = runCall(l.entry, { regions: false });
+  const got = runCall(l.entry, { regions: true });
+  assert.deepEqual(got.state, reference.state);
+  assert.equal(got.interpreted, 0, "the bctr into c2 stays in the region");
+});
+
+// Review of #191: what held code reaches goes before the seeds, whatever
+// their addresses; a seed's fragment is charged whole (the old single
+// fragment's free blocks are for the function's own flow).
+test("seeds: frontier leaders before seeds, and a seed's fragment charged whole", { skip: contSkip }, async () => {
+  const t = assemble(LONG, [
+    "entry", asm.li(3, 0), (pc, l) => asm.b(pc, l.hi),
+    "lo", asm.addi(4, 4, 1), asm.blr(), // a seed, below the leader
+    "hi", asm.addi(3, 3, 1), asm.blr()
+  ]);
+  const ranges = loadWords(LONG, t.words);
+  const options = { mask: PRODUCTION_DISABLE_MASK, maxBlocks: 1, names: coreAssembleOptions(core.module)?.helperNames };
+  const f = { entry: LONG, ranges, hash: null, extraEntries: [t.labels.lo] };
+  const one = await translateWithContinuations(core.module, f, { ...options, maxContinuations: 1 });
+  assert.deepEqual(one.continuations.map((x) => x.entry), [t.labels.hi], "the leader first, though the seed is lower");
+  assert.ok(one.budgetRefused >= 1, "the seed waits");
+  const both = await translateWithContinuations(core.module, f, { ...options, maxContinuations: 2 });
+  const seedFragment = both.continuations.find((x) => x.entry === t.labels.lo);
+  assert.ok(seedFragment);
+  assert.equal(both.budgetCharged, seedFragment.code.length, "the leader's fragment free, the seed's charged whole");
+});
+
+// 0145: HID0.ICFI flash-invalidates the instruction cache (Dolphin clears
+// its whole block cache, JitInterface::ClearSafe): every region is checked
+// against its plan before it runs again. Here a callee rewrites a function
+// main already ran (stw, no icbi or dcbf), then sets ICFI, and main calls the
+// function again: it must run the new code, like the interpreter, and not
+// main's or its own stale region. The mtspr is not a region op: the region
+// leaves before it.
+const unverifySkip = callSkip || (!core?.has("DolphinWeb_UnverifyRegions") && "core without region re-checks on an icache flush (0145)");
+const ICFI_TEXT = 0x8001c100;
+const HID0_SPR = ((1008 & 0x1f) << 5) | (1008 >>> 5);
+const mfspr = (d, spr) => (31 << 26) | (d << 21) | (spr << 11) | (339 << 1);
+const mtspr = (s, spr) => (31 << 26) | (s << 21) | (spr << 11) | (467 << 1);
+const mr = (a, s) => (31 << 26) | (s << 21) | (a << 16) | (s << 11) | (444 << 1);
+const FLASHER = assemble(ICFI_TEXT, [
+  "main", asm.mflr(0), asm.stwu(1, 1, -16), stw(0, 1, 20), (pc, l) => asm.bl(pc, l.target), mr(11, 9),
+  (pc, l) => asm.bl(pc, l.flasher), (pc, l) => asm.bl(pc, l.target),
+  lwz(0, 1, 20), asm.addi(1, 1, 16), mtlr(0), asm.blr(),
+  "target", asm.li(9, 1), asm.blr(),
+  "flasher", asm.lis(5, LI_R9_2 >>> 16), asm.ori(5, 5, LI_R9_2 & 0xffff),
+  (pc, l) => asm.lis(6, l.target >>> 16), (pc, l) => asm.ori(6, 6, l.target & 0xffff), stw(5, 6, 0),
+  mfspr(7, HID0_SPR), asm.ori(7, 7, 0x800), mtspr(7, HID0_SPR), asm.blr()
+]);
+test("a function rewritten then an icache flash invalidate (HID0.ICFI): its next call runs the new code, like the interpreter (0145)", { skip: unverifySkip }, () => {
+  const load = () => {
+    const dol = buildDol({ textAddr: ICFI_TEXT, text: FLASHER.words, entry: FLASHER.labels.main });
+    const { image, entryPoint } = imageFromDol(dol);
+    for (const seg of image.segments) core.load(seg.start, seg.bytes);
+    core.invalidate(ICFI_TEXT, 4 * FLASHER.words.length);
+    return planDol({ image, entryPoint, gameId: "TEST01", dolBytes: dol, options: { gapFill: false } });
+  };
+  load();
+  const reference = runCall(FLASHER.labels.main, { regions: false });
+  assert.equal(reference.state[11], 1, "the interpreter ran the old li r9, 1 first");
+  assert.equal(reference.state[9], 2, "then the new li r9, 2");
+  for (const maxFunctions of [100, 1]) {
+    const plan = load();
+    core.module._DolphinWeb_AotForgetRegionsForTest?.();
+    core.setRegionsEnabled(true);
+    core.setRegionChaining(true);
+    queueAll(plan, maxFunctions, true);
+    serviceAll();
+    const got = runCall(FLASHER.labels.main, { regions: true });
+    assert.ok(got.ran >= 1, `maxFunctions ${maxFunctions}: the regions ran`);
+    assert.deepEqual(got.state, reference.state, `maxFunctions ${maxFunctions}`);
+    assert.equal(got.downcount, reference.downcount, `maxFunctions ${maxFunctions}`);
+  }
+});
+
+// #215: the wasm function body cap, under JavaScriptCore only (it never
+// tiers a function past 100,000 bytes up to OMG). Without a cap the
+// formation is the one before (V8, SpiderMonkey); with one, every fragment,
+// the first included, stays under it, the same blocks held, and the module
+// runs like the interpreter. The cap is in the region key only when set.
+test("region key: the function cap is in it only when there is one", async () => {
+  const f = [{ entry: 0x80003100, sha256: "a".repeat(64) }];
+  const parts = { compilerVersion: 5, codegenMask: 0 };
+  assert.equal(await regionModuleKey(f, { ...parts, functionCap: 0 }), await regionModuleKey(f, parts), "no cap: the key of before");
+  assert.notEqual(await regionModuleKey(f, { ...parts, functionCap: 95000 }), await regionModuleKey(f, parts));
+  assert.notEqual(await regionModuleKey(f, { ...parts, functionCap: 95000 }), await regionModuleKey(f, { ...parts, functionCap: 50000 }));
+  await assert.rejects(regionModuleKey(f, { ...parts, functionCap: -1 }), /functionCap/);
+});
+
+test("function cap: none leaves the formation as before; one cuts every fragment, the first included, under it", { skip: contSkip }, async () => {
+  const program = longFunction(100);
+  const ranges = loadWords(LONG, program.words);
+  const options = { mask: PRODUCTION_DISABLE_MASK, maxBlocks: 64, names: coreAssembleOptions(core.module)?.helperNames };
+  const bytesOf = (r) => [r.fragment, ...(r.continuations ?? [])].map((x) => Array.from(x.code).join(","));
+  const plain = await translateWithContinuations(core.module, { entry: LONG, ranges, hash: null }, options);
+  const zero = await translateWithContinuations(core.module, { entry: LONG, ranges, hash: null }, { ...options, functionCap: 0 });
+  assert.deepEqual(bytesOf(zero), bytesOf(plain), "no cap: the same fragments, byte for byte");
+  assert.equal(plain.fragment.entries.length, 64, "the first fragment capped by blocks only");
+  const cap = Math.floor(plain.fragment.code.length / 3);
+  let slices = 0;
+  const r = await translateWithContinuations(core.module, { entry: LONG, ranges, hash: null }, { ...options, functionCap: cap, slice: async () => { slices++; } });
+  const fragments = [r.fragment, ...(r.continuations ?? [])];
+  assert.ok(r.fragment.entries.length < 64, "the first fragment cut");
+  assert.ok(fragments.every((x) => x.code.length <= cap), "every fragment under the cap");
+  assert.ok(slices >= 2, "the retries yield between them");
+  const held = (fs) => new Set(fs.flatMap((x) => x.entries));
+  assert.equal(held(fragments).size, held([plain.fragment, ...(plain.continuations ?? [])]).size, "the same blocks held");
+  core.module._DolphinWeb_AotForgetRegionsForTest?.();
+  const { bytes: mod, entries } = assembleRegion(claimEntries(fragments), { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages });
+  core.setRegionsEnabled(true);
+  core.queueRegion(mod, entries.map(([pc]) => pc), [{ ranges, hash: null }]);
+  core.serviceRegions();
+  const reference = runCall(LONG, { regions: false });
+  const got = runCall(LONG, { regions: true });
+  assert.deepEqual(got.state, reference.state);
+  assert.equal(got.interpreted, 0);
+  // A single block over the cap: kept as the first fragment (the entry).
+  const tiny = await translateWithContinuations(core.module, { entry: LONG, ranges, hash: null }, { ...options, functionCap: 16 });
+  assert.deepEqual([tiny.fragment?.entries.length, tiny.fragment?.code.length > 16], [1, true]);
+});
+
+// 0187 (?regionchaincache=1, enable bit 18): region chaining looks the next
+// region up in a cache of {pc, handle, epoch}. It must never chain into a
+// region that is no longer live, mapped or verified: the epoch moves at every
+// install and drop (s_region_at), at a cache clear (every region unverified)
+// and when an invalidation keeps a region unverified. Against the interpreter,
+// with the cache filled first, then after each of those changes.
+const CHAIN_CACHE = 1 << 18;
+// main calls G n times (bl); G calls H through bctrl, H returns into G: chains
+// across one region per function at every call and return.
+const BNE = (from, to) => asm.bc(4, 2, from, to); // bne cr0
+const ELSE_TEXT = 0x8001a100;
+const elseProgram = (n) => assemble(ELSE_TEXT, [
+  "main", asm.mflr(0), asm.stwu(1, 1, -16), stw(0, 1, 20), asm.lis(30, n >>> 16), asm.ori(30, 30, n & 0xffff),
+  "loop", (pc, l) => asm.bl(pc, l.G), asm.addi(30, 30, -1), asm.cmplwi(30, 0), (pc, l) => BNE(pc, l.loop),
+  lwz(0, 1, 20), asm.addi(1, 1, 16), mtlr(0), asm.blr(),
+  "G", asm.mflr(0), asm.stwu(1, 1, -16), stw(0, 1, 20), (pc, l) => asm.lis(5, l.H >>> 16), (pc, l) => asm.ori(5, 5, l.H & 0xffff),
+  asm.mtctr(5), asm.bctrl(),
+  "X", asm.addi(4, 4, 1), lwz(0, 1, 20), asm.addi(1, 1, 16), mtlr(0), asm.blr(),
+  "H", asm.addi(6, 6, 1), asm.blr()
+]);
+const chainCacheSkip = callSkip || (() => {
+  const lock = JSON.parse(readFileSync(new URL("../provenance/dolphin-source.lock.json", import.meta.url), "utf8"));
+  const built = JSON.parse(readFileSync(new URL("../cores/dolphin/dolphin-core-upstream.build.json", import.meta.url), "utf8"));
+  return built.source?.patchSeriesSha256 === lock.patchSeriesSha256 && lock.patches.some((p) => p.path.includes("/0187-"))
+    ? false : "core built from a patch series without 0187";
+})();
+// The CPU thread's mask (the chaining reads it); the test core starts at 0.
+function withChainCache(fn) {
+  const m = core.module;
+  const saved = typeof m._GetCachedInterpreterDisableMask === "function" ? m._GetCachedInterpreterDisableMask() >>> 0 : 0;
+  m._SetCachedInterpreterDisableMask(PRODUCTION_DISABLE_MASK | CHAIN_CACHE);
+  try { return fn(); } finally { m._SetCachedInterpreterDisableMask(saved); }
+}
+
+test("0187: chaining through the cache runs like the interpreter, across modules, and hits it", { skip: chainCacheSkip }, () => {
+  withChainCache(() => {
+    installCalls(1);
+    const reference = runCall(CALLS.labels.main, { regions: false });
+    for (let round = 0; round < 3; round++) { // the first fills the cache, the others hit it
+      const got = runCall(CALLS.labels.main, { regions: true });
+      assert.deepEqual(got.state, reference.state, `round ${round}`);
+      assert.equal(got.downcount, reference.downcount, `round ${round}`);
+    }
+  });
+});
+
+test("0187: a region dropped, invalidated or unverified after the cache was filled is never chained into from it", { skip: chainCacheSkip }, () => {
+  withChainCache(() => {
+    const program = elseProgram(20);
+    const reference = () => runCall(program.labels.main, { regions: false });
+    // (1) Code rewritten and invalidated (the region over it dropped or kept
+    // unverified): the cache filled before must not chain into it.
+    installCalls(1, program, ELSE_TEXT);
+    runCall(program.labels.main, { regions: true }); // fills the cache
+    const at = program.labels.H;
+    const word = asm.addi(6, 6, 5); // H: r6 += 5 instead of 1
+    core.load(at, Uint8Array.of(word >>> 24, (word >>> 16) & 0xff, (word >>> 8) & 0xff, word & 0xff));
+    core.invalidate(at, 4);
+    const rewritten = reference();
+    assert.deepEqual(runCall(program.labels.main, { regions: true }).state, rewritten.state, "after an invalidation");
+    // (2) Every region unverified (a cache clear): the cache must not chain
+    // before each one is verified again.
+    installCalls(1, program, ELSE_TEXT);
+    runCall(program.labels.main, { regions: true });
+    core.load(at, Uint8Array.of(word >>> 24, (word >>> 16) & 0xff, (word >>> 8) & 0xff, word & 0xff));
+    core.module._DolphinWeb_AotClearCacheForTest();
+    assert.deepEqual(runCall(program.labels.main, { regions: true }).state, reference().state, "after a cache clear");
+    // (3) Every region forgotten: nothing left to chain into.
+    installCalls(1, program, ELSE_TEXT);
+    runCall(program.labels.main, { regions: true });
+    core.module._DolphinWeb_AotForgetRegionsForTest();
+    const forgotten = runCall(program.labels.main, { regions: true });
+    assert.equal(forgotten.ran, 0, "no region runs once all are forgotten");
+    assert.deepEqual(forgotten.state, reference().state);
+  });
+});
+
+// 0189 (?regionfragments=1, enable bit 16): region chaining enters the
+// fragment holding the next pc (a slot of the core's table per fragment, from
+// the module's "region-entry-fragments" section), not the module's
+// dispatcher. With 0187's cache (the pair's both sides), across modules, like
+// the interpreter; the slots are released when the regions go; modules
+// assembled without the option carry no such section (mode off: as before).
+const FRAGMENTS = 1 << 16;
+const fragmentsSkip = chainCacheSkip || (() => {
+  const lock = JSON.parse(readFileSync(new URL("../provenance/dolphin-source.lock.json", import.meta.url), "utf8"));
+  return lock.patches.some((p) => p.path.includes("/0189-")) ? false : "patch series without 0189";
+})();
+function withMask(mask, fn) {
+  const m = core.module;
+  const saved = typeof m._GetCachedInterpreterDisableMask === "function" ? m._GetCachedInterpreterDisableMask() >>> 0 : 0;
+  m._SetCachedInterpreterDisableMask(mask);
+  try { return fn(); } finally { m._SetCachedInterpreterDisableMask(saved); }
+}
+function installFragments(program, text) {
+  const dol = buildDol({ textAddr: text, text: program.words, entry: program.labels.main });
+  const { image, entryPoint } = imageFromDol(dol);
+  const plan = planDol({ image, entryPoint, gameId: "TEST01", dolBytes: dol, options: { gapFill: false } });
+  for (const s of image.segments) core.load(s.start, s.bytes);
+  core.invalidate(text, 4 * program.words.length);
+  core.module._DolphinWeb_AotForgetRegionsForTest?.();
+  core.setRegionsEnabled(true);
+  core.setRegionChaining(true);
+  queueAll(plan, 1, true, PRODUCTION_DISABLE_MASK, true);
+  serviceAll();
+}
+
+test("0189: chaining into fragments runs like the interpreter across modules, and gives the slots back", { skip: fragmentsSkip }, () => {
+  withMask(PRODUCTION_DISABLE_MASK | CHAIN_CACHE | FRAGMENTS, () => {
+    for (const [program, text] of [[CALLS, CALL_TEXT], [elseProgram(30), ELSE_TEXT]]) {
+      installFragments(program, text);
+      const reference = runCall(program.labels.main, { regions: false });
+      for (let round = 0; round < 2; round++) {
+        const got = runCall(program.labels.main, { regions: true });
+        assert.deepEqual(got.state, reference.state, `round ${round}`);
+        assert.equal(got.downcount, reference.downcount, `round ${round}`);
+      }
+    }
+    const free = () => globalThis._dolphinFreeTableSlots?.length ?? 0;
+    const before = free();
+    core.module._DolphinWeb_AotForgetRegionsForTest();
+    assert.ok(free() > before, `slots released when the regions go (${before} -> ${free()})`);
+    const released = free();
+    installFragments(CALLS, CALL_TEXT); // reuses them
+    assert.ok(free() < released, "released slots reused before the table grows");
+  });
+});
+
+test("0189 without 0187's cache: chaining into fragments still runs like the interpreter", { skip: fragmentsSkip }, () => {
+  withMask(PRODUCTION_DISABLE_MASK | FRAGMENTS, () => {
+    for (const [program, text] of [[CALLS, CALL_TEXT], [elseProgram(30), ELSE_TEXT]]) {
+      installFragments(program, text);
+      const reference = runCall(program.labels.main, { regions: false });
+      const got = runCall(program.labels.main, { regions: true });
+      assert.ok(got.ran > 0, "regions ran");
+      assert.deepEqual(got.state, reference.state);
+      assert.equal(got.downcount, reference.downcount);
+    }
+  });
+});
+
+test("0189: slots released by dropped regions and reused by others are never chained into from the cache", { skip: fragmentsSkip }, () => {
+  withMask(PRODUCTION_DISABLE_MASK | CHAIN_CACHE | FRAGMENTS, () => {
+    const other = elseProgram(30);
+    installFragments(CALLS, CALL_TEXT);
+    const callsReference = runCall(CALLS.labels.main, { regions: false });
+    runCall(CALLS.labels.main, { regions: true }); // fills the cache with CALLS's slots
+    const free = () => globalThis._dolphinFreeTableSlots?.length ?? 0;
+    core.module._DolphinWeb_AotForgetRegionsForTest(); // CALLS's slots released
+    const released = free();
+    installFragments(other, ELSE_TEXT); // the other program's fragments take them
+    assert.ok(free() < released, `released slots reused (${released} -> ${free()})`);
+    const calls = runCall(CALLS.labels.main, { regions: true });
+    assert.equal(calls.ran, 0, "no region left for CALLS");
+    assert.deepEqual(calls.state, callsReference.state, "CALLS never enters the other program's fragments");
+    const reference = runCall(other.labels.main, { regions: false });
+    assert.deepEqual(runCall(other.labels.main, { regions: true }).state, reference.state);
+  });
+});
+
+test("0187 and 0189 are on by default; ?regionchaincache=0 and ?regionfragments=0 turn each off", () => {
+  const host = readFileSync(new URL("../src/core-host.js", import.meta.url), "utf8");
+  assert.match(host, /regionfragments: 1 << 16,/);
+  assert.match(host, /regionchaincache: 1 << 18,/);
+  assert.match(host, /if \(params\.get\("regionfragments"\) !== "0"\) \{\n\s*mask \|= CACHED_INTERPRETER_DISABLE_BITS\.regionfragments;/);
+  assert.match(host, /if \(params\.get\("regionchaincache"\) !== "0"\) \{\n\s*mask \|= CACHED_INTERPRETER_DISABLE_BITS\.regionchaincache;/);
+  assert.equal(PRODUCTION_DISABLE_MASK & (FRAGMENTS | CHAIN_CACHE), FRAGMENTS | CHAIN_CACHE, "the oracle's production mask has both");
+});
+
+test("0189 off: modules carry no entry -> fragment section", () => {
+  const f = { entry: 0x80003000, entries: [0x80003000], code: Uint8Array.of(0x00, 0x41, 0x00, 0x0b), relocs: [] };
+  const off = assembleRegion([f], { helpers: HELPER_SIGNATURES, pcOffset: 0, memoryPages: 1 });
+  const on = assembleRegion([f], { helpers: HELPER_SIGNATURES, pcOffset: 0, memoryPages: 1, fragmentEntries: true });
+  const has = (bytes) => Buffer.from(bytes).includes(Buffer.from("region-entry-fragments"));
+  assert.equal(has(off.bytes), false);
+  assert.equal(has(on.bytes), true);
+});

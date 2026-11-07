@@ -5,6 +5,35 @@
 import { execFileSync } from "node:child_process";
 import os from "node:os";
 
+// The power source (macOS `pmset -g batt`): a laptop on battery runs slower
+// and differently from on mains, so a measure says which it ran on.
+// { source: "ac" | "battery", percent } or null (another OS, no battery).
+export function parsePmsetBatt(text) {
+  const m = /Now drawing from '([^']+)'/.exec(text ?? "");
+  if (!m) return null;
+  const pct = /(\d+)%/.exec(text);
+  return { source: /battery/i.test(m[1]) ? "battery" : /ac/i.test(m[1]) ? "ac" : m[1], percent: pct ? Number(pct[1]) : null };
+}
+// On mains but not keeping up (2026-10-29: "AC attached", 72 -> 54 % over a
+// night of measures): the battery feeds the machine, which may then run as
+// on battery. A measure needs the charge not falling, and above this.
+export const MIN_BATTERY_PERCENT = 30;
+// A stretch from `start` to `end` (powerSnapshot readings) whose charge fell,
+// or ended under MIN_BATTERY_PERCENT: true. Unknown percentages: false.
+export function powerDrained(start, end, minPercent = MIN_BATTERY_PERCENT) {
+  const a = start?.percent, b = end?.percent ?? a;
+  if (!Number.isFinite(b)) return false;
+  return (Number.isFinite(a) && b < a) || b < minPercent;
+}
+export function powerSnapshot() {
+  if (os.platform() !== "darwin") return null;
+  try {
+    return parsePmsetBatt(execFileSync("pmset", ["-g", "batt"], { encoding: "utf8" }));
+  } catch {
+    return null;
+  }
+}
+
 export function machineSnapshot() {
   let uptime = "";
   try {
@@ -18,6 +47,7 @@ export function machineSnapshot() {
     cpuModel: os.cpus()[0]?.model ?? "",
     totalMemGiB: Math.round(os.totalmem() / 2 ** 30),
     platform: `${os.platform()} ${os.release()}`,
+    power: powerSnapshot(),
     uptime
   };
 }
@@ -46,6 +76,41 @@ export function sampleChromeCpu(profileDir) {
   } catch (error) {
     return { t: Date.now(), error: String(error.message || error) };
   }
+}
+
+// Windows has no `ps`: the same figures from two CDP SystemInfo.getProcessInfo
+// snapshots (cumulative CPU seconds per Chrome process, browser target only),
+// over the wall time between them. 100 = one core, as on macOS. Pure.
+export function cpuFromProcessInfo(before, after, wallMs) {
+  if (!before || !after || !(wallMs > 0)) return null;
+  const prev = new Map(before.map((p) => [p.id, p.cpuTime]));
+  let total = 0, rendererMax = 0, gpu = 0;
+  for (const p of after) {
+    const cpu = (Math.max(0, p.cpuTime - (prev.get(p.id) ?? 0)) * 1000 * 100) / wallMs;
+    total += cpu;
+    if (p.type === "renderer" && cpu > rendererMax) rendererMax = cpu;
+    if (p.type === "GPU") gpu += cpu;
+  }
+  return { total: Math.round(total), rendererMax: Math.round(rendererMax), gpu: Math.round(gpu), processes: after.length };
+}
+
+// A sampler over cpuFromProcessInfo for one Playwright context; each call
+// returns the CPU since the previous one (the first only sets the origin).
+export async function cdpCpuSampler(context) {
+  const cdp = await context.browser()?.newBrowserCDPSession();
+  if (!cdp) return null;
+  let last = null;
+  return async () => {
+    const t = Date.now();
+    try {
+      const { processInfo } = await cdp.send("SystemInfo.getProcessInfo");
+      const r = last ? cpuFromProcessInfo(last.info, processInfo, t - last.t) : null;
+      last = { t, info: processInfo };
+      return { t, load1: null, ...(r ?? { origin: true }) };
+    } catch (error) {
+      return { t, error: String(error.message || error) };
+    }
+  };
 }
 
 // Resident memory of one profile's Chrome processes, per process type

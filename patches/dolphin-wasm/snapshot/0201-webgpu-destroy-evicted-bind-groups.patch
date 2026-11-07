@@ -1,0 +1,81 @@
+diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.h b/Source/Core/VideoBackends/WebGPU/WebGPUGfx.h
+--- a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.h
++++ b/Source/Core/VideoBackends/WebGPU/WebGPUGfx.h
+@@ -174,6 +174,8 @@
+   bool BeginPassIfNeeded();
+   u32 PendingClearMask() const;
+   bool EndPassIfOpen();
++  // 0201: destroys the bind groups evicted from m_bg1_cache (outside a pass).
++  void DestroyRetiredBindGroups();
+   void AbortRecordedPass();
+   void DiscardOrAbortPendingGeometryRange();
+   void ResetRecordedPassState();
+@@ -344,6 +346,11 @@
+     std::array<u32, 8> sampler_ids{};
+   };
+   Bg1Slot m_bg1_cache[kBg1CacheSize] = {};
++  // 0201: bind groups evicted from m_bg1_cache, destroyed at the next pass
++  // end. Without it the consumer kept every evicted group alive (its id map
++  // only shrinks on a destroy): ~2,000 a second in a race, 135,000 after a
++  // minute, gigabytes of browser memory (WebKit malloc under Safari).
++  std::vector<u32> m_retired_bind_groups;
+ };
+ 
+ class WebGPUEFBInterface final : public EFBInterfaceBase
+diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp b/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp
+--- a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp
++++ b/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp
+@@ -1587,6 +1587,9 @@
+   if (m_ubo_cache_active)
+     InvalidateUboSlices();
+   ResetRecordedPassState();
++  // An aborted pass is a pass end too (EndPassIfOpen's failed geometry flush
++  // comes here): the retired groups go now, not at the next committed pass.
++  DestroyRetiredBindGroups();
+ }
+ 
+ void WebGPUGfx::DiscardOrAbortPendingGeometryRange()
+@@ -1601,7 +1604,21 @@
+   else
+     manager->DiscardPendingGeometryRange();
+ }
++
++// 0201: the consumer's OP_DESTROY tags: 1 buffer, 2 texture, 3 bind group.
++static constexpr u32 kDestroyTagBindGroup = 3;
+ 
++void WebGPUGfx::DestroyRetiredBindGroups()
++{
++  // Only between passes: a destroy inside a staged pass poisons it, and the
++  // consumer refuses one inside a pass while mapped uploads are pending.
++  if (m_pass_open || m_retired_bind_groups.empty())
++    return;
++  for (const u32 id : m_retired_bind_groups)
++    m_cmd_stream.PushDestroy(kDestroyTagBindGroup, id);
++  m_retired_bind_groups.clear();
++}
++
+ bool WebGPUGfx::EndPassIfOpen()
+ {
+   if (!m_pass_open)
+@@ -1619,6 +1636,7 @@
+   const bool committed = m_cmd_stream.PushEndPass();
+   m_pass_open = false;
+   ResetRecordedPassState();
++  DestroyRetiredBindGroups();
+   if (committed)
+   {
+     m_pending_clear = false;
+@@ -2252,7 +2270,12 @@
+     const u32 id = m_cmd_stream.PushCreateBindGroup(b.data(), b.size(), 1);
+     if (id)
+     {
+-      slot->id = id;  // evicts any colliding entry (harmless rebuild)
++      // A colliding entry is evicted (a harmless rebuild later). Its group
++      // may still be bound by this pass's earlier draws: it is destroyed at
++      // the pass end (0201), never here, inside the pass.
++      if (slot->id != 0)
++        m_retired_bind_groups.push_back(slot->id);
++      slot->id = id;
+       slot->sig = sig;
+       slot->texture_ids = texture_ids;
+       slot->sampler_ids = m_sampler_ids;

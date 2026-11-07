@@ -113,7 +113,7 @@ async function main() {
   const lockWait = num(values, "lock-wait", { min: 0 });
   const lock = await calmLock({
     maxLoad, calmWait: lockWait, log: (m) => log(`before the lock: ${m}`),
-    acquire: values["no-lock"] ? null : () => acquirePerfLock({ name: `harness first-launch (${REPO_ROOT})`, waitSec: lockWait, log })
+    acquire: values["no-lock"] ? null : () => acquirePerfLock({ requireMains: true, name: `harness first-launch (${REPO_ROOT})`, waitSec: lockWait, log })
   });
   const outDir = probeOutDir("first-launch", iso, values.out);
   const server = await ensureServer({ port, root: REPO_ROOT });

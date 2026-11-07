@@ -14,6 +14,27 @@
  *     (GX_BL_DSTALPHA), so the alpha step 2 wrote shows as brightness.
  * A backend that blends step 2 with the constant instead of the TEV alpha,
  * or writes the TEV alpha instead of the constant, shows another picture.
+ *
+ * DSTALPHA_COPLANAR (dstalpha-coplanar): depth test on, and step 2 drawn
+ * coplanar (GX_SetCoPlanar, Dolphin's zfreeze), so its pixel shader writes
+ * depth. On WebGPU such a shader cannot use dual-source blending even when
+ * the device has it, and takes the same no_dual_src path on every browser.
+ *
+ * DSTALPHA_REDRAW (dstalpha-redraw): depth test on (LEQUAL, writes); the
+ * rows are drawn again at the same depth with LESS (constant 0xff) and with
+ * NEVER (constant 0x00): every fragment must fail, so neither constant may
+ * reach the EFB. A second pass that tested EQUAL after the colour wrote
+ * depth would write them (review of patch 0136).
+ *
+ * The EFB copy clears depth only while depth updates are on (BPStructs:
+ * zmode.update_enable): the coplanar variant turns them on for its copies.
+ *
+ * DSTALPHA_ZINIT (dstalpha-zinit): step 2 depth-tested (LEQUAL). One copy
+ * before the loop clears depth to GX 0 with updates on; the loop's copies
+ * clear to far with updates off, so they must leave depth at 0 and every
+ * quad is rejected: the columns show alone. A backend clearing depth on
+ * those copies draws the rows. The EFB's initial depth is not used: it is
+ * undefined (the software renderer starts at 0, GPU backends at far).
  */
 #include <gccore.h>
 #include <malloc.h>
@@ -25,7 +46,7 @@ static const u32 column_rgba[4] = {0xc03020ff, 0x20a040ff, 0x2040c0ff, 0xe0c020f
 static const u8 quad_alpha[4] = {0x30, 0x80, 0xc0, 0xff};
 
 static void vtx(f32 x, f32 y, u32 rgba) {
-	GX_Position3f32(x, y, -1.0f);
+	GX_Position3f32(x, y, -10.0f);
 	GX_Color1u32(rgba);
 }
 
@@ -86,11 +107,25 @@ int main(void) {
 	Mtx id;
 	guMtxIdentity(id);
 
+#ifdef DSTALPHA_ZINIT
+	/* Depth to GX 0 once (updates on), then the loop's copies clear to far
+	 * with updates off. */
+	GX_SetCopyClear(bg, 0);
+	GX_SetZMode(GX_FALSE, GX_ALWAYS, GX_TRUE);
+	GX_CopyDisp(xfb[1], GX_TRUE);
+	GX_SetZMode(GX_FALSE, GX_ALWAYS, GX_FALSE);
+	GX_SetCopyClear(bg, 0x00ffffff);
+	GX_DrawDone();
+#endif
+
 	int fb = 0;
 	while (1) {
 		GX_LoadProjectionMtx(ortho, GX_ORTHOGRAPHIC);
 		GX_LoadPosMtxImm(id, GX_PNMTX0);
 
+#if defined(DSTALPHA_COPLANAR) || defined(DSTALPHA_REDRAW)
+		GX_SetZMode(GX_TRUE, GX_LEQUAL, GX_TRUE);
+#endif
 		/* 1. Opaque columns, destination alpha 0. */
 		GX_SetDstAlpha(GX_ENABLE, 0x00);
 		GX_SetBlendMode(GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_CLEAR);
@@ -100,6 +135,12 @@ int main(void) {
 		/* 2. Translucent rows: blended with the TEV alpha, destination alpha
 		 * written as a constant. */
 		GX_SetBlendMode(GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_INVSRCALPHA, GX_LO_CLEAR);
+#ifdef DSTALPHA_ZINIT
+		GX_SetZMode(GX_TRUE, GX_LEQUAL, GX_TRUE);
+#endif
+#ifdef DSTALPHA_COPLANAR
+		GX_SetCoPlanar(GX_TRUE);
+#endif
 		for (int r = 0; r < 4; r++) {
 			GX_SetDstAlpha(GX_ENABLE, r < 2 ? 0x40 : 0xc0);
 			for (int c = 0; c < 4; c++)
@@ -107,12 +148,37 @@ int main(void) {
 				     0xf0f0f000u | quad_alpha[(r + c) & 3]);
 		}
 
+#ifdef DSTALPHA_REDRAW
+		/* The same rows at the same depth: LESS and NEVER reject them all. */
+		GX_SetZMode(GX_TRUE, GX_LESS, GX_TRUE);
+		GX_SetDstAlpha(GX_ENABLE, 0xff);
+		for (int r = 0; r < 4; r++)
+			for (int c = 0; c < 4; c++)
+				rect(50 + c * 150, 50 + r * 100, 160 + c * 150, 120 + r * 100,
+				     0x10101000u | quad_alpha[(r + c) & 3]);
+		GX_SetZMode(GX_TRUE, GX_NEVER, GX_TRUE);
+		GX_SetDstAlpha(GX_ENABLE, 0x00);
+		for (int r = 0; r < 4; r++)
+			for (int c = 0; c < 4; c++)
+				rect(50 + c * 150, 50 + r * 100, 160 + c * 150, 120 + r * 100,
+				     0x10101000u | quad_alpha[(r + c) & 3]);
+#endif
+#ifdef DSTALPHA_COPLANAR
+		GX_SetCoPlanar(GX_FALSE);
+#endif
+#if defined(DSTALPHA_COPLANAR) || defined(DSTALPHA_ZINIT) || defined(DSTALPHA_REDRAW)
+		GX_SetZMode(GX_FALSE, GX_ALWAYS, GX_FALSE);
+#endif
 		/* 3. White band blended with the destination alpha. */
 		GX_SetDstAlpha(GX_DISABLE, 0x00);
 		GX_SetBlendMode(GX_BM_BLEND, GX_BL_DSTALPHA, GX_BL_INVDSTALPHA, GX_LO_CLEAR);
 		rect(30, 130, 620, 340, 0xffffffffu);
 
 		GX_DrawDone();
+#if defined(DSTALPHA_COPLANAR) || defined(DSTALPHA_REDRAW)
+		/* Depth updates on, so the copy clears depth for the next frame. */
+		GX_SetZMode(GX_FALSE, GX_ALWAYS, GX_TRUE);
+#endif
 		GX_CopyDisp(xfb[fb], GX_TRUE);
 		GX_Flush();
 		VIDEO_SetNextFramebuffer(xfb[fb]);

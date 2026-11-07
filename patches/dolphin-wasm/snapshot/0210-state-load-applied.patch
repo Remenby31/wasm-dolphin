@@ -1,0 +1,54 @@
+diff --git a/Source/Core/Core/State.cpp b/Source/Core/Core/State.cpp
+index 58e7dff..35f940e 100644
+--- a/Source/Core/Core/State.cpp
++++ b/Source/Core/Core/State.cpp
+@@ -4,6 +4,7 @@
+ #include "Core/State.h"
+ 
+ #include <algorithm>
++#include <atomic>
+ #include <filesystem>
+ #include <locale>
+ #include <map>
+@@ -69,6 +70,9 @@ static const u32 OUT_LEN = IN_LEN + (IN_LEN / 16) + 64 + 3;
+ static unsigned char __LZO_MMODEL out[OUT_LEN];
+ 
+ static AfterLoadCallbackFunc s_on_after_load_callback;
++// Patch 0210: whether the last LoadAsFromCore applied the state (read in the
++// after-load callback, which runs whatever the outcome).
++static std::atomic<bool> s_last_load_applied{false};
+ 
+ static Common::EventHook s_flush_unsaved_data_hook;
+ 
+@@ -904,10 +908,19 @@ static void LoadAsFromCore(Core::System& system, std::string filename)
+     }
+   }
+ 
++  // Patch 0210: the callback also runs when nothing was applied (a file that
++  // could not be read: another game, another version) or when the load failed
++  // and was undone; it tells them apart with LastLoadApplied().
++  s_last_load_applied.store(was_file_read && loaded_successfully, std::memory_order_release);
+   if (s_on_after_load_callback)
+     s_on_after_load_callback();
+ }
+ 
++bool LastLoadApplied()
++{
++  return s_last_load_applied.load(std::memory_order_acquire);
++}
++
+ void LoadAs(Core::System& system, std::string filename)
+ {
+   if (!CheckIfStateLoadIsAllowed(system))
+diff --git a/Source/Core/Core/State.h b/Source/Core/Core/State.h
+index 614dd88..da11091 100644
+--- a/Source/Core/Core/State.h
++++ b/Source/Core/Core/State.h
+@@ -110,4 +110,7 @@ void UndoLoadState(Core::System& system);
+ // for calling back into UI code without introducing a dependency on it in core
+ using AfterLoadCallbackFunc = std::function<void()>;
+ void SetOnAfterLoadCallback(AfterLoadCallbackFunc callback);
++// Patch 0210: in the after-load callback, whether that load applied the state
++// (false: the file could not be read, or the load failed and was undone).
++bool LastLoadApplied();
+ }  // namespace State

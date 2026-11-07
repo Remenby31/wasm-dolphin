@@ -63,12 +63,8 @@ async function record() {
       await page.waitForTimeout(100);
     }
     if (values.state) {
-      let loaded;
-      for (let tries = 0; tries < 60; tries++) {
-        loaded = await pageCall(page, "__loadStateFile", new URL("__harness_state.sav", session.url).href, 120000);
-        if (loaded?.loaded || loaded?.beforeState !== "Starting") break;
-        await page.waitForTimeout(1000);
-      }
+      // The worker waits for a core that takes the state (#325): one call.
+      const loaded = await pageCall(page, "__loadStateFile", new URL("__harness_state.sav", session.url).href, 120000);
       if (!loaded?.loaded) throw new Error(`savestate load failed: ${JSON.stringify(loaded)}`);
     }
     if (values.hold) await page.keyboard.down(values.hold);

@@ -1,0 +1,79 @@
+diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.cpp b/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.cpp
+--- a/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.cpp
++++ b/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.cpp
+@@ -1432,12 +1432,14 @@ bool WebGPUCommandStream::PushEndPass()
+   return committed;
+ }
+ 
+-bool WebGPUCommandStream::PushSubmitPresent()
++bool WebGPUCommandStream::PushSubmitPresent(u32 frame_tag, u32 tag_epoch)
+ {
+   if (!m_header)
+     return false;
+   CmdRecord rec{};
+   rec.op = static_cast<u32>(CmdOp::SubmitPresent);
++  rec.arg.u[0] = frame_tag;
++  rec.arg.u[1] = tag_epoch;
+   if (!Push(rec))
+     return false;
+   ++m_submit_serial;
+diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.h b/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.h
+--- a/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.h
++++ b/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.h
+@@ -109,6 +109,7 @@ enum class CmdOp : u32
+   //   DrawIndexed:     u0=idxCount u1=instCount u2=firstIdx u3=baseVtx
+   DrawIndexed = 20,
+   EndPass = 21,
++  //   SubmitPresent:   u0=frame tag u1=tag epoch (patch 0208; 0,0 = untagged)
+   SubmitPresent = 22,
+   //   Destroy:         u0=classTag u1=id
+   Destroy = 23,
+@@ -419,7 +420,11 @@ public:
+   bool PushDraw(u32 vtx_count, u32 inst_count, u32 first_vtx);
+   bool PushDrawIndexed(u32 idx_count, u32 inst_count, u32 first_idx, u32 base_vtx);
+   bool PushEndPass();
+-  bool PushSubmitPresent();
++  // Patch 0208: frame_tag is the presenter's frame count (low 32 bits), which
++  // moves only on a new XFB, so a duplicate VI swap repeats its tag; 0 when
++  // unknown (a smoke, the presenter's first blank frame). tag_epoch moves
++  // when the count went backwards (a state load restores it).
++  bool PushSubmitPresent(u32 frame_tag = 0, u32 tag_epoch = 0);
+   bool PushViTag(u32 vi_since_boot, u32 vi_since_load, u64 ticks, u32 load_generation);
+   bool PushPresentSource(u32 x, u32 y, u32 w, u32 h);
+   bool PushBackbufferSize(u32 w, u32 h);
+diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp b/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp
+--- a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp
++++ b/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp
+@@ -131,6 +131,11 @@ std::atomic<bool> s_geometry_upload_range_enabled{false};
+ std::atomic<u32> s_geometry_cache_mode{0};
+ std::atomic<u64> s_geometry_cache_epoch{0};
+ std::atomic<u64> s_geometry_upload_range_epoch{0};
++// 0208: the last present's frame tag and the tag epoch. Process-wide, not
++// per backend instance: a new boot restarts the presenter's count at 0, which
++// moves the epoch too. Only the presenting thread touches them.
++u32 s_last_present_frame_tag = 0;
++u32 s_present_tag_epoch = 0;
+ }
+ 
+ extern "C" EMSCRIPTEN_KEEPALIVE void SetWebGpuStateCacheEnabled(int enabled)
+@@ -1227,7 +1232,19 @@ void WebGPUGfx::PresentBackbuffer()
+   // Day-33 Phase C: close the backbuffer pass and submit. The canvas
+   // presents implicitly (the presenter rendered the XFB into it).
+   if (EndPassIfOpen() && m_cmd_stream.ready())
+-    m_cmd_stream.PushSubmitPresent();
++  {
++    // Patch 0208: tag the present with the frame it shows. The presenter
++    // counts a frame only when its XFB is new (ViSwap's duplicate check,
++    // ImmediateSwap) and before Present(), on this thread, so a duplicate VI
++    // swap carries the tag of the frame it repeats. A state load restores the
++    // count and a boot restarts it: when it goes back, the epoch moves, so the
++    // consumer never reads the new timeline as older pictures.
++    const u32 frame_tag = g_presenter ? static_cast<u32>(g_presenter->FrameCount()) : 0;
++    if (frame_tag < s_last_present_frame_tag)
++      ++s_present_tag_epoch;
++    s_last_present_frame_tag = frame_tag;
++    m_cmd_stream.PushSubmitPresent(frame_tag, s_present_tag_epoch);
++  }
+ }
+ 
+ void WebGPUGfx::ShowImage(const AbstractTexture* source_texture,

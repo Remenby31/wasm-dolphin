@@ -9,6 +9,13 @@
 // page load, or no SW support) the bytes are compiled directly: slower, never
 // broken.
 //
+// The engine's worker passes compileStreaming: null with V8 and its compiler
+// worker on (the product): the bytes then go through that worker, which
+// calls every function once, so the CPU thread never compiles a region
+// function lazily during play (a warm launch's race load stalled ~0.3 s).
+// The streaming path, and the TurboFan code V8 kept on it, is then unused;
+// what that costs in the first seconds of a race is to be measured.
+//
 // Trust: an entry carries the SHA-256 of its bytes and is used only if the
 // bytes it holds hash to it. A missing hash, a wrong hash, bytes the engine
 // rejects: the entry is deleted and reported, the region stays with the JIT.
@@ -21,6 +28,7 @@ import {
   aotCacheIdentity,
   aotCacheName,
   canonicalDiscKey,
+  canonicalDolKey,
   classifyAotCacheIdentity,
   isAotEntryKey,
   sha256Hex
@@ -54,6 +62,19 @@ export async function readDiscKeyFromFile(file) {
   const dolSize = Math.max(0x100, ...dolHeader.loadSections.map((s) => s.fileOffset + s.size));
   if (dolSize > MAX_DOL_BYTES || dolOffset + dolSize > file.size) return null;
   return canonicalDiscKey({ header, dol: await read(dolOffset, dolSize), fst: await read(fstOffset, fstSize) });
+}
+
+// The key of a booted .dol (canonicalDolKey): the whole file, when its header
+// parses and it is no bigger than a disc's DOL may be. Null otherwise.
+export async function readDolKeyFromFile(file) {
+  if (!file || typeof file.slice !== "function" || file.size < 0x100 || file.size > MAX_DOL_BYTES) return null;
+  const bytes = new Uint8Array(await file.slice(0, file.size).arrayBuffer());
+  try {
+    parseDolHeader(bytes.subarray(0, 0x100));
+  } catch {
+    return null;
+  }
+  return canonicalDolKey(bytes);
 }
 
 // Registered by the engine page when no site Service Worker controls it.
@@ -216,6 +237,8 @@ export async function probeAotServiceWorker(baseUrl, fetchImpl = globalThis.fetc
   }
 }
 
+export const LOAD_CONCURRENCY = 8;
+
 export async function openAotCache({
   discKey,
   coreHash,
@@ -226,6 +249,10 @@ export async function openAotCache({
   fetchImpl = globalThis.fetch,
   compile = (bytes) => WebAssembly.compile(bytes),
   compileStreaming = (response) => WebAssembly.compileStreaming(response),
+  // awaited before each key's load (the worker: give way to the core's disc reads)
+  beforeLoad = null,
+  // (key, error): a module that would not compile (src/region-link-failures.js)
+  onLoadReject = null,
   serviceWorker = null,
   onProgress = null,
   keepPerDisc = 2,
@@ -361,23 +388,34 @@ export async function openAotCache({
       await dropEntry(key);
       return { reason: "corrupt" };
     }
+    // "compile" once the engine has the bytes: a failure before (the
+    // Service Worker's fetch) is a read, never a refused module.
+    let stage = "fetch";
     try {
       // The bytes are checked above from their own read; the module is then
       // compiled from an untouched response, the one V8 attaches code to.
       let module;
       let streamed = false;
-      if (await viaServiceWorker()) {
+      // compileStreaming null: the caller compiles from the bytes (its
+      // compiler worker warms what it compiles).
+      if (compileStreaming && await viaServiceWorker()) {
         const response = await fetchImpl(urlOf(key));
         if (response.ok && response.headers.get(AOT_HASH_HEADER) === claimed) {
+          stage = "compile";
           module = await compileStreaming(response);
           streamed = true;
         }
       }
-      module ??= await compile(bytes);
+      if (!module) {
+        stage = "compile";
+        module = await compile(bytes);
+      }
       stats.loads += 1;
       if (streamed) stats.streamed += 1;
       return { module, streamed, byteLength: bytes.byteLength, bytes };
     } catch (error) {
+      // compileStreaming rejects a response it cannot read with a TypeError
+      if (stage === "compile" && !(error instanceof TypeError)) onLoadReject?.(key, error);
       if (error instanceof WebAssembly.CompileError || error?.name === "CompileError") {
         stats.rejected += 1;
         await dropEntry(key);
@@ -439,13 +477,23 @@ export async function openAotCache({
     // Map of key -> {module, streamed} or {reason}. Reasons: missing,
     // corrupt and engine-reject (both deleted), bad-key, compile-error,
     // cancelled.
+    // Up to LOAD_CONCURRENCY keys at once (a compile through the compiler
+    // worker is a round trip each: one after the other, a warm launch's 143
+    // regions took 3.8 s to install instead of 2.0), results in key order.
     load(keys) {
       return track((async () => {
-        const out = new Map();
-        for (const key of keys) {
-          out.set(key, cancelled ? { reason: "cancelled" } : await loadOne(key));
-        }
-        return out;
+        const list = [...keys];
+        const results = new Array(list.length);
+        let next = 0;
+        const worker = async () => {
+          while (next < list.length) {
+            const i = next++;
+            if (beforeLoad && !cancelled) await beforeLoad();
+            results[i] = cancelled ? { reason: "cancelled" } : await loadOne(list[i]);
+          }
+        };
+        await Promise.all(Array.from({ length: Math.min(LOAD_CONCURRENCY, list.length) }, worker));
+        return new Map(list.map((key, i) => [key, results[i]]));
       })());
     },
 

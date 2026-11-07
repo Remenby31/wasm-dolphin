@@ -16,9 +16,9 @@ clean-tree performance qualification.
 | Machine | AMD Ryzen 9 9950X3D, 32 logical CPUs, Windows `10.0.26200` x64 |
 | Browser | Headed Chrome `143.0.7499.4` |
 | Branch/commit | `perf/final-optimization` at `d851b336ca1c9de7da036b73145d3116aef6ec59`, dirty |
-| ROM | Melee Rev 2 NKit, 1,430,679,552 bytes; SHA-256 `1018b65a58ca654056be1611a43e753de5dd5f842ce5266581b29c6a12ce7c67` |
+| ROM | Reference game, Rev 2 NKit, 1,430,679,552 bytes; SHA-256 `<reference disc SHA-256, not tracked>` |
 | Core | `dolphin-core-upstream.wasm`, 12,873,138 bytes; SHA-256 `eaec73b4900d14635ddc2b5d3f825a5279ab6c222ae2890790586193328d3b09` |
-| Compressed save | `__battle.sav`, 21,170,115 bytes; SHA-256 `620879e2ed3c35248deba9fb2f7b2a39f91f5374d2f6a98d2a2455cb55e156d1` |
+| Compressed save | `__battle.sav`, 21,170,115 bytes; SHA-256 `<reference savestate SHA-256, not tracked>` |
 | Decoded save stream | 92,835,136 bytes; SHA-256 `89ef3abb5fc9f1e6a76cb8bf305e9a9e9faca916c6702f552ff92800ba510bce` |
 | Cache-off raw output | `.omx/final-opt/wgpu-ubo-health-cache0`, 20-second run |
 | Cache-on raw output | `.omx/final-opt/wgpu-ubo-health-cache1`, 15-second run |
@@ -98,7 +98,7 @@ The downstream chain continued to produce nonzero color:
 | `wgpuubocache=0` | 918,640 / 1,228,800 at present 311 | 209,279 / 307,200 at present 311 | 21 / 21 |
 | `wgpuubocache=1` | 918,640 / 1,228,800 at present 162 | 209,279 / 307,200 at present 162 | 16 / 16 |
 
-The cache-off final screenshot also visibly contains the Kirby-versus-Link
+The cache-off final screenshot also visibly contains the reference
 battle. This establishes that later XFB and backbuffer presentation worked;
 it does not retroactively make the earlier zero restore pass nonzero.
 

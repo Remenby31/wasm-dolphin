@@ -43,7 +43,7 @@
 export const REGION_HEAP_NAMES = Object.freeze(["ram_base", "l1_base"]);
 
 const TYPE_STATE = 0; // (i32) -> i32: dispatcher, stub, fragments
-const OP = { localGet: 0x20, localSet: 0x21, localTee: 0x22, call: 0x10, i32Load: 0x28, i32Const: 0x41, i32Eq: 0x46, i32LtU: 0x49, if: 0x04, end: 0x0b, return: 0x0f, returnCall: 0x12, returnCallIndirect: 0x13 };
+const OP = { localGet: 0x20, localSet: 0x21, localTee: 0x22, call: 0x10, i32Load: 0x28, i32Const: 0x41, i32Eq: 0x46, i32LtU: 0x49, i32And: 0x71, i32Mul: 0x6c, i32ShrU: 0x76, block: 0x02, if: 0x04, brIf: 0x0d, brTable: 0x0e, end: 0x0b, return: 0x0f, returnCall: 0x12, returnCallIndirect: 0x13 };
 const VAL = { i32: 0x7f, i64: 0x7e, f32: 0x7d, f64: 0x7c };
 
 function uleb(out, v) {
@@ -99,10 +99,42 @@ function signature(sig) {
   return out;
 }
 
-// Dispatcher body: binary search of state.pc over sorted [pc, funcIndex].
-// A PC that is not an entry returns 1 from the exported dispatcher (nothing
-// ran); the internal one that `dispatch` relocs reach (code already ran and
-// wrote state.pc) leaves through the exit stub (`missing` = { stub }).
+// Dispatcher hash (decision of 2026-10-24): a binary search over a module's
+// hundreds of entries cost 9.9 % of the CPU thread on a heavy scene, in
+// mispredicted compares. Instead, slot = hash(state.pc) in a power-of-two
+// table of at least twice the entries, then one `br_table` (one indirect
+// jump) to the compares of that slot's entries. The hash is chosen from a
+// fixed list by the entries alone (fewest compares in the fullest slot, then
+// in all), so a module's bytes depend only on its members, as the cache key.
+//   mul 0      slot = (pc >>> 2) & (size - 1)
+//   mul M      slot = Math.imul(pc >>> 2, M) >>> (32 - bits)
+export const DISPATCH_HASH_MULS = Object.freeze([0, 0x9e3779b1, 0x85ebca6b, 0xc2b2ae35, 0x27d4eb2f, 0x165667b1]);
+const DISPATCH_LINEAR_MAX = 4; // up to 4 entries: compares in a row
+
+export function dispatchSlot(pc, mul, bits) {
+  const w = (pc >>> 2) >>> 0;
+  return mul === 0 ? w & ((1 << bits) - 1) : Math.imul(w, mul) >>> (32 - bits);
+}
+
+export function chooseDispatchHash(pcs) {
+  let bits = 4;
+  while ((1 << bits) < 2 * pcs.length) bits++;
+  let best = null;
+  for (const mul of DISPATCH_HASH_MULS) {
+    const count = new Uint32Array(1 << bits);
+    for (const pc of pcs) count[dispatchSlot(pc, mul, bits)]++;
+    let max = 0, cost = 0;
+    for (const c of count) { if (c > max) max = c; cost += (c * (c + 1)) / 2; }
+    if (!best || max < best.max || (max === best.max && cost < best.cost)) best = { mul, bits, max, cost };
+  }
+  return best;
+}
+
+// Dispatcher body over sorted [pc, funcIndex]: a PC that is not an entry
+// returns 1 from the exported dispatcher (nothing ran); the internal one that
+// `dispatch` relocs reach (code already ran and wrote state.pc) leaves
+// through the exit stub (`missing` = { stub }). Only a declared entry is ever
+// tail-called: every slot compares the full pc.
 function dispatcherBody(entries, pcOffset, missing) {
   const miss = (out) => {
     if (typeof missing === "object") { out.push(OP.localGet, 0, OP.returnCall); uleb(out, missing.stub); }
@@ -112,27 +144,45 @@ function dispatcherBody(entries, pcOffset, missing) {
   body.push(OP.localGet, 0, OP.i32Load, 2);
   uleb(body, pcOffset);
   body.push(OP.localSet, 1);
-  const emit = (lo, hi) => {
-    if (hi - lo <= 4) {
-      for (let i = lo; i < hi; i++) {
-        body.push(OP.localGet, 1, OP.i32Const);
-        sleb(body, entries[i][0]);
-        body.push(OP.i32Eq, OP.if, 0x40, OP.localGet, 0, OP.returnCall);
-        uleb(body, entries[i][1]);
-        body.push(OP.end);
-      }
-      miss(body); // not an entry of the region
-      return;
+  const compares = (list) => {
+    for (const [pc, fn] of list) {
+      body.push(OP.localGet, 1, OP.i32Const);
+      sleb(body, pc);
+      body.push(OP.i32Eq, OP.if, 0x40, OP.localGet, 0, OP.returnCall);
+      uleb(body, fn);
+      body.push(OP.end);
     }
-    const mid = (lo + hi) >> 1;
-    body.push(OP.localGet, 1, OP.i32Const);
-    sleb(body, entries[mid][0]);
-    body.push(OP.i32LtU, OP.if, 0x40);
-    emit(lo, mid);
-    body.push(OP.end);
-    emit(mid, hi);
   };
-  emit(0, entries.length);
+  if (entries.length <= DISPATCH_LINEAR_MAX) {
+    compares(entries);
+  } else {
+    // block $miss { block $s(k-1) ... block $s0 { br_table } slot 0 ... } miss
+    // Slot j's block is the j-th non-empty slot; an empty slot goes to $miss.
+    const { mul, bits } = chooseDispatchHash(entries.map(([pc]) => pc));
+    const slots = new Map();
+    for (const e of entries) {
+      const s = dispatchSlot(e[0], mul, bits);
+      if (!slots.has(s)) slots.set(s, []);
+      slots.get(s).push(e);
+    }
+    const used = [...slots.keys()].sort((a, b) => a - b);
+    const depth = new Map(used.map((s, j) => [s, j]));
+    body.push(OP.block, 0x40);
+    for (let j = 0; j < used.length; j++) body.push(OP.block, 0x40);
+    body.push(OP.localGet, 1, OP.i32Const, 2, OP.i32ShrU);
+    if (mul === 0) { body.push(OP.i32Const); sleb(body, (1 << bits) - 1); body.push(OP.i32And); }
+    else { body.push(OP.i32Const); sleb(body, mul | 0); body.push(OP.i32Mul, OP.i32Const); sleb(body, 32 - bits); body.push(OP.i32ShrU); }
+    body.push(OP.brTable);
+    uleb(body, 1 << bits);
+    for (let s = 0; s < 1 << bits; s++) uleb(body, depth.get(s) ?? used.length);
+    uleb(body, used.length); // never taken: the slot is below the table size
+    for (const s of used) {
+      body.push(OP.end);
+      compares(slots.get(s));
+      miss(body); // a pc of this slot that is not an entry
+    }
+    body.push(OP.end); // $miss
+  }
   if (typeof missing === "object") miss(body);
   else body.push(OP.i32Const, missing);
   body.push(OP.end);
@@ -153,6 +203,13 @@ function dispatcherBody(entries, pcOffset, missing) {
 //               on Windows counts against the commit charge; decision of #30)
 // Returns { bytes, entries: [[pc, fragmentIndex]] sorted, helpers: [name] }.
 export const REGION_ENTRIES_SECTION = "region-entries";
+// 0189 (on by default since #361; ?regionfragments=0 turns it off): with
+// `fragmentEntries`, a custom section "region-entry-fragments" gives each
+// entry of "region-entries" (same order) the index of its fragment in the
+// module's "fragments" table, so the core can enter a fragment straight from
+// region chaining. Only in that mode: with it off, modules are byte for byte
+// as before 0189.
+export const REGION_ENTRY_FRAGMENTS_SECTION = "region-entry-fragments";
 // Custom section "region-layout": the u32 hash of the core's heap layout the
 // fragments were translated for (WasmLayoutHash: offsets in the CPU state and
 // sizes their code embeds; the RAM and L1 addresses are heap sites, out of
@@ -285,7 +342,7 @@ export function regionModuleEntries(module) {
 
 //   chain       the exit stub chains to the next region (env.region_chain,
 //               env.table): only for a core that exports them (patch 0102)
-export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memoryMinPages = 1, sharedMemory = true, heapBases = null, names = true, chain = false }) {
+export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memoryMinPages = 1, sharedMemory = true, heapBases = null, names = true, chain = false, fragmentEntries = false }) {
   if (!Array.isArray(fragments) || !fragments.length) throw new Error("region: no fragments");
   if (!Number.isInteger(pcOffset) || pcOffset < 0) throw new Error("region: pcOffset required");
   if (!Number.isInteger(memoryPages) || memoryPages < 1) throw new Error("region: memoryPages (the core's maximum) required");
@@ -349,13 +406,16 @@ export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memo
       }
       if (TEMPLATE.some((b, i) => code[r.offset + i] !== b)) throw new Error(`region: reloc at ${r.offset} is not a padded zero`);
       const opcode = code[r.offset - 1];
-      if ((r.kind === "import" && opcode !== 0x10) || ((r.kind === "jump" || r.kind === "dispatch") && opcode !== OP.returnCall)) {
+      if (((r.kind === "import" || r.kind === "call") && opcode !== OP.call) || ((r.kind === "jump" || r.kind === "dispatch") && opcode !== OP.returnCall)) {
         throw new Error(`region: ${r.kind} reloc at ${r.offset} after opcode 0x${opcode.toString(16)}`);
       }
       let index;
       if (r.kind === "import") index = helperIndex.get(r.name);
       else if (r.kind === "jump") index = entryOwner.get(r.targetPc >>> 0) ?? STUB;
       else if (r.kind === "dispatch") index = INNER;
+      // 0142: a guest call as a wasm call, to the fragment holding the
+      // callee here, else the exit stub (which chains on to its region).
+      else if (r.kind === "call") index = entryOwner.get(r.targetPc >>> 0) ?? STUB;
       else throw new Error(`region: unknown reloc kind ${r.kind}`);
       code.set(paddedUleb(index), r.offset);
     }
@@ -445,10 +505,32 @@ export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memo
   // so a drift of the core's offsets must show); an engine that doesn't know
   // the section ignores it.
   let hintsDropped = 0;
-  const onIf = (f, r) => Number.isInteger(r.offset) && r.offset >= 0 && r.offset < f.code.length && f.code[r.offset] === OP.if;
+  // An `if` or a `br_if` (0135: the downcount check branches to the shared exit).
+  const onIf = (f, r) => Number.isInteger(r.offset) && r.offset >= 0 && r.offset < f.code.length && (f.code[r.offset] === OP.if || f.code[r.offset] === OP.brIf);
+  // Offsets must be strictly increasing within a function (V8 drops the
+  // whole section otherwise, silently). Hints on the same offset that agree
+  // are kept once; hints that disagree are all dropped (no guess), counted
+  // in hintsDropped and hintsConflicting.
+  let hintsConflicting = 0;
+  const once = (hs) => {
+    const out = [];
+    for (let j = 0; j < hs.length;) {
+      let k = j;
+      while (k < hs.length && hs[k].offset === hs[j].offset) k++;
+      if (hs.slice(j, k).every((h) => h.likely === hs[j].likely)) {
+        out.push(hs[j]);
+        hintsDropped += k - j - 1;
+      } else {
+        hintsConflicting += k - j;
+        hintsDropped += k - j;
+      }
+      j = k;
+    }
+    return out;
+  };
   const hinted = fragments.map((f, i) => [FIRST + i, (f.relocs ?? []).filter((r) => r.kind === "hint")
     .filter((r) => onIf(f, r) || (hintsDropped++, false))
-    .sort((a, b) => a.offset - b.offset)]).filter(([, hs]) => hs.length);
+    .sort((a, b) => a.offset - b.offset)]).map(([fn, hs]) => [fn, once(hs)]).filter(([, hs]) => hs.length);
   if (hinted.length) {
     const hints = [];
     name(hints, "metadata.code.branch_hint");
@@ -470,6 +552,15 @@ export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memo
   name(custom, REGION_ENTRIES_SECTION);
   for (const [pc] of sortedEntries) custom.push(pc & 0xff, (pc >>> 8) & 0xff, (pc >>> 16) & 0xff, (pc >>> 24) & 0xff);
   section(out, 0, custom);
+  if (fragmentEntries) {
+    const owners = [];
+    name(owners, REGION_ENTRY_FRAGMENTS_SECTION);
+    for (const [, fn] of sortedEntries) {
+      const i = fn - FIRST;
+      owners.push(i & 0xff, (i >>> 8) & 0xff, (i >>> 16) & 0xff, (i >>> 24) & 0xff);
+    }
+    section(out, 0, owners);
+  }
   // Written whenever the bases are known, sites or not: a module of this
   // translator without the section is never installed (discio queues it
   // with no bases, which the core refuses).
@@ -519,7 +610,8 @@ export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memo
     layout,
     entries: sortedEntries.map(([pc, fn]) => [pc, fn - FIRST]),
     helpers: helperNames,
-    hintsDropped
+    hintsDropped,
+    hintsConflicting
   };
 }
 
@@ -618,13 +710,21 @@ export function groupRegions(module, order, { maxFunctions = 100 } = {}) {
 // from 2 on (2: continuation fragments from a capped fragment's frontier,
 // aot-orchestrator translateWithContinuations), so that a cache built with
 // another formation is translated again rather than reused.
-export const REGION_FORMATION = 3; // 3: the frontier attributes a branch to the nearest held entry (#167)
-export async function regionModuleKey(functions, { compilerVersion, codegenMask, chain = false, formation = REGION_FORMATION }) {
+// dispatch: the dispatchers' shape, hashed with the members from 2 on (2: a
+// hashed br_table, DISPATCH_HASH_MULS), so a module cached with the binary
+// search is assembled again.
+export const REGION_DISPATCH = 2;
+export const REGION_FORMATION = 7; // 3: frontier by nearest held entry, module budget by water-filling; 4: a continuation stops at blocks already held; 5: the plan's extra entries seed the frontier; 6: continuations when the frontier is not empty, the first fragment uncapped; 7: that only when the code it leads to loops
+// functionCap: the wasm function body cap the fragments were formed under
+// (JSC, REGION_JSC_FUNCTION_CAP); in the key only when there is one, so the
+// keys without it (V8, SpiderMonkey) are those of before.
+export async function regionModuleKey(functions, { compilerVersion, codegenMask, chain = false, formation = REGION_FORMATION, functionCap = 0, dispatch = REGION_DISPATCH }) {
   for (const [what, v] of [["compilerVersion", compilerVersion], ["codegenMask", codegenMask]]) {
     if (!Number.isInteger(v) || v < 0 || v > 0xffffffff) throw new Error(`region: ${what} must be a u32`);
   }
   const hex8 = (v) => (v >>> 0).toString(16).padStart(8, "0");
-  const text = (formation > 1 ? `formation:${formation};` : "") + functions.map((f) => {
+  if (!Number.isInteger(functionCap) || functionCap < 0) throw new Error("region: functionCap must be a non-negative integer");
+  const text = (dispatch > 1 ? `dispatch:${dispatch};` : "") + (formation > 1 ? `formation:${formation};` : "") + (functionCap > 0 ? `cap:${functionCap};` : "") + functions.map((f) => {
     if (!/^[0-9a-f]{64}$/.test(f.sha256 ?? "")) throw new Error(`region: function ${f.entry?.toString(16)} has no sha256`);
     const extra = [...(f.extraEntries ?? [])].map((pc) => (pc >>> 0)).sort((a, b) => a - b).map((pc) => pc.toString(16)).join(",");
     // Hot/cold formation: the hot blocks shape the module (only present for

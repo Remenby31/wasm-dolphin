@@ -29,11 +29,11 @@ what this plan is about.
 | --- | --- |
 | JIT tier (guarded vs mixed) | 35/35, 29/29, 31/29 on three slow titles |
 | JIT admission / emitter breadth | `reject:0` — nothing is rejected for unsupported instructions |
-| JIT coverage generally | 11 -> 59,754,839 block runs moved Metroid Prime 34% -> 36% |
-| the renderer, for most slow titles | Metroid 34/34, Paper Mario 35.5/34, Colosseum 32/36 (hw/sw) |
-| stale prebuilt JIT cache | A/B with the broken v1 file: Melee 100%/99%, F-Zero 99% |
+| JIT coverage generally | 11 -> 59,754,839 block runs moved a first-person adventure ("FPA" below) 34% -> 36% |
+| the renderer, for most slow titles | FPA 34/34, RPG A 35.5/34, RPG B 32/36 (hw/sw) |
+| stale prebuilt JIT cache | A/B with the broken v1 file: fighting game 100%/99%, futuristic racer 99% |
 
-Melee is not a valid control for anything CPU-side: it sits at the 100% cap with
+The fighting game is not a valid control for anything CPU-side: it sits at the 100% cap with
 the JIT on or off, so a difference cannot show. Use a title below realtime.
 
 ---
@@ -64,7 +64,7 @@ warnings worth keeping:
   index against a freshly built binary gave `File::Rename` -- a confident,
   meaningless answer. Never map an index across builds.
 - `--profiling-funcs` (needed for a name section, since the shipping wasm is
-  stripped) costs about **20% speed**: Metroid Prime 32% plain vs 25.5% named.
+  stripped) costs about **20% speed**: FPA 32% plain vs 25.5% named.
   Nothing measured on a named build is comparable to the baseline.
 
 On the named build every thread was dominated by `_do_futex_wait`, which looked
@@ -91,7 +91,7 @@ stat `pre:6/74` is `s_wasm_prefix_instruction_sum / s_wasm_block_attempt_count`
 -- the average number of instructions compiled per attempted block, against a
 max of 74. The admission loop walks a block and `break`s at the first
 instruction it cannot emit, compiling only the prefix before it. With warmup
-fixed, Metroid Prime runs 59.7M block executions, but at ~6 instructions each
+fixed, FPA runs 59.7M block executions, but at ~6 instructions each
 that is roughly 8% of the instruction stream.
 
 This revises the "emitter breadth is dead" entry above. `reject:0` is true --
@@ -107,7 +107,7 @@ histogram at the `break` sites in the prefix loop, then rank.
 
 ### Prefix-termination ranking (2026-08-31) -- corrects the entry above
 
-Instrumented every exit from the prefix loop. Metroid Prime, 50s:
+Instrumented every exit from the prefix loop. FPA, 50s:
 
 | reason | warm=700 | warm=60 |
 | --- | ---: | ---: |
@@ -191,7 +191,7 @@ committing to a lever before measuring its ceiling.
 
 ### Split measurement: where the 95% actually goes (2026-08-31)
 
-Metroid Prime, warm, JIT engaged (202 block modules), named build. Shares only
+FPA, warm, JIT engaged (202 block modules), named build. Shares only
 -- that build is ~20% slower, so absolute numbers are not comparable.
 
 | function | self time |
@@ -243,9 +243,9 @@ Moving it changed nothing:
 
 | title | reordered | control |
 | --- | ---: | ---: |
-| Metroid Prime | 27.5% | 27.5% |
-| Star Fox | 24% | 23% |
-| Paper Mario | 28% | 27% |
+| FPA | 27.5% | 27.5% |
+| action-adventure | 24% | 23% |
+| RPG A | 28% | 27% |
 
 Reverted. The chain is not where the 28% goes.
 
@@ -262,7 +262,7 @@ them heavily.
 
 ### And the JIT does not make code faster at all
 
-At warmup 0, Metroid Prime: 85.3M block runs at ~5 instructions each is ~427M
+At warmup 0, FPA: 85.3M block runs at ~5 instructions each is ~427M
 instructions in 50s, about 8.5M/s. The guest at 37% of 486MHz executes on the
 order of 180M/s. So JIT'd code is **~4.7% of instructions consuming 4.6% of
 time** -- the same cost per instruction as interpreting it.
@@ -282,7 +282,7 @@ and all four operands are finite, otherwise the exact `NI_*` path. Semantics
 follow `Interpreter::ps_*` exactly, including ps_mul's `Force25Bit` on FC.
 Behind `DOLPHIN_WEB_DISABLE_FASTPS` (bit 23) so it can be A/B'd on one binary.
 
-**Correct**: Wario World renders its throne room at 96%, Melee 100%, all titles
+**Correct**: an action platformer renders its throne room at 96%, the fighting game 100%, all titles
 boot with normal hash counts.
 
 **No measurable gain.** Interleaved A/B on the same binary via `?disable=`:
@@ -305,7 +305,7 @@ about +/-9 points. **No optimisation of that size can be validated on this rig.*
 Built 2026-08-31. Use it for every performance claim from now on.
 
 ```bash
-node tools/perf-ab.mjs --filter "Metroid Prime (USA)"   --a "" --b "DISABLE=0x800000" --pairs 5
+node tools/perf-ab.mjs --filter "<title>"   --a "" --b "DISABLE=0x800000" --pairs 5
 ```
 
 **Paired, not grouped.** A and B run back-to-back as a pair and are compared
@@ -329,15 +329,15 @@ matching the hand-run conclusion.
 
 ### Fixed-scene mode
 
-`--save-state __mkdd-race.sav` pins the workload so every run measures the same
+`--save-state __race.sav` pins the workload so every run measures the same
 frames, with input disabled and only the post-load tail scored. Pass the served
 NAME, not a path.
 
 The earlier `Save-state load failed: Failed to fetch` was not the server, the
 COEP headers or the 44MB size -- all of which were suspected. Git Bash (MSYS)
 rewrites a leading-slash argument into a Windows path before node sees it, so
-`--save-state /__mkdd-race.sav` arrived as
-`C:/Program Files/Git/__mkdd-race.sav` and the page dutifully failed to fetch
+`--save-state /__race.sav` arrived as
+`C:/Program Files/Git/__race.sav` and the page dutifully failed to fetch
 that. Proving it took reproducing the fetch inside the page, where all three
 URLs including the 44MB state returned 200 -- which showed the problem was the
 URL, not the fetching. The tool now builds the URL from `--base-url` and rejects
@@ -360,7 +360,7 @@ Required before any further perf work is meaningful:
 - **Report a spread**, not a point value.
 
 Until that exists, only effects larger than ~10 points are real: the underclock
-scaling (30/34/78%), the JIT warmup engagement change, and Star Fox's
+scaling (30/34/78%), the JIT warmup engagement change, and the action-adventure's
 renderer difference (30 vs 79%).
 
 ## MEASUREMENT DRIFT -- read before comparing anything
@@ -377,10 +377,10 @@ engages ~35s in. It is specified in frames but behaves as a time delay that
 scales inversely with how slow the game is — penalising exactly the titles that
 need it.
 
-**Evidence.** Metroid Prime, 50s run: warmup 700 gives 7 blocks compiled and 11
+**Evidence.** FPA, 50s run: warmup 700 gives 7 blocks compiled and 11
 block runs; warmup 60 gives 1,356 compiled and 59.7M runs.
 
-**Measured gain.** +2 points (Metroid 34->36, Star Fox 24->26), 0 on Colosseum.
+**Measured gain.** +2 points (FPA 34->36, action-adventure 24->26), 0 on RPG B.
 Small but free.
 
 **Test.** Full 45-disc sweep at the new default; confirm no title regresses and
@@ -415,7 +415,7 @@ compiled 63 blocks in the capture window and its bodies rounded to 0% -- the
 | JIT'd block bodies (190 block modules) | **3.7%** |
 | core module | 96.3% |
 
-Metroid Prime measured 37% here against 32% in the warmup-700 capture, matching
+FPA measured 37% here against 32% in the warmup-700 capture, matching
 the paired +3 in item 2.
 
 **This is not a block-linking ceiling and must not be read as one.** The 96.3%
@@ -429,7 +429,7 @@ The top frame is 27% of self time in one anonymous function.
 
 Rebuilt the core with `--profiling-funcs` added to
 `target_link_options(dolphin_web_core ...)`, so the wasm carries a name section
-and V8 reports real symbols. Metroid Prime, `jitwarmup=60`, 25s window, 1,282
+and V8 reports real symbols. FPA, `jitwarmup=60`, 25s window, 1,282
 blocks compiled, emulation thread:
 
 | frame | self time |
@@ -472,7 +472,7 @@ from one shared description. Read it before proposing state promotion.
 
 ## 4. Finish the Wii rendering fix
 
-**State.** The hardware renderer draws Mario Kart Wii correctly — the EFB holds
+**State.** The hardware renderer draws a Wii racing game correctly — the EFB holds
 the right scene and the EFB->XFB copy is verified correct by paired readback.
 The fault is in the XFB -> backbuffer blit.
 
@@ -483,7 +483,7 @@ The fault is in the XFB -> backbuffer blit.
 against the XFB entry's dimensions. Then fix and verify by eye against the
 software reference at the same screen.
 
-**Success.** Mario Kart Wii renders its race scene on `video=wgpu`.
+**Success.** The Wii racing game renders its race scene on `video=wgpu`.
 
 ## 5. Sweep the untested configuration space
 
@@ -502,13 +502,14 @@ implementing blind.
 
 ## 7. Broken titles
 
-GoldenEye Rogue Agent 0% and black; Resident Evil Code: Veronica X black;
-Animal Crossing static on both paths (#11). Each needs its own diagnosis.
+A shooter at 0% and black; a survival-horror game black; a life-sim game
+static on both paths (#11). Each needs its own diagnosis.
 
 ## 8. Wii Remote input
 
-No Wii title is playable past its controller prompt. Mario Kart Wii accepts a
-GameCube pad, which is why it could be driven at all; Zelda cannot.
+No Wii title is playable past its controller prompt. The Wii racing game accepts a
+GameCube pad, which is why it could be driven at all; a Wii action-adventure
+cannot.
 
 ## 9. Audio
 

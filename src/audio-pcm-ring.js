@@ -25,7 +25,26 @@ export const AUDIO_PCM_HEADER = Object.freeze({
   PRODUCER_EMPTY_MIXES: 13,
   PRODUCER_TIMER_GAP_MAX_US: 14,
   PRODUCER_FILL_HIGH_WATER: 15,
+  // What the core's mixer holds ahead of the ring, in µs (patch 0186); -1
+  // while unknown (a core without it, or before the boot).
+  MIXER_QUEUE_US: 16,
+  // ?audiorate=1 (rate control): the playback rate the producer asks of the
+  // consumer, in ppm above 1 (0..AUDIO_PCM_MAX_RATE_PPM; 0 = the plain copy),
+  // and its counters: frames the producer pulled from the mixer above the
+  // ring's target (to keep the mixer from overflowing), frames the consumer
+  // played resampled, and the extra input frames that resampling consumed.
+  RATE_PPM: 17,
+  PRODUCER_SURPLUS_FRAMES: 18,
+  RESAMPLED_FRAMES: 19,
+  RESAMPLE_EXTRA_FRAMES: 20,
 });
+
+// The consumer's rate control is bounded to +1 % (+17 cents), the default
+// bound (#432) and the ceiling; ?audioratemax=N asks for less. The single
+// constant every fallback derives from (audio.js, the worker adapter, the
+// producer).
+export const AUDIO_PCM_MAX_RATE_PPM = 10000;
+export const AUDIO_PCM_RATE_CEILING_PPM = AUDIO_PCM_MAX_RATE_PPM;
 
 const HEADER_WORDS = AUDIO_PCM_HEADER_BYTES / Int32Array.BYTES_PER_ELEMENT;
 
@@ -43,6 +62,7 @@ export function createAudioPcmRing(capacityFrames = AUDIO_PCM_CAPACITY_FRAMES) {
   Atomics.store(ring.header, AUDIO_PCM_HEADER.CHANNELS, AUDIO_PCM_CHANNELS);
   Atomics.store(ring.header, AUDIO_PCM_HEADER.SAMPLE_RATE, AUDIO_PCM_SAMPLE_RATE);
   Atomics.store(ring.header, AUDIO_PCM_HEADER.STATE, AUDIO_PCM_STATE_MUTED);
+  Atomics.store(ring.header, AUDIO_PCM_HEADER.MIXER_QUEUE_US, -1);
   return ring;
 }
 
@@ -129,6 +149,7 @@ export function consumeAudioPcm(
     result.consumedFrames = 0;
     result.underrunFrames = 0;
     result.flushed = true;
+    if (result.frac) result.frac = 0;
     result.epoch = epoch;
     return result;
   }
@@ -145,6 +166,35 @@ export function consumeAudioPcm(
   const capacity = Atomics.load(header, AUDIO_PCM_HEADER.CAPACITY_FRAMES) >>> 0;
   const read = Atomics.load(header, AUDIO_PCM_HEADER.READ_INDEX) >>> 0;
   const available = Math.min(capacity, audioPcmAvailableFrames(header));
+  const ratePpm = Math.max(0, Math.min(AUDIO_PCM_RATE_CEILING_PPM, Atomics.load(header, AUDIO_PCM_HEADER.RATE_PPM) | 0));
+  // rate control: 1 + ppm frames read per frame played, linear between two;
+  // the position's fraction carries over in result.frac and is dropped (at
+  // most half a frame) once the rate is back to 0
+  const step = 1 + ratePpm * 1e-6;
+  const frac = result.frac ?? 0;
+  if (ratePpm > 0 && available >= Math.ceil(frac + count * step) + 1) {
+    for (let frame = 0; frame < count; frame += 1) {
+      // each position from the start (no accumulated rounding)
+      const pos = frac + frame * step;
+      const i = Math.floor(pos), w = pos - i;
+      const a = ((read + i) % capacity) * AUDIO_PCM_CHANNELS, b = ((read + i + 1) % capacity) * AUDIO_PCM_CHANNELS;
+      outputLeft[frame] = (samples[a] * (1 - w) + samples[b] * w) / 32768;
+      outputRight[frame] = (samples[a + 1] * (1 - w) + samples[b + 1] * w) / 32768;
+    }
+    const end = frac + count * step + 1e-9;
+    const used = Math.floor(end);
+    result.frac = Math.max(0, end - 1e-9 - used);
+    Atomics.add(header, AUDIO_PCM_HEADER.CONSUMED_FRAMES, used);
+    Atomics.add(header, AUDIO_PCM_HEADER.RESAMPLED_FRAMES, count);
+    Atomics.add(header, AUDIO_PCM_HEADER.RESAMPLE_EXTRA_FRAMES, used - count);
+    Atomics.store(header, AUDIO_PCM_HEADER.READ_INDEX, (read + used) | 0);
+    result.consumedFrames = used;
+    result.underrunFrames = 0;
+    result.flushed = false;
+    result.epoch = epoch;
+    return result;
+  }
+  if (result.frac) result.frac = 0;
   const consumed = Math.min(count, available);
   for (let frame = 0; frame < consumed; frame += 1) {
     const src = ((read + frame) % capacity) * AUDIO_PCM_CHANNELS;
@@ -169,6 +219,19 @@ export function consumeAudioPcm(
   return result;
 }
 
+// 0186's arithmetic (Mixer::MixerFifo::QueuedMicroseconds), for its tests:
+// each queued granule is GRANULE_SIZE / 2 = 128 input samples (granules
+// overlap by half), at the input rate dividend / divisor; integer µs.
+export function mixerQueueMicroseconds(granules, divisor, dividend) {
+  if (!dividend) return 0;
+  return Number((BigInt(granules) * 128n * BigInt(divisor) * 1000000n) / BigInt(dividend));
+}
+
+function mixerQueueMsOf(header) {
+  const us = Atomics.load(header, AUDIO_PCM_HEADER.MIXER_QUEUE_US) | 0;
+  return us >= 0 ? us / 1000 : null;
+}
+
 export function snapshotAudioPcmRing(ring) {
   const { header } = ring;
   const read = Atomics.load(header, AUDIO_PCM_HEADER.READ_INDEX) >>> 0;
@@ -189,5 +252,10 @@ export function snapshotAudioPcmRing(ring) {
     producerTimerGapMaxMs:
       (Atomics.load(header, AUDIO_PCM_HEADER.PRODUCER_TIMER_GAP_MAX_US) >>> 0) / 1000,
     producerFillHighWater: Atomics.load(header, AUDIO_PCM_HEADER.PRODUCER_FILL_HIGH_WATER) >>> 0,
+    mixerQueueMs: mixerQueueMsOf(header),
+    ratePpm: Atomics.load(header, AUDIO_PCM_HEADER.RATE_PPM) | 0,
+    producerSurplusFrames: Atomics.load(header, AUDIO_PCM_HEADER.PRODUCER_SURPLUS_FRAMES) >>> 0,
+    resampledFrames: Atomics.load(header, AUDIO_PCM_HEADER.RESAMPLED_FRAMES) >>> 0,
+    resampleExtraFrames: Atomics.load(header, AUDIO_PCM_HEADER.RESAMPLE_EXTRA_FRAMES) >>> 0,
   };
 }

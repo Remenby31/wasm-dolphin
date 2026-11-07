@@ -8,7 +8,7 @@ import { expandMatrix, resolveQuery, summarizeMatrix, summarizeRun } from "../ha
 import { decodePng, encodePng } from "../harness/lib/png.mjs";
 import { describe, median, percentile, stdev } from "../harness/lib/stats.mjs";
 import { validateSteps } from "../harness/lib/steps.mjs";
-import { parsePsForProfile } from "../harness/lib/system.mjs";
+import { cpuFromProcessInfo, parsePsForProfile } from "../harness/lib/system.mjs";
 
 test("stats: median, sample stdev and nearest-rank percentile ignore non-numbers", () => {
   assert.equal(median([3, 1, null, 2]), 2);
@@ -90,4 +90,12 @@ test("system: Chrome CPU is summed for the harness profile only", () => {
 test("steps: each step has exactly one action", () => {
   assert.doesNotThrow(() => validateSteps([{ wait: 1 }, { tap: "Enter", repeat: 2 }, { pad: 1, state: {} }]));
   assert.throws(() => validateSteps([{ wait: 1, tap: "x" }]), /exactly one/);
+});
+
+test("cpuFromProcessInfo: Windows CPU from two CDP process snapshots (100 = one core)", () => {
+  const before = [{ type: "browser", id: 1, cpuTime: 1 }, { type: "renderer", id: 2, cpuTime: 10 }, { type: "GPU", id: 3, cpuTime: 2 }];
+  const after = [{ type: "browser", id: 1, cpuTime: 1.1 }, { type: "renderer", id: 2, cpuTime: 11.5 }, { type: "GPU", id: 3, cpuTime: 2.3 }, { type: "renderer", id: 4, cpuTime: 0.2 }];
+  assert.deepEqual(cpuFromProcessInfo(before, after, 1000), { total: 210, rendererMax: 150, gpu: 30, processes: 4 });
+  assert.equal(cpuFromProcessInfo(null, after, 1000), null);
+  assert.equal(cpuFromProcessInfo(before, after, 0), null);
 });

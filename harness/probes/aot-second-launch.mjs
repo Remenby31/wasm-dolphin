@@ -18,6 +18,9 @@
 // (validationEnableHarness heapShiftMb), so the emulated RAM sits elsewhere
 // than in the seed's session: a pass then also needs every cached region
 // patched for this heap (heapPatched > 0, 0084) and none refused for its layout.
+// Where the RAM cannot move (GameCube since 0106: static RAM and L1), nothing
+// is patched and nothing refused: the run is "not-applicable", not a failure
+// (lib/second-launch-verdict.mjs).
 //
 // Same port as the seed: the cache, OPFS and IndexedDB are per origin. Each
 // run boots an APFS clone of the seeded profile, plays the steps, waits
@@ -40,6 +43,7 @@ import path from "node:path";
 import { parseArgs } from "node:util";
 import { bootIso, launchChrome, workerRequest } from "../lib/browser.mjs";
 import { decodeRegionStats } from "../lib/jit-region-stats.mjs";
+import { secondLaunchVerdict } from "../lib/second-launch-verdict.mjs";
 import { seedOriginCheck } from "../lib/seed-origin.mjs";
 import { ensureServer } from "../lib/server.mjs";
 import { aotLaunchInfo } from "../lib/ttff.mjs";
@@ -81,7 +85,9 @@ function rss(profileDir) {
   return { totalMB: Math.round(total / 1024), byType };
 }
 
-async function launchOnce(profileDir) {
+// referenceOnly: boot without a heap shift and read where the RAM sits, then
+// stop (the reference a shifted launch is compared with).
+async function launchOnce(profileDir, { referenceOnly = false } = {}) {
   const result = { invalidReads: 0, samples: [], firstLines: [], capped: null, regions: null, error: null };
   const server = await ensureServer({ port: Number(values.port), root: process.cwd() });
   const context = await launchChrome({ profileDir });
@@ -107,8 +113,13 @@ async function launchOnce(profileDir) {
   try {
     await Promise.race([
       (async () => {
-        const heapShiftMb = Number(values["heap-shift-mb"] ?? 0);
+        const heapShiftMb = referenceOnly ? 0 : Number(values["heap-shift-mb"] ?? 0);
         await bootIso(page, { url: `${server.base}?${values.query}`, iso: values.iso, timeoutMs: 120000, ...(heapShiftMb > 0 ? { harness: { heapShiftMb } } : {}) });
+        if (referenceOnly) {
+          const ref = await workerRequest(page, "validationReadJitRegionStats", {}, 10000).catch(() => null);
+          result.layout = ref?.layout ?? null;
+          return;
+        }
         await runSteps(page, JSON.parse(readFileSync(values.steps, "utf8")));
         await page.waitForTimeout(Number(values.sec) * 1000);
         // The core publishes its derived counters (the boot window's worst
@@ -120,6 +131,7 @@ async function launchOnce(profileDir) {
         result.regions = r?.bytes ? decodeRegionStats(r.bytes).diagnostics ?? null : null;
         result.layoutRefused = Number.isInteger(r?.layoutRefused) ? r.layoutRefused : null;
         result.heapPatched = Number.isInteger(r?.heapPatched) ? r.heapPatched : null;
+        result.layout = r?.layout ?? null; // where the RAM sits (a static RAM, 0106, does not move with a heap shift)
         result.regionSleep = r?.regionSleep ?? null; // 0107: sleep installs, worst lateness
         // The session's first installs, one sample each: host ms, bytes, path
         // (0 first attempt, 1 after the ready byte, 2 cold); a sleep install is
@@ -145,11 +157,22 @@ async function launchOnce(profileDir) {
 
 // A launch without regions because the heap moved (all refused for their
 // layout) is told apart from one whose cache was empty.
-const result_layout = (r) => (r.layoutRefused > 0 ? ` (${r.layoutRefused} refused for another heap layout)` : "");
 
 const outDir = values.out ?? null;
 if (outDir) mkdirSync(outDir, { recursive: true });
 let failed = 0;
+// A heap shift is judged against where the RAM sits without one (a positive
+// fact, not inferred from what was patched): one unshifted reference launch.
+let referenceRamBase = null;
+if (values["heap-shift-mb"]) {
+  const profileDir = mkdtempSync(path.join(os.tmpdir(), "gc-aot-second-ref-"));
+  rmSync(profileDir, { recursive: true, force: true });
+  execFileSync("cp", ["-c", "-R", values["seed-profile"], profileDir]);
+  const ref = await launchOnce(profileDir, { referenceOnly: true });
+  rmSync(profileDir, { recursive: true, force: true });
+  referenceRamBase = Number.isInteger(ref.layout?.ramBase) ? ref.layout.ramBase : null;
+  log(`reference launch (no heap shift): ram base ${referenceRamBase ?? "unknown"}`);
+}
 for (let run = 1; run <= Number(values.runs); run += 1) {
   const profileDir = mkdtempSync(path.join(os.tmpdir(), "gc-aot-second-"));
   rmSync(profileDir, { recursive: true, force: true });
@@ -162,20 +185,8 @@ for (let run = 1; run <= Number(values.runs); run += 1) {
   // Before the boot (the boot set) and after the first image (the rest).
   const beforeBoot = r.aot?.install?.loaded ?? 0;
   const fromCache = beforeBoot + (r.aot?.afterFirstImage?.loaded ?? 0);
-  const healthy = [
-    r.error && `error: ${r.error}`,
-    r.capped && `memory cap (${r.capped.totalMB} MB: ${JSON.stringify(r.capped.byType)})`,
-    r.invalidReads > 0 && `${r.invalidReads} "Invalid read"`,
-    frames < Number(values["min-frames"]) && `${frames} frames < ${values["min-frames"]}`,
-    !(fromCache > 0) && "no module loaded from the region cache (a first launch: seed, port, compiler version?)",
-    // a forced heap shift: every region must have been patched, none refused
-    values["heap-shift-mb"] && !(r.heapPatched > 0) && `heap shifted but ${r.heapPatched ?? "no"} module patched`,
-    values["heap-shift-mb"] && r.layoutRefused > 0 && `heap shifted and ${r.layoutRefused} refused for their layout`
-  ].filter(Boolean);
-  const refusedLayout = !healthy.length && !(installed > 0) && r.layoutRefused > 0;
-  const why = refusedLayout ? [] : [...healthy, ...(healthy.length || installed > 0 ? [] : [`no region installed${result_layout(r)}`])];
-  const verdict = refusedLayout ? "refused-layout" : why.length ? "fail" : "pass";
-  log(`run ${run}: ${verdict === "fail" ? `FAIL (${why.join("; ")})` : verdict}; frames ${frames}, peak ${peak} MB, from cache ${fromCache} (${beforeBoot} before the boot), regions ${JSON.stringify(r.regions && { installed, refused: r.regions.regionsRefused, layoutRefused: r.layoutRefused, heapPatched: r.heapPatched, dropped: r.regions.regionsDropped, installMaxSliceMs: r.regions.installMaxSliceMs, installBootMaxSliceMs: r.regions.installBootMaxSliceMs })}${r.regionSleep ? `, sleep ${JSON.stringify(r.regionSleep)}` : ""}, install samples ${JSON.stringify(r.installSamples ?? null)}`);
+  const { verdict, why } = secondLaunchVerdict(r, { frames, fromCache, installed, heapShift: Boolean(values["heap-shift-mb"]), minFrames: Number(values["min-frames"]), referenceRamBase });
+  log(`run ${run}: ${verdict === "fail" ? `FAIL (${why.join("; ")})` : verdict === "not-applicable" ? `not-applicable (heap shifted, but the RAM did not move: static RAM, 0106; ram base ${r.layout?.ramBase ?? "?"})` : verdict}; frames ${frames}, peak ${peak} MB, from cache ${fromCache} (${beforeBoot} before the boot), regions ${JSON.stringify(r.regions && { installed, refused: r.regions.regionsRefused, layoutRefused: r.layoutRefused, heapPatched: r.heapPatched, dropped: r.regions.regionsDropped, installMaxSliceMs: r.regions.installMaxSliceMs, installBootMaxSliceMs: r.regions.installBootMaxSliceMs })}${r.regionSleep ? `, sleep ${JSON.stringify(r.regionSleep)}` : ""}, install samples ${JSON.stringify(r.installSamples ?? null)}`);
   if (verdict === "fail") failed += 1;
   if (outDir) writeFileSync(path.join(outDir, `run${run}.json`), JSON.stringify({ ...r, frames, peak, fromCache, beforeBoot, verdict, why }, null, 1));
 }

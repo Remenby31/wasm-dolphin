@@ -1,0 +1,91 @@
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -10721,7 +10721,29 @@
+   double install_ms = 0;
+ };
+ static_assert(sizeof(RegionStats) == 256);
+-std::unordered_map<u32, double> s_miss_cycles;  // while timing is on
++// Patch 0156: while stats are on (timing or not), the guest cycles each
++// chain of blocks ran outside the regions, by the PC it started at.
++std::unordered_map<u32, double> s_miss_cycles;
++// Patch 0156: the MISS_TOP most costly of them, published by the CPU thread
++// with the stats: {u32 seq, u32 count, then count x {f64 cycles, u32 pc,
++// u32 0}, u32 seq again}; a reader that sees the two seq differ read a torn
++// copy and reads again (DolphinWeb_JitRegionMissTop).
++constexpr std::size_t MISS_TOP = 64;
++struct RegionMissTop
++{
++  u32 seq = 0;
++  u32 count = 0;
++  struct Entry
++  {
++    double cycles;
++    u32 pc;
++    u32 pad;
++  } entries[MISS_TOP] = {};
++  u32 seq_end = 0;
++  u32 pad = 0;
++};
++static_assert(sizeof(RegionMissTop) == 8 + 16 * MISS_TOP + 8);
++alignas(8) RegionMissTop s_region_miss_top;
+ // Patch 0102 diagnostics, while stats are on: the PCs without a region that
+ // chains of regions leave for, and the region entries block chains reach
+ // (each a return to the dispatcher). Their most frequent, published by the
+@@ -11232,13 +11254,21 @@
+   top.reserve(s_miss_cycles.size());
+   for (const auto& [pc, cycles] : s_miss_cycles)
+     top.emplace_back(cycles, pc);
+-  const std::size_t n = std::min<std::size_t>(3, top.size());
++  const std::size_t n = std::min<std::size_t>(MISS_TOP, top.size());
+   std::partial_sort(top.begin(), top.begin() + n, top.end(), std::greater<>());
+   for (std::size_t i = 0; i < 3; ++i)
+   {
+     s_region_stats.top_miss[2 * i] = i < n ? top[i].second : 0;
+     s_region_stats.top_miss[2 * i + 1] = i < n ? top[i].first : 0;
+   }
++  // Patch 0156: the 64 most costly, the seq around the copy.
++  const u32 seq = s_region_miss_top.seq + 1;
++  __atomic_store_n(&s_region_miss_top.seq, seq, __ATOMIC_RELEASE);
++  s_region_miss_top.count = static_cast<u32>(n);
++  for (std::size_t i = 0; i < MISS_TOP; ++i)
++    s_region_miss_top.entries[i] = i < n ? RegionMissTop::Entry{top[i].first, top[i].second, 0} :
++                                           RegionMissTop::Entry{0, 0, 0};
++  __atomic_store_n(&s_region_miss_top.seq_end, seq, __ATOMIC_RELEASE);
+   PublishTransitionTop();
+ }
+ 
+@@ -11497,6 +11527,14 @@
+ extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_JitRegionTransitionTop()
+ {
+   return static_cast<u32>(reinterpret_cast<std::uintptr_t>(s_transition_top.data()));
++}
++
++// Patch 0156: the guest cycles ran outside the regions by the PC a chain of
++// blocks started at, the 64 most costly (RegionMissTop); while stats are on,
++// timing or not, published by the CPU thread with the stats.
++extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_JitRegionMissTop()
++{
++  return static_cast<u32>(reinterpret_cast<std::uintptr_t>(&s_region_miss_top));
+ }
+ 
+ // RegionChainStats (40 bytes), counted whether region stats are on or not,
+@@ -12229,6 +12267,18 @@
+             s_clock_pair_ms - (s_region_stats.region_time_ms - region_before) -
+             (s_sampled_lookup_ms - lookups_before) - (s_region_stats.idle_time_ms - idle_before);
+         s_region_stats.block_time_ms += std::max(ms, 0.0);
++        continue;
++      }
++      if (region_stats)
++      {
++        // Patch 0156: the cycles outside the regions by start PC without
++        // timing too (no clock read: a map increment per chain of blocks).
++        const u32 call_pc = m_ppc_state.pc;
++        const s32 call_downcount = m_ppc_state.downcount;
++        const double region_cycles_before = s_region_stats.region_cycles;
++        ExecuteOneBlock();
++        s_miss_cycles[call_pc] += static_cast<double>(call_downcount - m_ppc_state.downcount) -
++                                  (s_region_stats.region_cycles - region_cycles_before);
+         continue;
+       }
+ #endif
