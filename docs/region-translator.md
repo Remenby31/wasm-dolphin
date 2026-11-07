@@ -128,7 +128,7 @@ The three P1s and the trivial P2s are fixed in #43; the rest is tracked here.
 
 - [ ] **Translator off the CPU thread reads CPU-thread state**: `Analyze` consults `HLE::TryReplaceFunction(symbol_db)`, `GetMode()` and breakpoints unsynchronised. Give the translator its own read-only view (or snapshot them on the CPU thread).
 - [ ] **Analyzer options**: the translator's `PPCAnalyzer` does not take the JIT's options (e.g. DivByZeroExceptions, set by 2 game INIs), and they are not in the region cache key. Mirror the JIT's options and add them to `codegenMask`.
-- [ ] **Emit diagnostics counters** (`s_wasm_emit_*`, `s_fmh_*`, `s_wasm_emit_fail_*`) are incremented by the translator and the CPU thread at once: thread_local or atomic.
+- [ ] **Emit diagnostics counters** (`s_wasm_emit_*`, `s_wasm_emit_fail_*`) are incremented by the translator and the CPU thread at once: thread_local or atomic.
 - [ ] **Return code 1 after a mid-region `dispatch` exit** (an op outside the tier at `resume_pc`): code already ran, 1 claims nothing did. Harmless today; it skews `regionNotEntry`.
 - [ ] **DropRegion rebuilds the entry filter** from ~135k entries per dropped region: O(N·135k) for a wide invalidation. Rebuild once per invalidation; free dropped handles; clear regions and the queue on shutdown.
 - [ ] **Shared entry not remapped** when the first region holding it is dropped (speed only).

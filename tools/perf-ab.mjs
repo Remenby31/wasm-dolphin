@@ -14,7 +14,7 @@
 //
 // Usage:
 //   node tools/perf-ab.mjs --filter "<title substring>" \
-//     --a "" --b "DISABLE=0x800000" --pairs 5 [--duration 40]
+//     --a "" --b "DISABLE=0x100000" --pairs 5 [--duration 40]   (B: GPR register cache off, bit 20)
 //
 // --a and --b are space-separated ENV assignments applied to boot-matrix. The
 // only difference between the two arms should be the thing under test.
