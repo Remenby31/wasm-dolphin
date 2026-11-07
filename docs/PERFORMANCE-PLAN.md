@@ -305,7 +305,7 @@ about +/-9 points. **No optimisation of that size can be validated on this rig.*
 Built 2026-08-31. Use it for every performance claim from now on.
 
 ```bash
-node tools/perf-ab.mjs --filter "<title>"   --a "" --b "DISABLE=0x800000" --pairs 5
+node tools/perf-ab.mjs --filter "<title>"   --a "" --b "DISABLE=0x100000" --pairs 5   # B: GPR register cache off (bit 20, as ?regalloc=0)
 ```
 
 **Paired, not grouped.** A and B run back-to-back as a pair and are compared
