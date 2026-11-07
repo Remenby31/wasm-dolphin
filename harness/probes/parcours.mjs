@@ -53,6 +53,7 @@ import { parseArgs } from "node:util";
 import { gunzipSync, gzipSync } from "node:zlib";
 
 import { bootIso, ensureServer, launchChrome, readTimeline, REPO_ROOT, workerRequest } from "../lib/browser.mjs";
+import { browserVersionsOf, fullBrowserVersion, mixedBrowserReason } from "../lib/browser-version.mjs";
 import { exportRef } from "../cli.mjs";
 import { calmLock, defaultMaxLoad, loadGaveUp, loadLimit } from "../lib/env.mjs";
 import { readIntegrity, treeHasIntegrity } from "../lib/integrity.mjs";
@@ -221,6 +222,8 @@ async function playRun(o, server, { side, run, outDir }) {
     }
     else await context.assertInvisible("after boot");
     raw.browser = await page.evaluate(() => navigator.userAgent.match(/(?:Headless)?Chrome\/[\d.]+/)?.[0] ?? (/Version\/([\d.]+).*Safari/.exec(navigator.userAgent) ? `Safari/${/Version\/([\d.]+)/.exec(navigator.userAgent)[1]}` : navigator.userAgent)).catch(() => null);
+    // the full version (the user agent is reduced to 156.0.0.0): a series that mixes versions says so (lib/browser-version.mjs)
+    raw.browserVersion = safari ? raw.browser : await fullBrowserVersion(context, page);
     const progress = await workerRequest(page, "validationReadCoreProgress", {}, 5000);
     raw.tps = progress?.coreTicksPerSecond ?? null;
     // the 0113 headroom counters (XFB copies) on, as drop-meter turns them on
@@ -365,6 +368,7 @@ export function humanSummary(summary) {
     const v = summary.verdict;
     lines.push(`verdict (${v.usable.baseline} baseline, ${v.usable.candidate} candidate usable runs): ${v.regression ? `REGRESSION ${v.regressions.map((r) => `${r.where} ${r.metric} ${r.baseline} → ${r.candidate} (> ${r.threshold})`).join(", ")}` : v.inconclusive ? "NO VERDICT (a phase without enough runs)" : "no regression beyond the noise"}${v.improvement ? " (some improvement)" : ""}`);
   }
+  if (summary.browserMixed) lines.push(`WARNING: ${summary.browserMixed}`);
   if (summary.noVerdict) lines.push(`NO VERDICT: ${summary.noVerdict.join("; ")}`);
   return lines;
 }
@@ -396,11 +400,14 @@ export function exitCodeOf(summary) {
 function writeSummary(outDir, meta, analyses, noise) {
   const runs = analyses.map((a) => ({ side: a.side, run: a.run, ...a.analysis, rows: undefined }));
   const summary = { ...meta, runs };
+  summary.browserVersions = browserVersionsOf(analyses.map((a) => a.analysis.browserVersion));
+  summary.browserMixed = mixedBrowserReason(summary.browserVersions);
   const of = (side) => analyses.filter((a) => a.side === side).map((a) => a.analysis);
   if (meta.sides.baseline) {
     summary.verdict = parcoursVerdict(of("baseline"), of("candidate"), noise);
     const reasons = [];
     if (meta.gaveUp) reasons.push(meta.gaveUp);
+    if (summary.browserMixed) reasons.push(summary.browserMixed);
     for (const side of ["baseline", "candidate"]) if (of(side).filter(usable).length < 3) reasons.push(`${of(side).filter(usable).length} usable ${side} run(s) (complete, clean, calm), 3 needed`);
     if (summary.verdict.inconclusive) reasons.push("a phase or section has no verdict");
     summary.noVerdict = reasons.length ? reasons : null;
@@ -527,6 +534,7 @@ async function main() {
         raw.detect = o.detect;
         writeFileSync(path.join(outDir, `raw-${name}-${run}.json.gz`), gzipSync(JSON.stringify(raw)));
         const analysis = analyzeRaw(raw, { maxLoad: o.maxLoad, outDir, tag: `${name}-${run}` });
+        analysis.browserVersion = raw.browserVersion ?? null;
         writeFileSync(path.join(outDir, `${name}-${run}.json`), JSON.stringify(analysis) + "\n");
         analyses.push({ side: name, run, analysis });
         meta.browser ??= raw.browser ?? null;

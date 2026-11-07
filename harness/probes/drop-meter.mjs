@@ -62,6 +62,7 @@ import { parseArgs } from "node:util";
 import { gunzipSync, gzipSync } from "node:zlib";
 
 import { defaultDisplay, bootIso, ensureServer, grabFrame, launchBrowser, loadHarnessState, readFrameInfo, readTimeline, REPO_ROOT, workerRequest } from "../lib/browser.mjs";
+import { browserVersionsOf, fullBrowserVersion, mixedBrowserReason } from "../lib/browser-version.mjs";
 import { ANALYSIS_VERSION, ATTRIBUTION_CONTENT_BUSY, ATTRIBUTION_STARVED_SHARE, attributeDips, attributionLines, attributionTable, dropEvents, dropSummary, dropWindowsForAttribution, loadSegments, nativeFps, noiseOf, phaseSummaries, rowsOf, trendLine, trendTable, VERDICT_MIN_RUNS, visitVerdict, windowsOf, worstDrops } from "../lib/drops.mjs";
 import { exportRef } from "../cli.mjs";
 import { calmLock, defaultMaxLoad, loadGaveUp, loadLimit } from "../lib/env.mjs";
@@ -158,6 +159,8 @@ async function playVisit(o, server, profileDir, shotDir, visit) {
     await bootIso(page, { url: `${server.base}?${o.query}`, iso: o.iso, timeoutMs: 120000, harness: o.display ? { displayed: true, ...(o.pipeline ? { pipeline: true } : {}) } : {} });
     raw.bootMs = Date.now() - t0;
     raw.browser = await page.evaluate(() => navigator.userAgent.match(/(?:Headless)?Chrome\/[\d.]+|Firefox\/[\d.]+/)?.[0] ?? navigator.userAgent).catch(() => null);
+    // the full version (Chrome's user agent is reduced to 156.0.0.0; null off Chromium): lib/browser-version.mjs
+    raw.browserVersion = await fullBrowserVersion(context, page);
     await context.assertInvisible("after boot");
     // --state: the scene starts at a savestate (e.g. a 2-player race); the
     // scenario's guest seconds then count from the load.
@@ -458,7 +461,7 @@ export function analyzeVisit(raw, { native = null } = {}) {
   const integrity = integrityOf(raw.integrityStart, raw.integrityEnd, { allow: raw.integrityAllow ?? [], postload: Boolean(raw.integrityPostload) });
   return {
     integrity, integrityFailed: Boolean(integrity.fatal?.length),
-    timelineComplete: timeline.complete, sampled: rows.length > 0, power: powerOfVisit(raw), browser: raw.browser ?? null, bootMs: raw.bootMs, pc: raw.pc ?? null,
+    timelineComplete: timeline.complete, sampled: rows.length > 0, power: powerOfVisit(raw), browser: raw.browser ?? null, browserVersion: raw.browserVersion ?? null, bootMs: raw.bootMs, pc: raw.pc ?? null,
     displayFilter: displayFilterCost(raw.displayFilter),
     load1: { median: round(median(loadAvg), 2), max: round(Math.max(...loadAvg), 2) },
     regionsDone, rssPeakMB: rss.length ? Math.max(...rss) : null,
@@ -516,6 +519,7 @@ export function humanSummary(summary) {
   }
   for (const [k, c] of Object.entries(summary.displayFilterCost ?? {})) lines.push(`display filter ${k}: GPU ${c.gpuMsMedian} ms/frame (max ${c.gpuMsMax}), ${c.backbuffer?.join("x")} → ${c.canvas?.join("x")}`);
   if (summary.noVerdict) lines.push(`NO VERDICT: ${summary.noVerdict.join("; ")}`);
+  if (summary.browserMixed) lines.push(`WARNING: ${summary.browserMixed}`);
   if (summary.confirmation) lines.push(`confirmation batch: ${summary.confirmation.confirmed ? `REGRESSION REPRODUCED (${summary.confirmation.metrics.join(", ")})` : `not reproduced (${summary.confirmation.metrics.join(", ") || "none"} on the 2nd batch)`}`);
   return lines;
 }
@@ -595,6 +599,9 @@ export function noVerdictReasons({ analyses, visits, gaveUp = null, verdicts }) 
   // or within a run: the runs are from two machines, as far as speed goes.
   const powers = powerSourcesOf(analyses);
   if (powers.length > 1 || powers.includes("mixed")) reasons.push(`runs on ${powers.join(" and ")}: the power source changed during the batch`);
+  // a browser updated mid-batch (an MDM reinstall, 2026-11-07): two browsers, as far as anything goes
+  const mixed = mixedBrowserReason(browserVersionsOf(analyses.map((a) => a.analysis.browserVersion)));
+  if (mixed) reasons.push(mixed);
   for (let v = 1; v <= visits; v += 1) {
     const vv = verdicts[v];
     if (!vv) continue;
@@ -623,6 +630,8 @@ function writeSummary(outDir, meta, analyses, visits, { noise = null, confirm = 
   }
   // every batch, an A/A included: what --noise checks
   summary.powerSources = powerSourcesOf(analyses);
+  summary.browserVersions = browserVersionsOf(analyses.map((a) => a.analysis.browserVersion));
+  summary.browserMixed = mixedBrowserReason(summary.browserVersions);
   // glitch-meter G2: every visit whose replay integrity broke, either side
   summary.integrity = integrityFailures(analyses);
   summary.displayFilterCost = displayFilterCostSummary(analyses, visits);
