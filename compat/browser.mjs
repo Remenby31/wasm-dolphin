@@ -26,7 +26,7 @@ import { decodeReport } from "./lib/report-rows.mjs";
 const BASE = "core=upstream&video=software&presenter=2d&cpu=dual&speed=0&fastsw=0&efbaccess=1&efbcopyram=1&metrics=1";
 export const CONFIGS = {
   interp: `${BASE}&wasmjit=0`,
-  jit: `${BASE}&wasmjit=1&jitwarmup=120&forcejit=1`
+  jit: `${BASE}&wasmjit=1&jitwarmup=0&forcejit=1`
 };
 
 // Cheapest first, so the budget cuts the long GX sweeps (millions of
