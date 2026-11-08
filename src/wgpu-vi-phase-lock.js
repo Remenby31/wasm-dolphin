@@ -90,9 +90,9 @@ export const OUT_OF_REACH_MS = 3000;
 // within RATIO_TOLERANCE (its estimate wobbles: a drift past it was taken now
 // and then, and dropped again)
 export const ENTRY_UPDATES = 4;
-// a lock is taken only when the last RECENT_MS of arrivals and the whole
-// window agree on the period within this (assess: a swing of the speed in
-// the window would set the lock's starting drift wrong)
+// a lock starts from the window's drift only when every RECENT_MS of the
+// arrivals' window agrees with the whole window on the period within this,
+// else from none (a swing of the arrivals in the window would set it wrong)
 export const ENTRY_RATE_AGREEMENT = 0.0019;
 // a lock taken without the base window (a session's first, or again after a
 // drift out of reach) is not taken with the arrivals within this share of a
@@ -106,9 +106,6 @@ export const REENTRY_CUT_MARGIN = 0.1;
 // of the median) and the residuals' spread is under REFRESH_JITTER of the
 // period, between 45 and 165 Hz
 export const REFRESH_TICKS = 600;
-// 1 s of rAF before the refresh is trusted (was 2 s: the first lock came
-// 9.5 s into a boot, after the logo's load, the phase free meanwhile); the
-// inlier share and the jitter checks hold on these 60 as on more
 const MIN_REFRESH_TICKS = 120;
 export const REFRESH_INLIERS = 0.8;
 export const REFRESH_BAND = 0.3;
@@ -218,7 +215,7 @@ export function createViPhaseLock({ quickReentry = true, earlyFirstLock = true, 
   let saturatedMs = 0;
   // the leaky count of time the locked ratio spent off RATIO_TOLERANCE_LOCKED (ms)
   let ratioOffMs = 0;
-  const stats = { on: false, ppm: 0, locks: 0, lost: 0, why: "starting", driftPpm: null, refreshMs: null, frameMs: null, ratio: null, phase: null };
+  const stats = { on: false, ppm: 0, locks: 0, lost: 0, why: "starting", driftPpm: null, refreshMs: null, frameMs: null, ratio: null, phase: null, startDrift: null };
 
   function tick(frameTime, now = frameTime) {
     if (lastFrameTime === null || frameTime > lastFrameTime) {
@@ -285,16 +282,24 @@ export function createViPhaseLock({ quickReentry = true, earlyFirstLock = true, 
     // the default (auto) stops at 1:1: 2:1 only with ?vilock=1
     if (m > maxRatio) return { why: "2:1 only with ?vilock=1", refreshMs, frameMs, ratio };
     // unlocked: the window's period is the drift a lock starts from (its
-    // integral). A window holding a swing of the speed (a load, then the
-    // throttle catching up) reads a drift the game does not have: on the 2P
-    // parcours a lock taken 2 s after the logo's load read 0.9981, started
-    // its trim at -1500 ppm the wrong way and walked the phase to the cut at
-    // the film's start (18 frames). A lock is taken only when the last
-    // RECENT_MS read the same period as the whole window.
+    // integral). A window holding a swing of the arrivals (after a load, the
+    // replay's backlog draining) reads a drift the game does not have: on the
+    // 2P parcours a lock taken 2 s after the logo's load read 0.9981 against
+    // 1.001, started at -1860 ppm the wrong way and walked the phase to the
+    // cut at the film's start (18 frames). The lock is never refused for it
+    // (a ripple or a jitter of the arrivals would keep it off): it starts
+    // from the window's drift only when every RECENT_MS of the window reads
+    // the same period, else from none (0: the integral learns it).
+    let settled = true;
     if (!stats.on) {
-      const k = a.findIndex((t) => t >= now - RECENT_MS);
-      const q = k < 0 || a.length - k < MIN_RECENT_ARRIVALS ? null : period(a.slice(k), sp.slice(k));
-      if (!q || q.irregular || Math.abs(q.frameMs / frameMs - 1) > ENTRY_RATE_AGREEMENT) return { why: "rate unsettled", refreshMs, frameMs, ratio };
+      // each RECENT_MS of the window on its own (a swing shorter than the
+      // window shows in one of them, whichever part it sits in)
+      for (let from = now - ARRIVAL_WINDOW_MS; settled && from < now; from += RECENT_MS) {
+        const i = a.findIndex((t) => t >= from), j = a.findIndex((t) => t >= from + RECENT_MS);
+        const end = j < 0 ? a.length : j;
+        const q = i < 0 || end - i < MIN_RECENT_ARRIVALS ? null : period(a.slice(i, end), sp.slice(i, end));
+        settled = Boolean(q && !q.irregular && Math.abs(q.frameMs / frameMs - 1) <= ENTRY_RATE_AGREEMENT);
+      }
     }
     // the arrivals' phase in the refresh (circular mean, last second)
     let sx = 0, sy = 0;
@@ -304,7 +309,7 @@ export function createViPhaseLock({ quickReentry = true, earlyFirstLock = true, 
       sy += Math.sin(2 * Math.PI * ph);
     }
     const phase = ((Math.atan2(sy, sx) / (2 * Math.PI)) + 1) % 1;
-    return { why: null, refreshMs, frameMs, ratio, m, phase };
+    return { why: null, refreshMs, frameMs, ratio, m, phase, settled };
   }
 
   /**
@@ -332,7 +337,7 @@ export function createViPhaseLock({ quickReentry = true, earlyFirstLock = true, 
       // the base speed (no trim was ever written). On a boot it came 9.5 s
       // in, after the logo's load, the phase free meanwhile (2P parcours:
       // 76 % of the startup seconds' lost frames before the first lock);
-      // now ~3.5 s (2 s of rAF, 4 updates), and a load that follows is
+      // now ~3.5 s (2 s of rAF: MIN_REFRESH_TICKS, 4 updates), and a load that follows is
       // held through ("ratio off")
       const clean = reentry || (earlyFirstLock && stats.locks === 0) || (baseSince !== null && now - baseSince >= ARRIVAL_WINDOW_MS);
       // a quick (re-)entry is not taken with the arrivals next to the cut: the
@@ -366,7 +371,9 @@ export function createViPhaseLock({ quickReentry = true, earlyFirstLock = true, 
         entryStreak = 0;
         prevErr = null;
         // the drift the lock has to cancel: m refreshes per frame
-        integral = Math.max(-maxPpm, Math.min(maxPpm, (s.frameMs / (s.m * s.refreshMs) - 1) * 1e6));
+        // the drift to cancel, when the window's period can be trusted for it
+        integral = s.settled ? Math.max(-maxPpm, Math.min(maxPpm, (s.frameMs / (s.m * s.refreshMs) - 1) * 1e6)) : 0;
+        stats.startDrift = s.settled ? "window" : "none";
       }
       stats.on = true;
       reentry = false;
