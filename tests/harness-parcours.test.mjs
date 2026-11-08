@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 
-import { analyzeRun, classifySecond, filmPhaseLabels, newFrameBins, contentSecond, gapDetail, completionOf, currentPhase, deriveSeconds, GAME_DRAWS_PER_FRAME, LOAD_DISC_BPS, markerIndexes, MIN_PHASE_SEC, parcoursVerdict, phaseLabels, phaseMetrics, phaseNoise, renderTimeline, sectionsOf, segmentsOf, summarizeSeconds, windowCadence } from "../harness/lib/parcours.mjs";
+import { analyzeRun, classifySecond, filmPhaseLabels, newFrameBins, producedBins, contentSecond, gapDetail, completionOf, currentPhase, deriveSeconds, GAME_DRAWS_PER_FRAME, LOAD_DISC_BPS, markerIndexes, MIN_PHASE_SEC, parcoursVerdict, phaseLabels, phaseMetrics, phaseNoise, renderTimeline, sectionsOf, segmentsOf, summarizeSeconds, windowCadence } from "../harness/lib/parcours.mjs";
 import { filmMarkers, filmPhases, filmWithMarks, keyToPad, padStateOf, recordPorts, runRecordSteps, validateFilm, validateRecordSteps } from "../harness/lib/pad-film.mjs";
 import { analyzeRaw, countersOf, otherCpuOf, presentGaps, samplerTicksOf, viTimesOf, exitCodeOf, humanSummary, markerStep } from "../harness/probes/parcours.mjs";
 import { decodePng, encodePng } from "../harness/lib/png.mjs";
@@ -766,7 +766,7 @@ test("film phases: validated (polls in order, known phases), read apart from the
 
 test("probe: each sample keeps its presents' tags and whether the read saw them all; a run's own film phases win over --analyze --film", () => {
   const src = readFileSync(new URL("../harness/probes/parcours.mjs", import.meta.url), "utf8");
-  assert.match(src, /presents, presentTag, presentTagEpoch, presentsKnown, vi:/);
+  assert.match(src, /presents, presentTag, presentTagEpoch, presentsKnown, producedT, producedKnown, vi:/);
   // the worker's timeline carries each present's tag and epoch
   const worker = readFileSync(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
   assert.match(worker, /presents\.tag\.push\(harnessPresentRing\[slot \+ 3\]\)/);
@@ -827,4 +827,71 @@ test("worst seconds: a row owning no grid second is left out, never ranked over 
     { t: 4, speed: 100, smoothness: null, smoothBins: [{ t: 4, newFrames: null, smoothness: null }] }
   ];
   assert.deepEqual(summarizeSeconds(rows).worst.map((w) => w.t), [4, 2, 3], "the unknown second first, the healthy empty row out");
+});
+
+// Analysis 5: the produced frames (the content reference) on the same grid.
+// n produced frames evenly in [t - 1000, t)
+function withProduced(samples, perSec) {
+  samples.forEach((x, i) => { x.producedT = i === 0 ? [] : presentsIn(x.t, typeof perSec === "function" ? perSec(i) : perSec); x.producedKnown = true; });
+  return samples;
+}
+test("produced frames on the grid: counted per second like the presents, unknown when a read missed them; none recorded: the worker's rate (basis worker)", () => {
+  const s = withProduced(samplesOf([["menu", 3]]), (i) => (i === 2 ? 33 : 60));
+  assert.deepEqual(producedBins(s), { basis: "grid", bins: [60, 33, 60] });
+  s[3].producedKnown = false;
+  assert.deepEqual(producedBins(s).bins, [60, 33, null], "the last reading may hold frames after t2: its second unknown");
+  s[3].producedKnown = true; s[2].producedKnown = false;
+  assert.deepEqual(producedBins(s).bins, [60, null, null], "reading 2 may hold frames of (t1, t3)");
+  assert.deepEqual(producedBins(samplesOf([["menu", 2]])), { basis: "worker", bins: null });
+  // untagged frames: nothing known
+  const sw = withProduced(samplesOf([["menu", 2]]), 60);
+  for (const x of sw) delete x.info.newShown;
+  assert.deepEqual(producedBins(sw).bins, [null, null]);
+});
+
+test("a loading second where the game makes 45 frames: judged against the 45 it made (with margin), whatever the worker's 500 ms rate said", () => {
+  // the game makes 45 in the middle second, shows them all; the worker's rate says 15.6 there
+  const s = withProduced(samplesOf([["menu", 3]]), (i) => (i === 2 ? 45 : 60));
+  s[2].presents = presentsIn(s[2].t, 45);
+  s[2].info.producedFps = 15.6;
+  const rows = deriveSeconds(s, { tps: TPS });
+  assert.deepEqual(rows.map((r) => r.producedFps), [60, 45, 60]);
+  assert.deepEqual(rows.map((r) => r.producedFrom), ["grid", "grid", "grid"]);
+  assert.deepEqual(rows.map((r) => r.smoothBins[0].content), [false, true, false]);
+  assert.deepEqual(rows.map((r) => r.smoothness), [100, 100, 100]);
+  // 3 of the 45 made not shown: a loss, against what was made
+  s[2].presents = presentsIn(s[2].t, 42);
+  assert.equal(deriveSeconds(s, { tps: TPS })[1].smoothness, 93.3);
+  // no margin (a thread saturated: maybe why it made few): against the cadence
+  const busy = withProduced(samplesOf([["menu", 3]], { busy: 0.9 }), (i) => (i === 2 ? 45 : 60));
+  busy[2].presents = presentsIn(busy[2].t, 45);
+  assert.equal(deriveSeconds(busy, { tps: TPS })[1].smoothness, 75);
+  // what was made unknown in a second: its smoothness unknown, counted as such
+  const u = withProduced(samplesOf([["menu", 4]]), 60);
+  u[2].producedKnown = false;
+  const ur = deriveSeconds(u, { tps: TPS });
+  assert.deepEqual(ur.map((r) => r.smoothness), [100, null, null, 100]);
+  assert.equal(summarizeSeconds(ur).smoothness.unknown, 2);
+  assert.equal(analyzeRun({ samples: u, tps: TPS }).producedBasis, "grid");
+  assert.equal(analyzeRun({ samples: samplesOf([["menu", 2]]), tps: TPS }).producedBasis, "worker");
+});
+
+test("the produced basis per run: refused across bases (an A/B, an A/A's noise); the worker records each produced frame for the harness only", async () => {
+  const { mkdtempSync, writeFileSync } = await import("node:fs");
+  const os = await import("node:os");
+  const { readNoise, basisOf } = await import("../harness/probes/parcours.mjs");
+  const { ANALYSIS_VERSION } = await import("../harness/lib/parcours.mjs");
+  assert.equal(basisOf([{ producedBasis: "grid" }, { producedBasis: "worker" }], "producedBasis"), "mixed");
+  const dir = mkdtempSync(`${os.tmpdir()}/parcours-produced-`);
+  const base = { probe: "parcours", probeVersion: 2, analysisVersion: ANALYSIS_VERSION, film: "f#1", query: "q", newFramesBasis: "tag", producedBasis: "worker", noise: { "kind:menu": {} } };
+  writeFileSync(`${dir}/w.json`, JSON.stringify(base));
+  assert.throws(() => readNoise(`${dir}/w.json`, { probeVersion: 2, film: "f#1", query: "q", newFramesBasis: "tag", producedBasis: "grid" }), /producedBasis worker vs grid/);
+  const probe = readFileSync(new URL("../harness/probes/parcours.mjs", import.meta.url), "utf8");
+  assert.match(probe, /produced frames on different bases \(grid \/ worker\) across runs/);
+  const worker = readFileSync(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
+  assert.match(worker, /^let harnessProducedRing = null;$/m);
+  assert.match(worker, /harnessProducedRing \?\?= new Float64Array\(HARNESS_PRESENT_RING\);/);
+  assert.match(worker, /if \(!harnessEnabled \|\| !harnessProducedRing\) return;/);
+  assert.equal(worker.match(/if \(wgpuNewFrames\.queued\([^)]*\)\) recordProducedFrame\(\);/g)?.length, 2, "both WebGPU present paths");
+  assert.match(worker, /presents: \{ \.\.\.presents, lost: presentsLost \}, produced, vi,/);
 });

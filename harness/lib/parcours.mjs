@@ -47,7 +47,9 @@ import { median, percentile, round } from "./stats.mjs";
 // other half unseen), by frame tag when recorded (newFramesBasis "tag", else
 // "all"), unknown seconds counted (smoothUnknown, p5 unreliable past 5 %);
 // the film's declared phases (film.phases) before the detector's.
-export const ANALYSIS_VERSION = 4;
+// 5: the produced frames (the content reference) on the same grid, by tag
+// (producedBasis "grid"; "worker": the worker's 500 ms rate, older runs).
+export const ANALYSIS_VERSION = 5;
 
 export const PHASES = Object.freeze(["boot", "loading", "cinematic", "menu", "game"]);
 // A phase lasts at least this long: a shorter run of seconds goes to the
@@ -204,6 +206,35 @@ export function newFrameBins(samples, { binMs = NEW_FRAMES_BIN_MS } = {}) {
   };
 }
 
+// The frames produced (a new frame tag entering the present queue: the
+// worker's timeline, producedT) on the same fixed 1 s grid as newFrameBins:
+// the content reference of each second (what the game made), exact like the
+// new frames shown (the worker's 500 ms produced rate swung 15.6-59.9 on one
+// loading second where the game made 30-36 frames a second, every run).
+// Basis "grid" when the run recorded them, else "worker" (bins null: the
+// rows keep the worker's rate). A bin is null (unknown) when a reading that
+// may hold its frames was not read whole (producedKnown false, frames
+// untagged: info.newShown absent), as for the presents.
+export function producedBins(samples, { binMs = NEW_FRAMES_BIN_MS } = {}) {
+  if (!samples.length) return { basis: null, bins: null };
+  if (!samples.some((s) => Array.isArray(s.producedT))) return { basis: "worker", bins: null };
+  const origin = samples[0].t, last = samples.at(-1).t;
+  const known = samples.map((s) => Array.isArray(s.producedT) && s.producedKnown === true && num(s.info?.newShown) != null);
+  const n = Math.floor((last - origin) / binMs);
+  const counts = Array(n).fill(0);
+  const unknown = Array(n).fill(false);
+  samples.forEach((s, j) => {
+    if (j === 0 || known[j]) return;
+    const from = samples[j - 1].t, to = samples[j + 1]?.t ?? Infinity;
+    for (let k = Math.max(0, Math.floor((from - origin) / binMs)); k < n && origin + k * binMs < to; k += 1) unknown[k] = true;
+  });
+  for (const s of samples) for (const t of s.producedT ?? []) {
+    const k = Math.floor((t - origin) / binMs);
+    if (k >= 0 && k < n) counts[k] += 1;
+  }
+  return { basis: "grid", bins: counts.map((c, k) => (unknown[k] ? null : c * (1000 / binMs))) };
+}
+
 // The raw samples -> one row a second (the first sample is the origin).
 export function deriveSeconds(samples, { tps = null } = {}) {
   const rows = [];
@@ -211,6 +242,7 @@ export function deriveSeconds(samples, { tps = null } = {}) {
   const t0 = samples[0]?.t ?? 0;
   let booted = false;
   const { bins } = newFrameBins(samples);
+  const produced = producedBins(samples).bins;
   let nextBin = 0;
   for (let i = 1; i < samples.length; i += 1) {
     const a = samples[i - 1], b = samples[i];
@@ -253,8 +285,14 @@ export function deriveSeconds(samples, { tps = null } = {}) {
     // the worker's produced rate (0208, WebGPU only); off WebGPU (the
     // software renderer: none) the sampler's XFB copies a second, so a core
     // rendering 7 frames a second at full speed is seen (render-starved)
-    const producedFps = num(ib.producedFps) ?? (carried?.xfbPerSec != null ? carried.xfbPerSec : null);
-    const producedFrom = num(ib.producedFps) != null ? "worker" : carried?.xfbPerSec != null ? "xfb" : null;
+    // on the grid when the run recorded the produced frames (producedBins):
+    // the mean of this row's known bins; else the worker's rate
+    const ownProduced = produced ? own.map((x) => produced[x.k] ?? null) : null;
+    const knownProduced = ownProduced ? ownProduced.filter((x) => x != null) : [];
+    const producedFps = produced
+      ? (knownProduced.length ? knownProduced.reduce((n, x) => n + x, 0) / knownProduced.length : null)
+      : num(ib.producedFps) ?? (carried?.xfbPerSec != null ? carried.xfbPerSec : null);
+    const producedFrom = produced ? (producedFps != null ? "grid" : null) : num(ib.producedFps) != null ? "worker" : carried?.xfbPerSec != null ? "xfb" : null;
     const speed = carried?.speed ?? num(ib.speed);
     const draws = delta(ia.draws, ib.draws);
     const made = producedFps != null && producedFps * dt >= 1 ? producedFps * dt : null;
@@ -287,21 +325,30 @@ export function deriveSeconds(samples, { tps = null } = {}) {
       speed: round(speed, 1), newFps: round(newFps, 1), newFpsWorker: round(newFpsWorker, 1), producedFps: round(producedFps, 1), producedFrom,
       cadence: ref, sceneCadence, content,
       // each grid second's smoothness (null: unknown); the row's, its worst
-      smoothBins: own.map((x) => ({ t: round((x.to - t0) / 1000, 2), newFrames: x.newFrames, smoothness: smoothOf(x.newFrames, ref) })),
-      smoothness: own.length && own.every((x) => x.newFrames != null) ? Math.min(...own.map((x) => smoothOf(x.newFrames, ref))) : null,
+      // (on the grid: each second its own content judgement against what
+      // was made in that second; what was made unknown, the second unknown)
+      smoothBins: own.map((x, i) => {
+        if (!produced) return { t: round((x.to - t0) / 1000, 2), newFrames: x.newFrames, smoothness: smoothOf(x.newFrames, ref) };
+        const made = ownProduced[i];
+        const binContent = made != null && contentSecond({ producedFps: made, speed, cadence: sceneCadence, ...occupancy });
+        return { t: round((x.to - t0) / 1000, 2), newFrames: x.newFrames, produced: made, content: binContent, smoothness: made == null ? null : smoothOf(x.newFrames, binContent ? made : sceneCadence) };
+      }),
+      smoothness: null,
       viRate: round(viRate, 1), presents: (b.presents ?? []).length, hitches50, hitches100, maxGapMs: round(maxGapMs, 1),
       // the presenting worker's longest stall in the second (sampler rows)
       workerLagMs: Array.isArray(b.samplerTicks) && b.samplerTicks.length ? Math.max(...b.samplerTicks.map((x) => x[1])) : null,
       discBps: carried?.discBps == null ? null : Math.round(carried.discBps),
       // copies per frame need the worker's own produced count (off WebGPU
       // produced IS the copies: 1 by construction, so unknown)
-      xfbPerFrame: producedFrom === "worker" && carried?.xfbPerSec != null && producedFps > 0 ? round(carried.xfbPerSec / producedFps, 2) : null,
+      xfbPerFrame: (producedFrom === "worker" || producedFrom === "grid") && carried?.xfbPerSec != null && producedFps > 0 ? round(carried.xfbPerSec / producedFps, 2) : null,
       drawsPerFrame: draws != null && made ? round(draws / made, 1) : null,
       outOfOrder: delta(ia.outOfOrder, ib.outOfOrder),
       ...occupancy,
       integrity: b.integrity ?? null, film: b.film ?? null, filmFrom: a.film?.pos ?? null
     });
   }
+  // a row's smoothness: its worst grid second, null unless all are known
+  for (const r of rows) r.smoothness = r.smoothBins.length && r.smoothBins.every((x) => x.smoothness != null) ? Math.min(...r.smoothBins.map((x) => x.smoothness)) : null;
   return rows;
 }
 
@@ -503,7 +550,7 @@ export function analyzeRun(raw, { integrityAllow = [] } = {}) {
   }
   const all = rows.length >= 2 ? summarizeSeconds(rows, { integrityAllow }) : null;
   return {
-    seconds: rows.length, newFramesBasis: newFrameBins(raw.samples ?? []).basis, completion: completionOf(markers, reached, segments), segments, phases: kinds, sections, overall: all,
+    seconds: rows.length, newFramesBasis: newFrameBins(raw.samples ?? []).basis, producedBasis: producedBins(raw.samples ?? []).basis, completion: completionOf(markers, reached, segments), segments, phases: kinds, sections, overall: all,
     integrityFailed: Boolean(all?.integrity?.fatal?.length),
     rows: rows.map(({ integrity, film, filmFrom, at, ...r }) => ({ ...r, filmPos: film?.pos ?? null }))
   };

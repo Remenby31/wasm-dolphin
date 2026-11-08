@@ -103,10 +103,10 @@ test("the worker reads the tag from SUBMIT_PRESENT and counts at queue and show 
   assert.match(worker, /case WGPU_CMD_OP_SUBMIT_PRESENT:\n\s+backbufferPresentPending = false;\n(?:\s+\/\/.*\n)+\s+const presentFrameTag = u32\[recWord \+ 1\];\n\s+const presentFrameTagEpoch = u32\[recWord \+ 2\];/);
   // vsync: the tag rides on the queued frame, counted when queued and when shown
   assert.match(worker, /queueWgpuVsyncFrame\([^;]*,\n\s+presentFrameTag, presentFrameTagEpoch\);/);
-  assert.match(worker, /wgpuVsync\.queueFrame\(\{ coreFrame, shownVi, stream, tick: wgpuVsyncTick, at, tag, tagEpoch \}, \{ hidden \}\);\n\s+wgpuVsyncCountDrops\(before\);\n\s+if \(!frame\) return false;\n.*\n\s+wgpuNewFrames\.queued\(tag, tagEpoch\);/);
+  assert.match(worker, /wgpuVsync\.queueFrame\(\{ coreFrame, shownVi, stream, tick: wgpuVsyncTick, at, tag, tagEpoch \}, \{ hidden \}\);\n\s+wgpuVsyncCountDrops\(before\);\n\s+if \(!frame\) return false;\n.*\n\s+if \(wgpuNewFrames\.queued\(tag, tagEpoch\)\) recordProducedFrame\(\);/);
   assert.match(worker, /wgpuVsync\.shown\(f\);\n\s+wgpuNewFrames\.shown\(f\.tag, f\.tagEpoch\);/);
   // immediate: shown at the submit
-  assert.match(worker, /wgpuNewFrames\.queued\(presentFrameTag, presentFrameTagEpoch\);\n\s+wgpuNewFrames\.shown\(presentFrameTag, presentFrameTagEpoch\);\n\s+recordPresentedFrame\(/);
+  assert.match(worker, /if \(wgpuNewFrames\.queued\(presentFrameTag, presentFrameTagEpoch\)\) recordProducedFrame\(\);\n\s+wgpuNewFrames\.shown\(presentFrameTag, presentFrameTagEpoch\);\n\s+recordPresentedFrame\(/);
   // per window, reset at boot, in the frame stats
   assert.match(worker, /\(\{ newFramesPerSec, newFramesProducedPerSec \} = wgpuNewFrames\.window\(profileElapsedMs\)\);/);
   const reset = worker.slice(worker.indexOf("function resetPresentationBuffer()"), worker.indexOf("function readDetailedCoreStat("));
