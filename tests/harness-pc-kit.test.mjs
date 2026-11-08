@@ -6,7 +6,8 @@
 // display mode, the remote PowerShell encoding, the preflight checklist, the
 // calibration search on a model CPU, the job flow against a simulated PC,
 // and salon-pc.ps1 itself under pwsh with powercfg mocked (skipped without
-// pwsh). Nothing here is timed.
+// pwsh). Nothing here is timed. --engine HEAD: CI's checkout has neither
+// origin/main nor ../salon/engine.lock.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -262,7 +263,7 @@ test("pc-run: the whole flow in --dry-run (no connection)", () => {
   try {
     const film = path.join(dir, "f.json");
     writeFileSync(film, "{}");
-    const r = spawnSync(process.execPath, ["harness/remote/pc-run.mjs", "run", "--host", "pc", "--dry-run", "--out", path.join(dir, "out"), "--iso", "C:\\d\\g.iso", "--film", `1p=${film}`, "--clamp-mhz", "4300", "--runs", "1", "--job", "dry"], { cwd: ROOT, encoding: "utf8", env: { ...process.env, CLAUDE_JOB_DIR: "" } });
+    const r = spawnSync(process.execPath, ["harness/remote/pc-run.mjs", "run", "--host", "pc", "--dry-run", "--out", path.join(dir, "out"), "--iso", "C:\\d\\g.iso", "--film", `1p=${film}`, "--clamp-mhz", "4300", "--runs", "1", "--job", "dry", "--engine", "HEAD"], { cwd: ROOT, encoding: "utf8", env: { ...process.env, CLAUDE_JOB_DIR: "" } });
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stderr, /-Action 'clamp' -Job 'dry' -MaxMhz 4300/);
     assert.match(r.stderr, /-Action 'restore' -Job 'dry'/);
