@@ -414,7 +414,9 @@ export function summarizeSeconds(rows, { integrityAllow = [] } = {}) {
   const speed = triple(rows.map((r) => r.speed)), newFps = triple(rows.map((r) => r.newFps)), smooth = triple(grid);
   const smoothReliable = grid.length > 0 && smoothUnknown <= SMOOTH_UNKNOWN_MAX_SHARE * grid.length;
   // an unknown smoothness is never ranked good: it comes first
-  const worst = rows.filter((r) => r.smoothness != null || r.speed != null || (r.smoothBins?.length ?? 0) > 0)
+  // a row owning no grid second (two readings in one second) has no
+  // smoothness of its own: left out, not ranked over a bad one
+  const worst = rows.filter((r) => (Array.isArray(r.smoothBins) ? r.smoothBins.length > 0 : r.smoothness != null || r.speed != null))
     .sort((a, b) => (a.smoothness ?? -1) - (b.smoothness ?? -1) || (a.speed ?? 999) - (b.speed ?? 999))
     .slice(0, 3).map((r) => ({ t: r.t, speed: r.speed, newFps: r.newFps, smoothness: r.smoothness }));
   const sum = (k) => rows.reduce((s, r) => s + (r[k] ?? 0), 0);
@@ -536,7 +538,17 @@ export function parcoursVerdict(baseline, candidate, noise = null) {
   const phases = {};
   for (const k of keys) {
     const of = (xs) => xs.map((a) => phaseMetrics(a)[k]).filter(Boolean);
-    phases[k] = verdictOf(of(b), of(c), { noise: noise?.[k] ?? null, floor: PARCOURS_FLOOR, metrics: PARCOURS_PRIMARY });
+    const v = verdictOf(of(b), of(c), { noise: noise?.[k] ?? null, floor: PARCOURS_FLOOR, metrics: PARCOURS_PRIMARY });
+    // a smoothness p5 marked unreliable on either side (unknown seconds past
+    // SMOOTH_UNKNOWN_MAX_SHARE: a lost read can hide the worst second) is
+    // judged neither way: inconclusive
+    if ([...of(b), ...of(c)].some((m) => m.smoothReliable === false)) {
+      v.rows = v.rows.map((r) => (r.metric === "smoothP5" ? { ...r, regression: false, improvement: false, inconclusive: true, unreliable: true } : r));
+      v.regression = v.rows.some((r) => r.regression);
+      v.improvement = v.rows.some((r) => r.improvement);
+      v.inconclusive = true;
+    }
+    phases[k] = v;
   }
   const regressions = Object.entries(phases).flatMap(([k, v]) => v.rows.filter((r) => r.regression).map((r) => ({ where: k, ...r })));
   return {

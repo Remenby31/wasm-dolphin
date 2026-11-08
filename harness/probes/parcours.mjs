@@ -431,6 +431,8 @@ function writeSummary(outDir, meta, analyses, noise) {
     if (summary.browserMixed) reasons.push(summary.browserMixed);
     if (summary.newFramesBasis === "mixed") reasons.push("new frames counted on different bases (tag / all) across runs");
     for (const side of ["baseline", "candidate"]) if (of(side).filter(usable).length < 3) reasons.push(`${of(side).filter(usable).length} usable ${side} run(s) (complete, clean, calm), 3 needed`);
+    const unreliable = Object.entries(summary.verdict.phases).filter(([, v]) => v.rows.some((r) => r.unreliable)).map(([k]) => k);
+    if (unreliable.length) reasons.push(`smoothness p5 unreliable (unknown seconds) in ${unreliable.join(", ")}`);
     if (summary.verdict.inconclusive) reasons.push("a phase or section has no verdict");
     summary.noVerdict = reasons.length ? reasons : null;
   } else {

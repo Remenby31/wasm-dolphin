@@ -797,3 +797,34 @@ test("the new frames basis per run: refused across bases (an A/B, an A/A's noise
   const probe = readFileSync(new URL("../harness/probes/parcours.mjs", import.meta.url), "utf8");
   assert.match(probe, /new frames counted on different bases \(tag \/ all\) across runs/);
 });
+
+test("A/B: a smoothness p5 marked unreliable on either side is judged neither way (a lost read during a freeze hid the worst second)", () => {
+  const run = (smoothP5, smoothReliable) => ({ completion: { completed: true }, integrityFailed: false, phases: { menu: { metrics: { seconds: 20, speedMedian: 100, speedP5: 99, newFpsMedian: 60, smoothP5, smoothSeconds: 20, smoothUnknown: smoothReliable ? 0 : 2, smoothReliable, hitches100: 0 } } }, sections: {} });
+  // baseline p5 40; the candidate's read lost during a 600 ms freeze: its worst second unknown, p5 70
+  const v = parcoursVerdict([run(40, true), run(41, true), run(40, true)], [run(70, false), run(71, false), run(70, false)]);
+  const row = v.phases["kind:menu"].rows.find((r) => r.metric === "smoothP5");
+  assert.equal(row.improvement, false);
+  assert.equal(row.regression, false);
+  assert.equal(row.unreliable, true);
+  assert.equal(v.phases["kind:menu"].inconclusive, true);
+  assert.equal(v.improvement, false, "no improvement accepted on an unreliable p5");
+  // the other way: an unreliable baseline hides no regression either
+  const w = parcoursVerdict([run(90, false), run(90, false), run(90, false)], [run(40, true), run(40, true), run(41, true)]);
+  assert.equal(w.phases["kind:menu"].rows.find((r) => r.metric === "smoothP5").regression, false);
+  assert.equal(w.phases["kind:menu"].inconclusive, true);
+  // both reliable: judged
+  const x = parcoursVerdict([run(40, true), run(41, true), run(40, true)], [run(70, true), run(71, true), run(70, true)]);
+  assert.equal(x.phases["kind:menu"].rows.find((r) => r.metric === "smoothP5").improvement, true);
+  const probe = readFileSync(new URL("../harness/probes/parcours.mjs", import.meta.url), "utf8");
+  assert.match(probe, /smoothness p5 unreliable \(unknown seconds\) in/);
+});
+
+test("worst seconds: a row owning no grid second is left out, never ranked over a bad one", () => {
+  const rows = [
+    { t: 1, speed: 100, smoothness: null, smoothBins: [] },
+    { t: 2, speed: 100, smoothness: 90, smoothBins: [{ t: 2, newFrames: 54, smoothness: 90 }] },
+    { t: 3, speed: 100, smoothness: 100, smoothBins: [{ t: 3, newFrames: 60, smoothness: 100 }] },
+    { t: 4, speed: 100, smoothness: null, smoothBins: [{ t: 4, newFrames: null, smoothness: null }] }
+  ];
+  assert.deepEqual(summarizeSeconds(rows).worst.map((w) => w.t), [4, 2, 3], "the unknown second first, the healthy empty row out");
+});
