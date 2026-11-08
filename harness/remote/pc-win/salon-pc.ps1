@@ -369,7 +369,9 @@ function Status {
     $n = 0
     if ([int]::TryParse($raw, [ref]$n)) { $exit = $n } else { $exit = -1 }
   }
-  if (Test-Path -LiteralPath (Join-Path $jd "log")) { $tail = @(Get-Content -LiteralPath (Join-Path $jd "log") -Tail 15) }
+  # plain strings: Get-Content's lines carry PSProvider & co., which
+  # ConvertTo-Json -Depth 8 walks for minutes (CI windows-2025)
+  if (Test-Path -LiteralPath (Join-Path $jd "log")) { $tail = @(Get-Content -LiteralPath (Join-Path $jd "log") -Tail 15 | ForEach-Object { [string]$_ }) }
   $task = Get-ScheduledTask -TaskPath $TaskPath -TaskName $Job -ErrorAction SilentlyContinue
   $state = "missing"; if ($done) { $state = "done" } elseif ($task) { $state = "$($task.State)".ToLower() }
   Out-Result ([ordered]@{ action = "status"; job = $Job; state = $state; exit = $exit; logTail = $tail })
