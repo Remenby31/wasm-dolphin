@@ -30,7 +30,10 @@ import { decodeReport } from "./lib/report-rows.mjs";
 const BASE = "core=upstream&video=software&presenter=2d&cpu=dual&speed=0&fastsw=0&efbaccess=1&metrics=1";
 export const CONFIGS = {
   interp: `${BASE}&wasmjit=0`,
-  jit: `${BASE}&wasmjit=1&jitwarmup=120&forcejit=1`
+  // jitwarmup=0: the JIT from the first frame. The warmup counts XFB frames;
+  // with the default the short programs finished on the interpreter (the
+  // gate caught it: 0 JIT blocks).
+  jit: `${BASE}&wasmjit=1&jitwarmup=0&forcejit=1`
 };
 
 async function runOne(server, iso, query, timeoutSec) {
