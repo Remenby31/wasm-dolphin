@@ -3,8 +3,9 @@
 // SPDX-License-Identifier: MIT
 //
 // The PC kit's single-thread Wasm bench (research/pc-windows-kit.md): the
-// two generated kernels of lib/wasm-kernel.mjs (core: L1-resident; front:
-// ~830 KiB of wasm and 4 MiB of memory behind call_indirect) run in a
+// generated kernels of lib/wasm-kernel.mjs (core: L1-resident; front:
+// ~830 KiB of wasm and 4 MiB of memory behind call_indirect; alu: 16 live
+// locals, the JIT's tell, outside the score) run in a
 // dedicated worker of the browser under test, the thread type that carries
 // the emulated CPU. Per kernel: ns per dispatch at the first calls (cold:
 // Liftoff, or an interpreter) and at the end (hot: after tier-up), their
@@ -25,7 +26,7 @@ import { parseArgs } from "node:util";
 
 import { launchChrome } from "../lib/browser.mjs";
 import { median, round } from "../lib/stats.mjs";
-import { buildKernel, reference, SHAPES } from "../lib/wasm-kernel.mjs";
+import { buildKernel, reference, SCORE_KERNELS, SHAPES } from "../lib/wasm-kernel.mjs";
 
 export const BENCH_VERSION = 1;
 // A first call of this many dispatches checks the engine against the JS
@@ -57,7 +58,7 @@ export function summarizeCalls(nsPerDispatch, coldFirstCalls = null) {
 
 // The bench's score: geometric mean of the kernels' hot M dispatches/s.
 export function benchScore(kernels) {
-  const v = Object.values(kernels).map((k) => k?.mdps);
+  const v = SCORE_KERNELS.map((k) => kernels[k]?.mdps);
   if (!v.length || v.some((x) => !(x > 0))) return null;
   return round(Math.exp(v.reduce((s, x) => s + Math.log(x), 0) / v.length), 3);
 }
@@ -68,7 +69,7 @@ export function benchScore(kernels) {
 // windows-2025). So against two references measured on the same machine:
 // Chrome as it is, and Chrome with --js-flags=--disable-optimizing-compilers
 // (exactly "JavaScript optimization" off: Liftoff alone, no tier-up).
-//   interpreter   hot core kernel >= INTERPRETER_FACTOR x Chrome's (Edge's
+//   interpreter   hot alu kernel >= INTERPRETER_FACTOR x Chrome's (Edge's
 //                 enhanced security: DrumBrake, no JIT)
 //   liftoff-only  closer to the Liftoff reference than to Chrome's
 //   jit           otherwise
@@ -77,8 +78,10 @@ export function benchScore(kernels) {
 export const INTERPRETER_FACTOR = 5;
 export const LIFTOFF_GAP = 1.1;
 export const LIFTOFF_FLAGS = "--js-flags=--disable-optimizing-compilers";
-export function classifyJit(subject, { reference, liftoff = null } = {}) {
-  const a = subject?.kernels?.core?.hotNs, ref = reference?.kernels?.core?.hotNs, lo = liftoff?.kernels?.core?.hotNs;
+// The kernel read: alu (16 live locals: the widest Liftoff/TurboFan gap).
+export const JIT_KERNEL = "alu";
+export function classifyJit(subject, { reference, liftoff = null, kernel = JIT_KERNEL } = {}) {
+  const a = subject?.kernels?.[kernel]?.hotNs, ref = reference?.kernels?.[kernel]?.hotNs, lo = liftoff?.kernels?.[kernel]?.hotNs;
   if (!(a > 0) || !(ref > 0)) return { verdict: "unknown", factor: null, gap: null };
   const factor = round(a / ref, 2);
   const gap = lo > 0 ? round(lo / ref, 2) : null;
@@ -194,7 +197,7 @@ async function main() {
   const runs = [];
   for (let i = 0; i < Number(values.runs); i += 1) {
     const r = await benchOnce({ warmSec: Number(values["warm-sec"]), log });
-    log(`run ${i + 1}: score ${r.score}, core ${r.kernels.core.hotNs} ns (cold ${r.kernels.core.coldNs}), front ${r.kernels.front.hotNs} ns (cold ${r.kernels.front.coldNs})`);
+    log(`run ${i + 1}: score ${r.score}, ${Object.entries(r.kernels).map(([k, v]) => `${k} ${v.hotNs} ns (cold ${v.coldNs})`).join(", ")}`);
     runs.push(r);
   }
   const report = {
@@ -204,7 +207,7 @@ async function main() {
     ...summarizeRuns(runs), perRun: runs
   };
   if (values.out) writeFileSync(values.out, JSON.stringify(report, null, 1) + "\n");
-  console.log(JSON.stringify({ score: report.score, spreadPct: report.spreadPct, coreHotNs: report.kernels?.core?.hotNs ?? null }));
+  console.log(JSON.stringify({ score: report.score, spreadPct: report.spreadPct, hotNs: Object.fromEntries(Object.entries(report.kernels ?? {}).map(([k, v]) => [k, v.hotNs])) }));
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {

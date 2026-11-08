@@ -21,8 +21,16 @@ const OPS = ["add", "xor", "mul", "rotl", "shru", "load", "store", "bswap", "f64
 
 export const SHAPES = Object.freeze({
   core: Object.freeze({ funcs: 8, memWords: 4096, opsPerFunc: 24, seed: 0x5a17 }),
-  front: Object.freeze({ funcs: 2048, memWords: 1 << 20, opsPerFunc: 24, seed: 0x5a17 })
+  front: Object.freeze({ funcs: 2048, memWords: 1 << 20, opsPerFunc: 24, seed: 0x5a17 }),
+  // The JIT's tell, not in the score: one loop over 16 live i32 locals, no
+  // call, no memory. Liftoff keeps them on the stack (x64: more than 5
+  // locals are spilled, research/deep-x86-windows.md §1.3), TurboFan in
+  // registers; the core kernel, bound by call_indirect and memory, showed
+  // no gap between the two on CI windows-2025.
+  alu: Object.freeze({ kind: "alu", locals: 16, seed: 0x5a17 })
 });
+// The kernels the score is made of.
+export const SCORE_KERNELS = Object.freeze(["core", "front"]);
 
 function rng(seed) {
   let x = seed >>> 0 || 1;
@@ -89,9 +97,41 @@ function emitOp([kind, imm], memWords) {
   }
 }
 
+function aluPlan({ locals, seed }) {
+  const r = rng(seed);
+  return {
+    init: Array.from({ length: locals }, () => r() >>> 0),
+    steps: Array.from({ length: locals }, (_, i) => ({ j: (i + 1) % locals, k: (i + 5) % locals, rot: 1 + (r() % 31), mul: (r() | 1) >>> 0 }))
+  };
+}
+// run(n): n rounds of v[i] = rotl(v[i] ^ v[j], rot) + v[k] * mul over every
+// local; returns their xor.
+function buildAlu(shape) {
+  const { init, steps } = aluPlan(shape);
+  const L = shape.locals, N = 0, CNT = L + 1, V = (i) => 1 + i;
+  const code = [
+    ...init.flatMap((v, i) => [...i32c(v), ...set(V(i))]),
+    0x02, 0x40, ...get(N), 0x45, 0x0d, 0,
+    0x03, 0x40,
+    ...steps.flatMap((st, i) => [...get(V(i)), ...get(V(st.j)), XOR, ...i32c(st.rot), ROTL, ...get(V(st.k)), ...i32c(st.mul), MUL, ADD, ...set(V(i))]),
+    ...get(CNT), ...i32c(1), ADD, 0x22, CNT, ...get(N), 0x49, 0x0d, 0,
+    0x0b, 0x0b,
+    ...get(V(0)), ...init.slice(1).flatMap((_, i) => [...get(V(i + 1)), XOR])
+  ];
+  const b = [...vec([[L + 1, 0x7f]]), ...code, 0x0b];
+  const T = [0x60, 1, 0x7f, 1, 0x7f];
+  return new Uint8Array([
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+    ...section(1, vec([T])), ...section(3, vec([[0]])),
+    ...section(7, vec([[...str("run"), 0x00, 0]])),
+    ...section(10, vec([[...uleb(b.length), ...b]]))
+  ]);
+}
+
 // The module: functions 0..funcs-1 (i32) -> i32 in a table, `run(n)` the
-// dispatch loop, `memory` exported.
+// dispatch loop, `memory` exported (the alu shape: its own loop).
 export function buildKernel(shape) {
+  if (shape.kind === "alu") return buildAlu(shape);
   const plan = kernelPlan(shape);
   const { funcs, memWords } = shape;
   const T = [0x60, 1, 0x7f, 1, 0x7f];
@@ -126,6 +166,17 @@ export function buildKernel(shape) {
 
 // The same computation in JS (a checksum for tests; never timed).
 export function reference(shape, n) {
+  if (shape.kind === "alu") {
+    const { init, steps } = aluPlan(shape);
+    const v = Uint32Array.from(init);
+    for (let c = 0; c < n; c += 1) {
+      for (let i = 0; i < v.length; i += 1) {
+        const st = steps[i], x = (v[i] ^ v[st.j]) >>> 0;
+        v[i] = (((x << st.rot) | (x >>> (32 - st.rot))) + Math.imul(v[st.k], st.mul)) >>> 0;
+      }
+    }
+    return v.reduce((h, x) => (h ^ x) >>> 0, 0);
+  }
   const plan = kernelPlan(shape);
   const mem = new Uint32Array(shape.memWords);
   const mask = shape.memWords - 1;

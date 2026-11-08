@@ -30,6 +30,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const quiet = () => {};
 
 test("pc-kit: the generated kernels compute what their JS reference computes", () => {
+  assert.deepEqual(Object.keys(SHAPES), ["core", "front", "alu"]);
   for (const [name, shape] of Object.entries(SHAPES)) {
     const run = new WebAssembly.Instance(new WebAssembly.Module(buildKernel(shape)), {}).exports.run;
     for (const n of [0, 1, 777]) assert.equal(run(n) >>> 0, reference(shape, n), `${name} run(${n})`);
@@ -46,10 +47,10 @@ test("pc-bench: cold/hot, ratio, spread, score and the JIT verdicts", () => {
   assert.equal(s.ratio, 0.444);
   assert.equal(s.mdps, 250);
   assert.equal(summarizeCalls([1, 2]).hotNs, null, "too few calls: no figure");
-  assert.equal(benchScore({ core: { mdps: 100 }, front: { mdps: 25 } }), 50);
+  assert.equal(benchScore({ core: { mdps: 100 }, front: { mdps: 25 }, alu: { mdps: 1 } }), 50, "alu is not in the score");
   assert.equal(benchScore({ core: { mdps: 100 }, front: { mdps: null } }), null);
   assert.equal(summarizeCalls([...Array(13).fill(4)], [9, 8, 10]).coldNs, 9, "cold from the fresh modules' first calls");
-  const k = (hotNs) => ({ kernels: { core: { hotNs } } });
+  const k = (hotNs) => ({ kernels: { alu: { hotNs } } });
   const refs = { reference: k(2), liftoff: k(5) };
   assert.equal(classifyJit(k(40), refs).verdict, "interpreter");
   assert.equal(classifyJit(k(4.5), refs).verdict, "liftoff-only");
@@ -364,9 +365,9 @@ test("pc-run: the job report applies the protocol's exclusions run by run", () =
     writeFileSync(path.join(dir, "sampler.jsonl"), rows.map((r) => JSON.stringify(r)).join("\r\n"));
     writeFileSync(path.join(dir, "kit-record.json"), JSON.stringify({ clamp: { maxMhz: 4300, target: 50 }, affinity: "0xfff", exit: 0, restore: { diff: [] } }));
     const st = { visibility: "visible", focus: true, rafMs: { p50: 16.7 } };
-    writeFileSync(path.join(dir, "bench-pre-chrome.json"), JSON.stringify({ score: 50.5, kernels: { core: { hotNs: 2 } }, perRun: [{ state: st }] }));
-    writeFileSync(path.join(dir, "bench-pre-chrome-liftoff.json"), JSON.stringify({ score: 30, kernels: { core: { hotNs: 5 } }, perRun: [{ state: st }] }));
-    writeFileSync(path.join(dir, "bench-post-chrome.json"), JSON.stringify({ score: 46, kernels: { core: { hotNs: 2.2 } }, perRun: [{ state: { ...st, visibility: "hidden" } }] }));
+    writeFileSync(path.join(dir, "bench-pre-chrome.json"), JSON.stringify({ score: 50.5, kernels: { alu: { hotNs: 2 } }, perRun: [{ state: st }] }));
+    writeFileSync(path.join(dir, "bench-pre-chrome-liftoff.json"), JSON.stringify({ score: 30, kernels: { alu: { hotNs: 5 } }, perRun: [{ state: st }] }));
+    writeFileSync(path.join(dir, "bench-post-chrome.json"), JSON.stringify({ score: 46, kernels: { alu: { hotNs: 2.2 } }, perRun: [{ state: { ...st, visibility: "hidden" } }] }));
     const run = (v) => ({ side: "candidate", run: 1, browserVersion: v, completion: { completed: true }, phases: Object.fromEntries(["cinematic", "menu", "game"].map((p) => [p, { metrics: { speedP5: 99, smoothP5: 96, smoothReliable: true } }])) });
     [1, 2, 3, 4, 5].forEach((i) => { mkdirSync(path.join(dir, `parcours-1p-chrome-${i}`)); writeFileSync(path.join(dir, `parcours-1p-chrome-${i}`, "summary.json"), JSON.stringify({ runs: [run(i === 5 ? "158.0.1.2" : "157.0.8103.39")] })); });
     const md = jobReport(dir);
