@@ -56,8 +56,26 @@ the same in `npm test`, which core-build.yml runs on a core pull request's
 own build. `.github/workflows/compat.yml` publishes the table on every pull
 request and push to main.
 
+## The same hwtests on the whole machine
+
+`homebrew/build.sh` builds the cputest programs for the GameCube from the
+hwtests sources at the same pinned commit (CI fetches it), in the
+devkitPPC image `harness/homebrew/build.sh` pins (`-mogc`, libogc `cube`,
+fmt header-only). `homebrew/hwtests-report.cpp` replaces the hwtests'
+network reporter: the counts and the first 10 failures (source line and
+FNV-1a of the failure message) are painted into the XFB as checksummed rows
+(`homebrew/report.h`), read back from exact captures by `lib/report-rows.mjs`.
+`shim/` stands in for the Wii-only headers (no Wii remote, no network).
+reciprocal and fctiw are left out (2^32 inputs each: hours).
+
+`browser.mjs` boots each disc in headless Chromium (harness sessions,
+software renderer at full resolution) on the interpreter and on the JIT,
+and compares each report with `machine-expected.json`: every count and
+failure must match, the JIT run must have compiled and run blocks, the
+interpreter run none. The `machine` job of `compat.yml` runs it (about 5
+minutes). The failures are the same gaps as in the Node port.
+
 ## Not yet ported
 
-`gxtest/` (needs the whole
-machine and an EFB-to-RAM read back: a devkitPPC build booted by the
-harness), homebrews for MMU/BAT, VI modes and memory cards.
+`gxtest/` on the machine job (next), homebrews for MMU/BAT, VI modes and
+memory cards.
