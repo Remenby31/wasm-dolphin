@@ -21,8 +21,8 @@ test("ported hwtests: no failure outside compat/expected-failures.json, none lis
   core.setFprf(false);
   const records = await runSuites(core);
   assert.ok(records.length > 29000, `only ${records.length} checks`);
-  assert.ok(records.filter((r) => r.jit.status === "pass").length > 23000, "the JIT ran too few checks");
-  assert.deepEqual(judge(records, expected.failures), []);
+  assert.ok(records.filter((r) => r.compiled && r.jit.status === "pass").length > 22000, "the JIT ran too few checks");
+  assert.deepEqual(judge(records, expected.failures, expected.jitCoverage), []);
 });
 
 test("judge: an unlisted failure and a listed pass are both problems", () => {
@@ -32,6 +32,21 @@ test("judge: an unlisted failure and a listed pass are both problems", () => {
   assert.equal(problems.length, 2);
   assert.match(problems[0], /unexpected fail \[interp\] a/);
   assert.match(problems[1], /now passes \[interp\] b/);
+});
+
+test("judge: the JIT differing from the interpreter is a problem even on a listed failure", () => {
+  const rec = { id: "f/x 1", suite: "f", code: 1, compiled: true,
+    interp: { status: "fail", got: "1", expected: "3" }, jit: { status: "fail", got: "2", expected: "3" } };
+  const problems = judge([rec], [{ match: "^f/x ", tiers: ["interp", "jit"], count: { interp: 1, jit: 1 } }]);
+  assert.equal(problems.length, 1);
+  assert.match(problems[0], /JIT differs from the interpreter: f\/x 1: interp 1, jit 2/);
+});
+
+test("judge: a suite's count of fully compiled checks must stay exact", () => {
+  const rec = (id, compiled) => ({ id, suite: "s", code: 0, compiled, interp: { status: "pass", got: "a" }, jit: { status: "pass", got: "a" } });
+  const records = [rec("s/1", true), rec("s/2", false)];
+  assert.deepEqual(judge(records, [], { s: 1 }), []);
+  assert.match(judge(records, [], { s: 2 })[0], /JIT coverage of s: 1 checks fully compiled, .* says 2/);
 });
 
 test("judge: a family of failures must keep its exact count", () => {

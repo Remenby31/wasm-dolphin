@@ -10,8 +10,10 @@
 //   node compat/run.mjs [--core-dir DIR] [--json FILE] [--md FILE] [--only SUITE,...]
 //
 // Exit 1 when a check fails without being listed in compat/expected-failures.json,
-// or when a listed failure now passes (remove it from the list). Exit 2 when
-// the core cannot run the oracle.
+// when a listed failure now passes (remove it from the list), when the JIT's
+// final state differs from the interpreter's in any check (never listable),
+// or when a suite's count of fully JIT-compiled checks differs from
+// `jitCoverage` in that file. Exit 2 when the core cannot run the oracle.
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { parseArgs } from "node:util";
@@ -35,7 +37,9 @@ export async function runSuites(core, suites = SUITES) {
       if (c.config?.fprf !== undefined) core.setFprf(c.config.fprf);
       const r = core.run(Uint32Array.from(c.program), c.state, MASK);
       if (c.config?.fprf !== undefined) core.setFprf(false);
-      const rec = { suite: name, source: mod.source, id: c.id, code: r.code, compiledOps: r.compiledOps };
+      // Compiled: the JIT ran the whole program (blr included) as WASM blocks.
+      const compiled = r.code >= 0 && r.code <= 1 && r.compiledOps === c.program.length;
+      const rec = { suite: name, source: mod.source, id: c.id, code: r.code, compiledOps: r.compiledOps, compiled };
       if (r.code < 0 || r.code > 2) {
         for (const t of TIERS) rec[t] = { status: "error", detail: r.message || `oracle code ${r.code}` };
       } else {
@@ -57,11 +61,16 @@ export async function runSuites(core, suites = SUITES) {
  * count: {tier: n}}): any check of the family may fail, but the number of
  * failures per tier must be exactly `count` (a fix or a new failure changes it).
  */
-export function judge(records, expectedFailures) {
+export function judge(records, expectedFailures, jitCoverage = null) {
   const known = new Map(expectedFailures.filter((e) => e.id).map((e) => [e.id, e]));
   const families = expectedFailures.filter((e) => e.match).map((e) => ({ ...e, re: new RegExp(e.match), seen: {} }));
   const problems = [];
+  const compiledBySuite = {};
   for (const rec of records) {
+    if (rec.compiled) compiledBySuite[rec.suite] = (compiledBySuite[rec.suite] ?? 0) + 1;
+    // The JIT must compute what the interpreter computes, failing check or not.
+    if (rec.code === 1 || (rec.jit.got !== undefined && rec.interp.got !== undefined && rec.jit.got !== rec.interp.got))
+      problems.push(`JIT differs from the interpreter: ${rec.id}: interp ${rec.interp.got ?? "?"}, jit ${rec.jit.got ?? "?"}`);
     const entry = known.get(rec.id);
     const family = families.find((f) => f.re.test(rec.id));
     for (const t of TIERS) {
@@ -78,6 +87,13 @@ export function judge(records, expectedFailures) {
         problems.push(`unexpected ${res.status} [${t}] ${rec.id}: got ${res.got ?? res.detail}, hardware ${res.expected ?? "?"}`);
       if (res.status === "pass" && listed)
         problems.push(`now passes [${t}] ${rec.id}: remove it from compat/expected-failures.json`);
+    }
+  }
+  if (jitCoverage) {
+    for (const suite of new Set(records.map((r) => r.suite))) {
+      const n = compiledBySuite[suite] ?? 0;
+      if (n !== jitCoverage[suite])
+        problems.push(`JIT coverage of ${suite}: ${n} checks fully compiled, compat/expected-failures.json says ${jitCoverage[suite]}`);
     }
   }
   for (const f of families) {
@@ -102,8 +118,8 @@ export function markdown(records, problems, meta) {
   const total = { n: 0, i: 0, j: 0, jc: 0, k: 0 };
   for (const [suite, rs] of bySuite) {
     const i = rs.filter((r) => r.interp.status === "pass").length;
-    const jc = rs.filter((r) => r.jit.status !== "n/c").length;
-    const j = rs.filter((r) => r.jit.status === "pass").length;
+    const jc = rs.filter((r) => r.compiled).length;
+    const j = rs.filter((r) => r.compiled && r.jit.status === "pass").length;
     const k = rs.filter((r) => TIERS.some((t) => r[t].expectedFailure)).length;
     total.n += rs.length; total.i += i; total.j += j; total.jc += jc; total.k += k;
     lines.push(`| ${suite} | ${rs.length} | ${pct(i, rs.length)} | ${pct(j, jc)} | ${jc} | ${k} |`);
@@ -152,7 +168,7 @@ async function main() {
   const t0 = Date.now();
   const records = await runSuites(core, suites);
   const expected = JSON.parse(readFileSync(new URL("./expected-failures.json", import.meta.url), "utf8"));
-  const problems = judge(records, expected.failures);
+  const problems = judge(records, expected.failures, expected.jitCoverage);
   let coreId = "core";
   try {
     const lock = JSON.parse(readFileSync(new URL("core.lock.json", coreDir), "utf8"));

@@ -4,7 +4,9 @@
 // and after fcmpo (with the C bit set or clear beforehand), and cr0 after
 // fcmpo (values measured on hardware). Dolphin computes FPRF only when
 // Config::MAIN_FPRF is on (off by default): `fprf` runs with it on,
-// `fprf@default` with the core's default.
+// `fprf@default` with the core's default. FPRF is read from the final FPSCR
+// rather than through mffs (which the JIT does not compile), so the JIT runs
+// the whole program.
 import { makeState, ppc, read, hex32, bitsOfDouble, bitsOfFloat, doubleBitsOfFloatBits, BLR } from "../../lib/ppc.mjs";
 
 export const source = "cputest/fprf.cpp";
@@ -41,18 +43,18 @@ export function makeCases(suite, config) {
       const state = (c) => makeState({ fpr: { 1: enc(v), 2: enc(-0), 5: enc(c ? NaN : 0), 6: enc(0) } });
       out.push({
         id: `${suite}/${w} arith ${name}`, config,
-        program: [add(3, 1, 2), ppc.mffs(4), BLR], state: state(false),
-        check: (s) => ({ got: bin((Number(read.ps0(s, 4) & 0xffffffffn) >>> 12) & 0x1f, 5), expected: bin(arith, 5) })
+        program: [add(3, 1, 2), BLR], state: state(false),
+        check: (s) => ({ got: bin((read.fpscr(s) >>> 12) & 0x1f, 5), expected: bin(arith, 5) })
       });
       for (const c of [false, true]) {
-        const program = [add(3, 5, 6), ppc.fcmpo(0, 1, 2), ppc.mffs(4), ppc.mfcr(3), BLR];
+        const program = [add(3, 5, 6), ppc.fcmpo(0, 1, 2), ppc.mfcr(3), BLR];
         out.push({
           id: `${suite}/${w} compare cr ${name} c=${+c}`, config, program, state: state(c),
           check: (s) => ({ got: bin(read.gpr(s, 3) >>> 28, 4), expected: bin(compare, 4) })
         });
         out.push({
           id: `${suite}/${w} compare fprf ${name} c=${+c}`, config, program, state: state(c),
-          check: (s) => ({ got: bin((Number(read.ps0(s, 4) & 0xffffffffn) >>> 12) & 0x1f, 5),
+          check: (s) => ({ got: bin((read.fpscr(s) >>> 12) & 0x1f, 5),
             expected: bin(compare | (c ? 0x10 : 0), 5) })
         });
       }
