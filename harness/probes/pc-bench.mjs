@@ -68,15 +68,18 @@ export function benchScore(kernels) {
 // tiers the small kernels up while the call is sized; seen on CI
 // windows-2025). So against two references measured on the same machine:
 // Chrome as it is, and Chrome with --js-flags=--disable-optimizing-compilers
-// (exactly "JavaScript optimization" off: Liftoff alone, no tier-up).
-//   interpreter   hot alu kernel >= INTERPRETER_FACTOR x Chrome's (Edge's
-//                 enhanced security: DrumBrake, no JIT)
-//   liftoff-only  closer to the Liftoff reference than to Chrome's
-//   jit           otherwise
-//   unknown       a reference missing, or the two references too close to
-//                 separate (< LIFTOFF_GAP apart: the kernel cannot tell)
-export const INTERPRETER_FACTOR = 5;
-export const LIFTOFF_GAP = 1.1;
+// (exactly "JavaScript optimization" off: Liftoff alone, no tier-up). On the
+// alu kernel (CI windows-2025, Chrome 156, 2026-11-08): 5.33 ns as is,
+// 62 ns without the optimizer or with --liftoff-only, 5.33 ns with
+// --no-liftoff; Edge 5.33 ns.
+//   interpreter   >= INTERPRETER_OVER_LIFTOFF x the Liftoff reference (Edge's
+//                 enhanced security: DrumBrake, no JIT; to confirm on the PC)
+//   liftoff-only  above the geometric middle of the two references
+//   jit           under it
+//   unknown       a reference missing, or the references closer than
+//                 LIFTOFF_GAP (the kernel would not tell them apart)
+export const INTERPRETER_OVER_LIFTOFF = 2;
+export const LIFTOFF_GAP = 2;
 export const LIFTOFF_FLAGS = "--js-flags=--disable-optimizing-compilers";
 // The kernel read: alu (16 live locals: the widest Liftoff/TurboFan gap).
 export const JIT_KERNEL = "alu";
@@ -85,9 +88,9 @@ export function classifyJit(subject, { reference, liftoff = null, kernel = JIT_K
   if (!(a > 0) || !(ref > 0)) return { verdict: "unknown", factor: null, gap: null };
   const factor = round(a / ref, 2);
   const gap = lo > 0 ? round(lo / ref, 2) : null;
-  if (factor >= INTERPRETER_FACTOR) return { verdict: "interpreter", factor, gap };
   if (!(gap >= LIFTOFF_GAP)) return { verdict: "unknown", factor, gap };
-  return { verdict: a >= (ref + lo) / 2 ? "liftoff-only" : "jit", factor, gap };
+  if (a >= INTERPRETER_OVER_LIFTOFF * lo) return { verdict: "interpreter", factor, gap };
+  return { verdict: a >= Math.sqrt(ref * lo) ? "liftoff-only" : "jit", factor, gap };
 }
 
 // The worker's program (a string: it runs in the browser). Per kernel:

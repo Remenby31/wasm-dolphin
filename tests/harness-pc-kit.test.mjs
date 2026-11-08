@@ -51,15 +51,16 @@ test("pc-bench: cold/hot, ratio, spread, score and the JIT verdicts", () => {
   assert.equal(benchScore({ core: { mdps: 100 }, front: { mdps: null } }), null);
   assert.equal(summarizeCalls([...Array(13).fill(4)], [9, 8, 10]).coldNs, 9, "cold from the fresh modules' first calls");
   const k = (hotNs) => ({ kernels: { alu: { hotNs } } });
-  const refs = { reference: k(2), liftoff: k(5) };
-  assert.equal(classifyJit(k(40), refs).verdict, "interpreter");
-  assert.equal(classifyJit(k(4.5), refs).verdict, "liftoff-only");
-  assert.equal(classifyJit(k(2.2), refs).verdict, "jit");
-  assert.equal(classifyJit(k(2.2), { reference: k(2), liftoff: k(2.1) }).verdict, "unknown", "references too close to tell");
-  assert.equal(classifyJit(k(2.2), {}).verdict, "unknown");
-  const f = benchFindings({ "bench-pre-chrome": k(2), "bench-pre-chrome-liftoff": k(5), "bench-pre-msedge": k(30) }, null);
+  // the CI windows-2025 readings: 5.33 ns as is, 62 ns without the optimizer
+  const refs = { reference: k(5.33), liftoff: k(62) };
+  assert.equal(classifyJit(k(5.33), refs).verdict, "jit");
+  assert.equal(classifyJit(k(62), refs).verdict, "liftoff-only", "Liftoff alone is ~12x: not an interpreter");
+  assert.equal(classifyJit(k(400), refs).verdict, "interpreter");
+  assert.equal(classifyJit(k(6), { reference: k(5.33), liftoff: k(6.5) }).verdict, "unknown", "references too close to tell");
+  assert.equal(classifyJit(k(6), {}).verdict, "unknown");
+  const f = benchFindings({ "bench-pre-chrome": k(5.33), "bench-pre-chrome-liftoff": k(62), "bench-pre-msedge": k(300) }, null);
   assert.deepEqual(f.map((x) => [x.name, x.jit.verdict]), [["bench-pre-chrome", "jit"], ["bench-pre-msedge", "interpreter"]]);
-  assert.equal(benchFindings({ "bench-chrome": k(2), "bench-chrome-liftoff": k(2.05) }, null)[0].jit.verdict, "liftoff-only?");
+  assert.equal(benchFindings({ "bench-chrome": k(5.33), "bench-chrome-liftoff": k(6) }, null)[0].jit.verdict, "liftoff-only?");
   assert.deepEqual(benchSteps("bench-pre", ["chrome", "msedge"], "C:\\j").map((x) => [x.name, x.env.HARNESS_CHROME_ARGS ?? ""]),
     [["bench-pre-chrome", ""], ["bench-pre-msedge", ""], ["bench-pre-chrome-liftoff", "--js-flags=--disable-optimizing-compilers"]]);
   assert.deepEqual(summarizeRuns([{ score: 10 }, { score: 12 }, { score: 11 }]), { runs: 3, score: 11, scores: [10, 12, 11], spreadPct: 18.2, kernels: {} });
@@ -366,7 +367,7 @@ test("pc-run: the job report applies the protocol's exclusions run by run", () =
     writeFileSync(path.join(dir, "kit-record.json"), JSON.stringify({ clamp: { maxMhz: 4300, target: 50 }, affinity: "0xfff", exit: 0, restore: { diff: [] } }));
     const st = { visibility: "visible", focus: true, rafMs: { p50: 16.7 } };
     writeFileSync(path.join(dir, "bench-pre-chrome.json"), JSON.stringify({ score: 50.5, kernels: { alu: { hotNs: 2 } }, perRun: [{ state: st }] }));
-    writeFileSync(path.join(dir, "bench-pre-chrome-liftoff.json"), JSON.stringify({ score: 30, kernels: { alu: { hotNs: 5 } }, perRun: [{ state: st }] }));
+    writeFileSync(path.join(dir, "bench-pre-chrome-liftoff.json"), JSON.stringify({ score: 30, kernels: { alu: { hotNs: 25 } }, perRun: [{ state: st }] }));
     writeFileSync(path.join(dir, "bench-post-chrome.json"), JSON.stringify({ score: 46, kernels: { alu: { hotNs: 2.2 } }, perRun: [{ state: { ...st, visibility: "hidden" } }] }));
     const run = (v) => ({ side: "candidate", run: 1, browserVersion: v, completion: { completed: true }, phases: Object.fromEntries(["cinematic", "menu", "game"].map((p) => [p, { metrics: { speedP5: 99, smoothP5: 96, smoothReliable: true } }])) });
     [1, 2, 3, 4, 5].forEach((i) => { mkdirSync(path.join(dir, `parcours-1p-chrome-${i}`)); writeFileSync(path.join(dir, `parcours-1p-chrome-${i}`, "summary.json"), JSON.stringify({ runs: [run(i === 5 ? "158.0.1.2" : "157.0.8103.39")] })); });

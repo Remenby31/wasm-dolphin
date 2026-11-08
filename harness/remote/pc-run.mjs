@@ -246,6 +246,8 @@ export function benchFindings(benches, target) {
       if (!g[key]) continue;
       const { name, b } = g[key];
       const jit = classifyJit(b, { reference: g.chrome?.b, liftoff: g["chrome-liftoff"]?.b });
+      // Chrome against itself: "jit" when its Liftoff reference is far
+      // slower; else its optimizer is off (a policy) or the kernel cannot tell
       const chromeJit = key === "chrome" ? { ...jit, verdict: jit.gap >= LIFTOFF_GAP ? "jit" : jit.gap == null ? "unknown" : "liftoff-only?" } : jit;
       const st = b?.perRun?.[0]?.state ?? null;
       const page = st ? { visible: st.visibility === "visible", focus: st.focus, rafP50: st.rafMs?.p50 ?? null } : null;

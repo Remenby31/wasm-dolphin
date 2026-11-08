@@ -117,6 +117,7 @@ jobs:
             const f = benchFindings({ "bench-chrome": r("bench-chrome"), "bench-chrome-liftoff": r("bench-chrome-liftoff"), "bench-msedge": r("bench-msedge") }, null);
             for (const x of f) console.log(x.name, x.score, JSON.stringify(x.jit), JSON.stringify(x.page));
             if (f.find((x) => x.browser === "chrome")?.jit.verdict !== "jit") throw new Error("Chrome not told apart from Chrome without optimizer: the bench cannot see an optimizer off");
+            if (f.find((x) => x.browser === "msedge")?.jit.verdict !== "jit") throw new Error("the runner Edge is not read as jit");'
       - name: A job through the scheduled task, in the logged-on session
         shell: powershell
         run: |
