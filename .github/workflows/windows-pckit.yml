@@ -134,8 +134,13 @@ jobs:
           @{ cwd = "$PWD"; affinity = "0x3"; restoreAtEnd = $true; env = @{ X = "1" }; steps = @(@{ name = "hello"; args = @("-e", "console.log(process.env.X)"); env = @{}; continueOnError = $false }) } | ConvertTo-Json -Depth 5 | Set-Content -Encoding UTF8 "$k\jobs\ci2\spec.json"
           Kit @("-Action", "snapshot", "-Job", "ci2", "-KitDir", $k)
           Kit @("-Action", "start", "-Job", "ci2", "-KitDir", $k)
+          # one traced status call: on a hang, the last lines it reached
+          $tj = Start-Job -ScriptBlock { param($s, $k) powershell -NoProfile -ExecutionPolicy Bypass -Command "Set-PSDebug -Trace 1; & '$s' -Action status -Job ci2 -KitDir '$k'" 2>&1 } -ArgumentList $s, $k
+          if (-not (Wait-Job $tj -Timeout 40)) { "TRACED STATUS HUNG; last lines:"; Stop-Job $tj }
+          Receive-Job $tj | Select-Object -Last 25 | ForEach-Object { "  trace: $_" }
+          Get-Process powershell, node -ErrorAction SilentlyContinue | Format-Table Id, ProcessName, SessionId, StartTime | Out-String
           $st = ""
-          for ($i = 0; $i -lt 20; $i++) { Start-Sleep 3; $st = Kit @("-Action", "status", "-Job", "ci2", "-KitDir", $k); "[$i] $st"; if ($st -match '"state":"done"') { break } }
+          for ($i = 0; $i -lt 3; $i++) { Start-Sleep 3; $st = Kit @("-Action", "status", "-Job", "ci2", "-KitDir", $k); "[$i] $st"; if ($st -match '"state":"done"') { break } }
           Get-ChildItem "$k\jobs\ci2" | Format-Table Name, Length | Out-String
           Get-Content "$k\jobs\ci2\log" -ErrorAction SilentlyContinue
           Get-Content "$k\jobs\ci2\hello.out" -ErrorAction SilentlyContinue
