@@ -90,6 +90,10 @@ export const OUT_OF_REACH_MS = 3000;
 // within RATIO_TOLERANCE (its estimate wobbles: a drift past it was taken now
 // and then, and dropped again)
 export const ENTRY_UPDATES = 4;
+// a lock is taken only when the last RECENT_MS of arrivals and the whole
+// window agree on the period within this (assess: a swing of the speed in
+// the window would set the lock's starting drift wrong)
+export const ENTRY_RATE_AGREEMENT = 0.0019;
 // a lock taken without the base window (a session's first, or again after a
 // drift out of reach) is not taken with the arrivals within this share of a
 // refresh of the cut
@@ -280,6 +284,18 @@ export function createViPhaseLock({ quickReentry = true, earlyFirstLock = true, 
     if (m < 1 || m > 2 || (!stats.on && Math.abs(ratio - m) > m * RATIO_TOLERANCE)) return { why: "no integer ratio", refreshMs, frameMs, ratio };
     // the default (auto) stops at 1:1: 2:1 only with ?vilock=1
     if (m > maxRatio) return { why: "2:1 only with ?vilock=1", refreshMs, frameMs, ratio };
+    // unlocked: the window's period is the drift a lock starts from (its
+    // integral). A window holding a swing of the speed (a load, then the
+    // throttle catching up) reads a drift the game does not have: on the 2P
+    // parcours a lock taken 2 s after the logo's load read 0.9981, started
+    // its trim at -1500 ppm the wrong way and walked the phase to the cut at
+    // the film's start (18 frames). A lock is taken only when the last
+    // RECENT_MS read the same period as the whole window.
+    if (!stats.on) {
+      const k = a.findIndex((t) => t >= now - RECENT_MS);
+      const q = k < 0 || a.length - k < MIN_RECENT_ARRIVALS ? null : period(a.slice(k), sp.slice(k));
+      if (!q || q.irregular || Math.abs(q.frameMs / frameMs - 1) > ENTRY_RATE_AGREEMENT) return { why: "rate unsettled", refreshMs, frameMs, ratio };
+    }
     // the arrivals' phase in the refresh (circular mean, last second)
     let sx = 0, sy = 0;
     for (const t of a.filter((t) => t >= now - 1000)) {

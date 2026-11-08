@@ -591,3 +591,44 @@ test("rAF not yet stable at a boot (jittery, or ticks missing): no lock taken on
     assert.ok(r.firstLock !== null && r.firstLock >= 6000, `${name}: locked once regular (${r.firstLock})`);
   }
 });
+
+// After the logo's load the frames' ARRIVALS at the presenter can lag and
+// then drain (the replay catching up), the emulation itself regular: a
+// window over the drain reads the frames faster than they are (2P parcours:
+// 0.9981 against 1.001, a lock started at -1860 ppm the wrong way and walked
+// the phase to the cut at the film's start). The lock waits until the last
+// second and the whole window agree: its starting drift is the game's.
+function drainBoot({ offset, lagMs = 8, drainMs = 1500, load = 3000, seconds = 16 }) {
+  const R = 1000 / 60;
+  const vi = createViPhaseLock();
+  const delay = (t) => (t < load ? 0 : t < load + 300 ? (lagMs * (t - load)) / 300 : Math.max(0, lagMs * (1 - (t - load - 300) / drainMs)));
+  let factor = 1, next = offset, n = 0, last = 0, first = null, drift = null;
+  const whys = new Set();
+  for (let k = 0; k * R < seconds * 1000; k++) {
+    const t = 0.37 * R + k * R;
+    const at = () => next + delay(next) + (((n * 7919) % 7) - 3) * 0.6;
+    while (at() <= t) { vi.arrival(at()); n++; next += NTSC_VI_MS / factor; }
+    vi.tick(t, t);
+    if (t - last >= 500) {
+      last = t;
+      factor = vi.update(t).factor;
+      if (!vi.stats.on) whys.add(vi.stats.why);
+      if (vi.stats.on && first === null) { first = t; drift = vi.stats.driftPpm; }
+    }
+  }
+  return { first, drift, whys };
+}
+
+test("a lock is not started on a window that holds a swing of the arrivals (a drain after a load): its starting drift is the game's", () => {
+  let boots = 0, waited = 0;
+  for (const [lagMs, drainMs] of [[8, 600], [8, 1500], [12, 600]]) for (let offset = 0; offset < 16.6; offset += 0.5) {
+    const r = drainBoot({ offset, lagMs, drainMs });
+    boots++;
+    assert.ok(r.first !== null, `${lagMs}/${drainMs} ${offset}: locked`);
+    // NTSC on 60 Hz: +1001 ppm
+    assert.ok(Math.abs(r.drift - 1001) <= 700, `${lagMs}/${drainMs} ${offset}: started at ${r.drift} ppm`);
+    if (r.whys.has("rate unsettled")) waited++;
+  }
+  console.log(`drain after a load: ${boots} boots, every lock started within 700 ppm of the game's drift; ${waited} waited for the window to settle`);
+  assert.ok(waited >= boots / 2, `the check held the lock back (${waited})`);
+});
