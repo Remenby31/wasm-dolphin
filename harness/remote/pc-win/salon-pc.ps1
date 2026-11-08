@@ -350,11 +350,16 @@ function Start-Job-Task {
 function Status {
   Need-Job
   $jd = Job-Dir
-  $exit = $null; $tail = @()
-  if (Test-Path -LiteralPath (Join-Path $jd "exit")) { $exit = [int](Get-Content -Raw -LiteralPath (Join-Path $jd "exit")) }
+  $exit = $null; $tail = @(); $done = $false
+  $done = Test-Path -LiteralPath (Join-Path $jd "exit")
+  if ($done) {
+    $raw = "$(Get-Content -Raw -LiteralPath (Join-Path $jd "exit"))".Trim()
+    $n = 0
+    if ([int]::TryParse($raw, [ref]$n)) { $exit = $n } else { $exit = -1 }
+  }
   if (Test-Path -LiteralPath (Join-Path $jd "log")) { $tail = @(Get-Content -LiteralPath (Join-Path $jd "log") -Tail 15) }
   $task = Get-ScheduledTask -TaskPath $TaskPath -TaskName $Job -ErrorAction SilentlyContinue
-  $state = "missing"; if ($null -ne $exit) { $state = "done" } elseif ($task) { $state = "$($task.State)".ToLower() }
+  $state = "missing"; if ($done) { $state = "done" } elseif ($task) { $state = "$($task.State)".ToLower() }
   Out-Result ([ordered]@{ action = "status"; job = $Job; state = $state; exit = $exit; logTail = $tail })
 }
 
@@ -392,9 +397,13 @@ function Inner {
       $out = Join-Path $jd "$($step.name).out"; $err = Join-Path $jd "$($step.name).err"
       $argLine = ($step.args | ForEach-Object { if ($_ -match '[\s"]') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ } }) -join " "
       $node = Start-Process -FilePath (Join-Path $KitDir "node\node.exe") -ArgumentList $argLine -WorkingDirectory $spec.cwd -RedirectStandardOutput $out -RedirectStandardError $err -WindowStyle Hidden -PassThru
+      # the handle cached now, or ExitCode stays empty once the process is
+      # gone (Start-Process -PassThru; seen on CI windows-2025)
+      $null = $node.Handle
       "$($node.Id)" | Set-Content -LiteralPath (Join-Path $jd "node.pid")
       $node.WaitForExit()
       $rc = $node.ExitCode
+      if ($null -eq $rc -or "$rc" -eq "") { $rc = 98 }
       "[$((Get-Date).ToString('o'))] step $($step.name): exit $rc" | Out-File -LiteralPath $log -Append -Encoding UTF8
       Get-Content -LiteralPath $err -Tail 20 -ErrorAction SilentlyContinue | Out-File -LiteralPath $log -Append -Encoding UTF8
       if ($rc -ne 0) { $code = $rc; if (-not $step.continueOnError) { break } }

@@ -5,8 +5,9 @@ name: windows PC kit (salon-pc.ps1 on a real Windows)
 # and lints clean under Windows PowerShell 5.1, its check reads this machine,
 # the clamp's power scheme is created and fully undone (the scheme list and
 # the processor settings as before), the bench page runs in Chrome and in
-# Edge (headless: the runner has no GPU and its timings mean nothing), and a
-# scheduled task runs a job in the logged-on session. No disc, no game.
+# Edge and tells Chrome from Chrome without optimizer (headless: no GPU, the
+# timings mean nothing), and a scheduled task runs a job in the logged-on
+# session. No disc, no game.
 # Runs only when the kit changes.
 
 on:
@@ -95,13 +96,20 @@ jobs:
       - name: Playwright (driver only; the runner's Chrome and Edge are used)
         shell: bash
         run: npm i -g playwright@1.56.1
-      - name: pc-bench in Chrome and in Edge (headless; the page and the kernels on Windows, not a timing)
+      - name: pc-bench in Chrome, Chrome without optimizer, Edge (headless; the page, the kernels and the JIT reading on Windows, not a timing)
         shell: bash
         run: |
-          node harness/probes/pc-bench.mjs --runs 1 --warm-sec 1 --out "$RUNNER_TEMP/bench-chrome.json"
-          HARNESS_BROWSER_CHANNEL=msedge node harness/probes/pc-bench.mjs --runs 1 --warm-sec 1 --out "$RUNNER_TEMP/bench-edge.json"
-      - name: A job through the scheduled task, in the logged-on session (report only)
-        continue-on-error: true
+          node harness/probes/pc-bench.mjs --runs 1 --warm-sec 2 --out "$RUNNER_TEMP/bench-chrome.json"
+          HARNESS_CHROME_ARGS=--js-flags=--disable-optimizing-compilers node harness/probes/pc-bench.mjs --runs 1 --warm-sec 2 --out "$RUNNER_TEMP/bench-chrome-liftoff.json"
+          HARNESS_BROWSER_CHANNEL=msedge node harness/probes/pc-bench.mjs --runs 1 --warm-sec 2 --out "$RUNNER_TEMP/bench-msedge.json"
+          node --input-type=module -e '
+            import { readFileSync } from "node:fs";
+            import { benchFindings } from "./harness/remote/pc-run.mjs";
+            const r = (n) => JSON.parse(readFileSync(process.env.RUNNER_TEMP + "/" + n + ".json", "utf8"));
+            const f = benchFindings({ "bench-chrome": r("bench-chrome"), "bench-chrome-liftoff": r("bench-chrome-liftoff"), "bench-msedge": r("bench-msedge") }, null);
+            for (const x of f) console.log(x.name, x.score, JSON.stringify(x.jit), JSON.stringify(x.page));
+            if (f.find((x) => x.browser === "chrome")?.jit.verdict !== "jit") throw new Error("Chrome not told apart from its Liftoff reference: the bench cannot see an optimizer off");
+      - name: A job through the scheduled task, in the logged-on session
         shell: powershell
         run: |
           $k = "$env:RUNNER_TEMP\salon-kit"; $s = "$PWD\harness\remote\pc-win\salon-pc.ps1"
@@ -115,7 +123,9 @@ jobs:
           Get-Content "$k\jobs\ci2\log" -ErrorAction SilentlyContinue
           Get-Content "$k\jobs\ci2\hello.out" -ErrorAction SilentlyContinue
           powershell -NoProfile -ExecutionPolicy Bypass -File $s -Action restore -Job ci2 -KitDir $k | Select-Object -Last 1
-          if ($st -notmatch '"exit":0') { exit 1 }
+          if ($st -notmatch '"exit":0') { "the job did not exit 0"; exit 1 }
+          if ((Get-Content "$k\jobs\ci2\hello.out") -ne "1") { "the spec's env did not reach the step"; exit 1 }
+          if ((Get-Content "$k\jobs\ci2\log" -Raw) -notmatch 'session [1-9]') { "the task did not run in a user session"; exit 1 }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
@@ -124,4 +134,5 @@ jobs:
             ${{ runner.temp }}/check.txt
             ${{ runner.temp }}/roundtrip.txt
             ${{ runner.temp }}/bench-*.json
+            ${{ runner.temp }}/salon-kit/jobs/ci2
           retention-days: 7

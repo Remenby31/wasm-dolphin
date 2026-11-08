@@ -186,8 +186,14 @@ export function preflight(check, { browsers = ["chrome", "msedge"], bench = {}, 
     add(`page-focus-${b}`, "warn", st.focus === true, `focus ${st.focus}`, "the window has no focus (QoS Medium): click into it once, or close what took the focus");
     const raf = st.rafMs?.p50;
     add(`raf-${b}`, "block", raf == null || raf < 25, `rAF p50 ${raf ?? "?"} ms`, "rAF at 30 Hz: an energy saver (browser or Windows) or a 30 Hz screen");
-    const jit = (r?.perRun ?? [r]).map((x) => x.jit);
-    add(`jit-${b}`, "block", jit.every((j) => j === "tier-up"), `tier-up ${jit.join(", ")}`, "no optimizing tier: Edge enhanced security (interpreter) or JavaScript optimization off; add the site exception and re-run");
+    // r.jit: pc-bench classifyJit against this machine's Chrome and
+    // Chrome-without-optimizer references (pc-run adds it)
+    if (r?.jit) {
+      const v = r.jit.verdict;
+      const level = b === "chrome" ? "block" : "warn"; // Edge's mode is the Edge result itself (protocol §5)
+      add(`jit-${b}`, level, v === "jit" || (b === "chrome" && v === "unknown"), `${v} (x${r.jit.factor ?? "?"} Chrome's hot ns; Liftoff reference x${r.jit.gap ?? "?"})`,
+        v === "interpreter" ? "Wasm interpreted (Edge enhanced security): the site exception, then reload" : "the optimizing tier is off (JavaScript optimization setting or policy)");
+    }
   }
   if (needIso) add("iso-on-pc", "block", Boolean(check.iso?.exists), `${needIso}: ${check.iso?.exists ? `${check.iso.bytes} bytes` : "missing"}`, "put the disc on the PC yourself (never copied by the kit)");
   return { items, blocked: items.filter((i) => i.level === "block"), warnings: items.filter((i) => i.level === "warn") };

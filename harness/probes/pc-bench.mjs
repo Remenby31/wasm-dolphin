@@ -31,18 +31,22 @@ export const BENCH_VERSION = 1;
 // A first call of this many dispatches checks the engine against the JS
 // reference before anything is timed.
 export const CHECK_N = 1000;
-// Cold: the first COLD_CALLS timed calls; hot: the last HOT_CALLS.
+// Hot: the last HOT_CALLS; cold: the first call of COLD_CALLS fresh modules
+// (another seed: other bytes) of COLD_MS each.
 export const COLD_CALLS = 3;
+export const COLD_MS = 5;
 export const HOT_CALLS = 10;
 // A call aims at this duration (its dispatch count is sized on the first one).
 export const CALL_MS = 15;
 
 const pct = (a, p) => { const s = [...a].sort((x, y) => x - y); return s[Math.min(s.length - 1, Math.floor(p * (s.length - 1) + 0.5))]; };
 
-// One kernel's calls (ns per dispatch, in call order) -> its summary. Pure.
-export function summarizeCalls(nsPerDispatch) {
+// One kernel's calls (ns per dispatch, in call order) and its fresh
+// modules' first calls -> its summary. ratio = hot / cold: information
+// only (classifyJit decides). Pure.
+export function summarizeCalls(nsPerDispatch, coldFirstCalls = null) {
   if (nsPerDispatch.length < COLD_CALLS + HOT_CALLS) return { calls: nsPerDispatch.length, coldNs: null, hotNs: null, ratio: null, spread: null, mdps: null };
-  const cold = median(nsPerDispatch.slice(0, COLD_CALLS));
+  const cold = median(coldFirstCalls?.length ? coldFirstCalls : nsPerDispatch.slice(0, COLD_CALLS));
   const hotCalls = nsPerDispatch.slice(-HOT_CALLS);
   const hot = median(hotCalls);
   return {
@@ -58,24 +62,29 @@ export function benchScore(kernels) {
   return round(Math.exp(v.reduce((s, x) => s + Math.log(x), 0) / v.length), 3);
 }
 
-// What the tier-up says about the JIT (research/deep-windows-blockers.md
-// §1.5): no gain from the first calls to the last = no optimizing tier
-// (Liftoff alone, or an interpreter). Which of the two needs a second
-// browser on the same machine: jitAgainst. Threshold to calibrate on the PC.
-export const NO_TIER_UP_RATIO = 0.85;
-export function jitVerdict(kernels) {
-  const r = kernels.core?.ratio;
-  if (!Number.isFinite(r)) return "unknown";
-  return r > NO_TIER_UP_RATIO ? "no-tier-up" : "tier-up";
-}
-// Same machine, two browsers (e.g. Edge against Chrome): hot core kernel
-// this many times slower = an interpreter (Edge's enhanced security: no JIT).
+// Which compiler ran the Wasm (research/deep-windows-blockers.md §1.5). One
+// browser alone cannot tell: the first calls are already optimized (V8
+// tiers the small kernels up while the call is sized; seen on CI
+// windows-2025). So against two references measured on the same machine:
+// Chrome as it is, and Chrome with --js-flags=--disable-optimizing-compilers
+// (exactly "JavaScript optimization" off: Liftoff alone, no tier-up).
+//   interpreter   hot core kernel >= INTERPRETER_FACTOR x Chrome's (Edge's
+//                 enhanced security: DrumBrake, no JIT)
+//   liftoff-only  closer to the Liftoff reference than to Chrome's
+//   jit           otherwise
+//   unknown       a reference missing, or the two references too close to
+//                 separate (< LIFTOFF_GAP apart: the kernel cannot tell)
 export const INTERPRETER_FACTOR = 5;
-export function jitAgainst(subject, reference) {
-  const a = subject?.kernels?.core?.hotNs, b = reference?.kernels?.core?.hotNs;
-  if (!(a > 0) || !(b > 0)) return { factor: null, verdict: "unknown" };
-  const factor = round(a / b, 2);
-  return { factor, verdict: factor >= INTERPRETER_FACTOR ? "interpreter" : jitVerdict(subject.kernels) === "no-tier-up" ? "liftoff-only" : "jit" };
+export const LIFTOFF_GAP = 1.1;
+export const LIFTOFF_FLAGS = "--js-flags=--disable-optimizing-compilers";
+export function classifyJit(subject, { reference, liftoff = null } = {}) {
+  const a = subject?.kernels?.core?.hotNs, ref = reference?.kernels?.core?.hotNs, lo = liftoff?.kernels?.core?.hotNs;
+  if (!(a > 0) || !(ref > 0)) return { verdict: "unknown", factor: null, gap: null };
+  const factor = round(a / ref, 2);
+  const gap = lo > 0 ? round(lo / ref, 2) : null;
+  if (factor >= INTERPRETER_FACTOR) return { verdict: "interpreter", factor, gap };
+  if (!(gap >= LIFTOFF_GAP)) return { verdict: "unknown", factor, gap };
+  return { verdict: a >= (ref + lo) / 2 ? "liftoff-only" : "jit", factor, gap };
 }
 
 // The worker's program (a string: it runs in the browser). Per kernel:
@@ -83,7 +92,7 @@ export function jitAgainst(subject, reference) {
 // then call until warmMs has passed.
 export const WORKER_SOURCE = `
 onmessage = (e) => {
-  const { kernels, warmMs, callMs, coldCalls, hotCalls } = e.data;
+  const { kernels, warmMs, callMs, coldMs, coldCalls, hotCalls } = e.data;
   const out = {};
   for (const [name, k] of Object.entries(kernels)) {
     const bytes = Uint8Array.from(atob(k.b64), (c) => c.charCodeAt(0));
@@ -100,7 +109,18 @@ onmessage = (e) => {
       ns.push((performance.now() - t) * 1e6 / n);
       if (performance.now() - t0 > warmMs * 20) break;
     }
-    out[name] = { checksumOk: check === k.expect, n, ns };
+    // cold: the first call of fresh modules (other bytes, so no cached
+    // optimized code), each sized to ~coldMs at the hot speed
+    const hot = ns.slice(-hotCalls).sort((a, b) => a - b)[hotCalls >> 1];
+    const nCold = Math.max(200, Math.round(coldMs * 1e6 / hot));
+    const cold = [];
+    for (const b64 of k.cold) {
+      const run2 = new WebAssembly.Instance(new WebAssembly.Module(Uint8Array.from(atob(b64), (c) => c.charCodeAt(0))), {}).exports.run;
+      t = performance.now();
+      run2(nCold);
+      cold.push((performance.now() - t) * 1e6 / nCold);
+    }
+    out[name] = { checksumOk: check === k.expect, n, ns, cold };
   }
   postMessage(out);
 };`;
@@ -125,7 +145,8 @@ async function pageState(page) {
 
 export async function benchOnce({ warmSec = 4, log = () => {} } = {}) {
   const kernels = Object.fromEntries(Object.entries(SHAPES).map(([name, shape]) => [name, {
-    b64: Buffer.from(buildKernel(shape)).toString("base64"), checkN: CHECK_N, expect: reference(shape, CHECK_N)
+    b64: Buffer.from(buildKernel(shape)).toString("base64"), checkN: CHECK_N, expect: reference(shape, CHECK_N),
+    cold: Array.from({ length: COLD_CALLS }, (_, i) => Buffer.from(buildKernel({ ...shape, seed: shape.seed + 1 + i })).toString("base64"))
   }]));
   const dir = mkdtempSync(path.join(os.tmpdir(), "gc-pc-bench-"));
   const context = await launchChrome({ profileDir: dir });
@@ -141,13 +162,13 @@ export async function benchOnce({ warmSec = 4, log = () => {} } = {}) {
       w.onmessage = (e) => resolve(e.data);
       w.onerror = (e) => reject(new Error(e.message || "worker error"));
       w.postMessage(msg);
-    }), { src: WORKER_SOURCE, msg: { kernels, warmMs: warmSec * 1000, callMs: CALL_MS, coldCalls: COLD_CALLS, hotCalls: HOT_CALLS } });
+    }), { src: WORKER_SOURCE, msg: { kernels, warmMs: warmSec * 1000, callMs: CALL_MS, coldMs: COLD_MS, coldCalls: COLD_CALLS, hotCalls: HOT_CALLS } });
     const res = {};
     for (const [name, r] of Object.entries(raw)) {
       if (!r.checksumOk) throw new Error(`${name}: checksum mismatch (the engine computed another result than the JS reference)`);
-      res[name] = { n: r.n, ...summarizeCalls(r.ns) };
+      res[name] = { n: r.n, ...summarizeCalls(r.ns, r.cold) };
     }
-    return { state, kernels: res, score: benchScore(res), jit: jitVerdict(res) };
+    return { state, kernels: res, score: benchScore(res) };
   } finally {
     await context.close().catch(() => {});
     rmSync(dir, { recursive: true, force: true });
@@ -155,10 +176,16 @@ export async function benchOnce({ warmSec = 4, log = () => {} } = {}) {
 }
 
 // Several runs (a fresh browser each) -> their median score.
+// Several runs (a fresh browser each) -> their median score and, per
+// kernel, the median hot and cold ns (what classifyJit reads).
 export function summarizeRuns(runs) {
   const scores = runs.map((r) => r.score).filter((s) => s > 0);
   const m = median(scores);
-  return { runs: runs.length, score: m == null ? null : round(m, 3), scores, spreadPct: scores.length > 1 && m ? round((100 * (Math.max(...scores) - Math.min(...scores))) / m, 1) : null };
+  const kernels = {};
+  for (const k of [...new Set(runs.flatMap((r) => Object.keys(r.kernels ?? {})))]) {
+    kernels[k] = { hotNs: round(median(runs.map((r) => r.kernels?.[k]?.hotNs)), 2), coldNs: round(median(runs.map((r) => r.kernels?.[k]?.coldNs)), 2) };
+  }
+  return { runs: runs.length, score: m == null ? null : round(m, 3), scores, spreadPct: scores.length > 1 && m ? round((100 * (Math.max(...scores) - Math.min(...scores))) / m, 1) : null, kernels };
 }
 
 async function main() {
@@ -167,7 +194,7 @@ async function main() {
   const runs = [];
   for (let i = 0; i < Number(values.runs); i += 1) {
     const r = await benchOnce({ warmSec: Number(values["warm-sec"]), log });
-    log(`run ${i + 1}: score ${r.score}, jit ${r.jit}, core ${r.kernels.core.hotNs} ns, front ${r.kernels.front.hotNs} ns`);
+    log(`run ${i + 1}: score ${r.score}, core ${r.kernels.core.hotNs} ns (cold ${r.kernels.core.coldNs}), front ${r.kernels.front.hotNs} ns (cold ${r.kernels.front.coldNs})`);
     runs.push(r);
   }
   const report = {
@@ -177,7 +204,7 @@ async function main() {
     ...summarizeRuns(runs), perRun: runs
   };
   if (values.out) writeFileSync(values.out, JSON.stringify(report, null, 1) + "\n");
-  console.log(JSON.stringify({ score: report.score, spreadPct: report.spreadPct, jit: runs.map((r) => r.jit) }));
+  console.log(JSON.stringify({ score: report.score, spreadPct: report.spreadPct, coreHotNs: report.kernels?.core?.hotNs ?? null }));
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {

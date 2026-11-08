@@ -19,12 +19,12 @@ import { browserChannel, chromeLaunchOptions } from "../harness/lib/browser.mjs"
 import { chromeInfo } from "../harness/lib/probe-out.mjs";
 import { parseWin32Battery } from "../harness/lib/system.mjs";
 import { buildKernel, reference, SHAPES } from "../harness/lib/wasm-kernel.mjs";
-import { benchScore, jitAgainst, jitVerdict, summarizeCalls, summarizeRuns } from "../harness/probes/pc-bench.mjs";
+import { benchScore, classifyJit, summarizeCalls, summarizeRuns } from "../harness/probes/pc-bench.mjs";
 import {
   assertSendable, benchHold, calibrationTarget, stepWindows, versionOutliers, encodePs, gb6Of, j1bTable, KIT_SCHEME, kitCommand, knobIneffective, nextProbe, parseKitJson, preflight, restoreDiff, samplerVerdict
 } from "../harness/lib/pc-kit.mjs";
 import { calibrate } from "../harness/remote/pc-win/pc-calibrate.mjs";
-import { clampOf, jobReport, jobSpec, parcoursSteps, runJob, simulatedPc } from "../harness/remote/pc-run.mjs";
+import { benchFindings, benchSteps, clampOf, jobReport, jobSpec, parcoursSteps, runJob, simulatedPc } from "../harness/remote/pc-run.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const quiet = () => {};
@@ -48,13 +48,20 @@ test("pc-bench: cold/hot, ratio, spread, score and the JIT verdicts", () => {
   assert.equal(summarizeCalls([1, 2]).hotNs, null, "too few calls: no figure");
   assert.equal(benchScore({ core: { mdps: 100 }, front: { mdps: 25 } }), 50);
   assert.equal(benchScore({ core: { mdps: 100 }, front: { mdps: null } }), null);
-  assert.equal(jitVerdict({ core: { ratio: 0.5 } }), "tier-up");
-  assert.equal(jitVerdict({ core: { ratio: 0.97 } }), "no-tier-up");
-  const chrome = { kernels: { core: { hotNs: 2, ratio: 0.5 } } };
-  assert.equal(jitAgainst({ kernels: { core: { hotNs: 40, ratio: 1 } } }, chrome).verdict, "interpreter");
-  assert.equal(jitAgainst({ kernels: { core: { hotNs: 3, ratio: 0.98 } } }, chrome).verdict, "liftoff-only");
-  assert.equal(jitAgainst({ kernels: { core: { hotNs: 2.1, ratio: 0.5 } } }, chrome).verdict, "jit");
-  assert.deepEqual(summarizeRuns([{ score: 10 }, { score: 12 }, { score: 11 }]), { runs: 3, score: 11, scores: [10, 12, 11], spreadPct: 18.2 });
+  assert.equal(summarizeCalls([...Array(13).fill(4)], [9, 8, 10]).coldNs, 9, "cold from the fresh modules' first calls");
+  const k = (hotNs) => ({ kernels: { core: { hotNs } } });
+  const refs = { reference: k(2), liftoff: k(5) };
+  assert.equal(classifyJit(k(40), refs).verdict, "interpreter");
+  assert.equal(classifyJit(k(4.5), refs).verdict, "liftoff-only");
+  assert.equal(classifyJit(k(2.2), refs).verdict, "jit");
+  assert.equal(classifyJit(k(2.2), { reference: k(2), liftoff: k(2.1) }).verdict, "unknown", "references too close to tell");
+  assert.equal(classifyJit(k(2.2), {}).verdict, "unknown");
+  const f = benchFindings({ "bench-pre-chrome": k(2), "bench-pre-chrome-liftoff": k(5), "bench-pre-msedge": k(30) }, null);
+  assert.deepEqual(f.map((x) => [x.name, x.jit.verdict]), [["bench-pre-chrome", "jit"], ["bench-pre-msedge", "interpreter"]]);
+  assert.equal(benchFindings({ "bench-chrome": k(2), "bench-chrome-liftoff": k(2.05) }, null)[0].jit.verdict, "liftoff-only?");
+  assert.deepEqual(benchSteps("bench-pre", ["chrome", "msedge"], "C:\\j").map((x) => [x.name, x.env.HARNESS_CHROME_ARGS ?? ""]),
+    [["bench-pre-chrome", ""], ["bench-pre-msedge", ""], ["bench-pre-chrome-liftoff", "--js-flags=--disable-optimizing-compilers"]]);
+  assert.deepEqual(summarizeRuns([{ score: 10 }, { score: 12 }, { score: 11 }]), { runs: 3, score: 11, scores: [10, 12, 11], spreadPct: 18.2, kernels: {} });
 });
 
 test("pc-kit: the windows display is Windows only, shown full screen; Edge by channel", () => {
@@ -176,11 +183,13 @@ test("pc-kit: the preflight blocks on each Windows trap it can see", () => {
   assert.deepEqual(warns((c) => { c.gpus[0].refreshHz = 144; }), ["refresh-60"]);
   assert.deepEqual(warns((c) => { c.policies.edgeUser = { EnhanceSecurityMode: 2 }; }), ["edge-esm-policy"]);
   assert.deepEqual(warns((c) => { c.classAffinity.threads = 6; }), ["smt"]);
-  const bench = (st, jit = "tier-up") => preflight(base, { bench: { chrome: { perRun: [{ jit, state: st }] } } }).blocked.map((b) => b.id);
-  assert.deepEqual(bench({ visibility: "visible", focus: true, rafMs: { p50: 16.7 } }), []);
-  assert.deepEqual(bench({ visibility: "hidden", focus: false, rafMs: { p50: 16.7 } }), ["page-visible-chrome"]);
-  assert.deepEqual(bench({ visibility: "visible", focus: true, rafMs: { p50: 33.3 } }), ["raf-chrome"], "energy saver at 30 Hz");
-  assert.deepEqual(bench({ visibility: "visible", focus: true, rafMs: { p50: 16.7 } }, "no-tier-up"), ["jit-chrome"], "Edge enhanced security / optimizer off");
+  const bench = (st, verdict = "jit", b = "chrome") => preflight(base, { bench: { [b]: { jit: { verdict }, perRun: [{ state: st }] } } }).blocked.map((x) => x.id);
+  const ok = { visibility: "visible", focus: true, rafMs: { p50: 16.7 } };
+  assert.deepEqual(bench(ok), []);
+  assert.deepEqual(bench({ ...ok, visibility: "hidden", focus: false }), ["page-visible-chrome"]);
+  assert.deepEqual(bench({ ...ok, rafMs: { p50: 33.3 } }), ["raf-chrome"], "energy saver at 30 Hz");
+  assert.deepEqual(bench(ok, "liftoff-only"), ["jit-chrome"], "optimizer off");
+  assert.deepEqual(bench(ok, "interpreter", "msedge"), [], "Edge's interpreter is a result, not a block");
   assert.deepEqual(preflight({ ...base, iso: { exists: false } }, { needIso: "C:\\d\\g.iso" }).blocked.map((b) => b.id), ["iso-on-pc"]);
 });
 
@@ -308,6 +317,11 @@ $k = '${dir}'
 & $s -Action restore -Job t1 -KitDir $k
 try { & $s -Action clamp -Job 't1;rm' -MaxMhz 4300 -KitDir $k } catch { "SALONKIT-JSON " + (@{ refused = "$_" } | ConvertTo-Json -Compress) }
 try { & $s -Action clamp -Job t9 -MaxMhz 4300 -KitDir $k } catch { "SALONKIT-JSON " + (@{ refused = "$_" } | ConvertTo-Json -Compress) }
+foreach ($j in @("t3", "t4")) { New-Item -ItemType Directory -Force -Path (Join-Path (Join-Path $k "jobs") $j) | Out-Null }
+Set-Content -LiteralPath (Join-Path (Join-Path (Join-Path $k "jobs") "t3") "exit") -Value ""
+Set-Content -LiteralPath (Join-Path (Join-Path (Join-Path $k "jobs") "t4") "exit") -Value "0"
+& $s -Action status -Job t3 -KitDir $k
+& $s -Action status -Job t4 -KitDir $k
 "SALONKIT-JSON " + (@{ final = $global:pc.active; schemes = @($global:pc.schemes) } | ConvertTo-Json -Compress)
 `;
     const f = path.join(dir, "h.ps1");
@@ -315,7 +329,9 @@ try { & $s -Action clamp -Job t9 -MaxMhz 4300 -KitDir $k } catch { "SALONKIT-JSO
     const r = spawnSync(PWSH, ["-NoProfile", "-File", f], { encoding: "utf8" });
     assert.equal(r.status, 0, r.stderr + r.stdout);
     const out = r.stdout.split(/\r?\n/).filter((l) => l.startsWith("SALONKIT-JSON ")).map((l) => JSON.parse(l.slice(14)));
-    const [snap, clamp, snap2, restore, badJob, noSnap, final] = out;
+    const [snap, clamp, snap2, restore, badJob, noSnap, st3, st4, final] = out;
+    assert.deepEqual([st3.state, st3.exit], ["done", -1], "an empty exit file is done, exit unknown (-1), not a crash");
+    assert.deepEqual([st4.state, st4.exit], ["done", 0]);
     assert.equal(snap.state.activeScheme, "381b4222-f694-41f0-9685-ff5bb260df2e");
     assert.equal(snap.state.processor.PROCFREQMAX.ac, 0);
     assert.equal(snap.state.processor.PROCFREQMAX1, null, "a setting this CPU lacks is null, not an error");
@@ -339,16 +355,18 @@ test("pc-run: the job report applies the protocol's exclusions run by run", () =
   const dir = mkdtempSync(path.join(os.tmpdir(), "pc-kit-report-"));
   try {
     const at = (s) => new Date(Date.UTC(2026, 10, 20, 20, 0, s)).toISOString().replace("Z", "0000+00:00");
-    const steps = ["bench-pre-chrome", "parcours-1p-chrome-1", "parcours-1p-chrome-2", "parcours-1p-chrome-3", "parcours-1p-chrome-4", "parcours-1p-chrome-5", "bench-post-chrome"];
+    const steps = ["bench-pre-chrome", "bench-pre-chrome-liftoff", "parcours-1p-chrome-1", "parcours-1p-chrome-2", "parcours-1p-chrome-3", "parcours-1p-chrome-4", "parcours-1p-chrome-5", "bench-post-chrome"];
     const log = ["\uFEFF[" + at(0) + "] job j, affinity 0xfff, session 1"];
     steps.forEach((n, i) => { log.push(`[${at(i * 100 + 1)}] step ${n}: node x`, `[${at(i * 100 + 90)}] step ${n}: exit 0`); });
     writeFileSync(path.join(dir, "log"), log.join("\r\n"));
-    // run 2 is contaminated (a busy process during its window)
-    const rows = Array.from({ length: 140 }, (_, k) => ({ t: at(k * 5), otherPct: k * 5 > 205 && k * 5 < 285 ? 400 : 4, scheme: KIT_SCHEME, browserAffinity: "0xfff", locked: false }));
+    // run 2 (step 4: 300-390 s) is contaminated (a busy process during its window)
+    const rows = Array.from({ length: 170 }, (_, k) => ({ t: at(k * 5), otherPct: k * 5 > 305 && k * 5 < 385 ? 400 : 4, scheme: KIT_SCHEME, browserAffinity: "0xfff", locked: false }));
     writeFileSync(path.join(dir, "sampler.jsonl"), rows.map((r) => JSON.stringify(r)).join("\r\n"));
     writeFileSync(path.join(dir, "kit-record.json"), JSON.stringify({ clamp: { maxMhz: 4300, target: 50 }, affinity: "0xfff", exit: 0, restore: { diff: [] } }));
-    writeFileSync(path.join(dir, "bench-pre-chrome.json"), JSON.stringify({ score: 50.5, perRun: [{ jit: "tier-up" }] }));
-    writeFileSync(path.join(dir, "bench-post-chrome.json"), JSON.stringify({ score: 46, perRun: [{ jit: "tier-up" }] }));
+    const st = { visibility: "visible", focus: true, rafMs: { p50: 16.7 } };
+    writeFileSync(path.join(dir, "bench-pre-chrome.json"), JSON.stringify({ score: 50.5, kernels: { core: { hotNs: 2 } }, perRun: [{ state: st }] }));
+    writeFileSync(path.join(dir, "bench-pre-chrome-liftoff.json"), JSON.stringify({ score: 30, kernels: { core: { hotNs: 5 } }, perRun: [{ state: st }] }));
+    writeFileSync(path.join(dir, "bench-post-chrome.json"), JSON.stringify({ score: 46, kernels: { core: { hotNs: 2.2 } }, perRun: [{ state: { ...st, visibility: "hidden" } }] }));
     const run = (v) => ({ side: "candidate", run: 1, browserVersion: v, completion: { completed: true }, phases: Object.fromEntries(["cinematic", "menu", "game"].map((p) => [p, { metrics: { speedP5: 99, smoothP5: 96, smoothReliable: true } }])) });
     [1, 2, 3, 4, 5].forEach((i) => { mkdirSync(path.join(dir, `parcours-1p-chrome-${i}`)); writeFileSync(path.join(dir, `parcours-1p-chrome-${i}`, "summary.json"), JSON.stringify({ runs: [run(i === 5 ? "158.0.1.2" : "157.0.8103.39")] })); });
     const md = jobReport(dir);
@@ -356,7 +374,8 @@ test("pc-run: the job report applies the protocol's exclusions run by run", () =
     assert.match(md, /parcours-1p-chrome-5: browser 158\.0\.1\.2, not the cell's version/);
     assert.match(md, /\| 1p \/ chrome \| game \| 3\/3 \| 99 \| 96 \|/);
     assert.match(md, /bench-post-chrome: score 46, -8 % from the target 50 \(OUTSIDE ±3 %\)/);
-    assert.match(md, /Series invalid \(protocol §5\): bench-post-chrome -8 % from the target/);
+    assert.match(md, /Series invalid \(protocol §5\): bench-post-chrome -8 % from the target; bench-post-chrome: page hidden/);
+    assert.match(md, /bench-pre-chrome: score 50\.5, 1 % from the target 50; JIT jit/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -89,8 +89,8 @@ async function main() {
   const bench = async () => {
     const runs = [];
     for (let i = 0; i < Number(values.runs); i += 1) runs.push(await benchOnce({ warmSec: Number(values["warm-sec"]), log }));
-    const bad = runs.find((r) => r.jit !== "tier-up" || r.state.visibility !== "visible");
-    if (bad) throw new Error(`a bench run is not usable for calibration (jit ${bad.jit}, ${bad.state.visibility}): see the preflight`);
+    const bad = runs.find((r) => r.state.visibility !== "visible" || (r.state.rafMs?.p50 ?? 0) >= 25);
+    if (bad) throw new Error(`a bench run is not usable for calibration (${bad.state.visibility}, rAF ${bad.state.rafMs?.p50} ms): see the preflight`);
     return summarizeRuns(runs).score;
   };
   const result = await calibrate({ bench, clamp: (o) => psClamp(values.job, o), hostGb6, turboMhz: known ? MAX_TURBO_MHZ[known.name] ?? null : null, tol: Number(values.tol), log });

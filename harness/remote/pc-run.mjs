@@ -31,6 +31,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 
+import { classifyJit, LIFTOFF_FLAGS, LIFTOFF_GAP } from "../probes/pc-bench.mjs";
 import { assertSendable, benchHold, CLASS_CORES, encodePs, gb6Of, j1bMarkdown, j1bTable, JOB_ID, KIT_DIR, KIT_SCHEME, kitCommand, newJobId, parseKitJson, preflight, preflightMarkdown, psQuote, restoreDiff, rowsIn, samplerVerdict, stepWindows, versionOutliers } from "../lib/pc-kit.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -222,6 +223,37 @@ export function jobSpec({ harnessDir, steps, affinity, env = {} }) {
 }
 const channelOf = (b) => ({ chrome: "chrome", edge: "msedge", msedge: "msedge" })[b] ?? (() => { throw new Error(`--browser ${b}: chrome or msedge`); })();
 const benchStep = (name, browser, jobDir, extra = {}) => ({ name, env: { HARNESS_BROWSER_CHANNEL: channelOf(browser), ...(extra.env ?? {}) }, continueOnError: extra.continueOnError, args: ["harness/probes/pc-bench.mjs", "--runs", "3", "--out", W(jobDir, `${name}.json`)] });
+// The benches of a job's start (or end): every browser, plus Chrome with the
+// optimizer off, the Liftoff reference classifyJit needs.
+export const benchSteps = (prefix, browsers, jobDir) => [
+  ...browsers.map((b) => benchStep(`${prefix}-${channelOf(b)}`, b, jobDir, { continueOnError: true })),
+  benchStep(`${prefix}-chrome-liftoff`, "chrome", jobDir, { continueOnError: true, env: { HARNESS_CHROME_ARGS: LIFTOFF_FLAGS } })
+];
+// A job's benches read together: score, the hold against the target, the
+// JIT verdict of each against its group's Chrome and Liftoff references.
+export function benchFindings(benches, target) {
+  const groups = new Map();
+  for (const [name, b] of Object.entries(benches)) {
+    const m = /^(.*)-(chrome-liftoff|chrome|msedge)$/.exec(name);
+    if (!m) continue;
+    const g = groups.get(m[1]) ?? {};
+    g[m[2]] = { name, b };
+    groups.set(m[1], g);
+  }
+  const out = [];
+  for (const g of groups.values()) {
+    for (const key of ["chrome", "msedge"]) {
+      if (!g[key]) continue;
+      const { name, b } = g[key];
+      const jit = classifyJit(b, { reference: g.chrome?.b, liftoff: g["chrome-liftoff"]?.b });
+      const chromeJit = key === "chrome" ? { ...jit, verdict: jit.gap >= LIFTOFF_GAP ? "jit" : jit.gap == null ? "unknown" : "liftoff-only?" } : jit;
+      const st = b?.perRun?.[0]?.state ?? null;
+      const page = st ? { visible: st.visibility === "visible", focus: st.focus, rafP50: st.rafMs?.p50 ?? null } : null;
+      out.push({ name, browser: key, score: b?.score ?? null, hold: target ? benchHold(b?.score, target) : null, jit: chromeJit, page });
+    }
+  }
+  return out;
+}
 
 // The parcours steps: one run per call, interleaved run by run over the
 // browsers and the scenes (a drift touches every cell alike, as J1a did).
@@ -301,19 +333,20 @@ export function jobReport(local, { check = null } = {}) {
   const eff = rows.map((r) => r.maxEffMhz).filter(Number.isFinite).sort((a, b) => a - b);
   lines.push("## Machine during the job", "", `${sv.rows} samples, other processes median ${sv.otherMedian ?? "?"} % / p95 ${sv.otherP95 ?? "?"} % of a core; busiest core's effective clock median ${eff.length ? eff[eff.length >> 1] : "?"} MHz, max ${eff.at(-1) ?? "?"} MHz; ${sv.contaminated ? `contaminated somewhere: ${sv.reasons.join("; ")}` : "clean"}`, "");
   const windows = stepWindows(read("log") ?? "");
-  // protocol §2: the clamp held at both ends of the series
+  // protocol §2 and §5: the clamp held at both ends of the series, and
+  // which compiler each browser ran
   const target = rec?.clamp?.target ?? null;
-  const benches = Object.keys(windows).filter((n) => /^bench-(pre|post)-/.test(n));
-  let seriesInvalid = [];
-  if (benches.length) {
-    lines.push("## Clamp held (bench at both ends)", "");
-    for (const n of benches) {
-      const b = read(`${n}.json`) ? JSON.parse(read(`${n}.json`)) : null;
-      const h = target ? benchHold(b?.score, target) : null;
-      const jit = (b?.perRun ?? []).map((r) => r.jit);
-      lines.push(`- ${n}: score ${b?.score ?? "none"}${h ? `, ${h.offPct} % from the target ${target}${h.ok ? "" : " (OUTSIDE ±3 %)"}` : " (no target: clamp not from a calibration)"}, jit ${jit.join("/") || "?"}`);
-      if (h && !h.ok) seriesInvalid.push(`${n} ${h.offPct} % from the target`);
-      if (/chrome$/.test(n) && jit.some((j) => j !== "tier-up")) seriesInvalid.push(`${n}: Chrome without tier-up`);
+  const benches = Object.fromEntries(Object.keys(windows).filter((n) => /^bench-/.test(n)).map((n) => [n, read(`${n}.json`) ? JSON.parse(read(`${n}.json`)) : null]));
+  const seriesInvalid = [];
+  const findings = benchFindings(benches, target);
+  if (findings.length) {
+    lines.push("## Bench (clamp held, JIT)", "");
+    for (const f of findings) {
+      lines.push(`- ${f.name}: score ${f.score ?? "none"}${f.hold ? `, ${f.hold.offPct} % from the target ${target}${f.hold.ok ? "" : " (OUTSIDE ±3 %)"}` : ""}; JIT ${f.jit.verdict} (hot core x${f.jit.factor ?? "?"} Chrome's, Liftoff reference x${f.jit.gap ?? "?"})`);
+      if (/^bench-(pre|post)-/.test(f.name) && f.hold && !f.hold.ok) seriesInvalid.push(`${f.name} ${f.hold.offPct} % from the target`);
+      if (f.browser === "chrome" && f.jit.verdict === "liftoff-only?") seriesInvalid.push(`${f.name}: Chrome no faster than its Liftoff reference (optimizer off?)`);
+      if (f.page) lines.push(`  page ${f.page.visible ? "visible" : "HIDDEN"}, focus ${f.page.focus}, rAF p50 ${f.page.rafP50} ms`);
+      if (/^bench-(pre|post)-/.test(f.name) && f.page && (!f.page.visible || f.page.rafP50 >= 25)) seriesInvalid.push(`${f.name}: page ${f.page.visible ? "at 30 Hz" : "hidden"}`);
     }
     lines.push("");
   }
@@ -394,7 +427,7 @@ async function main() {
   if (cmd === "smoke") {
     const steps = [
       { name: "webgpu-adapter", continueOnError: true, args: ["harness/probes/webgpu-adapter.mjs", "--port", "8301", "--no-unsafe-webgpu", "--expect", "adapter", "--out", W(jobDir(job), "webgpu-adapter.json")] },
-      ...browsers.map((b) => benchStep(`bench-${channelOf(b)}`, b, jobDir(job), { continueOnError: true }))
+      ...benchSteps("bench", browsers, jobDir(job))
     ];
     if (values.homebrew) {
       assertSendable(path.resolve(values.homebrew), { homebrewDirs: [path.join(REPO, "harness", "homebrew", "out")] });
@@ -429,9 +462,9 @@ async function main() {
     ? clampOf({ calibration: await calibrateJob(`${job}-cal`) })
     : clampOf(values);
   const steps = [
-    ...browsers.map((b) => benchStep(`bench-pre-${channelOf(b)}`, b, jobDir(job), { continueOnError: true })),
+    ...benchSteps("bench-pre", browsers, jobDir(job)),
     ...parcoursSteps({ jobDir: jobDir(job), iso: values.iso, films, browsers, runs: Number(values.runs), query: values.query, engineDir: st.trees.engine.dest }),
-    ...browsers.map((b) => benchStep(`bench-post-${channelOf(b)}`, b, jobDir(job), { continueOnError: true }))
+    ...benchSteps("bench-post", browsers, jobDir(job))
   ];
   await go(job, steps, clamp);
 }
