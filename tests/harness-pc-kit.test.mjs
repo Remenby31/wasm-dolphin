@@ -9,7 +9,7 @@
 // pwsh). Nothing here is timed.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -21,10 +21,10 @@ import { parseWin32Battery } from "../harness/lib/system.mjs";
 import { buildKernel, reference, SHAPES } from "../harness/lib/wasm-kernel.mjs";
 import { benchScore, jitAgainst, jitVerdict, summarizeCalls, summarizeRuns } from "../harness/probes/pc-bench.mjs";
 import {
-  assertSendable, calibrationTarget, encodePs, gb6Of, j1bTable, KIT_SCHEME, kitCommand, knobIneffective, nextProbe, parseKitJson, preflight, restoreDiff, samplerVerdict
+  assertSendable, benchHold, calibrationTarget, stepWindows, versionOutliers, encodePs, gb6Of, j1bTable, KIT_SCHEME, kitCommand, knobIneffective, nextProbe, parseKitJson, preflight, restoreDiff, samplerVerdict
 } from "../harness/lib/pc-kit.mjs";
 import { calibrate } from "../harness/remote/pc-win/pc-calibrate.mjs";
-import { clampOf, jobSpec, parcoursSteps, runJob, simulatedPc } from "../harness/remote/pc-run.mjs";
+import { clampOf, jobReport, jobSpec, parcoursSteps, runJob, simulatedPc } from "../harness/remote/pc-run.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const quiet = () => {};
@@ -285,7 +285,7 @@ function global:powercfg {
     '/changename' { }
     '/setactive' { $global:pc.active = $a[1] }
     '/delete' { $global:pc.schemes.Remove($a[1]) }
-    '/query' {
+    { $_ -in '/qh', '/query' } {
       if ($a[3] -notmatch '^(bc5038f7|be337238|75b0ae3f)' -or $a[3] -match 'e101$|5ed$') { $global:LASTEXITCODE = 1; return }
       $k = "$($a[1])|$($a[3])"; $d = $global:defaults[$a[3]]; $cur = $global:pc.v[$k]; if (-not $cur) { $cur = @{ ac = $d; dc = $d } }
       "    Power Setting GUID: $($a[3])"; '      Minimum Possible Setting: 0x00000000'; '      Maximum Possible Setting: 0x00000064'
@@ -333,4 +333,42 @@ try { & $s -Action clamp -Job t9 -MaxMhz 4300 -KitDir $k } catch { "SALONKIT-JSO
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("pc-run: the job report applies the protocol's exclusions run by run", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "pc-kit-report-"));
+  try {
+    const at = (s) => new Date(Date.UTC(2026, 10, 20, 20, 0, s)).toISOString().replace("Z", "0000+00:00");
+    const steps = ["bench-pre-chrome", "parcours-1p-chrome-1", "parcours-1p-chrome-2", "parcours-1p-chrome-3", "parcours-1p-chrome-4", "parcours-1p-chrome-5", "bench-post-chrome"];
+    const log = ["\uFEFF[" + at(0) + "] job j, affinity 0xfff, session 1"];
+    steps.forEach((n, i) => { log.push(`[${at(i * 100 + 1)}] step ${n}: node x`, `[${at(i * 100 + 90)}] step ${n}: exit 0`); });
+    writeFileSync(path.join(dir, "log"), log.join("\r\n"));
+    // run 2 is contaminated (a busy process during its window)
+    const rows = Array.from({ length: 140 }, (_, k) => ({ t: at(k * 5), otherPct: k * 5 > 205 && k * 5 < 285 ? 400 : 4, scheme: KIT_SCHEME, browserAffinity: "0xfff", locked: false }));
+    writeFileSync(path.join(dir, "sampler.jsonl"), rows.map((r) => JSON.stringify(r)).join("\r\n"));
+    writeFileSync(path.join(dir, "kit-record.json"), JSON.stringify({ clamp: { maxMhz: 4300, target: 50 }, affinity: "0xfff", exit: 0, restore: { diff: [] } }));
+    writeFileSync(path.join(dir, "bench-pre-chrome.json"), JSON.stringify({ score: 50.5, perRun: [{ jit: "tier-up" }] }));
+    writeFileSync(path.join(dir, "bench-post-chrome.json"), JSON.stringify({ score: 46, perRun: [{ jit: "tier-up" }] }));
+    const run = (v) => ({ side: "candidate", run: 1, browserVersion: v, completion: { completed: true }, phases: Object.fromEntries(["cinematic", "menu", "game"].map((p) => [p, { metrics: { speedP5: 99, smoothP5: 96, smoothReliable: true } }])) });
+    [1, 2, 3, 4, 5].forEach((i) => { mkdirSync(path.join(dir, `parcours-1p-chrome-${i}`)); writeFileSync(path.join(dir, `parcours-1p-chrome-${i}`, "summary.json"), JSON.stringify({ runs: [run(i === 5 ? "158.0.1.2" : "157.0.8103.39")] })); });
+    const md = jobReport(dir);
+    assert.match(md, /parcours-1p-chrome-2: other processes/);
+    assert.match(md, /parcours-1p-chrome-5: browser 158\.0\.1\.2, not the cell's version/);
+    assert.match(md, /\| 1p \/ chrome \| game \| 3\/3 \| 99 \| 96 \|/);
+    assert.match(md, /bench-post-chrome: score 46, -8 % from the target 50 \(OUTSIDE ±3 %\)/);
+    assert.match(md, /Series invalid \(protocol §5\): bench-post-chrome -8 % from the target/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("pc-kit: step windows, bench hold, version outliers", () => {
+  const w = stepWindows("[2026-11-20T20:00:01.1234567+01:00] step a: node x\r\n[2026-11-20T20:01:01.0000000+01:00] step a: exit 3\r\n[2026-11-20T20:02:00+01:00] step b: node y");
+  assert.equal(w.a.exit, 3);
+  assert.equal(w.a.to - w.a.from, 59877);
+  assert.equal(w.b.to, null);
+  assert.deepEqual(benchHold(51, 50), { ok: true, offPct: 2 });
+  assert.deepEqual(benchHold(48, 50), { ok: false, offPct: -4 });
+  assert.deepEqual(benchHold(null, 50), { ok: false, offPct: null });
+  assert.deepEqual(versionOutliers([{ browserVersion: "a" }, { browserVersion: "a" }, { browserVersion: "b" }]), [{ browserVersion: "b" }]);
 });

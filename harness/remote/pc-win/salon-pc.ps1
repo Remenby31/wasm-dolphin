@@ -73,10 +73,12 @@ function All-Schemes {
   return $guids
 }
 # AC and DC index of a processor setting in a scheme: the last two 0x values
-# of `powercfg /query` (after the possible-values lines); $null when the
-# setting does not exist on this machine.
+# of `powercfg /qh` (/query hides the hidden settings, PROCFREQMAX among
+# them: CI windows-2025, 2026-11-08), after the possible-values lines;
+# $null when the setting does not exist on this machine.
 function Setting-Values($scheme, $setting) {
-  $out = & powercfg /query $scheme $SubProcessor $setting 2>$null
+  $out = & powercfg /qh $scheme $SubProcessor $setting 2>$null
+  if ($LASTEXITCODE -ne 0 -or -not $out) { $out = & powercfg /query $scheme $SubProcessor $setting 2>$null }
   if ($LASTEXITCODE -ne 0 -or -not $out) { return $null }
   $hex = @([regex]::Matches(($out -join "`n"), '0x[0-9a-fA-F]{8}') | ForEach-Object { [Convert]::ToInt64($_.Value, 16) })
   if ($hex.Count -lt 2) { return $null }
@@ -135,12 +137,14 @@ function Core-Map {
 function Class-Affinity([int]$n) {
   $cores = Core-Map
   if (@($cores | Where-Object { $_.group -ne 0 }).Count) { throw "more than one processor group: the kit handles group 0 only" }
-  $top = ($cores | Measure-Object -Property efficiencyClass -Maximum).Maximum
+  # plain loops: Measure-Object -Property does not read dictionaries in 5.1
+  $top = -1; $classes = @{}
+  foreach ($c in $cores) { $classes[$c.efficiencyClass] = 1; if ($c.efficiencyClass -gt $top) { $top = $c.efficiencyClass } }
   $pick = @($cores | Where-Object { $_.efficiencyClass -eq $top } | Select-Object -First $n)
   if ($pick.Count -lt $n) { throw "only $($pick.Count) cores of the fastest class (asked $n)" }
-  [uint64]$mask = 0
-  foreach ($c in $pick) { $mask = $mask -bor [Convert]::ToUInt64($c.mask.Substring(2), 16) }
-  return [ordered]@{ mask = ("0x{0:x}" -f $mask); cores = $n; threads = ($pick | Measure-Object -Property threads -Sum).Sum; efficiencyClass = $top; hybrid = (@($cores | Select-Object -ExpandProperty efficiencyClass -Unique).Count -gt 1) }
+  [uint64]$mask = 0; $threads = 0
+  foreach ($c in $pick) { $mask = $mask -bor [Convert]::ToUInt64($c.mask.Substring(2), 16); $threads += $c.threads }
+  return [ordered]@{ mask = ("0x{0:x}" -f $mask); cores = $n; threads = $threads; efficiencyClass = $top; hybrid = ($classes.Count -gt 1) }
 }
 
 function File-Version($paths) {

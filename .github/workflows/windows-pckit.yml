@@ -66,6 +66,10 @@ jobs:
           $k = "$env:RUNNER_TEMP\salon-kit"; $s = "harness\remote\pc-win\salon-pc.ps1"
           $before = (powercfg /list) -join "`n"; $active = (powercfg /getactivescheme) -join ""
           $o = @()
+          # the runner has 2 cores: the class affinity is asked for 2
+          $a = powershell -NoProfile -ExecutionPolicy Bypass -File $s -Action affinity -Cores 2 -KitDir $k | Select-Object -Last 1
+          $a
+          if ($a -notmatch '"mask":"0x[0-9a-f]+"') { "no class affinity"; exit 1 }
           $o += powershell -NoProfile -ExecutionPolicy Bypass -File $s -Action snapshot -Job ci1 -KitDir $k | Select-Object -Last 1
           $o += powershell -NoProfile -ExecutionPolicy Bypass -File $s -Action clamp -Job ci1 -MaxMhz 2000 -StatePct 90 -KitDir $k | Select-Object -Last 1
           $mid = (powercfg /getactivescheme) -join ""

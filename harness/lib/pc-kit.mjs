@@ -240,6 +240,37 @@ export function j1bMarkdown(rows) {
     ...rows.map((r) => `| ${r.label} | ${r.phase} | ${r.validRuns}/${r.runs} | ${r.speedP5 ?? "–"} | ${r.smoothP5 ?? "–"}${r.smoothUnreliable ? " (unreliable)" : ""} | ${r.speedP5PerRun.map((s, i) => `${s}/${r.smoothP5PerRun[i]}`).join(", ")} | ${r.verdict} |`)].join("\n");
 }
 
+// The steps' windows from the job's log (salon-pc.ps1 inner):
+// "[ISO time] step NAME: node ..." then "[ISO time] step NAME: exit N".
+export function stepWindows(logText) {
+  const w = {};
+  for (const l of String(logText ?? "").split(/\r?\n/)) {
+    const m = /^\uFEFF?\[([^\]]+)\] step (\S+): (node |exit (-?\d+))/.exec(l);
+    if (!m) continue;
+    const t = Date.parse(m[1]);
+    if (m[4] == null) w[m[2]] = { from: t, to: null, exit: null };
+    else if (w[m[2]]) Object.assign(w[m[2]], { to: t, exit: Number(m[4]) });
+  }
+  return w;
+}
+// Sampler rows inside a window (a row is the 5 s ending at its time).
+export const rowsIn = (rows, { from, to }) => rows.filter((r) => { const t = Date.parse(r.t); return t > from && (to == null || t - 5000 < to); });
+// The bench at both ends of a series against the calibration's target
+// (protocol §2: within ±3 %).
+export const BENCH_HOLD_PCT = 3;
+export function benchHold(score, target) {
+  if (!(score > 0) || !(target > 0)) return { ok: false, offPct: null };
+  const offPct = Math.round((score / target - 1) * 1000) / 10;
+  return { ok: Math.abs(offPct) <= BENCH_HOLD_PCT, offPct };
+}
+// A cell's runs whose browser version is not the cell's most common one.
+export function versionOutliers(runs) {
+  const count = new Map();
+  for (const r of runs) count.set(r.browserVersion ?? null, (count.get(r.browserVersion ?? null) ?? 0) + 1);
+  const top = [...count.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
+  return runs.filter((r) => (r.browserVersion ?? null) !== top);
+}
+
 // What a restore must give back: the snapshot's scheme active, the kit's
 // scheme and task gone, the scheme list and the processor settings as before.
 export function restoreDiff(before, after, job) {

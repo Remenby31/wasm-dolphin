@@ -31,7 +31,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 
-import { assertSendable, CLASS_CORES, gb6Of, j1bMarkdown, j1bTable, JOB_ID, KIT_DIR, KIT_SCHEME, kitCommand, newJobId, parseKitJson, preflight, preflightMarkdown, restoreDiff, samplerVerdict, encodePs, psQuote } from "../lib/pc-kit.mjs";
+import { assertSendable, benchHold, CLASS_CORES, encodePs, gb6Of, j1bMarkdown, j1bTable, JOB_ID, KIT_DIR, KIT_SCHEME, kitCommand, newJobId, parseKitJson, preflight, preflightMarkdown, psQuote, restoreDiff, rowsIn, samplerVerdict, stepWindows, versionOutliers } from "../lib/pc-kit.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, "..", "..");
@@ -136,9 +136,9 @@ export function pushKitScript(t) {
   t.put(path.join(HERE, "pc-win", "salon-pc.ps1"), W(KIT_DIR, "salon-pc.ps1"));
 }
 
-export function check(t, { iso = null, browsers = ["chrome", "msedge"] } = {}) {
+export function check(t, { iso = null, browsers = ["chrome", "msedge"], cores = CLASS_CORES } = {}) {
   pushKitScript(t);
-  const c = kit(t, "check");
+  const c = kit(t, "check", { Cores: cores });
   if (iso) c.iso = kit(t, "stat", { Path: iso });
   return { check: c, preflight: preflight(c, { browsers, needIso: iso }) };
 }
@@ -282,7 +282,7 @@ export function clampOf(values) {
   if (values.calibration) {
     const c = JSON.parse(readFileSync(values.calibration, "utf8"));
     if (!c.chosen) throw new Error(`${values.calibration}: no usable clamp (${c.why})`);
-    return c.chosen;
+    return { ...c.chosen, target: c.target, calibration: path.basename(path.dirname(path.resolve(values.calibration))) };
   }
   throw new Error("say which clamp: --calibration FILE (pc-run calibrate), --clamp-mhz N, or --no-clamp (the host's own speed)");
 }
@@ -292,28 +292,53 @@ export function clampOf(values) {
 export function jobReport(local, { check = null } = {}) {
   const lines = [`# PC kit job ${path.basename(local)}`, ""];
   if (check) lines.push("## Preflight", "", preflightMarkdown(check.preflight), "");
-  const rec = existsSync(path.join(local, "kit-record.json")) ? JSON.parse(readFileSync(path.join(local, "kit-record.json"), "utf8")) : null;
+  const read = (f) => (existsSync(path.join(local, f)) ? readFileSync(path.join(local, f), "utf8").replace(/^\uFEFF/, "") : null);
+  const rec = read("kit-record.json") ? JSON.parse(read("kit-record.json")) : null;
   if (rec) lines.push("## Clamp and restore", "", `clamp ${JSON.stringify(rec.clamp)}, affinity ${rec.affinity ?? "none"}, exit ${rec.exit ?? "?"}; restore: ${rec.restore?.diff?.length ? `DIFFERS (${rec.restore.diff.join("; ")})` : "as before"}`, "");
-  const rows = existsSync(path.join(local, "sampler.jsonl")) ? readFileSync(path.join(local, "sampler.jsonl"), "utf8").split(/\r?\n/).filter(Boolean).map((l) => JSON.parse(l.replace(/^\uFEFF/, ""))) : [];
-  const sv = samplerVerdict(rows, { affinity: rec?.affinity ?? null, scheme: rec?.clamp ? KIT_SCHEME : null });
+  const rows = (read("sampler.jsonl") ?? "").split(/\r?\n/).filter(Boolean).map((l) => JSON.parse(l.replace(/^\uFEFF/, "")));
+  const opts = { affinity: rec?.affinity ?? null, scheme: rec?.clamp ? KIT_SCHEME : null };
+  const sv = samplerVerdict(rows, opts);
   const eff = rows.map((r) => r.maxEffMhz).filter(Number.isFinite).sort((a, b) => a - b);
-  lines.push("## Machine during the job", "", `${sv.rows} samples, other processes median ${sv.otherMedian ?? "?"} % / p95 ${sv.otherP95 ?? "?"} % of a core; busiest core's effective clock median ${eff.length ? eff[eff.length >> 1] : "?"} MHz, max ${eff.at(-1) ?? "?"} MHz; ${sv.contaminated ? `CONTAMINATED: ${sv.reasons.join("; ")}` : "clean"}`, "");
-  const summaries = [];
-  for (const d of readdirSync(local).filter((x) => x.startsWith("parcours-")).sort()) {
-    const f = path.join(local, d, "summary.json");
-    if (!existsSync(f)) continue;
-    const [, scene, browser] = /^parcours-([^-]+)-([^-]+)-\d+$/.exec(d) ?? [];
-    summaries.push({ label: `${scene} / ${browser}`, summary: JSON.parse(readFileSync(f, "utf8")) });
-  }
-  if (summaries.length) {
-    // one run per call: pool the calls of a cell into one summary
-    const cells = new Map();
-    for (const s of summaries) {
-      const c = cells.get(s.label) ?? { label: s.label, summary: { runs: [] } };
-      c.summary.runs.push(...(s.summary.runs ?? []).map((r, k) => ({ ...r, run: c.summary.runs.length + k + 1 })));
-      cells.set(s.label, c);
+  lines.push("## Machine during the job", "", `${sv.rows} samples, other processes median ${sv.otherMedian ?? "?"} % / p95 ${sv.otherP95 ?? "?"} % of a core; busiest core's effective clock median ${eff.length ? eff[eff.length >> 1] : "?"} MHz, max ${eff.at(-1) ?? "?"} MHz; ${sv.contaminated ? `contaminated somewhere: ${sv.reasons.join("; ")}` : "clean"}`, "");
+  const windows = stepWindows(read("log") ?? "");
+  // protocol §2: the clamp held at both ends of the series
+  const target = rec?.clamp?.target ?? null;
+  const benches = Object.keys(windows).filter((n) => /^bench-(pre|post)-/.test(n));
+  let seriesInvalid = [];
+  if (benches.length) {
+    lines.push("## Clamp held (bench at both ends)", "");
+    for (const n of benches) {
+      const b = read(`${n}.json`) ? JSON.parse(read(`${n}.json`)) : null;
+      const h = target ? benchHold(b?.score, target) : null;
+      const jit = (b?.perRun ?? []).map((r) => r.jit);
+      lines.push(`- ${n}: score ${b?.score ?? "none"}${h ? `, ${h.offPct} % from the target ${target}${h.ok ? "" : " (OUTSIDE ±3 %)"}` : " (no target: clamp not from a calibration)"}, jit ${jit.join("/") || "?"}`);
+      if (h && !h.ok) seriesInvalid.push(`${n} ${h.offPct} % from the target`);
+      if (/chrome$/.test(n) && jit.some((j) => j !== "tier-up")) seriesInvalid.push(`${n}: Chrome without tier-up`);
     }
-    lines.push("## J1b (research/pc-windows-protocol.md)", "", sv.contaminated ? "**The job is contaminated (above): no verdict from it.**\n" : "", j1bMarkdown(j1bTable([...cells.values()])), "");
+    lines.push("");
+  }
+  const cells = new Map(), excluded = [];
+  for (const d of readdirSync(local).filter((x) => /^parcours-[^-]+-[^-]+-\d+$/.test(x)).sort()) {
+    const f = path.join(local, d, "summary.json");
+    const [, scene, browser] = /^parcours-([^-]+)-([^-]+)-\d+$/.exec(d);
+    const label = `${scene} / ${browser}`;
+    const c = cells.get(label) ?? { label, summary: { runs: [] } };
+    cells.set(label, c);
+    if (!existsSync(f)) { excluded.push(`${d}: no summary (exit ${windows[d]?.exit ?? "?"})`); continue; }
+    const w = windows[d];
+    const v = w ? samplerVerdict(rowsIn(rows, w), opts) : { contaminated: true, reasons: ["no window in the log"] };
+    for (const r of JSON.parse(readFileSync(f, "utf8")).runs ?? []) {
+      const run = { ...r, run: c.summary.runs.length + 1, step: d };
+      if (v.contaminated) { excluded.push(`${d}: ${v.reasons.join("; ")}`); run.kitExcluded = true; }
+      c.summary.runs.push(run);
+    }
+  }
+  if (cells.size) {
+    for (const c of cells.values()) for (const r of versionOutliers(c.summary.runs.filter((x) => !x.kitExcluded))) { excluded.push(`${r.step}: browser ${r.browserVersion}, not the cell's version`); r.kitExcluded = true; }
+    for (const c of cells.values()) c.summary.runs = c.summary.runs.filter((r) => !r.kitExcluded);
+    lines.push("## J1b (research/pc-windows-protocol.md)", "");
+    if (seriesInvalid.length) lines.push(`**Series invalid (protocol §5): ${seriesInvalid.join("; ")}.**`, "");
+    lines.push(j1bMarkdown(j1bTable([...cells.values()])), "", `Excluded (protocol §5): ${excluded.length ? excluded.join("; ") : "none"}.`, "");
   }
   writeFileSync(path.join(local, "report.md"), lines.join("\n"));
   return lines.join("\n");
@@ -347,7 +372,7 @@ async function main() {
   if (cmd === "restore") { const r = kit(t, "restore", { Job: job }); const d = restoreDiff(r.before, r.after, job); console.log(d.length ? `restore differs: ${d.join("; ")}` : "restored"); return void (process.exitCode = d.length ? 1 : 0); }
   if (cmd === "fetch") { t.getDir(W(KIT_DIR, "jobs", job), outDir); console.log(jobReport(path.join(outDir, job))); return; }
 
-  const pre = check(t, { iso: values.iso ?? null, browsers: browsers.map(channelOf) });
+  const pre = check(t, { iso: values.iso ?? null, browsers: browsers.map(channelOf), cores: Number(values.cores) });
   mkdirSync(outDir, { recursive: true });
   writeFileSync(path.join(outDir, `check-${job}.json`), JSON.stringify(pre.check, null, 1) + "\n");
   log(preflightMarkdown(pre.preflight));
