@@ -639,6 +639,12 @@ test("new frames a second: 2 frames lost in the first half of a second read 58, 
   assert.deepEqual(rows.map((r) => r.smoothness), [100, 96.7, 100]);
   assert.deepEqual(rows.map((r) => r.newFpsWorker), [60, 60, 56], "the worker's rate kept apart");
   assert.equal(newFrameBins(s).basis, "all", "no tags recorded: every present counts");
+  // readings a little early against the grid (the first one late): each second still in its own row
+  const early = samplesOf([["menu", 3]]);
+  early[2].presents = without(at60(early[2].t), early[2].t - 805, early[2].t - 770);
+  early[0].t += 8;
+  for (const x of early.slice(1)) x.t -= 5;
+  assert.deepEqual(deriveSeconds(early, { tps: TPS }).map((r) => r.newFps), [60, 58, null], "the last grid second ends after the last reading: none");
 });
 
 test("new frames a second: a loss at the half second, or across two grid seconds, is counted once; readings over 1 s apart lose none", () => {

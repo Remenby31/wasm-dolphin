@@ -236,12 +236,15 @@ export function deriveSeconds(samples, { tps = null } = {}) {
     const shown = delta(ia.newShown, ib.newShown);
     const newFpsWorker = num(ib.newFps) ?? (shown != null ? shown / dt : null);
     // the new frames shown, counted present by present on the fixed 1 s grid
-    // (newFrameBins): this row's bins are those ending in (a.t, b.t] (one,
-    // or two after a late reading); the smoothness reads these only: the
-    // worker's rate saw half the second, twice over
+    // (newFrameBins): this row's bins are those whose middle is in
+    // (a.t, b.t] (the readings sit near the grid's edges, early or late: one
+    // bin a row, two after a skipped reading, each bin in one row); the
+    // smoothness reads these only: the worker's rate saw half the second,
+    // twice over
     const own = [];
-    while (nextBin < bins.length && bins[nextBin].to <= b.t) {
-      if (bins[nextBin].to > a.t) own.push(bins[nextBin]);
+    const mid = (x) => (x.from + x.to) / 2;
+    while (nextBin < bins.length && mid(bins[nextBin]) <= b.t) {
+      if (mid(bins[nextBin]) > a.t) own.push(bins[nextBin]);
       nextBin += 1;
     }
     const knownBins = own.filter((x) => x.newFrames != null);
