@@ -8,7 +8,8 @@
 // One raw sample a second (the probe reads them, nothing per frame):
 //   t         host ms (timeOrigin + now) of the page's reading
 //   info      __lastFrameInfo: speed (gameSpeed %), newFps and producedFps
-//             (the worker's 500 ms window),
+//             (the worker's 500 ms window: newFps kept as newFpsWorker, the
+//             seconds count the presents instead),
 //             newShown (new frames shown since boot, cumulative), outOfOrder
 //             (cumulative), cpuBusy, gpuBusy, replayBusy (occupancy of the
 //             worker's last 500 ms window, 0..1), draws (the replay's draws
@@ -16,7 +17,9 @@
 //   counters  the drop sampler's last row of that second (its own t): ticks,
 //             discBytes, xfbCopies (EFB→XFB copies), cumulative; null when
 //             no row came (the rates of the previous second are kept)
-//   presents  host times of the presentations of that second (timeline)
+//   presents  host times of the presentations of that second (timeline);
+//             presentVi the VI each shows, presentsKnown false when the
+//             timeline read failed or its ring lost presents
 //   vi        VI outputs of that second (timeline); viT their host times
 //             (the frames' phase against the presents: ?vilock, patch 0212)
 //   audioQ    the mixer queue's overflow skips and underrun fills since boot,
@@ -38,7 +41,10 @@ import { median, percentile, round } from "./stats.mjs";
 // PROBE_VERSION). An A/A's noise holds only for the same analysis: readNoise
 // refuses another. 2: content seconds judged against what was made
 // (contentRule), the menus' smoothness p5 several points higher than in 1.
-export const ANALYSIS_VERSION = 2;
+// 3: new frames counted present by present over each exact second (was the
+// worker's last 500 ms: one 50 ms hitch read 93.3 %, the other half unseen);
+// the film's declared phases (film.phases) before the detector's.
+export const ANALYSIS_VERSION = 3;
 
 export const PHASES = Object.freeze(["boot", "loading", "cinematic", "menu", "game"]);
 // A phase lasts at least this long: a shorter run of seconds goes to the
@@ -125,12 +131,70 @@ export function contentSecond({ producedFps, speed, cadence, cpuBusy, gpuBusy, r
 }
 const delta = (a, b) => (num(a) == null || num(b) == null || b < a ? null : b - a);
 
+// The new frames shown in the second ending at each reading: every present
+// of the timeline whose time t is in (b.t - 1000, b.t], b the reading (a
+// present at or before a reading was read by it: the timeline is read after
+// the page's time). Exact, whatever the reading's phase against the worker's
+// stats posts. One entry per sample (index 0: null); null when unknown:
+//   - a reading whose timeline was not read or lost presents (presentsKnown
+//     false; on a record without that field: viT null while the run has VI
+//     times, the probe's own mark of a failed or lossy read) and whose span
+//     the second overlaps;
+//   - frames without tags (info.newShown absent: the software renderer
+//     presents a picture at every VI, new or not);
+//   - with each present's VI recorded (presentVi): a present without one.
+// A present is new when its VI is past every VI shown before (a repeat or an
+// out-of-order frame is not); without presentVi (records before analysis 3)
+// every present is (the WebGPU vsync presenter puts each frame up once).
+export const NEW_FRAMES_WINDOW_MS = 1000;
+export function newFramesPerSecond(samples, { windowMs = NEW_FRAMES_WINDOW_MS } = {}) {
+  const out = samples.map(() => null);
+  const viEver = samples.some((s) => Array.isArray(s.viT));
+  const known = samples.map((s) => {
+    if (!Array.isArray(s.presents)) return false;
+    if (typeof s.presentsKnown === "boolean") return s.presentsKnown;
+    return viEver ? Array.isArray(s.viT) : true;
+  });
+  // every present in time order: [t, new (true / false / null unknown)]
+  const all = [];
+  let maxVi = -Infinity;
+  samples.forEach((s, k) => {
+    const vis = Array.isArray(s.presentVi) ? s.presentVi : null;
+    (s.presents ?? []).forEach((t, j) => {
+      if (!vis) { all.push([t, true]); return; }
+      const v = vis[j];
+      if (!(typeof v === "number" && v >= 0)) { all.push([t, null]); return; }
+      all.push([t, v > maxVi]);
+      maxVi = Math.max(maxVi, v);
+    });
+  });
+  all.sort((x, y) => x[0] - y[0]);
+  for (let i = 1; i < samples.length; i += 1) {
+    const b = samples[i];
+    if (num(b.info?.newShown) == null) continue;
+    const from = b.t - windowMs;
+    // every reading whose span (the reading before, it] the window touches
+    let ok = known[i];
+    for (let k = i - 1; ok && k >= 0 && samples[k].t > from; k -= 1) ok = known[k];
+    if (!ok) continue;
+    let n = 0;
+    for (const [t, isNew] of all) {
+      if (t <= from || t > b.t) continue;
+      if (isNew === null) { n = null; break; }
+      if (isNew) n += 1;
+    }
+    out[i] = n === null ? null : n * (1000 / windowMs);
+  }
+  return out;
+}
+
 // The raw samples -> one row a second (the first sample is the origin).
 export function deriveSeconds(samples, { tps = null } = {}) {
   const rows = [];
   let cadence = null, lastPresent = null, prevCounters = samples[0]?.counters ?? null, carried = null;
   const t0 = samples[0]?.t ?? 0;
   let booted = false;
+  const exact = newFramesPerSecond(samples);
   for (let i = 1; i < samples.length; i += 1) {
     const a = samples[i - 1], b = samples[i];
     const dt = (b.t - a.t) / 1000;
@@ -149,11 +213,16 @@ export function deriveSeconds(samples, { tps = null } = {}) {
       };
     }
     if (c && (!prevCounters || c.t > prevCounters.t)) prevCounters = c;
-    // the worker's own rate (its 500 ms stats window): the cumulative count
-    // moves once per stats post, so its difference over one page second
-    // swings by a post's worth (~45 / ~75 at 60); the count only without it
+    // the worker's own rate (its last 500 ms stats window): what the
+    // seconds' phases and cadence read; the cumulative count moves once per
+    // stats post (~45 / ~75 at 60), the count only without the rate
     const shown = delta(ia.newShown, ib.newShown);
-    const newFps = num(ib.newFps) ?? (shown != null ? shown / dt : null);
+    const newFpsWorker = num(ib.newFps) ?? (shown != null ? shown / dt : null);
+    // the new frames shown, counted present by present over the exact second
+    // ending at this reading (newFramesInWindow); the smoothness reads this
+    // one only: the worker's rate saw half the second, twice over
+    const newFps = exact[i];
+    const newSignal = newFps ?? newFpsWorker;
     // the worker's produced rate (0208, WebGPU only); off WebGPU (the
     // software renderer: none) the sampler's XFB copies a second, so a core
     // rendering 7 frames a second at full speed is seen (render-starved)
@@ -177,7 +246,7 @@ export function deriveSeconds(samples, { tps = null } = {}) {
     // a second with no present at all is one long gap (counted once, where it ends)
     if (!(b.presents ?? []).length && lastPresent != null) maxGapMs = Math.max(maxGapMs, b.t - lastPresent);
     const occupancy = { cpuBusy: num(ib.cpuBusy), gpuBusy: num(ib.gpuBusy), replayBusy: num(ib.replayBusy) };
-    const seen = windowCadence({ newFps, producedFps, speed, viRate, ...occupancy });
+    const seen = windowCadence({ newFps: newSignal, producedFps, speed, viRate, ...occupancy });
     cadence = seen ?? cadence;
     const sceneCadence = cadence ?? viCadence(viRate);
     // Content, not a loss: the game itself made fewer frames than the
@@ -188,7 +257,7 @@ export function deriveSeconds(samples, { tps = null } = {}) {
     booted ||= (num(ib.newShown) ?? 0) > 0;
     rows.push({
       i: rows.length, t: round((b.t - t0) / 1000, 2), at: b.t, booted,
-      speed: round(speed, 1), newFps: round(newFps, 1), producedFps: round(producedFps, 1), producedFrom,
+      speed: round(speed, 1), newFps: round(newFps, 1), newFpsWorker: round(newFpsWorker, 1), producedFps: round(producedFps, 1), producedFrom,
       cadence: ref, sceneCadence, content, smoothness: newFps == null || !(Number.isFinite(ref) && ref > 0) ? null : round(Math.max(0, Math.min(100, (newFps / ref) * 100)), 1),
       viRate: round(viRate, 1), presents: (b.presents ?? []).length, hitches50, hitches100, maxGapMs: round(maxGapMs, 1),
       // the presenting worker's longest stall in the second (sampler rows)
@@ -200,7 +269,7 @@ export function deriveSeconds(samples, { tps = null } = {}) {
       drawsPerFrame: draws != null && made ? round(draws / made, 1) : null,
       outOfOrder: delta(ia.outOfOrder, ib.outOfOrder),
       ...occupancy,
-      integrity: b.integrity ?? null, film: b.film ?? null
+      integrity: b.integrity ?? null, film: b.film ?? null, filmFrom: a.film?.pos ?? null
     });
   }
   return rows;
@@ -211,9 +280,10 @@ export function deriveSeconds(samples, { tps = null } = {}) {
 export function classifySecond(r, { gameDrawsPerFrame = GAME_DRAWS_PER_FRAME } = {}) {
   if (!r.booted) return "boot";
   const disc = r.discBps ?? 0;
-  const scarce = (r.newFps ?? 0) < SCARCE_SHARE * (r.sceneCadence ?? r.cadence ?? 60) || (r.speed != null && r.speed < SCARCE_SPEED);
+  const shown = r.newFps ?? r.newFpsWorker ?? 0;
+  const scarce = shown < SCARCE_SHARE * (r.sceneCadence ?? r.cadence ?? 60) || (r.speed != null && r.speed < SCARCE_SPEED);
   if (disc >= LOAD_DISC_BPS && scarce) return "loading";
-  if ((r.newFps ?? 0) < MIN_NEW_FPS) return null;
+  if (shown < MIN_NEW_FPS) return null;
   const draws = r.drawsPerFrame;
   if ((r.xfbPerFrame != null && r.xfbPerFrame < CINEMA_XFB_PER_FRAME) || (disc >= STREAM_DISC_BPS && draws != null && draws < CINEMA_MAX_DRAWS_PER_FRAME)) return "cinematic";
   if (draws == null) return null;
@@ -263,6 +333,34 @@ export function currentPhase(rows, { minSec = MIN_PHASE_SEC, ...opts } = {}) {
   if (rows.length < minSec) return null;
   const last = rows.slice(-minSec).map((r) => classifySecond(r, opts));
   return last.every((l) => l != null && l === last[0]) ? last[0] : null;
+}
+
+// The film's own phases (film.phases: [{ at, phase, label }], each from its
+// poll to the next one's): the film clock is the same in every run, where a
+// detected boundary moves with the signals under test (a lock shifting the
+// race's start by a second). Each second takes the declared phase covering
+// most of its film span (filmFrom, film.pos]; a span still at one poll (the
+// film held at a marker) the phase at that poll. null: no film position, no
+// phase declared, or the span mostly before the first declared one: the
+// detector's label stands there, and wherever the film declares phase null
+// (the detector from that poll on) or the run had shown no frame yet (boot).
+export function filmPhaseLabels(rows, phases) {
+  if (!Array.isArray(phases) || !phases.length) return rows.map(() => null);
+  const spans = phases.map((p, k) => ({ from: p.at, to: phases[k + 1]?.at ?? Infinity, phase: p.phase }));
+  return rows.map((r) => {
+    const to = num(r.film?.pos), from = num(r.filmFrom);
+    if (to == null || from == null || to < from || r.booted === false) return null;
+    if (to === from) return spans.find((x) => x.from <= to && to < x.to)?.phase ?? null;
+    let best = null, most = 0, covered = 0;
+    for (const x of spans) {
+      const over = Math.min(to, x.to) - Math.max(from, x.from);
+      if (!(over > 0)) continue;
+      covered += over;
+      if (over > most) { most = over; best = x.phase; }
+    }
+    // mostly before the first declared phase: the detector's
+    return covered * 2 > to - from ? best ?? null : null;
+  });
 }
 
 // Runs of one phase: [{ phase, from, to }] in seconds (row indexes).
@@ -342,7 +440,9 @@ export function sectionsOf(rows, reached, markers) {
 export function analyzeRun(raw, { integrityAllow = [] } = {}) {
   const rows = deriveSeconds(raw.samples ?? [], { tps: raw.tps });
   const { raw: rawLabels, labels } = phaseLabels(rows, raw.detect ?? {});
-  rows.forEach((r, i) => { r.phase = labels[i]; r.rawPhase = rawLabels[i]; });
+  // the film's declared phases first, the detector where it declares none
+  const film = filmPhaseLabels(rows, raw.filmPhases);
+  rows.forEach((r, i) => { r.phase = film[i] ?? labels[i]; r.rawPhase = rawLabels[i]; r.phaseFrom = film[i] ? "film" : "detector"; });
   const segments = segmentsOf(labels).map((s) => ({ ...s, fromT: rows[s.from]?.t ?? null, toT: rows[s.to - 1]?.t ?? null }));
   const kinds = {};
   for (const p of PHASES) {
@@ -362,7 +462,7 @@ export function analyzeRun(raw, { integrityAllow = [] } = {}) {
   return {
     seconds: rows.length, completion: completionOf(markers, reached, segments), segments, phases: kinds, sections, overall: all,
     integrityFailed: Boolean(all?.integrity?.fatal?.length),
-    rows: rows.map(({ integrity, film, at, ...r }) => r)
+    rows: rows.map(({ integrity, film, filmFrom, at, ...r }) => ({ ...r, filmPos: film?.pos ?? null }))
   };
 }
 

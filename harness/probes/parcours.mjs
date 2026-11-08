@@ -15,7 +15,9 @@
 //     [--config product | --query "..."] [--marker-timeout 120] [--max-sec 1200]
 //     [--shots [--shot-every N]] [--max-load L] [--load-wait 300] [--lock-wait 14400 | --no-lock] [--out dir]
 //   node harness/probes/parcours.mjs --iso disc.iso --port N --record steps.json --film-out film.json [--auto '{"bias":0}'] [--shots [--shot-every N]]
-//   node harness/probes/parcours.mjs --analyze <out dir> [--noise <A/A>/summary.json]
+//   node harness/probes/parcours.mjs --analyze <out dir> [--noise <A/A>/summary.json] [--film film.json]
+//     (--film with --analyze: that film's declared phases, film.phases, for
+//     runs recorded without them; the film must be the one the runs played)
 //   --browser safari: the real Safari of this Mac instead of headless Chrome
 //   (lib/safari-page.mjs: off screen, the disc by HTTP ranges on 127.0.0.1,
 //   the screen unlocked); a Safari run's noise is a Safari A/A
@@ -58,7 +60,7 @@ import { exportRef } from "../cli.mjs";
 import { calmLock, defaultMaxLoad, loadGaveUp, loadLimit } from "../lib/env.mjs";
 import { readIntegrity, treeHasIntegrity } from "../lib/integrity.mjs";
 import { claim } from "../lib/ownership.mjs";
-import { filmMarkers, filmWithMarks, padFilmStatus, recordPorts, releaseMarker, runRecordSteps, signalStuck, startPadFilm, stopPadFilm, validateFilm, validateRecordSteps } from "../lib/pad-film.mjs";
+import { filmMarkers, filmPhases, filmWithMarks, padFilmStatus, recordPorts, releaseMarker, runRecordSteps, signalStuck, startPadFilm, stopPadFilm, validateFilm, validateRecordSteps } from "../lib/pad-film.mjs";
 import { ANALYSIS_VERSION, analyzeRun, currentPhase, deriveSeconds, frameDiff, gapDetail, markerIndexes, STILL_DIFF, phaseNoise, parcoursVerdict, renderTimeline, usable } from "../lib/parcours.mjs";
 import { acquirePerfLock } from "../lib/perf-lock.mjs";
 import { descendantsOf } from "../lib/lock-run.mjs";
@@ -197,7 +199,7 @@ export function markerStep({ status, markers, phase, now, state, defaultTimeoutS
 }
 
 async function playRun(o, server, { side, run, outDir }) {
-  const raw = { side, run, samples: [], reached: [], marks: [], stuckAt: [], loads: [], markers: o.film ? filmMarkers(o.film) : [] };
+  const raw = { side, run, samples: [], reached: [], marks: [], stuckAt: [], loads: [], markers: o.film ? filmMarkers(o.film) : [], filmPhases: o.film ? filmPhases(o.film) : [] };
   const profileDir = mkdtempSync(path.join(os.tmpdir(), "gc-harness-parcours-"));
   const releaseProfile = claim(profileDir, REPO_ROOT, "chrome-profile");
   // --browser safari: the real Safari of this Mac (lib/safari-page.mjs), the
@@ -258,11 +260,16 @@ async function playRun(o, server, { side, run, outDir }) {
       // patch 0212's audio queue events and the VI lock's counters (null on a core without them)
       const audioQ = await workerRequest(page, "validationReadAudioQueue", {}, 5000).catch(() => null);
       const presents = tl?.presents?.t ?? [], viT = viTimesOf(tl), samplerTicks = samplerTicksOf(drained);
+      // the VI each present shows (a repeat shows one shown before) and
+      // whether the read saw every present: the exact new frames a second
+      // (lib/parcours.mjs newFramesPerSecond)
+      const presentVi = Array.isArray(tl?.presents?.vi) && tl.presents.vi.length === presents.length ? tl.presents.vi : null;
+      const presentsKnown = Boolean(tl && !tl.error && Array.isArray(tl.presents?.t) && !tl.presents.lost);
       // per present, the gap before it: its VIs and the worker's stall
       // (lib/drops.mjs parcoursWindowsForAttribution reads gapVis, gapWorkerLagMs)
       const per = presentGaps(raw.samples.at(-1), { presents, viT, samplerTicks });
       if (o.samplerRows && drained?.rows) (raw.samplerRows ??= []).push(drained);
-      raw.samples.push({ t, info, counters: countersOf(drained), presents, vi: tl?.vi?.t?.length ?? null, viT, samplerTicks, gapVis: per.vis, gapWorkerLagMs: per.workerLagMs, audioQ: audioQ?.unavailable ? null : audioQ, integrity: integrity?.unread || integrity?.unavailable ? null : integrity, film: status ? { pos: status.pos, hold: status.hold, polls: status.polls } : null });
+      raw.samples.push({ t, info, counters: countersOf(drained), presents, presentVi, presentsKnown, vi: tl?.vi?.t?.length ?? null, viT, samplerTicks, gapVis: per.vis, gapWorkerLagMs: per.workerLagMs, audioQ: audioQ?.unavailable ? null : audioQ, integrity: integrity?.unread || integrity?.unavailable ? null : integrity, film: status ? { pos: status.pos, hold: status.hold, polls: status.polls } : null });
       raw.loads.push([Date.now(), os.loadavg()[0]]);
       const sec = Math.round((Date.now() - t0) / 1000);
       // the other processes' CPU every OTHER_CPU_EVERY_SEC, off the loop
@@ -331,13 +338,16 @@ async function playRun(o, server, { side, run, outDir }) {
 }
 
 // One run's analysis from its raw record (pure but for the PNG written).
-export function analyzeRaw(raw, { maxLoad, outDir = null, tag = null } = {}) {
+export function analyzeRaw(raw, { maxLoad, outDir = null, tag = null, filmPhases: declared = null } = {}) {
   if (raw.error) return { error: raw.error, ended: raw.ended ?? null };
   const reached = raw.reached?.length || !raw.marks?.length ? raw.reached ?? [] : raw.marks.map((m, k) => ({ ordinal: k, missed: m.missed, at: m.atHost ?? null, t: m.t }));
   const markers = raw.markers?.length ? raw.markers : (raw.marks ?? []).map((m) => ({ phase: m.phase, label: m.label }));
   // a recorded mark is placed at the second it was taken (no host time kept)
   const withAt = reached.map((r) => (r.at == null && r.t != null ? { ...r, at: (raw.samples[0]?.t ?? 0) + r.t * 1000 } : r));
-  const a = analyzeRun({ samples: raw.samples, tps: raw.tps, markers, reached: withAt, detect: raw.detect ?? {} });
+  // the film's declared phases: the run's own, else those given (--analyze --film)
+  const phases = raw.filmPhases?.length ? raw.filmPhases : declared ?? [];
+  const a = analyzeRun({ samples: raw.samples, tps: raw.tps, markers, reached: withAt, detect: raw.detect ?? {}, filmPhases: phases });
+  a.phaseClock = phases.length ? "film" : "detector";
   const loads = (raw.loads ?? []).map((x) => x[1]);
   a.load1 = { median: round(median(loads), 2), max: loads.length ? round(Math.max(...loads), 2) : null };
   const others = (raw.otherCpu ?? []).map((x) => x[1]);
@@ -426,13 +436,17 @@ function resolveSide(name, spec) {
   return { name, label: spec, root: exportRef(spec), temp: true };
 }
 
-async function analyzeDir(dir, { noiseFile, log }) {
+async function analyzeDir(dir, { noiseFile, log, film = null }) {
+  const declared = film ? filmPhases(film) : null;
   const meta = JSON.parse(readFileSync(path.join(dir, "summary.json"), "utf8"));
   const analyses = [];
   for (const f of readdirSync(dir).filter((x) => /^raw-(candidate|baseline)-\d+\.json\.gz$/.test(x)).sort()) {
     const [, side, run] = f.match(/^raw-(\w+)-(\d+)/);
     const raw = JSON.parse(gunzipSync(readFileSync(path.join(dir, f))));
-    const analysis = analyzeRaw(raw, { maxLoad: meta.maxLoad, outDir: dir, tag: `${side}-${run}` });
+    // --film: the film these runs played (its markers as they recorded them)
+    const same = (x) => (x ?? []).map((m) => [m.at, m.phase, m.label ?? null]);
+    if (film && JSON.stringify(same(raw.markers)) !== JSON.stringify(same(filmMarkers(film)))) throw new Error(`--film: ${f} played another film (its markers differ)`);
+    const analysis = analyzeRaw(raw, { maxLoad: meta.maxLoad, outDir: dir, tag: `${side}-${run}`, filmPhases: declared });
     writeFileSync(path.join(dir, `${side}-${run}.json`), JSON.stringify(analysis) + "\n");
     analyses.push({ side, run: Number(run), analysis });
   }
@@ -456,7 +470,10 @@ async function main() {
     }
   });
   const log = (m) => console.log(`[parcours] ${m}`);
-  if (values.analyze) return analyzeDir(path.resolve(values.analyze), { noiseFile: values.noise ?? null, log });
+  if (values.analyze) {
+    const film = values.film ? validateFilm(JSON.parse(readFileSync(values.film, "utf8"))) : null;
+    return analyzeDir(path.resolve(values.analyze), { noiseFile: values.noise ?? null, log, film });
+  }
   if (!values.iso || !(values.film || values.record)) throw new Error("usage: parcours.mjs --iso disc.iso --port N (--film film.json [--runs N] [--baseline ref|dir] [--noise aa/summary.json] | --record steps.json --film-out film.json) | --analyze dir");
   if (values.record && !values["film-out"]) throw new Error("--record needs --film-out (where the film goes: local data, never the repo)");
   if (values.record && values.baseline) throw new Error("--record: one run of one tree, no --baseline");

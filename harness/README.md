@@ -508,7 +508,11 @@ bytes, EFB→XFB copies), the timeline (every present and VI output) and the
 replay's integrity counters, and every present gap past 25 ms with its VI
 outputs and the presenting worker's stall inside it (the drop sampler runs
 every 100 ms, drained once a second; PROBE_VERSION 2). `lib/parcours.mjs` (pure) derives per second
-the speed (guest/host time from the core ticks), new frames per second,
+the speed (guest/host time from the core ticks), new frames per second
+(analysis 3: every present counted over the exact second ending at each
+reading, a repeat of a VI already shown left out; null when the timeline
+read failed or lost presents; the worker's own 500 ms rate, kept as
+`newFpsWorker`, saw half the second: one 50 ms hitch read 93.3 %),
 smoothness (new frames against the game's cadence, learnt as the site
 learns it: VI/n snapped, below the VI rate only with occupancy margin, else
 the VI rate; in a content second, where the game itself made fewer frames
@@ -517,7 +521,15 @@ hitches over 50 and 100 ms, and summarises each phase
 and each film section: min, p5 and median of speed, new frames and
 smoothness, the 3 worst seconds, hitches, integrity, occupancy, seconds.
 
-Phases come from generic signals only (thresholds in `lib/parcours.mjs`),
+A film may declare its phases on its own clock, `"phases": [{ "at": 1240,
+"phase": "cinematic", "label": "intro" }, { "at": 2130, "phase": "menu" }]`
+(each from its poll to the next one's; null: the detector's from there): each second then takes the declared
+phase covering most of its film span, the same in every run, where a
+detected boundary moves with what is measured. RESYNC markers are no
+boundaries: one is recorded once the phase has been seen for 2 s. `--analyze
+dir --film film.json` re-analyses runs recorded without them (the film's
+markers must be the runs'). Before the first declared phase, and in a film
+declaring none, phases come from generic signals only (thresholds in `lib/parcours.mjs`),
 each lasting at least 2 s (a shorter run joins the phase before it):
 `boot` before the first new frame; `loading` when the disc reads ≥ 2.5 MiB/s
 while new frames fall under 90 % of the cadence; `cinematic` for new frames
