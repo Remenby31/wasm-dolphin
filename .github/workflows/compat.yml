@@ -1,0 +1,52 @@
+name: compat (hardware-value tests, no game)
+
+# Accuracy checks that need no commercial game: dolphin-emu/hwtests (GPLv2,
+# values measured on a console) ported to the core's JIT oracle
+# (compat/README.md). Each check runs on the interpreter and on the WASM JIT
+# of the committed core, in Node: no browser, no disc. The table goes to the
+# job summary and the compat-cpu artifact.
+#
+# On a pull request the committed core is main's (pull requests carry
+# sources only); a pull request that changes the core is tested on its own
+# build by `npm test` in core-build.yml (tests/compat-hwtests.test.mjs).
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: compat-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  cpu:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.12.0
+
+      - name: Hardware tests (CPU), interpreter and JIT
+        run: node compat/run.mjs --json compat-cpu.json --md compat-cpu.md
+
+      - name: Table
+        if: always()
+        run: test -f compat-cpu.md && cat compat-cpu.md >> "$GITHUB_STEP_SUMMARY" || true
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: compat-cpu
+          path: compat-cpu.*
+          if-no-files-found: ignore
