@@ -1,0 +1,123 @@
+name: windows PC kit (salon-pc.ps1 on a real Windows)
+
+# The PC kit's Windows side (harness/remote/pc-win, research/pc-windows-kit.md)
+# on a GitHub Windows runner, before it meets the real PC: the script parses
+# and lints clean under Windows PowerShell 5.1, its check reads this machine,
+# the clamp's power scheme is created and fully undone (the scheme list and
+# the processor settings as before), the bench page runs in Chrome and in
+# Edge (headless: the runner has no GPU and its timings mean nothing), and a
+# scheduled task runs a job in the logged-on session. No disc, no game.
+# Runs only when the kit changes.
+
+on:
+  pull_request:
+    paths:
+      - harness/remote/pc-win/**
+      - harness/remote/pc-run.mjs
+      - harness/lib/pc-kit.mjs
+      - harness/lib/wasm-kernel.mjs
+      - harness/probes/pc-bench.mjs
+      - .github/workflows/windows-pckit.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pckit:
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - name: Parse and lint under Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          $t = $null; $e = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile("$PWD\harness\remote\pc-win\salon-pc.ps1", [ref]$t, [ref]$e)
+          if ($e.Count) { $e | ForEach-Object { "$($_.Extent.StartLineNumber): $($_.Message)" }; exit 1 }
+          if (Get-Module -ListAvailable PSScriptAnalyzer) {
+            $r = Invoke-ScriptAnalyzer -Path harness\remote\pc-win\salon-pc.ps1 -Severity Error
+            $r | Format-Table -AutoSize | Out-String -Width 200
+            if ($r) { exit 1 }
+          } else { "PSScriptAnalyzer not on this image: parse only" }
+      - name: check (this machine as the kit sees it)
+        shell: powershell
+        run: |
+          $o = powershell -NoProfile -ExecutionPolicy Bypass -File harness\remote\pc-win\salon-pc.ps1 -Action check -KitDir "$env:RUNNER_TEMP\salon-kit"
+          $o | Select-Object -Last 1 | Set-Content -Encoding UTF8 "$env:RUNNER_TEMP\check.txt"
+          $o | Select-Object -Last 1
+      - name: Preflight reading of that check
+        shell: bash
+        run: |
+          node --input-type=module -e '
+            import { readFileSync } from "node:fs";
+            import { parseKitJson, preflight, preflightMarkdown } from "./harness/lib/pc-kit.mjs";
+            const c = parseKitJson(readFileSync(process.env.RUNNER_TEMP + "/check.txt", "utf8").replace(/^\uFEFF/, ""));
+            if (!c?.cpu?.name || !c.power?.activeScheme) throw new Error("check gave no CPU or scheme");
+            console.log(preflightMarkdown(preflight(c, { browsers: ["chrome", "msedge"] })));'
+      - name: Snapshot, clamp, restore with the real powercfg; the machine as before
+        shell: powershell
+        run: |
+          $k = "$env:RUNNER_TEMP\salon-kit"; $s = "harness\remote\pc-win\salon-pc.ps1"
+          $before = (powercfg /list) -join "`n"; $active = (powercfg /getactivescheme) -join ""
+          $o = @()
+          $o += powershell -NoProfile -ExecutionPolicy Bypass -File $s -Action snapshot -Job ci1 -KitDir $k | Select-Object -Last 1
+          $o += powershell -NoProfile -ExecutionPolicy Bypass -File $s -Action clamp -Job ci1 -MaxMhz 2000 -StatePct 90 -KitDir $k | Select-Object -Last 1
+          $mid = (powercfg /getactivescheme) -join ""
+          $o += powershell -NoProfile -ExecutionPolicy Bypass -File $s -Action restore -Job ci1 -KitDir $k | Select-Object -Last 1
+          $o | Set-Content -Encoding UTF8 "$env:RUNNER_TEMP\roundtrip.txt"
+          $o
+          if ($mid -notmatch "5a10c0de-0b1d-4c1a-9e2f-12400c1a0001") { "the kit's scheme was not active while clamped: $mid"; exit 1 }
+          if (((powercfg /list) -join "`n") -ne $before) { "scheme list changed"; exit 1 }
+          if (((powercfg /getactivescheme) -join "") -ne $active) { "active scheme changed"; exit 1 }
+      - name: The round trip's own diff is empty
+        shell: bash
+        run: |
+          node --input-type=module -e '
+            import { readFileSync } from "node:fs";
+            import { parseKitJson, restoreDiff } from "./harness/lib/pc-kit.mjs";
+            const lines = readFileSync(process.env.RUNNER_TEMP + "/roundtrip.txt", "utf8").replace(/^\uFEFF/, "").split(/\r?\n/).filter(Boolean);
+            const [snap, clamp, restore] = lines.map((l) => parseKitJson(l));
+            console.log(JSON.stringify(clamp.processor));
+            if (clamp.processor.PROCFREQMAX?.ac !== 2000) throw new Error("PROCFREQMAX not set in the kit scheme");
+            const d = restoreDiff(restore.before, restore.after, "ci1");
+            if (d.length) throw new Error(d.join("; "));
+            console.log("restored:", JSON.stringify(restore.after.activeScheme));'
+      - name: Playwright (driver only; the runner's Chrome and Edge are used)
+        shell: bash
+        run: npm i -g playwright@1.56.1
+      - name: pc-bench in Chrome and in Edge (headless; the page and the kernels on Windows, not a timing)
+        shell: bash
+        run: |
+          node harness/probes/pc-bench.mjs --runs 1 --warm-sec 1 --out "$RUNNER_TEMP/bench-chrome.json"
+          HARNESS_BROWSER_CHANNEL=msedge node harness/probes/pc-bench.mjs --runs 1 --warm-sec 1 --out "$RUNNER_TEMP/bench-edge.json"
+      - name: A job through the scheduled task, in the logged-on session (report only)
+        continue-on-error: true
+        shell: powershell
+        run: |
+          $k = "$env:RUNNER_TEMP\salon-kit"; $s = "$PWD\harness\remote\pc-win\salon-pc.ps1"
+          New-Item -ItemType Directory -Force -Path "$k\jobs\ci2", "$k\node" | Out-Null
+          Copy-Item (Get-Command node).Source "$k\node\node.exe"
+          @{ cwd = "$PWD"; affinity = "0x3"; restoreAtEnd = $true; env = @{ X = "1" }; steps = @(@{ name = "hello"; args = @("-e", "console.log(process.env.X)"); env = @{}; continueOnError = $false }) } | ConvertTo-Json -Depth 5 | Set-Content -Encoding UTF8 "$k\jobs\ci2\spec.json"
+          powershell -NoProfile -ExecutionPolicy Bypass -File $s -Action snapshot -Job ci2 -KitDir $k | Select-Object -Last 1
+          powershell -NoProfile -ExecutionPolicy Bypass -File $s -Action start -Job ci2 -KitDir $k | Select-Object -Last 1
+          for ($i = 0; $i -lt 30; $i++) { Start-Sleep 2; $st = powershell -NoProfile -ExecutionPolicy Bypass -File $s -Action status -Job ci2 -KitDir $k | Select-Object -Last 1; if ($st -match '"state":"done"') { break } }
+          $st
+          Get-Content "$k\jobs\ci2\log" -ErrorAction SilentlyContinue
+          Get-Content "$k\jobs\ci2\hello.out" -ErrorAction SilentlyContinue
+          powershell -NoProfile -ExecutionPolicy Bypass -File $s -Action restore -Job ci2 -KitDir $k | Select-Object -Last 1
+          if ($st -notmatch '"exit":0') { exit 1 }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: windows-pckit
+          path: |
+            ${{ runner.temp }}/check.txt
+            ${{ runner.temp }}/roundtrip.txt
+            ${{ runner.temp }}/bench-*.json
+          retention-days: 7
