@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 
-import { analyzeRun, classifySecond, filmPhaseLabels, newFrameBins, producedBins, contentSecond, gapDetail, completionOf, currentPhase, deriveSeconds, GAME_DRAWS_PER_FRAME, LOAD_DISC_BPS, markerIndexes, MIN_PHASE_SEC, parcoursVerdict, phaseLabels, phaseMetrics, phaseNoise, renderTimeline, sectionsOf, segmentsOf, summarizeSeconds, windowCadence } from "../harness/lib/parcours.mjs";
+import { analyzeRun, classifySecond, filmPhaseLabels, newFrameBins, producedBins, regularProduction, contentSecond, gapDetail, completionOf, currentPhase, deriveSeconds, GAME_DRAWS_PER_FRAME, LOAD_DISC_BPS, markerIndexes, MIN_PHASE_SEC, parcoursVerdict, phaseLabels, phaseMetrics, phaseNoise, renderTimeline, sectionsOf, segmentsOf, summarizeSeconds, windowCadence } from "../harness/lib/parcours.mjs";
 import { filmMarkers, filmPhases, filmWithMarks, keyToPad, padStateOf, recordPorts, runRecordSteps, validateFilm, validateRecordSteps } from "../harness/lib/pad-film.mjs";
 import { analyzeRaw, countersOf, otherCpuOf, presentGaps, samplerTicksOf, viTimesOf, exitCodeOf, humanSummary, markerStep } from "../harness/probes/parcours.mjs";
 import { decodePng, encodePng } from "../harness/lib/png.mjs";
@@ -837,12 +837,15 @@ function withProduced(samples, perSec) {
 }
 test("produced frames on the grid: counted per second like the presents, unknown when a read missed them; none recorded: the worker's rate (basis worker)", () => {
   const s = withProduced(samplesOf([["menu", 3]]), (i) => (i === 2 ? 33 : 60));
-  assert.deepEqual(producedBins(s), { basis: "grid", bins: [60, 33, 60] });
+  assert.equal(producedBins(s).basis, "grid");
+  assert.deepEqual(producedBins(s).bins, [60, 33, 60]);
   s[3].producedKnown = false;
   assert.deepEqual(producedBins(s).bins, [60, 33, null], "the last reading may hold frames after t2: its second unknown");
   s[3].producedKnown = true; s[2].producedKnown = false;
   assert.deepEqual(producedBins(s).bins, [60, null, null], "reading 2 may hold frames of (t1, t3)");
   assert.deepEqual(producedBins(samplesOf([["menu", 2]])), { basis: "worker", bins: null });
+  // each second's longest pause: one frame interval when regular
+  assert.ok(producedBins(withProduced(samplesOf([["menu", 2]]), 60)).maxGapMs.every((g) => Math.abs(g - 1000 / 60) < 0.01));
   // untagged frames: nothing known
   const sw = withProduced(samplesOf([["menu", 2]]), 60);
   for (const x of sw) delete x.info.newShown;
@@ -892,6 +895,30 @@ test("the produced basis per run: refused across bases (an A/B, an A/A's noise);
   assert.match(worker, /^let harnessProducedRing = null;$/m);
   assert.match(worker, /harnessProducedRing \?\?= new Float64Array\(HARNESS_PRESENT_RING\);/);
   assert.match(worker, /if \(!harnessEnabled \|\| !harnessProducedRing\) return;/);
-  assert.equal(worker.match(/if \(wgpuNewFrames\.queued\([^)]*\)\) recordProducedFrame\(\);/g)?.length, 2, "both WebGPU present paths");
+  assert.equal(worker.match(/if \(wgpuNewFrames\.queued\([^)]*\) && harnessProducedRing\) recordProducedFrame\(\);/g)?.length, 2, "both WebGPU present paths, the ring checked inline (no call for a player)");
   assert.match(worker, /presents: \{ \.\.\.presents, lost: presentsLost \}, produced, vi,/);
+});
+
+test("a worker stall that stops making and showing alike is a loss, not content: only a regular production is content", () => {
+  // the middle second: 300 ms with nothing made nor shown (a worker stall), 42 made and 42 shown around it
+  const stalled = (t) => presentsIn(t, 60).filter((p) => p < t - 700 || p >= t - 400);
+  const s = withProduced(samplesOf([["menu", 3]]), 60);
+  s[2].producedT = stalled(s[2].t);
+  s[2].presents = stalled(s[2].t);
+  assert.equal(s[2].producedT.length, 42);
+  const rows = deriveSeconds(s, { tps: TPS });
+  assert.equal(rows[1].smoothBins[0].regular, false);
+  assert.equal(rows[1].smoothBins[0].content, false);
+  assert.equal(rows[1].smoothness, 70, "read against the cadence: 42 of 60");
+  // a game making 42 a second, spread over it: content, read against what it made
+  const even = withProduced(samplesOf([["menu", 3]]), (i) => (i === 2 ? 42 : 60));
+  even[2].presents = presentsIn(even[2].t, 42);
+  const er = deriveSeconds(even, { tps: TPS });
+  assert.equal(er[1].smoothBins[0].regular, true);
+  assert.equal(er[1].smoothness, 100);
+  // the rule: the longest pause at most 1.5 frame intervals; unknown is never regular
+  assert.equal(regularProduction(42, 35), true);
+  assert.equal(regularProduction(42, 300), false);
+  assert.equal(regularProduction(42, null), false);
+  assert.equal(regularProduction(0, 10), false);
 });

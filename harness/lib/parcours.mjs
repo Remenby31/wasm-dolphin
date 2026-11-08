@@ -228,12 +228,29 @@ export function producedBins(samples, { binMs = NEW_FRAMES_BIN_MS } = {}) {
     const from = samples[j - 1].t, to = samples[j + 1]?.t ?? Infinity;
     for (let k = Math.max(0, Math.floor((from - origin) / binMs)); k < n && origin + k * binMs < to; k += 1) unknown[k] = true;
   });
-  for (const s of samples) for (const t of s.producedT ?? []) {
+  const times = samples.flatMap((s) => s.producedT ?? []).sort((x, y) => x - y);
+  for (const t of times) {
     const k = Math.floor((t - origin) / binMs);
     if (k >= 0 && k < n) counts[k] += 1;
   }
-  return { basis: "grid", bins: counts.map((c, k) => (unknown[k] ? null : c * (1000 / binMs))) };
+  // each second's longest pause in production: every interval between two
+  // frames (or from the last frame to the second's end, with none after
+  // known) that overlaps the second, its whole length
+  const maxGap = Array(n).fill(0);
+  const edges = [origin, ...times.filter((t) => t >= origin), last];
+  for (let i = 1; i < edges.length; i += 1) {
+    const a = edges[i - 1], b = edges[i];
+    for (let k = Math.max(0, Math.floor((a - origin) / binMs)); k < n && origin + k * binMs < b; k += 1) maxGap[k] = Math.max(maxGap[k], b - a);
+  }
+  return { basis: "grid", bins: counts.map((c, k) => (unknown[k] ? null : c * (1000 / binMs))), maxGapMs: maxGap.map((g, k) => (unknown[k] ? null : g)) };
 }
+
+// A second's production is regular (its frames spread over it, no burst then
+// a stop): its longest pause at most REGULAR_GAP_FACTOR frame intervals. A
+// worker stalled 300 ms makes and shows nothing meanwhile: 42 made, 42
+// shown, and only a regular production may be the game's own content.
+export const REGULAR_GAP_FACTOR = 1.5;
+export const regularProduction = (made, maxGapMs) => Number.isFinite(made) && made > 0 && Number.isFinite(maxGapMs) && maxGapMs <= REGULAR_GAP_FACTOR * (1000 / made);
 
 // The raw samples -> one row a second (the first sample is the origin).
 export function deriveSeconds(samples, { tps = null } = {}) {
@@ -242,7 +259,7 @@ export function deriveSeconds(samples, { tps = null } = {}) {
   const t0 = samples[0]?.t ?? 0;
   let booted = false;
   const { bins } = newFrameBins(samples);
-  const produced = producedBins(samples).bins;
+  const { bins: produced, maxGapMs: producedGap } = producedBins(samples);
   let nextBin = 0;
   for (let i = 1; i < samples.length; i += 1) {
     const a = samples[i - 1], b = samples[i];
@@ -329,9 +346,13 @@ export function deriveSeconds(samples, { tps = null } = {}) {
       // was made in that second; what was made unknown, the second unknown)
       smoothBins: own.map((x, i) => {
         if (!produced) return { t: round((x.to - t0) / 1000, 2), newFrames: x.newFrames, smoothness: smoothOf(x.newFrames, ref) };
+        // content only with a regular production (a stall that stops making
+        // and showing alike is a loss); speed and occupancy are the row's
+        // (the occupancy: the worker's 500 ms window)
         const made = ownProduced[i];
-        const binContent = made != null && contentSecond({ producedFps: made, speed, cadence: sceneCadence, ...occupancy });
-        return { t: round((x.to - t0) / 1000, 2), newFrames: x.newFrames, produced: made, content: binContent, smoothness: made == null ? null : smoothOf(x.newFrames, binContent ? made : sceneCadence) };
+        const regular = made != null && regularProduction(made, producedGap[x.k]);
+        const binContent = regular && contentSecond({ producedFps: made, speed, cadence: sceneCadence, ...occupancy });
+        return { t: round((x.to - t0) / 1000, 2), newFrames: x.newFrames, produced: made, regular, content: binContent, smoothness: made == null ? null : smoothOf(x.newFrames, binContent ? made : sceneCadence) };
       }),
       smoothness: null,
       viRate: round(viRate, 1), presents: (b.presents ?? []).length, hitches50, hitches100, maxGapMs: round(maxGapMs, 1),

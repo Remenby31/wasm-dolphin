@@ -750,7 +750,7 @@ let harnessPresentHead = 0;
 // per frame produced (a new frame tag entering the present queue,
 // wgpuNewFrames.queued): its host time. The harness's produced frames a
 // second on the same grid as the presents; with the presents ring, null for
-// every player.
+// every player (and no call on their path: the ring is checked inline).
 let harnessProducedRing = null;
 let harnessProducedHead = 0;
 let harnessProducedRead = 0;
@@ -13483,7 +13483,7 @@ function queueWgpuVsyncFrame(coreFrame, shownVi, stream, tag = 0, tagEpoch = 0) 
   wgpuVsyncCountDrops(before);
   if (!frame) return false;
   if (stream && streamCapture.active) streamWgpuVsyncFrame(frame.tex, coreFrame);
-  if (wgpuNewFrames.queued(tag, tagEpoch)) recordProducedFrame();
+  if (wgpuNewFrames.queued(tag, tagEpoch) && harnessProducedRing) recordProducedFrame();
   if (harnessPipeline) harnessPipelineLog.queued(shownVi, performance.timeOrigin + at);
   if (wgpuVsyncTracking()) wgpuGamePacer.stamp(at);
   if (wgpuViLock) {
@@ -16506,7 +16506,7 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
           } else {
             if (streamCapture.active && !hardwareInputMarkerApplied) streamCapture.offerCanvas(renderCanvas, api?.getFrame?.() ?? 0);
             // Shown at the submit: queued and shown at once.
-            if (wgpuNewFrames.queued(presentFrameTag, presentFrameTagEpoch)) recordProducedFrame();
+            if (wgpuNewFrames.queued(presentFrameTag, presentFrameTagEpoch) && harnessProducedRing) recordProducedFrame();
             wgpuNewFrames.shown(presentFrameTag, presentFrameTagEpoch);
             recordPresentedFrame(api?.getFrame?.() ?? 0, wgpuExactCapture.currentBoot(), presentFrameTag, presentFrameTagEpoch);
             if (harnessPipeline) harnessPipelineLog.queued(wgpuExactCapture.currentBoot(), harnessNow());
