@@ -183,9 +183,9 @@ test("bounded and smooth: never past MAX_PPM, at most SLEW a second; out of reac
   assert.equal(near.vi.stats.lost, 1);
 });
 
-// the first arrival's offset (ms) for a lock taken near `phase` (~5 s in: 3 s
-// of the speed at the base, 4 stable updates; the free drift +0.06 cycle/s)
-const at = (phase) => 0.37 * (1000 / 60) + (((phase - 0.3) % 1) + 1) % 1 * (1000 / 60);
+// the first arrival's offset (ms) for a lock taken near `phase` (~4 s in: 2 s
+// of rAF, 4 stable updates; the free drift +0.06 cycle/s)
+const at = (phase) => 0.37 * (1000 / 60) + (((phase - 0.24) % 1) + 1) % 1 * (1000 / 60);
 
 // the phase never wraps through the cut (0 / 1) once locked
 const noCrossing = (phases) => phases.every((p, i) => i === 0 || Math.abs(p - phases[i - 1]) < 0.5) && Math.min(...phases.map((p) => Math.min(p, 1 - p))) > 0.04;
@@ -522,4 +522,72 @@ test("a sustained drift past reach after the lock (the game 1 % slow for good): 
   const later = trace.filter((x) => x.t >= released.t + 3_000);
   assert.ok(later.length && later.every((x) => !x.on && x.ppm === 0), JSON.stringify(later.slice(0, 3)));
   assert.equal(vi.stats.locks, 1);
+});
+
+// A boot: the rAF and the frames from t = 0 (NTSC on 60 Hz), the logo's load
+// at 4-5 s (the core 8 % behind for half a second, then 8 % ahead as the
+// throttle catches up: 96 then 104 % seen on the 2P parcours), through the
+// presenter's real queue; frames lost from 1.5 to 12 s.
+function bootRun({ offset, earlyFirstLock, tickJitter = () => 0, tickMissing = () => false, seconds = 14 }) {
+  const R = 1000 / 60, load = 4000;
+  const q = createVsyncQueue({ queueSize: 2, createTexture: () => ({}) });
+  const vi = createViPhaseLock({ earlyFirstLock });
+  let factor = 1, next = offset, n = 0, tick = 0, last = 0, repeats = 0, dropped0 = null, firstLock = null;
+  const onTicks = [];
+  for (let k = 0; k * R < seconds * 1000; k++) {
+    const t = 0.37 * R + k * R;
+    const j = (m) => (((m * 7919) % 7) - 3) * 0.6 + (t >= load && t < load + 1000 ? (((m * 104729) % 9) - 4) : 0);
+    while (next + j(n) <= t) {
+      const at = next + j(n);
+      q.textureForPass("k", 1, 1);
+      q.queueFrame({ n, tick, at });
+      vi.arrival(at);
+      n++;
+      next += (at >= load && at < load + 1000 ? NTSC_VI_MS / (at < load + 500 ? 0.92 : 1.08) : NTSC_VI_MS) / factor;
+    }
+    tick++;
+    if (!tickMissing(k)) vi.tick(t + tickJitter(k), t + tickJitter(k));
+    if (t - last >= 500) {
+      last = t;
+      factor = vi.update(t).factor;
+      if (vi.stats.on && firstLock === null) firstLock = t;
+      onTicks.push({ t, on: vi.stats.on, why: vi.stats.why });
+    }
+    if (t >= 1500 && dropped0 === null) dropped0 = q.stats.dropped;
+    const f = q.takeForDisplay(tick, null);
+    if (f) q.shown(f);
+    else if (t >= 1500 && t < 12_000) repeats++;
+  }
+  return { lost: repeats + q.stats.dropped - dropped0, firstLock, stats: vi.stats, trace: onTicks };
+}
+
+test("a session's first lock needs no base window (no trim was ever written): taken ~1.5 s sooner at a boot, fewer frames lost through the logo's load", () => {
+  let before = 0, after = 0, worse = 0, worst = 0;
+  const firstBefore = [], firstAfter = [];
+  for (let offset = 0; offset < 16.6; offset += 0.25) {
+    const a = bootRun({ offset, earlyFirstLock: false }), b = bootRun({ offset, earlyFirstLock: true });
+    before += a.lost; after += b.lost;
+    firstBefore.push(a.firstLock); firstAfter.push(b.firstLock);
+    if (b.lost > a.lost + 4) { worse++; worst = Math.max(worst, b.lost - a.lost); }
+    assert.equal(b.stats.lost, 0, `${offset}: held through the load`);
+  }
+  const med = (v) => [...v].sort((x, y) => x - y)[v.length >> 1];
+  console.log(`boot: first lock ${med(firstBefore) / 1000} -> ${med(firstAfter) / 1000} s; frames lost 1.5-12 s ${before} -> ${after} over ${firstAfter.length} boots; worse by > 4 in ${worse} (at most ${worst})`);
+  assert.ok(med(firstAfter) <= med(firstBefore) - 1000, "at least 1 s sooner");
+  assert.ok(after < 0.7 * before, `frames lost ${before} -> ${after}`);
+  assert.ok(worse <= firstAfter.length * 0.1, `worse in ${worse}`);
+});
+
+test("rAF not yet stable at a boot (jittery, or ticks missing): no lock taken on it, taken once it is regular", () => {
+  // the first 6 s: +/-3 ms of jitter (0.18 of a refresh), or one BeginFrame in three missing
+  const noise = (k) => { const x = Math.sin(k * 12.9898) * 43758.5453; return 2 * (x - Math.floor(x)) - 1; };
+  const jittery = (k) => (k * (1000 / 60) < 6000 ? 3 * noise(k) : 0);
+  const missing = (k) => k * (1000 / 60) < 6000 && k % 3 === 0;
+  for (const [name, o] of [["jittery", { tickJitter: jittery }], ["missing", { tickMissing: missing }]]) {
+    const r = bootRun({ offset: 5, earlyFirstLock: true, ...o });
+    const early = r.trace.filter((x) => x.t < 6000);
+    assert.ok(early.every((x) => !x.on), `${name}: locked on an unstable rAF ${JSON.stringify(early.filter((x) => x.on).slice(0, 2))}`);
+    assert.ok(early.some((x) => x.why === "rAF jitter" || x.why === "rAF irregular"), `${name}: ${[...new Set(early.map((x) => x.why))].join(", ")}`);
+    assert.ok(r.firstLock !== null && r.firstLock >= 6000, `${name}: locked once regular (${r.firstLock})`);
+  }
 });

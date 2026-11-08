@@ -90,9 +90,9 @@ export const OUT_OF_REACH_MS = 3000;
 // within RATIO_TOLERANCE (its estimate wobbles: a drift past it was taken now
 // and then, and dropped again)
 export const ENTRY_UPDATES = 4;
-// after a drift out of reach, the lock is taken again as soon as the drift
-// is back within reach (no base window first), but not with the arrivals
-// within this share of a refresh of the cut
+// a lock taken without the base window (a session's first, or again after a
+// drift out of reach) is not taken with the arrivals within this share of a
+// refresh of the cut
 export const REENTRY_CUT_MARGIN = 0.1;
 // the refresh: a least-squares line through the last REFRESH_TICKS rAF frame
 // times, each numbered by the refreshes since the first (a missed vsync counts
@@ -102,6 +102,9 @@ export const REENTRY_CUT_MARGIN = 0.1;
 // of the median) and the residuals' spread is under REFRESH_JITTER of the
 // period, between 45 and 165 Hz
 export const REFRESH_TICKS = 600;
+// 1 s of rAF before the refresh is trusted (was 2 s: the first lock came
+// 9.5 s into a boot, after the logo's load, the phase free meanwhile); the
+// inlier share and the jitter checks hold on these 60 as on more
 const MIN_REFRESH_TICKS = 120;
 export const REFRESH_INLIERS = 0.8;
 export const REFRESH_BAND = 0.3;
@@ -182,7 +185,7 @@ export function viLockMode(v) {
 // The largest frames-per-refresh ratio the lock takes in each mode.
 export const MAX_RATIO = Object.freeze({ on: 2, auto: 1 });
 
-export function createViPhaseLock({ quickReentry = true, maxPpm = MAX_PPM, slewPpmPerSec = SLEW_PPM_PER_SEC, target = TARGET_PHASE, errAlpha = ERR_ALPHA, writeStep = WRITE_STEP_PPM, maxRatio = MAX_RATIO.on } = {}) {
+export function createViPhaseLock({ quickReentry = true, earlyFirstLock = true, maxPpm = MAX_PPM, slewPpmPerSec = SLEW_PPM_PER_SEC, target = TARGET_PHASE, errAlpha = ERR_ALPHA, writeStep = WRITE_STEP_PPM, maxRatio = MAX_RATIO.on } = {}) {
   // the error the output's P term sees (smoothed), and the trim written
   // (held until the controller's moved by writeStep)
   let errSmooth = null;
@@ -297,8 +300,9 @@ export function createViPhaseLock({ quickReentry = true, maxPpm = MAX_PPM, slewP
     lastUpdate = now;
     const s = assess(now);
     if (!stats.on) {
-      // the first lock: once the speed has been the base for the whole
-      // window, then ENTRY_UPDATES lockable updates in a row. After a lock
+      // ENTRY_UPDATES lockable updates in a row; after a lock let go (other
+      // than for a drift out of reach), once the speed has been the base for
+      // the whole window first. After a lock
       // let go for a drift out of reach, no wait for the base: the period
       // is read on base time (each gap at the speed it ran, period()), so a
       // window spanning the release and the slew back reads right. That
@@ -308,12 +312,18 @@ export function createViPhaseLock({ quickReentry = true, maxPpm = MAX_PPM, slewP
       // cut while it settled, 22 frames lost.
       if (ppm !== 0) baseSince = null;
       else baseSince ??= now;
-      const clean = reentry || (baseSince !== null && now - baseSince >= ARRIVAL_WINDOW_MS);
-      // a quick re-entry is not taken with the arrivals next to the cut: the
+      // the first lock of a session neither: every arrival so far came at
+      // the base speed (no trim was ever written). On a boot it came 9.5 s
+      // in, after the logo's load, the phase free meanwhile (2P parcours:
+      // 76 % of the startup seconds' lost frames before the first lock);
+      // now ~3.5 s (2 s of rAF, 4 updates), and a load that follows is
+      // held through ("ratio off")
+      const clean = reentry || (earlyFirstLock && stats.locks === 0) || (baseSince !== null && now - baseSince >= ARRIVAL_WINDOW_MS);
+      // a quick (re-)entry is not taken with the arrivals next to the cut: the
       // drift that let go would carry them across it while the trim turns
       // (then the acquisition crosses back: two crossings for one); they
       // cross unlocked and the lock is taken past it
-      const nearCut = reentry && s.why === null && Math.min(s.phase, 1 - s.phase) < REENTRY_CUT_MARGIN;
+      const nearCut = (reentry || (earlyFirstLock && stats.locks === 0)) && s.why === null && Math.min(s.phase, 1 - s.phase) < REENTRY_CUT_MARGIN;
       entryStreak = s.why === null && clean && !nearCut ? entryStreak + 1 : 0;
       if (s.why === null && entryStreak < ENTRY_UPDATES) s.why = "settling";
     }
