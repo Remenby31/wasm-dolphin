@@ -23,7 +23,7 @@ import { decodeReport } from "./lib/report-rows.mjs";
 
 // efbaccess=1: gxtest pokes and peeks the EFB (EFBAccessEnable, a per-disc
 // setting off by default; off, every peek reads 0).
-const BASE = "core=upstream&video=software&presenter=2d&cpu=dual&speed=0&fastsw=0&efbaccess=1&metrics=1";
+const BASE = "core=upstream&video=software&presenter=2d&cpu=dual&speed=0&fastsw=0&efbaccess=1&efbcopyram=1&metrics=1";
 export const CONFIGS = {
   interp: `${BASE}&wasmjit=0`,
   jit: `${BASE}&wasmjit=1&jitwarmup=120&forcejit=1`

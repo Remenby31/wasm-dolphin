@@ -52,7 +52,11 @@ static void round_trip(u32 seed) {
   RP_CHECK(r == CARD_ERROR_READY, r);
   r = CARD_Read(&file, in, len, 0);
   RP_CHECK(r == CARD_ERROR_READY, r);
-  RP_CHECK(memcmp(in, out, len) == 0, in[0]);
+  /* Detail: the first differing word's index, then the word read there. */
+  u32 first = len / 4;
+  for (u32 i = 0; i < len / 4; i++) if (in[i] != out[i]) { first = i; break; }
+  RP_CHECK(first == len / 4, first);
+  RP_CHECK(first == len / 4, first < len / 4 ? in[first] : 0);
   card_stat st;
   r = CARD_GetStatus(CARD_SLOTA, file.filenum, &st);
   RP_CHECK(r == CARD_ERROR_READY && st.len == len, r == CARD_ERROR_READY ? (s32)st.len : r);

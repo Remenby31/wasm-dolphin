@@ -9,7 +9,7 @@
  *   480i NTSC, EURGB60, MPAL  59.94 Hz (525 lines, two fields)
  *   240p (double strike)      59.826 Hz (263 lines per field)
  *   576i PAL                  50.00 Hz (625 lines, two fields)
- *   288p PAL (double strike)  49.92 Hz (313 lines per field)
+ *   288p PAL (double strike)  50.08 Hz (312 lines per field)
  *   480p                      59.94 Hz (525 lines, 27 MHz pixel clock)
  * Tolerance 0.2 %. The report goes back to the starting mode. Results:
  * compat/homebrew/report.h (detail: the measured rate in mHz).
@@ -47,7 +47,7 @@ int main(void) {
   check_mode(&TVNtsc480IntDf, fb, 59940);
   check_mode(&TVNtsc240Ds, fb, 59826);
   check_mode(&TVPal576IntDfScale, fb, 50000);
-  check_mode(&TVPal264Ds, fb, 49920);
+  check_mode(&TVPal264Ds, fb, 50080);
   check_mode(&TVEurgb60Hz480IntDf, fb, 59940);
   check_mode(&TVMpal480IntDf, fb, 59940);
   check_mode(&TVNtsc480Prog, fb, 59940);
