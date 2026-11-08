@@ -402,6 +402,9 @@ async function main() {
   const browsers = values.browser.split(",").map((b) => b.trim()).filter(Boolean);
   const job = values.job ?? newJobId(cmd);
   if (!JOB_ID.test(job)) throw new Error(`--job ${job}: letters, digits, . _ -`);
+  // the arguments, before any connection
+  if (values.iso && !/^[A-Za-z]:\\/.test(values.iso)) throw new Error(`--iso ${values.iso}: a Windows path on the PC (the kit never sends a disc)`);
+  if ((cmd === "run" || cmd === "all") && (!values.iso || !values.film?.length)) throw new Error("run: --iso <path ON the PC> and --film scene=film.json (one per scene)");
 
   if (cmd === "status") return console.log(JSON.stringify(kit(t, "status", { Job: job }), null, 1));
   if (cmd === "restore") { const r = kit(t, "restore", { Job: job }); const d = restoreDiff(r.before, r.after, job); console.log(d.length ? `restore differs: ${d.join("; ")}` : "restored"); return void (process.exitCode = d.length ? 1 : 0); }
@@ -449,8 +452,6 @@ async function main() {
   if (cmd === "calibrate") return void (await calibrateJob(job));
 
   // run / all
-  if (!values.iso || !values.film?.length) throw new Error("run: --iso <path ON the PC> and --film scene=film.json (one per scene)");
-  if (!/^[A-Za-z]:\\/.test(values.iso)) throw new Error(`--iso ${values.iso}: a Windows path on the PC (the kit never sends a disc)`);
   const films = {};
   for (const f of values.film) {
     const [scene, file] = f.includes("=") ? f.split(/=(.*)/s) : [path.basename(f, ".json"), f];
