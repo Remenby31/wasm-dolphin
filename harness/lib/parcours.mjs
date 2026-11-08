@@ -18,8 +18,9 @@
 //             discBytes, xfbCopies (EFB→XFB copies), cumulative; null when
 //             no row came (the rates of the previous second are kept)
 //   presents  host times of the presentations of that second (timeline);
-//             presentVi the VI each shows, presentsKnown false when the
-//             timeline read failed or its ring lost presents
+//             presentTag / presentTagEpoch the frame tag each shows (patch
+//             0208), presentsKnown false when the timeline read failed, its
+//             ring lost presents or the tags were not one per present
 //   vi        VI outputs of that second (timeline); viT their host times
 //             (the frames' phase against the presents: ?vilock, patch 0212)
 //   audioQ    the mixer queue's overflow skips and underrun fills since boot,
@@ -41,10 +42,12 @@ import { median, percentile, round } from "./stats.mjs";
 // PROBE_VERSION). An A/A's noise holds only for the same analysis: readNoise
 // refuses another. 2: content seconds judged against what was made
 // (contentRule), the menus' smoothness p5 several points higher than in 1.
-// 3: new frames counted present by present over each exact second (was the
-// worker's last 500 ms: one 50 ms hitch read 93.3 %, the other half unseen);
+// 4: new frames counted present by present on a fixed 1 s grid of the
+// timeline (was the worker's last 500 ms: one 50 ms hitch read 93.3 %, the
+// other half unseen), by frame tag when recorded (newFramesBasis "tag", else
+// "all"), unknown seconds counted (smoothUnknown, p5 unreliable past 5 %);
 // the film's declared phases (film.phases) before the detector's.
-export const ANALYSIS_VERSION = 3;
+export const ANALYSIS_VERSION = 4;
 
 export const PHASES = Object.freeze(["boot", "loading", "cinematic", "menu", "game"]);
 // A phase lasts at least this long: a shorter run of seconds goes to the
@@ -129,63 +132,76 @@ export function contentSecond({ producedFps, speed, cadence, cpuBusy, gpuBusy, r
   if (!(Number.isFinite(producedFps) && producedFps > 0)) return false;
   return contentRule({ speed, produced: producedFps, expected: cadence, occupancy: { cpu: cpuBusy, gpu: gpuBusy, replay: replayBusy } });
 }
+const smoothOf = (n, ref) => (n == null || !(Number.isFinite(ref) && ref > 0) ? null : round(Math.max(0, Math.min(100, (n / ref) * 100)), 1));
 const delta = (a, b) => (num(a) == null || num(b) == null || b < a ? null : b - a);
 
-// The new frames shown in the second ending at each reading: every present
-// of the timeline whose time t is in (b.t - 1000, b.t], b the reading (a
-// present at or before a reading was read by it: the timeline is read after
-// the page's time). Exact, whatever the reading's phase against the worker's
-// stats posts. One entry per sample (index 0: null); null when unknown:
-//   - a reading whose timeline was not read or lost presents (presentsKnown
-//     false; on a record without that field: viT null while the run has VI
-//     times, the probe's own mark of a failed or lossy read) and whose span
-//     the second overlaps;
-//   - frames without tags (info.newShown absent: the software renderer
-//     presents a picture at every VI, new or not);
-//   - with each present's VI recorded (presentVi): a present without one.
-// A present is new when its VI is past every VI shown before (a repeat or an
-// out-of-order frame is not); without presentVi (records before analysis 3)
-// every present is (the WebGPU vsync presenter puts each frame up once).
-export const NEW_FRAMES_WINDOW_MS = 1000;
-export function newFramesPerSecond(samples, { windowMs = NEW_FRAMES_WINDOW_MS } = {}) {
-  const out = samples.map(() => null);
+// The new frames shown, second by second on a FIXED grid: bin k is
+// [origin + k s, origin + (k + 1) s), origin the first reading; every present
+// of the timeline lands in exactly one bin, whatever the readings' times (a
+// hitch delays the reading after it: a window tied to the readings would
+// leave part of the gap unseen). Basis:
+//   "tag"  each present's frame tag and tag epoch recorded (presentTag,
+//          presentTagEpoch: src/wgpu-new-frames.js, patch 0208): a present is
+//          new when its (epoch, tag) is past the last one shown (a re-shown
+//          duplicate or an older frame is not; a reboot or a state load
+//          moves the epoch); a tag of 0 (unknown) makes its bin unknown;
+//   "all"  no tags recorded (records before analysis 4): every present is
+//          one, which only holds on the WebGPU vsync presenter (each frame
+//          put up once); a re-shown duplicate would count.
+// A bin is null (unknown) when a reading that may hold its presents was not
+// read whole: reading j holds the presents after reading j-1's timeline read
+// and up to its own, all within (t[j-1], t[j+1]) since the loop reads in
+// order; unknown are a reading flagged presentsKnown false (the read failed,
+// the ring lost presents, the tags missing or not one per present), on a
+// record without that flag viT null while the run has VI times, and frames
+// untagged (info.newShown absent: the software renderer presents a picture
+// at every VI). Bins past the last reading are incomplete: none.
+export const NEW_FRAMES_BIN_MS = 1000;
+export function newFrameBins(samples, { binMs = NEW_FRAMES_BIN_MS } = {}) {
+  if (!samples.length) return { basis: null, bins: [] };
+  const origin = samples[0].t, last = samples.at(-1).t;
   const viEver = samples.some((s) => Array.isArray(s.viT));
+  const basis = samples.some((s) => Array.isArray(s.presentTag)) ? "tag" : "all";
   const known = samples.map((s) => {
-    if (!Array.isArray(s.presents)) return false;
-    if (typeof s.presentsKnown === "boolean") return s.presentsKnown;
+    if (!Array.isArray(s.presents) || num(s.info?.newShown) == null) return false;
+    if (typeof s.presentsKnown === "boolean" && !s.presentsKnown) return false;
+    if (basis === "tag" && !(Array.isArray(s.presentTag) && Array.isArray(s.presentTagEpoch) && s.presentTag.length === s.presents.length && s.presentTagEpoch.length === s.presents.length)) return false;
+    if (typeof s.presentsKnown === "boolean") return true;
     return viEver ? Array.isArray(s.viT) : true;
+  });
+  const n = Math.floor((last - origin) / binMs);
+  const counts = Array(n).fill(0);
+  const unknown = Array(n).fill(false);
+  // the spans a reading not read whole may hold presents in
+  samples.forEach((s, j) => {
+    if (j === 0 || known[j]) return;
+    const from = samples[j - 1].t, to = samples[j + 1]?.t ?? Infinity;
+    for (let k = Math.max(0, Math.floor((from - origin) / binMs)); k < n && origin + k * binMs < to; k += 1) unknown[k] = true;
   });
   // every present in time order: [t, new (true / false / null unknown)]
   const all = [];
-  let maxVi = -Infinity;
-  samples.forEach((s, k) => {
-    const vis = Array.isArray(s.presentVi) ? s.presentVi : null;
-    (s.presents ?? []).forEach((t, j) => {
-      if (!vis) { all.push([t, true]); return; }
-      const v = vis[j];
-      if (!(typeof v === "number" && v >= 0)) { all.push([t, null]); return; }
-      all.push([t, v > maxVi]);
-      maxVi = Math.max(maxVi, v);
-    });
-  });
+  samples.forEach((s, j) => (s.presents ?? []).forEach((t, i) => all.push([t, j, i])));
   all.sort((x, y) => x[0] - y[0]);
-  for (let i = 1; i < samples.length; i += 1) {
-    const b = samples[i];
-    if (num(b.info?.newShown) == null) continue;
-    const from = b.t - windowMs;
-    // every reading whose span (the reading before, it] the window touches
-    let ok = known[i];
-    for (let k = i - 1; ok && k >= 0 && samples[k].t > from; k -= 1) ok = known[k];
-    if (!ok) continue;
-    let n = 0;
-    for (const [t, isNew] of all) {
-      if (t <= from || t > b.t) continue;
-      if (isNew === null) { n = null; break; }
-      if (isNew) n += 1;
+  let shownTag = 0, shownEpoch = -Infinity;
+  for (const [t, j, i] of all) {
+    const k = Math.floor((t - origin) / binMs);
+    let isNew = true;
+    if (basis === "tag") {
+      const tag = samples[j].presentTag?.[i], epoch = samples[j].presentTagEpoch?.[i];
+      if (!(Number.isFinite(tag) && tag > 0 && Number.isFinite(epoch))) isNew = null;
+      else {
+        isNew = epoch > shownEpoch || (epoch === shownEpoch && tag > shownTag);
+        if (isNew) { shownTag = tag; shownEpoch = epoch; }
+      }
     }
-    out[i] = n === null ? null : n * (1000 / windowMs);
+    if (k < 0 || k >= n) continue;
+    if (isNew === null) unknown[k] = true;
+    else if (isNew) counts[k] += 1;
   }
-  return out;
+  return {
+    basis,
+    bins: counts.map((c, k) => ({ k, from: origin + k * binMs, to: origin + (k + 1) * binMs, newFrames: unknown[k] ? null : c * (1000 / binMs) }))
+  };
 }
 
 // The raw samples -> one row a second (the first sample is the origin).
@@ -194,7 +210,8 @@ export function deriveSeconds(samples, { tps = null } = {}) {
   let cadence = null, lastPresent = null, prevCounters = samples[0]?.counters ?? null, carried = null;
   const t0 = samples[0]?.t ?? 0;
   let booted = false;
-  const exact = newFramesPerSecond(samples);
+  const { bins } = newFrameBins(samples);
+  let nextBin = 0;
   for (let i = 1; i < samples.length; i += 1) {
     const a = samples[i - 1], b = samples[i];
     const dt = (b.t - a.t) / 1000;
@@ -218,10 +235,17 @@ export function deriveSeconds(samples, { tps = null } = {}) {
     // stats post (~45 / ~75 at 60), the count only without the rate
     const shown = delta(ia.newShown, ib.newShown);
     const newFpsWorker = num(ib.newFps) ?? (shown != null ? shown / dt : null);
-    // the new frames shown, counted present by present over the exact second
-    // ending at this reading (newFramesInWindow); the smoothness reads this
-    // one only: the worker's rate saw half the second, twice over
-    const newFps = exact[i];
+    // the new frames shown, counted present by present on the fixed 1 s grid
+    // (newFrameBins): this row's bins are those ending in (a.t, b.t] (one,
+    // or two after a late reading); the smoothness reads these only: the
+    // worker's rate saw half the second, twice over
+    const own = [];
+    while (nextBin < bins.length && bins[nextBin].to <= b.t) {
+      if (bins[nextBin].to > a.t) own.push(bins[nextBin]);
+      nextBin += 1;
+    }
+    const knownBins = own.filter((x) => x.newFrames != null);
+    const newFps = knownBins.length ? knownBins.reduce((n, x) => n + x.newFrames, 0) / knownBins.length : null;
     const newSignal = newFps ?? newFpsWorker;
     // the worker's produced rate (0208, WebGPU only); off WebGPU (the
     // software renderer: none) the sampler's XFB copies a second, so a core
@@ -258,7 +282,10 @@ export function deriveSeconds(samples, { tps = null } = {}) {
     rows.push({
       i: rows.length, t: round((b.t - t0) / 1000, 2), at: b.t, booted,
       speed: round(speed, 1), newFps: round(newFps, 1), newFpsWorker: round(newFpsWorker, 1), producedFps: round(producedFps, 1), producedFrom,
-      cadence: ref, sceneCadence, content, smoothness: newFps == null || !(Number.isFinite(ref) && ref > 0) ? null : round(Math.max(0, Math.min(100, (newFps / ref) * 100)), 1),
+      cadence: ref, sceneCadence, content,
+      // each grid second's smoothness (null: unknown); the row's, its worst
+      smoothBins: own.map((x) => ({ t: round((x.to - t0) / 1000, 2), newFrames: x.newFrames, smoothness: smoothOf(x.newFrames, ref) })),
+      smoothness: own.length && own.every((x) => x.newFrames != null) ? Math.min(...own.map((x) => smoothOf(x.newFrames, ref))) : null,
       viRate: round(viRate, 1), presents: (b.presents ?? []).length, hitches50, hitches100, maxGapMs: round(maxGapMs, 1),
       // the presenting worker's longest stall in the second (sampler rows)
       workerLagMs: Array.isArray(b.samplerTicks) && b.samplerTicks.length ? Math.max(...b.samplerTicks.map((x) => x[1])) : null,
@@ -373,10 +400,19 @@ const triple = (xs) => {
 
 // One phase (or section): its seconds -> the numbers a person reads and the
 // flat metrics the A/B judges.
+// Smoothness unknown in more than this share of a phase's grid seconds: its
+// p5 is marked unreliable (an unknown second may be the worst one).
+export const SMOOTH_UNKNOWN_MAX_SHARE = 0.05;
 export function summarizeSeconds(rows, { integrityAllow = [] } = {}) {
-  const speed = triple(rows.map((r) => r.speed)), newFps = triple(rows.map((r) => r.newFps)), smooth = triple(rows.map((r) => r.smoothness));
-  const worst = rows.filter((r) => r.smoothness != null || r.speed != null)
-    .sort((a, b) => (a.smoothness ?? 101) - (b.smoothness ?? 101) || (a.speed ?? 999) - (b.speed ?? 999))
+  // the grid seconds (deriveSeconds smoothBins), each counted once; a row
+  // without them (built by hand) is one second
+  const grid = rows.flatMap((r) => (Array.isArray(r.smoothBins) ? r.smoothBins.map((x) => x.smoothness) : [r.smoothness]));
+  const smoothUnknown = grid.filter((x) => x == null).length;
+  const speed = triple(rows.map((r) => r.speed)), newFps = triple(rows.map((r) => r.newFps)), smooth = triple(grid);
+  const smoothReliable = grid.length > 0 && smoothUnknown <= SMOOTH_UNKNOWN_MAX_SHARE * grid.length;
+  // an unknown smoothness is never ranked good: it comes first
+  const worst = rows.filter((r) => r.smoothness != null || r.speed != null || (r.smoothBins?.length ?? 0) > 0)
+    .sort((a, b) => (a.smoothness ?? -1) - (b.smoothness ?? -1) || (a.speed ?? 999) - (b.speed ?? 999))
     .slice(0, 3).map((r) => ({ t: r.t, speed: r.speed, newFps: r.newFps, smoothness: r.smoothness }));
   const sum = (k) => rows.reduce((s, r) => s + (r[k] ?? 0), 0);
   const first = rows.find((r) => r.integrity), last = rows.findLast((r) => r.integrity);
@@ -384,12 +420,13 @@ export function summarizeSeconds(rows, { integrityAllow = [] } = {}) {
   const metrics = {
     seconds: rows.length, speedMedian: speed.median, speedP5: speed.p5, speedMin: speed.min,
     newFpsMedian: newFps.median, newFpsP5: newFps.p5, smoothMedian: smooth.median, smoothP5: smooth.p5, smoothMin: smooth.min,
+    smoothSeconds: grid.length, smoothUnknown, smoothReliable,
     hitches50: sum("hitches50"), hitches100: sum("hitches100")
   };
   // seconds whose missing frames were the game's own (contentSecond)
   const contentSeconds = rows.filter((r) => r.content).length;
   return {
-    seconds: rows.length, contentSeconds, speed, newFps, smoothness: smooth, hitches50: metrics.hitches50, hitches100: metrics.hitches100, worst,
+    seconds: rows.length, contentSeconds, speed, newFps, smoothness: { ...smooth, seconds: grid.length, unknown: smoothUnknown, reliable: smoothReliable }, hitches50: metrics.hitches50, hitches100: metrics.hitches100, worst,
     occupancy: { cpuBusy: round(median(rows.map((r) => r.cpuBusy)), 2), gpuBusy: round(median(rows.map((r) => r.gpuBusy)), 2), replayBusy: round(median(rows.map((r) => r.replayBusy)), 2) },
     discMB: round(rows.reduce((s, r) => s + (r.discBps ?? 0), 0) / (1 << 20), 1),
     integrity: integrity ? { fatal: integrity.fatal ?? [], reported: integrity.reported ?? [] } : null,
@@ -443,7 +480,8 @@ export function analyzeRun(raw, { integrityAllow = [] } = {}) {
   // the film's declared phases first, the detector where it declares none
   const film = filmPhaseLabels(rows, raw.filmPhases);
   rows.forEach((r, i) => { r.phase = film[i] ?? labels[i]; r.rawPhase = rawLabels[i]; r.phaseFrom = film[i] ? "film" : "detector"; });
-  const segments = segmentsOf(labels).map((s) => ({ ...s, fromT: rows[s.from]?.t ?? null, toT: rows[s.to - 1]?.t ?? null }));
+  // segments (and the completion's phase order) on the phases kept: the film's where declared
+  const segments = segmentsOf(rows.map((r) => r.phase)).map((s) => ({ ...s, fromT: rows[s.from]?.t ?? null, toT: rows[s.to - 1]?.t ?? null }));
   const kinds = {};
   for (const p of PHASES) {
     const rs = rows.filter((r) => r.phase === p);
@@ -460,7 +498,7 @@ export function analyzeRun(raw, { integrityAllow = [] } = {}) {
   }
   const all = rows.length >= 2 ? summarizeSeconds(rows, { integrityAllow }) : null;
   return {
-    seconds: rows.length, completion: completionOf(markers, reached, segments), segments, phases: kinds, sections, overall: all,
+    seconds: rows.length, newFramesBasis: newFrameBins(raw.samples ?? []).basis, completion: completionOf(markers, reached, segments), segments, phases: kinds, sections, overall: all,
     integrityFailed: Boolean(all?.integrity?.fatal?.length),
     rows: rows.map(({ integrity, film, filmFrom, at, ...r }) => ({ ...r, filmPos: film?.pos ?? null }))
   };

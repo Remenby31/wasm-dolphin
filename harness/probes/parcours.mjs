@@ -260,16 +260,18 @@ async function playRun(o, server, { side, run, outDir }) {
       // patch 0212's audio queue events and the VI lock's counters (null on a core without them)
       const audioQ = await workerRequest(page, "validationReadAudioQueue", {}, 5000).catch(() => null);
       const presents = tl?.presents?.t ?? [], viT = viTimesOf(tl), samplerTicks = samplerTicksOf(drained);
-      // the VI each present shows (a repeat shows one shown before) and
-      // whether the read saw every present: the exact new frames a second
-      // (lib/parcours.mjs newFramesPerSecond)
-      const presentVi = Array.isArray(tl?.presents?.vi) && tl.presents.vi.length === presents.length ? tl.presents.vi : null;
-      const presentsKnown = Boolean(tl && !tl.error && Array.isArray(tl.presents?.t) && !tl.presents.lost);
+      // the frame tag each present shows (a re-shown duplicate shows one
+      // shown before) and whether the read saw every present, with one tag
+      // each: the new frames a second (lib/parcours.mjs newFrameBins)
+      const one = (x) => Array.isArray(x) && x.length === presents.length;
+      const presentTag = one(tl?.presents?.tag) && one(tl?.presents?.tagEpoch) ? tl.presents.tag : null;
+      const presentTagEpoch = presentTag ? tl.presents.tagEpoch : null;
+      const presentsKnown = Boolean(tl && !tl.error && Array.isArray(tl.presents?.t) && !tl.presents.lost && presentTag);
       // per present, the gap before it: its VIs and the worker's stall
       // (lib/drops.mjs parcoursWindowsForAttribution reads gapVis, gapWorkerLagMs)
       const per = presentGaps(raw.samples.at(-1), { presents, viT, samplerTicks });
       if (o.samplerRows && drained?.rows) (raw.samplerRows ??= []).push(drained);
-      raw.samples.push({ t, info, counters: countersOf(drained), presents, presentVi, presentsKnown, vi: tl?.vi?.t?.length ?? null, viT, samplerTicks, gapVis: per.vis, gapWorkerLagMs: per.workerLagMs, audioQ: audioQ?.unavailable ? null : audioQ, integrity: integrity?.unread || integrity?.unavailable ? null : integrity, film: status ? { pos: status.pos, hold: status.hold, polls: status.polls } : null });
+      raw.samples.push({ t, info, counters: countersOf(drained), presents, presentTag, presentTagEpoch, presentsKnown, vi: tl?.vi?.t?.length ?? null, viT, samplerTicks, gapVis: per.vis, gapWorkerLagMs: per.workerLagMs, audioQ: audioQ?.unavailable ? null : audioQ, integrity: integrity?.unread || integrity?.unavailable ? null : integrity, film: status ? { pos: status.pos, hold: status.hold, polls: status.polls } : null });
       raw.loads.push([Date.now(), os.loadavg()[0]]);
       const sec = Math.round((Date.now() - t0) / 1000);
       // the other processes' CPU every OTHER_CPU_EVERY_SEC, off the loop
@@ -371,8 +373,8 @@ export function humanSummary(summary) {
   for (const r of summary.runs) {
     if (r.error) { lines.push(`${r.side} ${r.run}: FAILED ${r.error}`); continue; }
     const c = r.completion;
-    lines.push(`${r.side} ${r.run}: ${c.completed ? "COMPLETE" : `INCOMPLETE (${c.reached}/${c.markers} markers${c.missing.length ? `, missed ${c.missing.join(", ")}` : ""}${c.phasesInOrder ? "" : ", phases out of order"})`}, ${r.seconds} s, ${r.segments.map((s) => `${s.phase} ${s.to - s.from}`).join(" > ")}${r.integrityFailed ? " INTEGRITY" : ""}${r.overloaded ? " OVERLOADED" : ""}${r.powerDrained ? " POWER" : ""}`);
-    for (const [k, p] of Object.entries(r.phases)) lines.push(`   ${k.padEnd(9)} ${String(p.seconds).padStart(4)} s  speed ${p.speed.median} (p5 ${p.speed.p5}, min ${p.speed.min}) %  new ${p.newFps.median} (p5 ${p.newFps.p5})/s  smooth ${p.smoothness.median} (p5 ${p.smoothness.p5}) %  hitches >50 ${p.hitches50} >100 ${p.hitches100}  busy ${p.occupancy.cpuBusy}/${p.occupancy.gpuBusy}/${p.occupancy.replayBusy}`);
+    lines.push(`${r.side} ${r.run}: ${c.completed ? "COMPLETE" : `INCOMPLETE (${c.reached}/${c.markers} markers${c.missing.length ? `, missed ${c.missing.join(", ")}` : ""}${c.phasesInOrder ? "" : ", phases out of order"})`}, ${r.seconds} s, ${r.segments.map((s) => `${s.phase} ${s.to - s.from}`).join(" > ")}${r.integrityFailed ? " INTEGRITY" : ""}${r.overloaded ? " OVERLOADED" : ""}, new frames by ${r.newFramesBasis ?? "?"}${r.powerDrained ? " POWER" : ""}`);
+    for (const [k, p] of Object.entries(r.phases)) lines.push(`   ${k.padEnd(9)} ${String(p.seconds).padStart(4)} s  speed ${p.speed.median} (p5 ${p.speed.p5}, min ${p.speed.min}) %  new ${p.newFps.median} (p5 ${p.newFps.p5})/s  smooth ${p.smoothness.median} (p5 ${p.smoothness.p5}${p.smoothness.unknown ? `, ${p.smoothness.unknown}/${p.smoothness.seconds} s unknown${p.smoothness.reliable ? "" : ": p5 UNRELIABLE"}` : ""}) %  hitches >50 ${p.hitches50} >100 ${p.hitches100}  busy ${p.occupancy.cpuBusy}/${p.occupancy.gpuBusy}/${p.occupancy.replayBusy}`);
   }
   if (summary.verdict) {
     const v = summary.verdict;
@@ -392,6 +394,8 @@ export function readNoise(file, expect) {
   if ((s.analysisVersion ?? 1) !== ANALYSIS_VERSION) throw new Error(`--noise ${file}: analysed with analysis version ${s.analysisVersion ?? 1}, this probe judges with ${ANALYSIS_VERSION}: re-analyse it (parcours.mjs --analyze <its dir>) or rerun the A/A`);
   // --edge drives (a capture stream in the page): another measure; unset is none
   const differ = ["probeVersion", "film", "query", "edge"].filter((k) => JSON.stringify(s[k] ?? null) !== JSON.stringify(expect[k] ?? null));
+  // new frames counted by tag or every present: another measure (lib/parcours.mjs newFrameBins)
+  if ((s.newFramesBasis ?? null) !== (expect.newFramesBasis ?? null)) differ.push(`newFramesBasis ${s.newFramesBasis ?? "none"} vs ${expect.newFramesBasis ?? "none"}`);
   if (expect.cpuModel && s.machine?.cpuModel && s.machine.cpuModel !== expect.cpuModel) differ.push("cpuModel");
   if (differ.length) throw new Error(`--noise ${file}: another measure (${differ.join(", ")})`);
   if (!s.noise) throw new Error(`--noise ${file}: no A/A noise in it (a comparison, or no usable run)`);
@@ -407,17 +411,25 @@ export function exitCodeOf(summary) {
   return summary.runs.some((r) => r.error || !r.completion?.completed) ? 1 : 0;
 }
 
+// The runs' new frames basis: "tag", "all", "mixed", or null (no run analysed).
+export function basisOf(analyses) {
+  const b = [...new Set(analyses.filter((a) => a && !a.error).map((a) => a.newFramesBasis ?? null))];
+  return b.length === 0 ? null : b.length === 1 ? b[0] : "mixed";
+}
+
 function writeSummary(outDir, meta, analyses, noise) {
   const runs = analyses.map((a) => ({ side: a.side, run: a.run, ...a.analysis, rows: undefined }));
   const summary = { ...meta, runs };
   summary.browserVersions = browserVersionsOf(analyses.map((a) => a.analysis.browserVersion));
   summary.browserMixed = mixedBrowserReason(summary.browserVersions);
+  summary.newFramesBasis = basisOf(analyses.map((a) => a.analysis));
   const of = (side) => analyses.filter((a) => a.side === side).map((a) => a.analysis);
   if (meta.sides.baseline) {
     summary.verdict = parcoursVerdict(of("baseline"), of("candidate"), noise);
     const reasons = [];
     if (meta.gaveUp) reasons.push(meta.gaveUp);
     if (summary.browserMixed) reasons.push(summary.browserMixed);
+    if (summary.newFramesBasis === "mixed") reasons.push("new frames counted on different bases (tag / all) across runs");
     for (const side of ["baseline", "candidate"]) if (of(side).filter(usable).length < 3) reasons.push(`${of(side).filter(usable).length} usable ${side} run(s) (complete, clean, calm), 3 needed`);
     if (summary.verdict.inconclusive) reasons.push("a phase or section has no verdict");
     summary.noVerdict = reasons.length ? reasons : null;
@@ -450,7 +462,7 @@ async function analyzeDir(dir, { noiseFile, log, film = null }) {
     writeFileSync(path.join(dir, `${side}-${run}.json`), JSON.stringify(analysis) + "\n");
     analyses.push({ side, run: Number(run), analysis });
   }
-  const noise = noiseFile ? readNoise(noiseFile, { ...meta, cpuModel: meta.machine?.cpuModel }) : null;
+  const noise = noiseFile ? readNoise(noiseFile, { ...meta, cpuModel: meta.machine?.cpuModel, newFramesBasis: basisOf(analyses.map((a) => a.analysis)) }) : null;
   const { runs, verdict, noise: n, human, noVerdict, ...rest } = meta;
   const summary = writeSummary(dir, { ...rest, analysisVersion: ANALYSIS_VERSION, reanalyzedAt: new Date().toISOString() }, analyses, noise);
   for (const l of summary.human) log(l);
@@ -507,7 +519,8 @@ async function main() {
   const filmBytes = values.film ? readFileSync(values.film) : null;
   const filmId = filmBytes ? `${path.basename(values.film)}#${createHash("sha256").update(filmBytes).digest("hex").slice(0, 12)}` : null;
   const machine = machineSnapshot();
-  const noise = values.noise ? readNoise(values.noise, { probeVersion: PROBE_VERSION, film: filmId, query: o.query, edge: o.edge, cpuModel: machine.cpuModel }) : null;
+  // this probe records the frame tags: its runs count by tag
+  const noise = values.noise ? readNoise(values.noise, { probeVersion: PROBE_VERSION, film: filmId, query: o.query, edge: o.edge, cpuModel: machine.cpuModel, newFramesBasis: "tag" }) : null;
   const sides = { candidate: resolveSide("candidate", values.candidate) };
   if (values.baseline) sides.baseline = resolveSide("baseline", values.baseline);
   const lockWait = num(values, "lock-wait", { min: 0 });

@@ -509,10 +509,14 @@ replay's integrity counters, and every present gap past 25 ms with its VI
 outputs and the presenting worker's stall inside it (the drop sampler runs
 every 100 ms, drained once a second; PROBE_VERSION 2). `lib/parcours.mjs` (pure) derives per second
 the speed (guest/host time from the core ticks), new frames per second
-(analysis 3: every present counted over the exact second ending at each
-reading, a repeat of a VI already shown left out; null when the timeline
-read failed or lost presents; the worker's own 500 ms rate, kept as
-`newFpsWorker`, saw half the second: one 50 ms hitch read 93.3 %),
+(analysis 4: every present of the timeline binned on a fixed 1 s grid, each
+counted once whatever the readings' times; by frame tag and epoch when the
+run recorded them, `newFramesBasis: "tag"`, a re-shown duplicate or an
+older frame not new; else `"all"`, every present one; a second is unknown
+when a reading that may hold its presents was not read whole, counted as
+`smoothUnknown`, the phase's p5 marked unreliable past 5 %; A/Bs and noise
+across bases refused; the worker's own 500 ms rate, kept as `newFpsWorker`,
+saw half the second: one 50 ms hitch read 93.3 %),
 smoothness (new frames against the game's cadence, learnt as the site
 learns it: VI/n snapped, below the VI rate only with occupancy margin, else
 the VI rate; in a content second, where the game itself made fewer frames

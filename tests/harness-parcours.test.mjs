@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 
-import { analyzeRun, classifySecond, filmPhaseLabels, newFramesPerSecond, contentSecond, gapDetail, completionOf, currentPhase, deriveSeconds, GAME_DRAWS_PER_FRAME, LOAD_DISC_BPS, markerIndexes, MIN_PHASE_SEC, parcoursVerdict, phaseLabels, phaseMetrics, phaseNoise, renderTimeline, sectionsOf, segmentsOf, summarizeSeconds, windowCadence } from "../harness/lib/parcours.mjs";
+import { analyzeRun, classifySecond, filmPhaseLabels, newFrameBins, contentSecond, gapDetail, completionOf, currentPhase, deriveSeconds, GAME_DRAWS_PER_FRAME, LOAD_DISC_BPS, markerIndexes, MIN_PHASE_SEC, parcoursVerdict, phaseLabels, phaseMetrics, phaseNoise, renderTimeline, sectionsOf, segmentsOf, summarizeSeconds, windowCadence } from "../harness/lib/parcours.mjs";
 import { filmMarkers, filmPhases, filmWithMarks, keyToPad, padStateOf, recordPorts, runRecordSteps, validateFilm, validateRecordSteps } from "../harness/lib/pad-film.mjs";
 import { analyzeRaw, countersOf, otherCpuOf, presentGaps, samplerTicksOf, viTimesOf, exitCodeOf, humanSummary, markerStep } from "../harness/probes/parcours.mjs";
 import { decodePng, encodePng } from "../harness/lib/png.mjs";
@@ -22,8 +22,8 @@ const LOOK = {
   game: { newFps: 60, draws: 400, disc: 0.1 * MiB, xfb: 60 },
   still: { newFps: 0, draws: 0, disc: 0, xfb: 0 }
 };
-// n presents evenly in the second ending at t: (t - 1000, t]
-const presentsIn = (t, n) => Array.from({ length: n }, (_, i) => t - 1000 + ((i + 1) * 1000) / n);
+// n presents evenly in the second ending at t: [t - 1000, t)
+const presentsIn = (t, n) => Array.from({ length: n }, (_, i) => t - 1000 + (i * 1000) / n);
 // Raw samples (as the probe records them) for a list of [look, seconds].
 function samplesOf(plan, { speed = 100, busy = 0.3, presentGap = null } = {}) {
   const out = [];
@@ -616,67 +616,111 @@ test("deriveSeconds off WebGPU: no produced counter, the sampler's XFB copies st
   assert.ok(result.dips.every((d) => Object.keys(d.parts).length === 1 && Math.abs(d.parts["render-starved"] - 53) < 0.5), JSON.stringify(result.dips.map((d) => d.parts)));
 });
 
-// Analysis 3: the new frames of each exact second, present by present (the
-// worker's last 500 ms rate saw half the second and counted it twice).
+// Analysis 4: the new frames of each second of a fixed grid on the timeline,
+// present by present (the worker's last 500 ms rate saw half the second and
+// counted it twice), by frame tag when recorded.
 const at60 = (t) => presentsIn(t, 60);
-const without = (presents, from, to) => presents.filter((p) => p <= from || p > to);
+const without = (presents, from, to) => presents.filter((p) => p < from || p >= to);
+// tags for every present of the samples, one new frame each from `first`
+function tagged(samples, first = 1) {
+  let tag = first;
+  for (const x of samples) { x.presentTag = x.presents.map(() => tag++); x.presentTagEpoch = x.presents.map(() => 1); x.presentsKnown = true; }
+  return samples;
+}
 test("new frames a second: 2 frames lost in the first half of a second read 58, whatever the worker's 500 ms rate says", () => {
   const s = samplesOf([["menu", 3]]);
-  // two presents of the second ending at s[2].t missing 200-233 ms into it (one 50 ms gap)
+  // two presents of the second before s[2] missing 200-233 ms into it (one 50 ms gap)
   s[2].presents = without(at60(s[2].t), s[2].t - 805, s[2].t - 770);
   assert.equal(s[2].presents.length, 58);
-  // the worker's last 500 ms held none of it: its rate says 60; at another
-  // reading phase it said 56 (2 lost in a half second, twice)
+  // the worker's last 500 ms held none of it: its rate says 60; read at another phase, 56
   s[2].info.newFps = 60; s[3].info.newFps = 56;
   const rows = deriveSeconds(s, { tps: TPS });
   assert.deepEqual(rows.map((r) => r.newFps), [60, 58, 60]);
   assert.deepEqual(rows.map((r) => r.smoothness), [100, 96.7, 100]);
   assert.deepEqual(rows.map((r) => r.newFpsWorker), [60, 60, 56], "the worker's rate kept apart");
-  assert.equal(rows[1].hitches50, 0, "a 50 ms gap is no hitch over 50");
+  assert.equal(newFrameBins(s).basis, "all", "no tags recorded: every present counts");
 });
 
-test("new frames a second: a loss at the half second, or across two seconds, is counted once", () => {
+test("new frames a second: a loss at the half second, or across two grid seconds, is counted once; readings over 1 s apart lose none", () => {
   const s = samplesOf([["menu", 4]]);
-  // 2 lost around the half second of one second
   s[2].presents = without(at60(s[2].t), s[2].t - 510, s[2].t - 480);
-  // 2 lost across the reading of s[3]: its last one and s[4]'s first one
+  // 2 lost across a grid boundary: the last present of one second, the first of the next
   s[3].presents = at60(s[3].t).slice(0, -1);
   s[4].presents = at60(s[4].t).slice(1);
   const rows = deriveSeconds(s, { tps: TPS });
   assert.deepEqual(rows.map((r) => r.newFps), [60, 58, 59, 59]);
-  assert.equal(rows.reduce((n, r) => n + (60 - r.newFps), 0), 4, "4 frames lost, 4 counted");
-  // a reading late by 30 ms: still the exact second before it
+  // a late reading (a hitch delays it): the reading 300 ms late holds the presents up to it, the grid is unchanged
   const late = samplesOf([["menu", 3]]);
-  late[2].t += 30; late[2].presents = late[2].presents.concat([late[2].t - 13]);
-  late[3].presents = late[3].presents.filter((p) => p > late[2].t);
+  late[2].t += 300;
+  late[2].presents = [...late[2].presents, ...late[3].presents.filter((p) => p < late[2].t)];
+  late[3].presents = late[3].presents.filter((p) => p >= late[2].t);
   assert.deepEqual(deriveSeconds(late, { tps: TPS }).map((r) => r.newFps), [60, 60, 60], "a present read early or late counts in its own second");
+  // a reading skipped (the loop 2 s on): the row spans two grid seconds, each kept; a gap across their boundary counted once
+  const skip = samplesOf([["menu", 4]]);
+  const gap = (p) => !(p >= skip[2].t - 20 && p < skip[2].t + 20);
+  skip[3].presents = [...skip[2].presents, ...skip[3].presents].filter(gap);
+  skip.splice(2, 1);
+  const rows2 = deriveSeconds(skip, { tps: TPS });
+  assert.deepEqual(rows2.map((r) => r.smoothBins.map((x) => x.newFrames)), [[60], [59, 58], [60]]);
+  assert.equal(rows2[1].smoothness, 96.7, "the row: its worst second");
+  const all = summarizeSeconds(rows2);
+  assert.equal(all.smoothness.seconds, 4, "4 grid seconds, each once");
+  assert.equal(all.smoothness.min, 96.7);
 });
 
-test("new frames a second: unknown when the timeline read failed or lost presents, or frames are untagged; a repeat is no new frame", () => {
+test("new frames a second: unknown seconds counted, never good; past 5 % of a phase its p5 is unreliable", () => {
   const s = samplesOf([["menu", 4]]);
   s[2].presentsKnown = false;
-  // s[2]'s span is in the seconds ending at s[2] only (the windows are 1 s, readings 1 s apart)
-  assert.deepEqual(deriveSeconds(s, { tps: TPS }).map((r) => r.newFps), [60, null, 60, 60]);
-  // a late reading: the next second reaches back into the unknown span
-  s[3].t -= 20;
-  assert.deepEqual(deriveSeconds(s, { tps: TPS }).map((r) => r.smoothness), [100, null, null, 100]);
+  // reading 2 may hold presents of (t1, t3): both grid seconds unknown
+  const rows = deriveSeconds(s, { tps: TPS });
+  assert.deepEqual(rows.map((r) => r.newFps), [60, null, null, 60]);
+  const sum = summarizeSeconds(rows);
+  assert.equal(sum.smoothness.unknown, 2);
+  assert.equal(sum.smoothness.reliable, false);
+  assert.equal(sum.metrics.smoothUnknown, 2);
+  assert.equal(sum.worst[0].smoothness, null, "unknown ranked first, never as good");
+  // one unknown in 30: under 5 %, reliable
+  const long = samplesOf([["menu", 31]]);
+  long[31].presentsKnown = false;
+  const s30 = summarizeSeconds(deriveSeconds(long, { tps: TPS }));
+  assert.equal(s30.smoothness.unknown, 1);
+  assert.equal(s30.smoothness.reliable, true);
   // records before analysis 3: viT null (the probe's mark of a failed or lossy read) is unknown
-  const old = samplesOf([["menu", 2]]);
+  const old = samplesOf([["menu", 3]]);
   old.forEach((x) => { x.viT = [x.t]; });
-  old[1].viT = null;
-  assert.deepEqual(newFramesPerSecond(old), [null, null, 60]);
-  // untagged frames (no newShown): the presents are no count of new frames
+  old[2].viT = null;
+  assert.deepEqual(newFrameBins(old).bins.map((x) => x.newFrames), [60, null, null], "reading 2 may hold presents of (t1, t3)");
+  // untagged frames (no newShown: the software renderer) are no count of new frames
   const sw = samplesOf([["menu", 2]]);
   for (const x of sw) delete x.info.newShown;
-  assert.deepEqual(newFramesPerSecond(sw), [null, null, null]);
-  // presentVi: a present showing a VI shown before is a repeat; an unknown VI, an unknown second
-  const tagged = samplesOf([["menu", 2]]);
-  let vi = 0;
-  for (const x of tagged) x.presentVi = x.presents.map(() => (vi += 1));
-  tagged[1].presentVi[5] = tagged[1].presentVi[4];
-  assert.deepEqual(newFramesPerSecond(tagged), [null, 59, 60]);
-  tagged[2].presentVi[3] = -1;
-  assert.deepEqual(newFramesPerSecond(tagged), [null, 59, null]);
+  assert.deepEqual(newFrameBins(sw).bins.map((x) => x.newFrames), [null, null]);
+});
+
+test("new frames by tag: a re-shown duplicate or an older frame is no new frame; a reboot (new epoch) is; tag 0 or tags not one per present: unknown", () => {
+  const s = tagged(samplesOf([["menu", 3]]));
+  assert.equal(newFrameBins(s).basis, "tag");
+  // a duplicate re-shown (same tag, same epoch: its VI number would be new) and an older frame after a newer one
+  s[1].presentTag[5] = s[1].presentTag[4];
+  s[1].presentTag[9] = s[1].presentTag[3];
+  assert.deepEqual(newFrameBins(s).bins.map((x) => x.newFrames), [58, 60, 60]);
+  // a reboot: the tags start over at 1 in a new epoch
+  const r = tagged(samplesOf([["menu", 3]]));
+  r[2].presentTag = r[2].presents.map((_, i) => i + 1);
+  r[2].presentTagEpoch = r[2].presents.map(() => 2);
+  r[3].presentTag = r[3].presents.map((_, i) => 61 + i);
+  r[3].presentTagEpoch = r[3].presents.map(() => 2);
+  assert.deepEqual(newFrameBins(r).bins.map((x) => x.newFrames), [60, 60, 60]);
+  // without the epoch the restart would read as older frames: the epoch is what makes them new
+  r[2].presentTagEpoch = r[2].presents.map(() => 1);
+  assert.equal(newFrameBins(r).bins[1].newFrames, 0);
+  // an untagged present (0): its second unknown
+  const z = tagged(samplesOf([["menu", 2]]));
+  z[2].presentTag[7] = 0;
+  assert.deepEqual(newFrameBins(z).bins.map((x) => x.newFrames), [60, null]);
+  // tags not one per present: the reading is unknown (its span (t1, t3): two seconds)
+  const m = tagged(samplesOf([["menu", 3]]));
+  m[2].presentTag = m[2].presentTag.slice(1);
+  assert.deepEqual(newFrameBins(m).bins.map((x) => x.newFrames), [60, null, null]);
 });
 
 test("phases from the film clock: each second takes the declared phase covering most of its film span; the detector before the first", () => {
@@ -695,6 +739,11 @@ test("phases from the film clock: each second takes the declared phase covering 
   assert.deepEqual(a.rows.map((r) => r.phase), ["menu", "menu", "cinematic", "cinematic", "cinematic", "menu", "menu", "menu", "menu", "menu"]);
   assert.deepEqual(a.rows.map((r) => r.phaseFrom), ["detector", "detector", "film", "film", "film", "film", "film", "film", "film", "film"]);
   assert.deepEqual(analyzeRun({ samples: s, tps: TPS }).rows.map((r) => r.phase).slice(2, 7), ["menu", "cinematic", "cinematic", "cinematic", "menu"], "the detector alone");
+  // segments and the completion's phase order on the film's phases
+  assert.deepEqual(a.segments.map((x) => [x.phase, x.to - x.from]), [["menu", 2], ["cinematic", 3], ["menu", 5]]);
+  const marked = analyzeRun({ samples: s, tps: TPS, filmPhases: [{ at: 280, phase: "cinematic" }, { at: 600, phase: "game" }], markers: [{ at: 300, phase: "game" }], reached: [{ ordinal: 0, at: s[8].t }] });
+  assert.equal(marked.completion.phasesInOrder, true, "the film's game phase, though the detector saw a menu");
+  assert.equal(marked.newFramesBasis, "all");
 });
 
 test("film phases: validated (polls in order, known phases), read apart from the RESYNC markers", () => {
@@ -709,9 +758,13 @@ test("film phases: validated (polls in order, known phases), read apart from the
   assert.deepEqual(filmMarkers(film).map((m) => m.at), [1500], "the markers stay the markers");
 });
 
-test("probe: each sample keeps its presents' VIs and whether the read saw them all; a run's own film phases win over --analyze --film", () => {
+test("probe: each sample keeps its presents' tags and whether the read saw them all; a run's own film phases win over --analyze --film", () => {
   const src = readFileSync(new URL("../harness/probes/parcours.mjs", import.meta.url), "utf8");
-  assert.match(src, /presents, presentVi, presentsKnown, vi:/);
+  assert.match(src, /presents, presentTag, presentTagEpoch, presentsKnown, vi:/);
+  // the worker's timeline carries each present's tag and epoch
+  const worker = readFileSync(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
+  assert.match(worker, /presents\.tag\.push\(harnessPresentRing\[slot \+ 3\]\)/);
+  assert.match(worker, /recordPresentedFrame\(f\.coreFrame, f\.shownVi, f\.tag, f\.tagEpoch\)/);
   assert.match(src, /filmPhases: o\.film \? filmPhases\(o\.film\) : \[\]/);
   const s = samplesOf([["menu", 3], ["cinematic", 3]]);
   s.forEach((x, k) => { x.film = { pos: k * 120, hold: 0 }; });
@@ -720,4 +773,21 @@ test("probe: each sample keeps its presents' VIs and whether the read saw them a
   const a = analyzeRaw({ ...raw, filmPhases: undefined }, { maxLoad: 12, filmPhases: [{ at: 0, phase: "menu" }] });
   assert.equal(a.phases.menu.seconds, 6);
   assert.equal(a.phaseClock, "film");
+});
+
+test("the new frames basis per run: refused across bases (an A/B, an A/A's noise)", async () => {
+  const { mkdtempSync, writeFileSync } = await import("node:fs");
+  const os = await import("node:os");
+  const { readNoise, basisOf } = await import("../harness/probes/parcours.mjs");
+  const { ANALYSIS_VERSION } = await import("../harness/lib/parcours.mjs");
+  assert.equal(analyzeRun({ samples: tagged(samplesOf([["menu", 2]])), tps: TPS }).newFramesBasis, "tag");
+  assert.equal(basisOf([{ newFramesBasis: "tag" }, { newFramesBasis: "tag" }]), "tag");
+  assert.equal(basisOf([{ newFramesBasis: "tag" }, { newFramesBasis: "all" }]), "mixed");
+  const dir = mkdtempSync(`${os.tmpdir()}/parcours-basis-`);
+  const base = { probe: "parcours", probeVersion: 2, analysisVersion: ANALYSIS_VERSION, film: "f#1", query: "q", newFramesBasis: "all", noise: { "kind:menu": {} } };
+  writeFileSync(`${dir}/all.json`, JSON.stringify(base));
+  assert.throws(() => readNoise(`${dir}/all.json`, { probeVersion: 2, film: "f#1", query: "q", newFramesBasis: "tag" }), /newFramesBasis all vs tag/);
+  assert.deepEqual(readNoise(`${dir}/all.json`, { probeVersion: 2, film: "f#1", query: "q", newFramesBasis: "all" }), base.noise);
+  const probe = readFileSync(new URL("../harness/probes/parcours.mjs", import.meta.url), "utf8");
+  assert.match(probe, /new frames counted on different bases \(tag \/ all\) across runs/);
 });
