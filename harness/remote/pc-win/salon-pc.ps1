@@ -310,15 +310,13 @@ function Restore {
   $state = $null; $warn = @()
   try { $state = Read-State } catch { $warn += "no snapshot: the Balanced scheme is activated if the kit's was active" }
   $jd = Job-Dir
-  # the job's processes only: the pids it wrote down, checked by name
+  # the job's processes only: a pid it wrote down AND that process's start
+  # time (Windows reuses pids at once: a pid alone once named the CI step's
+  # own shell); one process each, never its tree
   $killed = @()
   foreach ($f in @("node.pid", "sampler.pid")) {
-    $pf = Join-Path $jd $f
-    if (Test-Path -LiteralPath $pf) {
-      $id = [int](Get-Content -Raw -LiteralPath $pf)
-      $p = Get-Process -Id $id -ErrorAction SilentlyContinue
-      if ($p -and @("node", "powershell") -contains $p.ProcessName) { & taskkill /PID $id /T /F 2>$null | Out-Null; $killed += $id }
-    }
+    $p = Read-PidFile (Join-Path $jd $f)
+    if ($p) { try { $p.Kill(); $killed += $p.Id } catch {} }
   }
   $task = Get-ScheduledTask -TaskPath $TaskPath -TaskName $Job -ErrorAction SilentlyContinue
   if ($task) { Unregister-ScheduledTask -TaskPath $TaskPath -TaskName $Job -Confirm:$false }
@@ -326,6 +324,20 @@ function Restore {
   $after = [ordered]@{ activeScheme = $active; schemes = @(All-Schemes); processor = Processor-Settings $active; tasks = @(Get-ScheduledTask -TaskPath $TaskPath -ErrorAction SilentlyContinue | ForEach-Object { $_.TaskName }) }
   # a job's profiles are throwaway (the browser's own profile dirs live under the job dir)
   Out-Result ([ordered]@{ action = "restore"; job = $Job; before = $state; after = $after; killed = $killed; warnings = $warn })
+}
+
+# "pid start-time-ticks": a process is the job's only if both match.
+function Write-PidFile($file, $proc) {
+  "$($proc.Id) $($proc.StartTime.ToUniversalTime().Ticks)" | Set-Content -LiteralPath $file
+}
+function Read-PidFile($file) {
+  if (-not (Test-Path -LiteralPath $file)) { return $null }
+  $f = "$(Get-Content -Raw -LiteralPath $file)".Trim() -split '\s+'
+  if ($f.Count -ne 2) { return $null }
+  $p = Get-Process -Id ([int]$f[0]) -ErrorAction SilentlyContinue
+  if (-not $p) { return $null }
+  try { if ($p.StartTime.ToUniversalTime().Ticks -ne [int64]$f[1]) { return $null } } catch { return $null }
+  return $p
 }
 
 function Start-Job-Task {
@@ -388,7 +400,7 @@ function Inner {
     if ($spec.affinity) { $me.ProcessorAffinity = [IntPtr][Convert]::ToInt64($spec.affinity.Substring(2), 16) }
     "[$((Get-Date).ToString('o'))] job $Job, affinity $("0x{0:x}" -f $me.ProcessorAffinity.ToInt64()), session $($me.SessionId)" | Out-File -LiteralPath $log -Encoding UTF8
     $sampler = Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$PSCommandPath`" -Action sampler -Job $Job -KitDir `"$KitDir`"" -WindowStyle Hidden -PassThru
-    "$($sampler.Id)" | Set-Content -LiteralPath (Join-Path $jd "sampler.pid")
+    Write-PidFile (Join-Path $jd "sampler.pid") $sampler
     $code = 0
     foreach ($step in $spec.steps) {
       foreach ($p in $spec.env.PSObject.Properties) { [Environment]::SetEnvironmentVariable($p.Name, [string]$p.Value, "Process") }
@@ -400,7 +412,7 @@ function Inner {
       # the handle cached now, or ExitCode stays empty once the process is
       # gone (Start-Process -PassThru; seen on CI windows-2025)
       $null = $node.Handle
-      "$($node.Id)" | Set-Content -LiteralPath (Join-Path $jd "node.pid")
+      Write-PidFile (Join-Path $jd "node.pid") $node
       $node.WaitForExit()
       $rc = $node.ExitCode
       if ($null -eq $rc -or "$rc" -eq "") { $rc = 98 }

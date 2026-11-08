@@ -119,19 +119,27 @@ jobs:
             if (f.find((x) => x.browser === "chrome")?.jit.verdict !== "jit") throw new Error("Chrome not told apart from Chrome without optimizer: the bench cannot see an optimizer off");
             if (f.find((x) => x.browser === "msedge")?.jit.verdict !== "jit") throw new Error("the runner Edge is not read as jit");'
       - name: A job through the scheduled task, in the logged-on session
+        timeout-minutes: 6
         shell: powershell
         run: |
           $k = "$env:RUNNER_TEMP\salon-kit"; $s = "$PWD\harness\remote\pc-win\salon-pc.ps1"
+          # every call bounded and echoed: a hung one names itself
+          function Kit([string[]]$a) {
+            $j = Start-Job -ScriptBlock { param($s, $a) powershell -NoProfile -ExecutionPolicy Bypass -File $s @a 2>&1 | Select-Object -Last 1 } -ArgumentList $s, $a
+            if (-not (Wait-Job $j -Timeout 60)) { Stop-Job $j; "TIMEOUT: $($a -join ' ')"; return }
+            Receive-Job $j
+          }
           New-Item -ItemType Directory -Force -Path "$k\jobs\ci2", "$k\node" | Out-Null
           Copy-Item (Get-Command node).Source "$k\node\node.exe"
           @{ cwd = "$PWD"; affinity = "0x3"; restoreAtEnd = $true; env = @{ X = "1" }; steps = @(@{ name = "hello"; args = @("-e", "console.log(process.env.X)"); env = @{}; continueOnError = $false }) } | ConvertTo-Json -Depth 5 | Set-Content -Encoding UTF8 "$k\jobs\ci2\spec.json"
-          powershell -NoProfile -ExecutionPolicy Bypass -File $s -Action snapshot -Job ci2 -KitDir $k | Select-Object -Last 1
-          powershell -NoProfile -ExecutionPolicy Bypass -File $s -Action start -Job ci2 -KitDir $k | Select-Object -Last 1
-          for ($i = 0; $i -lt 30; $i++) { Start-Sleep 2; $st = powershell -NoProfile -ExecutionPolicy Bypass -File $s -Action status -Job ci2 -KitDir $k | Select-Object -Last 1; if ($st -match '"state":"done"') { break } }
-          $st
+          Kit @("-Action", "snapshot", "-Job", "ci2", "-KitDir", $k)
+          Kit @("-Action", "start", "-Job", "ci2", "-KitDir", $k)
+          $st = ""
+          for ($i = 0; $i -lt 20; $i++) { Start-Sleep 3; $st = Kit @("-Action", "status", "-Job", "ci2", "-KitDir", $k); "[$i] $st"; if ($st -match '"state":"done"') { break } }
+          Get-ChildItem "$k\jobs\ci2" | Format-Table Name, Length | Out-String
           Get-Content "$k\jobs\ci2\log" -ErrorAction SilentlyContinue
           Get-Content "$k\jobs\ci2\hello.out" -ErrorAction SilentlyContinue
-          powershell -NoProfile -ExecutionPolicy Bypass -File $s -Action restore -Job ci2 -KitDir $k | Select-Object -Last 1
+          Kit @("-Action", "restore", "-Job", "ci2", "-KitDir", $k)
           if ($st -notmatch '"exit":0') { "the job did not exit 0"; exit 1 }
           if ((Get-Content "$k\jobs\ci2\hello.out") -ne "1") { "the spec's env did not reach the step"; exit 1 }
           if ((Get-Content "$k\jobs\ci2\log" -Raw) -notmatch 'session [1-9]') { "the task did not run in a user session"; exit 1 }

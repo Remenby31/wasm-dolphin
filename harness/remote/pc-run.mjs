@@ -50,17 +50,20 @@ export function sshTransport(host, { log = console.error } = {}) {
   const base = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=20", "-o", "ServerAliveInterval=15"];
   return {
     dry: false,
-    ssh(command, { quiet = false } = {}) {
-      const r = spawnSync("ssh", [...base, host, command], { encoding: "utf8", maxBuffer: 1 << 28 });
+    // every call bounded: a hung remote call must not hold the Mac side
+    // forever (npm install and tree unpacking take the longest)
+    ssh(command, { quiet = false, timeoutSec = 900 } = {}) {
+      const r = spawnSync("ssh", [...base, host, command], { encoding: "utf8", maxBuffer: 1 << 28, timeout: timeoutSec * 1000, killSignal: "SIGKILL" });
+      if (r.error?.code === "ETIMEDOUT") throw new Error(`ssh ${host}: no answer in ${timeoutSec} s`);
       if (r.status !== 0 && !quiet) throw new Error(`ssh ${host} exit ${r.status}: ${String(r.stderr).trim().slice(-600)}`);
       return { status: r.status, out: r.stdout ?? "", err: r.stderr ?? "" };
     },
     put(local, remoteWin) {
-      const r = spawnSync("scp", [...base, "-q", local, `${host}:${scpPath(remoteWin)}`], { encoding: "utf8" });
+      const r = spawnSync("scp", [...base, "-q", local, `${host}:${scpPath(remoteWin)}`], { encoding: "utf8", timeout: 1800 * 1000, killSignal: "SIGKILL" });
       if (r.status !== 0) throw new Error(`scp ${local} -> ${remoteWin}: ${String(r.stderr).trim()}`);
     },
     getDir(remoteWin, localParent) {
-      const r = spawnSync("scp", [...base, "-q", "-r", `${host}:${scpPath(remoteWin)}`, localParent], { encoding: "utf8" });
+      const r = spawnSync("scp", [...base, "-q", "-r", `${host}:${scpPath(remoteWin)}`, localParent], { encoding: "utf8", timeout: 1800 * 1000, killSignal: "SIGKILL" });
       if (r.status !== 0) throw new Error(`scp -r ${remoteWin}: ${String(r.stderr).trim()}`);
     },
     log
@@ -125,7 +128,7 @@ export function simulatedPc({ cpu = "13th Gen Intel(R) Core(TM) i9-13900K", log 
 
 // ---- PC operations
 const kit = (t, action, params = {}) => {
-  const r = t.ssh(kitCommand(action, params));
+  const r = t.ssh(kitCommand(action, params), { timeoutSec: action === "check" ? 180 : 120 });
   const j = parseKitJson(r.out);
   if (!j) throw new Error(`salon-pc.ps1 -Action ${action}: no result: ${(r.err || r.out).trim().slice(-600)}`);
   return j;
