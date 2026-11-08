@@ -90,6 +90,10 @@ export const OUT_OF_REACH_MS = 3000;
 // within RATIO_TOLERANCE (its estimate wobbles: a drift past it was taken now
 // and then, and dropped again)
 export const ENTRY_UPDATES = 4;
+// after a drift out of reach, the lock is taken again as soon as the drift
+// is back within reach (no base window first), but not with the arrivals
+// within this share of a refresh of the cut
+export const REENTRY_CUT_MARGIN = 0.1;
 // the refresh: a least-squares line through the last REFRESH_TICKS rAF frame
 // times, each numbered by the refreshes since the first (a missed vsync counts
 // as whole periods): 0.0007 Hz over 7,200 ticks, where a filtered mean of the
@@ -178,7 +182,7 @@ export function viLockMode(v) {
 // The largest frames-per-refresh ratio the lock takes in each mode.
 export const MAX_RATIO = Object.freeze({ on: 2, auto: 1 });
 
-export function createViPhaseLock({ maxPpm = MAX_PPM, slewPpmPerSec = SLEW_PPM_PER_SEC, target = TARGET_PHASE, errAlpha = ERR_ALPHA, writeStep = WRITE_STEP_PPM, maxRatio = MAX_RATIO.on } = {}) {
+export function createViPhaseLock({ quickReentry = true, maxPpm = MAX_PPM, slewPpmPerSec = SLEW_PPM_PER_SEC, target = TARGET_PHASE, errAlpha = ERR_ALPHA, writeStep = WRITE_STEP_PPM, maxRatio = MAX_RATIO.on } = {}) {
   // the error the output's P term sees (smoothed), and the trim written
   // (held until the controller's moved by writeStep)
   let errSmooth = null;
@@ -190,8 +194,10 @@ export function createViPhaseLock({ maxPpm = MAX_PPM, slewPpmPerSec = SLEW_PPM_P
   // the BeginFrame's frameTime: the phase is measured against that cut, the
   // offset smoothed (its jitter would move the phase)
   let cutOffset = null;
-  // the arrivals of the window, and the speed factor each came at
+  // the arrivals of the window, and the speed factor each came at (the trim
+  // written when it arrived: the gap before it ran at that speed)
   const arrivals = [];
+  const arrivalSpeeds = [];
   let ppm = 0;
   let integral = 0;
   let lastUpdate = null;
@@ -199,6 +205,8 @@ export function createViPhaseLock({ maxPpm = MAX_PPM, slewPpmPerSec = SLEW_PPM_P
   let prevErr = null;
   // since when the speed has been the base while unlocked (null: it is not)
   let baseSince = null;
+  // unlocked after a drift out of reach: the next lock needs no base window
+  let reentry = false;
   // the leaky count of time the output spent at the bound (ms)
   let saturatedMs = 0;
   // the leaky count of time the locked ratio spent off RATIO_TOLERANCE_LOCKED (ms)
@@ -218,39 +226,46 @@ export function createViPhaseLock({ maxPpm = MAX_PPM, slewPpmPerSec = SLEW_PPM_P
 
   function arrival(at) {
     arrivals.push(at);
-    while (arrivals.length && arrivals[0] < at - ARRIVAL_WINDOW_MS) arrivals.shift();
+    arrivalSpeeds.push(1 + out / 1e6);
+    while (arrivals.length && arrivals[0] < at - ARRIVAL_WINDOW_MS) { arrivals.shift(); arrivalSpeeds.shift(); }
   }
 
-  // The frames' period at the base speed over arrivals `a`: a least-squares
-  // fit (their jitter averages out), with the speed taken out; irregular when
-  // more than IRREGULAR_SHARE of the gaps are over 1.5 times the median.
-  function period(a, speed) {
+  // The frames' period at the base speed over arrivals `a` (sp: the speed
+  // each came at): a least-squares fit (their jitter averages out) on base time,
+  // each gap times the speed it ran at, so a window spanning a change of the
+  // trim (a release, its slew back to the base) reads the base period, not
+  // a mix; irregular when more than IRREGULAR_SHARE of the gaps are over 1.5
+  // times the median.
+  function period(a, sp) {
     const ag = a.slice(1).map((t, i) => t - a[i]);
     const p = median(ag);
     const irregular = ag.filter((g) => g > 1.5 * p).length > ag.length * IRREGULAR_SHARE;
-    const n = a.length, mi = (n - 1) / 2, mt = a.reduce((x, y) => x + y, 0) / n;
+    const b = [0];
+    for (let i = 1; i < a.length; i++) b.push(b[i - 1] + (a[i] - a[i - 1]) * sp[i]);
+    const n = b.length, mi = (n - 1) / 2, mt = b.reduce((x, y) => x + y, 0) / n;
     let sxy = 0, sxx = 0;
     for (let i = 0; i < n; i++) {
-      sxy += (i - mi) * (a[i] - mt);
+      sxy += (i - mi) * (b[i] - mt);
       sxx += (i - mi) ** 2;
     }
-    const frameMs = (sxy / sxx) * speed;
+    const frameMs = sxy / sxx;
     return { irregular, frameMs, ratio: (refreshMs) => frameMs / refreshMs };
   }
 
   /** Why no lock now (null: lockable), with the measures it needs. */
-  function assess(now, speed) {
+  function assess(now) {
     if (lastTickAt === null || now - lastTickAt > NO_TICK_MS) return { why: "no rAF" };
     const { refreshMs, why } = stableRefresh(times, { jitter: stats.on ? REFRESH_JITTER : REFRESH_JITTER_ENTER });
     if (!refreshMs) return { why };
-    const a = arrivals.filter((t) => t >= now - ARRIVAL_WINDOW_MS);
+    const from = arrivals.findIndex((t) => t >= now - ARRIVAL_WINDOW_MS);
+    const a = from < 0 ? [] : arrivals.slice(from), sp = from < 0 ? [] : arrivalSpeeds.slice(from);
     if (a.length < MIN_ARRIVALS) return { why: "few frames", refreshMs };
-    const full = period(a, speed);
+    const full = period(a, sp);
     // locked, the last RECENT_MS judged on their own: is the slowdown still on?
     const recentOff = () => {
-      const r = a.filter((t) => t >= now - RECENT_MS);
-      if (r.length < MIN_RECENT_ARRIVALS) return true;
-      const q = period(r, speed);
+      const k = a.findIndex((t) => t >= now - RECENT_MS);
+      if (k < 0 || a.length - k < MIN_RECENT_ARRIVALS) return true;
+      const q = period(a.slice(k), sp.slice(k));
       const mr = Math.round(q.ratio(refreshMs));
       return q.irregular || mr < 1 || mr > 2 || Math.abs(q.ratio(refreshMs) - mr) > mr * RATIO_TOLERANCE_LOCKED;
     };
@@ -280,17 +295,26 @@ export function createViPhaseLock({ maxPpm = MAX_PPM, slewPpmPerSec = SLEW_PPM_P
   function update(now, { base = 1 } = {}) {
     const dt = lastUpdate === null ? 0.5 : Math.min(2, (now - lastUpdate) / 1000);
     lastUpdate = now;
-    // the speed the arrivals came at: the trim written
-    const speed = 1 + out / 1e6;
-    const s = assess(now, speed);
+    const s = assess(now);
     if (!stats.on) {
-      // the frames' period is measured over ARRIVAL_WINDOW_MS: only once the
-      // speed has been back at the base for all of it (after a release the
-      // window still holds frames made faster, and the ratio reads low)
+      // the first lock: once the speed has been the base for the whole
+      // window, then ENTRY_UPDATES lockable updates in a row. After a lock
+      // let go for a drift out of reach, no wait for the base: the period
+      // is read on base time (each gap at the speed it ran, period()), so a
+      // window spanning the release and the slew back reads right. That
+      // wait made a re-entry take 5 s at least: on the 2P parcours (2p-4,
+      // c157) the lock let go at a film's start (a few seconds out of
+      // reach), the drift came back within reach, and the phase crossed the
+      // cut while it settled, 22 frames lost.
       if (ppm !== 0) baseSince = null;
       else baseSince ??= now;
-      const clean = baseSince !== null && now - baseSince >= ARRIVAL_WINDOW_MS;
-      entryStreak = s.why === null && clean ? entryStreak + 1 : 0;
+      const clean = reentry || (baseSince !== null && now - baseSince >= ARRIVAL_WINDOW_MS);
+      // a quick re-entry is not taken with the arrivals next to the cut: the
+      // drift that let go would carry them across it while the trim turns
+      // (then the acquisition crosses back: two crossings for one); they
+      // cross unlocked and the lock is taken past it
+      const nearCut = reentry && s.why === null && Math.min(s.phase, 1 - s.phase) < REENTRY_CUT_MARGIN;
+      entryStreak = s.why === null && clean && !nearCut ? entryStreak + 1 : 0;
       if (s.why === null && entryStreak < ENTRY_UPDATES) s.why = "settling";
     }
     // locked, the output held at the bound OUT_OF_REACH_MS (leaky): out of reach
@@ -319,6 +343,7 @@ export function createViPhaseLock({ maxPpm = MAX_PPM, slewPpmPerSec = SLEW_PPM_P
         integral = Math.max(-maxPpm, Math.min(maxPpm, (s.frameMs / (s.m * s.refreshMs) - 1) * 1e6));
       }
       stats.on = true;
+      reentry = false;
       // P limited to what the slew can follow from the current output, and
       // the integral frozen while the clamp or the slew holds the output
       // back (it wound up at the acquisition: an overshoot to 0.8, a
@@ -345,7 +370,9 @@ export function createViPhaseLock({ maxPpm = MAX_PPM, slewPpmPerSec = SLEW_PPM_P
       ratioOffMs = 0;
       prevErr = null;
       errSmooth = null;
-      if (s.why === "drift out of reach") entryStreak = 0;
+      if (s.why === "drift out of reach") { entryStreak = 0; reentry = quickReentry; }
+      // hidden (no rAF): a new start, the base window first
+      if (s.why === "no rAF") reentry = false;
     }
     stats.driftPpm = stats.on ? Math.round(integral) : null;
     const step = slewPpmPerSec * dt;
