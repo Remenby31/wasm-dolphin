@@ -91,7 +91,7 @@ jobs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
       - name: Run on the interpreter and the JIT
-        run: node compat/browser.mjs --dir "$RUNNER_TEMP/hwtests-out" --port 8130 --timeout 240 --budget 1080 --json compat-machine.json --md compat-machine.md
+        run: node compat/browser.mjs --dir "$RUNNER_TEMP/hwtests-out" --port 8130 --timeout 150 --budget 900 --json compat-machine.json --md compat-machine.md
 
       - name: Table
         if: always()

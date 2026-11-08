@@ -21,11 +21,21 @@ import { ensureServer } from "../harness/lib/browser.mjs";
 import { captureInSession, openSession } from "../harness/lib/session.mjs";
 import { decodeReport } from "./lib/report-rows.mjs";
 
-const BASE = "core=upstream&video=software&presenter=2d&cpu=dual&speed=0&fastsw=0&metrics=1";
+// efbaccess=1: gxtest pokes and peeks the EFB (EFBAccessEnable, a per-disc
+// setting off by default; off, every peek reads 0).
+const BASE = "core=upstream&video=software&presenter=2d&cpu=dual&speed=0&fastsw=0&efbaccess=1&metrics=1";
 export const CONFIGS = {
   interp: `${BASE}&wasmjit=0`,
   jit: `${BASE}&wasmjit=1&jitwarmup=120&forcejit=1`
 };
+
+// Cheapest first, so the budget cuts the long GX sweeps (millions of
+// subtests: their partial counts are still reported). gxtest checks the GPU:
+// the JIT config only (the shipped engine); the CPU tests run on both tiers.
+const ORDER = ["battest", "cardtest", "vitest", "cputest_", "gxtest_bitfield", "gxtest_clipping", "gxtest_rasterization",
+  "gxtest_tev", "gxtest_lighting", "gxtest_intensity", "gxtest_copyfilter"];
+const rank = (name) => { const i = ORDER.findIndex((p) => name.startsWith(p)); return i < 0 ? ORDER.length : i; };
+export const configsFor = (program, configs) => (program.startsWith("gxtest_") ? configs.filter((c) => c === "jit") : configs);
 
 async function runOne(server, iso, query, timeoutSec) {
   const t0 = Date.now();
@@ -72,12 +82,12 @@ async function main() {
   if (!values.dir || !values.port) throw new Error("usage: compat/browser.mjs --dir <out> --port N");
   const only = values.only ? new Set(values.only.split(",")) : null;
   const isos = readdirSync(values.dir).filter((f) => f.endsWith(".iso")).map((f) => f.slice(0, -4))
-    .filter((n) => !only || only.has(n)).sort();
+    .filter((n) => !only || only.has(n)).sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
   const server = await ensureServer({ port: Number(values.port) });
   const results = [];
   const deadline = Date.now() + Number(values.budget) * 1000;
   for (const program of isos) {
-    for (const config of values.configs.split(",")) {
+    for (const config of configsFor(program, values.configs.split(","))) {
       const left = (deadline - Date.now()) / 1000;
       if (left < 30) { results.push({ program, config, status: "skipped", seconds: 0, captures: 0, error: null, report: null }); continue; }
       const r = await runOne(server, path.resolve(values.dir, `${program}.iso`), CONFIGS[config], Math.min(Number(values.timeout), left));
