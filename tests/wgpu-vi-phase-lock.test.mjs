@@ -1,9 +1,8 @@
 // Copyright 2026 wasm-dolphin contributors
 // SPDX-License-Identifier: MIT
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
-import { createViPhaseLock, MAX_PPM, MAX_RATIO, stableRefresh, viLockMode, WRITE_STEP_PPM } from "../src/wgpu-vi-phase-lock.js";
+import { createViPhaseLock, MAX_PPM, MAX_RATIO, REENTRY_CUT_MARGIN, stableRefresh, viLockMode, WRITE_STEP_PPM } from "../src/wgpu-vi-phase-lock.js";
 import { createVsyncQueue } from "../src/wgpu-vsync-queue.js";
 
 const NTSC_VI_MS = 1000 / 59.94;
@@ -256,7 +255,7 @@ function drive({ seconds = 60, changeAt = 20_000, hzBefore = 60, hzAfter = 60, v
   return { vi, trace };
 }
 
-test("out of reach after the lock (screen 60 -> 60.08 Hz, a game slowed 0.3 %): released within 10 s, not cycling at the bound", () => {
+test("out of reach after the lock (screen 60 -> 60.08 Hz, a game slowed 0.3 %): released within seconds, not cycling at the bound", () => {
   for (const [name, o] of [["60.08 Hz", { hzAfter: 60.08 }], ["game -0.3 %", { viAfter: NTSC_VI_MS * 1.003 }]]) {
     const { vi, trace } = drive(o);
     const before = trace.filter((x) => x.t < 20_000).at(-1);
@@ -264,7 +263,7 @@ test("out of reach after the lock (screen 60 -> 60.08 Hz, a game slowed 0.3 %): 
     const released = trace.find((x) => x.t > 20_000 && !x.on);
     assert.ok(released, `${name}: released ${JSON.stringify(trace.slice(-3))}`);
     console.log(`${name}: released after ${Math.round(released.t - 20_000)} ms`);
-    assert.ok(released.t - 20_000 <= 10_000, `${name}: released after ${released.t - 20_000} ms`);
+    assert.ok(released.t - 20_000 <= 8_000, `${name}: released after ${released.t - 20_000} ms`);
     assert.equal(released.why, "drift out of reach", name);
     // and not taken again: the drift is past the entry tolerance
     assert.equal(vi.stats.on, false, name);
@@ -433,14 +432,85 @@ test("after a drift out of reach, the lock is taken again once the drift is back
   assert.equal(worse, 0, "never worse by more than 2 frames");
 });
 
-test("a quick re-entry is not taken with the arrivals next to the cut, nor after a hidden tab (the base window first then)", () => {
-  // out of reach for good (60.08 Hz): released and never taken again, quick re-entry or not
+// Locked on NTSC at 60 Hz, then out of reach (the game 0.4 % slow) until the
+// lock lets go, then NTSC again. Each update's state; `hiddenMs`: no rAF for
+// that long right after the release (a hidden tab).
+function outAndBack({ offset = 3, hiddenMs = 0, seconds = 50, viAt = null }) {
+  const R = 1000 / 60;
+  const vi = createViPhaseLock();
+  let factor = 1, next = offset, n = 0, last = 0, releasedAt = null, backAt = null;
+  const trace = [];
+  for (let k = 0; k * R < seconds * 1000; k++) {
+    const t = 0.37 * R + k * R;
+    // out of reach from 20 s until the release, then back at NTSC
+    const viMs = viAt ? viAt(t, releasedAt) : t >= 20_000 && releasedAt === null ? NTSC_VI_MS * 1.004 : NTSC_VI_MS;
+    while (next <= t) {
+      vi.arrival(next + (((n * 7919) % 5) - 2) * 0.5);
+      n++;
+      next += viMs / factor;
+    }
+    const hidden = releasedAt !== null && t < releasedAt + hiddenMs;
+    if (!hidden) vi.tick(t, t);
+    if (t - last >= 500) {
+      last = t;
+      const wasOn = vi.stats.on;
+      factor = vi.update(t).factor;
+      if (wasOn && !vi.stats.on && releasedAt === null && vi.stats.why === "drift out of reach") releasedAt = t;
+      if (releasedAt !== null && backAt === null && t > releasedAt && t >= releasedAt + hiddenMs) backAt = t;
+      trace.push({ t, on: vi.stats.on, why: vi.stats.why, phase: vi.stats.phase, ppm: vi.stats.ppm });
+    }
+  }
+  const relock = releasedAt === null ? null : trace.find((x, i) => x.t > releasedAt && x.on && !trace[i - 1].on);
+  return { vi, trace, releasedAt, backAt, relock };
+}
+
+test("a quick re-entry is never taken with the arrivals within REENTRY_CUT_MARGIN of the cut: it waits for them past it", () => {
+  let relocks = 0, waitedNearCut = 0;
+  for (let offset = 0; offset < 16.6; offset += 0.25) for (const hot of [1.0012, 1.0016]) {
+    const sw = 15_000, viAt = (t) => (t < sw ? NTSC_VI_MS * 0.999 : t < sw + 1000 ? (NTSC_VI_MS * hot) / 0.99 : t < sw + 7000 ? NTSC_VI_MS * hot : NTSC_VI_MS);
+    const r = outAndBack({ offset, viAt, seconds: 45 });
+    if (r.releasedAt === null) continue;
+    if (!r.relock) continue;
+    relocks++;
+    // the phase the lock was taken at (the update that took it)
+    assert.ok(Math.min(r.relock.phase, 1 - r.relock.phase) >= REENTRY_CUT_MARGIN - 0.005, `${offset}: taken at ${r.relock.phase} (stats round to 0.01)`);
+    // the updates before it that were lockable but held near the cut
+    if (r.trace.some((x) => x.t > r.releasedAt && x.t < r.relock.t && x.why === "settling" && x.phase !== null && Math.min(x.phase, 1 - x.phase) < REENTRY_CUT_MARGIN)) waitedNearCut++;
+  }
+  console.log(`out and back: ${relocks} re-entries, ${waitedNearCut} held near the cut first`);
+  assert.ok(relocks >= 20, `re-entries ${relocks}`);
+  assert.ok(waitedNearCut >= 3, `the gate held some (${waitedNearCut})`);
+});
+
+test("a hidden tab after the release (no rAF): the next lock waits for the base window, as the first one", () => {
+  // the film start (filmStart), let go with the arrivals late in the refresh;
+  // then the game a little fast, the phase moving away from the cut (the
+  // near-cut hold out of the way): only the base window can delay the lock
+  const sw = 15_000, viAt = (t, releasedAt) => (releasedAt !== null ? NTSC_VI_MS * 0.9995 : t < sw ? NTSC_VI_MS * 0.999 : t < sw + 1000 ? (NTSC_VI_MS * 1.0012) / 0.99 : t < sw + 7000 ? NTSC_VI_MS * 1.0012 : NTSC_VI_MS);
+  let compared = 0;
+  for (let offset = 0; offset < 16.5; offset += 0.5) {
+    const quick = outAndBack({ offset, viAt, seconds: 45 });
+    if (!quick.relock) continue;
+    const hidden = outAndBack({ offset, viAt, seconds: 45, hiddenMs: 1200 });
+    assert.ok(hidden.relock, `${offset}: locks again after the hidden tab`);
+    // hidden: the speed back at the base for ARRIVAL_WINDOW_MS (3 s) first, then 4 updates
+    const sinceBack = hidden.relock.t - hidden.backAt;
+    assert.ok(sinceBack >= 3_000, `${offset}: hidden, taken ${sinceBack} ms after the rAF came back`);
+    compared++;
+  }
+  assert.ok(compared >= 10, `cases ${compared}`);
+  // and quick re-entries do come sooner than that base window on this scenario
+  const quickDelays = [];
+  for (let offset = 0; offset < 16.5; offset += 0.5) {
+    const q = outAndBack({ offset, viAt, seconds: 45 });
+    if (q.relock) quickDelays.push(q.relock.t - q.releasedAt);
+  }
+  quickDelays.sort((a, b) => a - b);
+  assert.ok(quickDelays[quickDelays.length >> 1] < 3_000, `quick re-entry median ${quickDelays[quickDelays.length >> 1]} ms`);
+  // out of reach for good (60.08 Hz): released and never taken again
   const { vi } = drive({ hzAfter: 60.08 });
   assert.equal(vi.stats.locks, 1);
   assert.equal(vi.stats.on, false);
-  const src = readFileSync(new URL("../src/wgpu-vi-phase-lock.js", import.meta.url), "utf8");
-  assert.match(src, /Math\.min\(s\.phase, 1 - s\.phase\) < REENTRY_CUT_MARGIN/);
-  assert.match(src, /if \(s\.why === "no rAF"\) reentry = false;/);
 });
 
 test("a sustained drift past reach after the lock (the game 1 % slow for good): released within 10 s, the speed back to the base", () => {
