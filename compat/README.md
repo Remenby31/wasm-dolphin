@@ -29,13 +29,21 @@ ops allowed), and both results are compared with the console's value.
 | ni | ni.cpp | 10 | non-IEEE mode |
 | fprf | fprf.cpp | 90 | with Config::MAIN_FPRF on |
 | fprf-default | fprf.cpp | 90 | with the core's default (FPRF off) |
+| load | load.cpp | 1088 | 16 load forms, hwtest operand roles |
+| nan | nan.cpp | 626 | asm blocks transcribed by script, assembled in `nan.mjs` |
+| reciprocal | reciprocal.cpp | 10240 | fres/frsqrte: 5120 of the hwtest's 2^32 inputs |
+| pairedmove | pairedmove.cpp | 8800 | the hwtest's full grid |
 
 Values were measured on a Wii (Broadway); the GameCube's Gekko shares the
 core. A check is `n/c` for the JIT when the JIT left the block to the
 interpreter (fctiw today).
 
+`lib/float-ref.mjs` ports the hwtests' models of the fres/frsqrte tables and
+of the paired-single mantissa rounding (`Common/FloatUtils.h`).
+
 `expected-failures.json` lists the checks that fail today, per tier, with a
-reason. `run.mjs` exits 1 on a failure not listed and on a listed failure
+reason: one check by `id`, or a family by `match` (a regex) whose number of
+failures per tier must stay exactly `count`. `run.mjs` exits 1 on a failure not listed and on a listed failure
 that passes (so a fix updates the list). `tests/compat-hwtests.test.mjs` runs
 the same in `npm test`, which core-build.yml runs on a core pull request's
 own build. `.github/workflows/compat.yml` publishes the table on every pull
@@ -43,6 +51,6 @@ request and push to main.
 
 ## Not yet ported
 
-`cputest/{nan,load,pairedmove,reciprocal}.cpp`, `gxtest/` (needs the whole
+`gxtest/` (needs the whole
 machine and an EFB-to-RAM read back: a devkitPPC build booted by the
 harness), homebrews for MMU/BAT, VI modes and memory cards.

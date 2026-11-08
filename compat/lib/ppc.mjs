@@ -30,6 +30,11 @@ const sprField = (n) => ((n & 0x1f) << 5) | (n >> 5);
 
 export const ppc = {
   li: (rd, imm) => D(14, rd, 0, imm),
+  // Loads: D form (rd, displacement, ra) and X form (rd, ra, rb).
+  ...Object.fromEntries([["lwz", 32], ["lwzu", 33], ["lbz", 34], ["lbzu", 35], ["lhz", 40], ["lhzu", 41],
+    ["lha", 42], ["lhau", 43]].map(([n, op]) => [n, (rd, d, ra) => D(op, rd, ra, d)])),
+  ...Object.fromEntries([["lwzx", 23], ["lwzux", 55], ["lbzx", 87], ["lbzux", 119], ["lhzx", 279],
+    ["lhzux", 311], ["lhax", 343], ["lhaux", 375]].map(([n, xo]) => [n, (rd, ra, rb) => X(31, rd, ra, rb, xo)])),
   addi: (rd, ra, imm) => D(14, rd, ra, imm),
   cmpwi: (crf, ra, imm) => D(11, crf << 2, ra, imm),
   mtspr: (spr, rs) => X(31, rs, 0, 0, 467) | (sprField(spr) << 11),
@@ -42,6 +47,21 @@ export const ppc = {
   rlwimi: (ra, rs, sh, mb, me) => M(20, rs, ra, sh, mb, me),
   rlwinm: (ra, rs, sh, mb, me) => M(21, rs, ra, sh, mb, me),
   rlwnm: (ra, rs, rb, mb, me) => M(23, rs, ra, rb, mb, me),
+  isync: () => 0x4c00012c,
+  lfd: (fd, d, ra) => D(50, fd, ra, d),
+  // Paired singles; A-form operands in assembly order (frD, frA, frC, frB).
+  ...Object.fromEntries([["ps_mr", 72], ["ps_neg", 40], ["ps_abs", 264], ["ps_nabs", 136]]
+    .map(([n, xo]) => [n, (fd, fb) => X(4, fd, 0, fb, xo)])),
+  ...Object.fromEntries([["ps_merge00", 528], ["ps_merge01", 560], ["ps_merge10", 592], ["ps_merge11", 624]]
+    .map(([n, xo]) => [n, (fd, fa, fb) => X(4, fd, fa, fb, xo)])),
+  ps_sel: (fd, fa, fc, fb) => A(4, fd, fa, fb, fc, 23),
+  ps_sum0: (fd, fa, fc, fb) => A(4, fd, fa, fb, fc, 10),
+  ps_sum1: (fd, fa, fc, fb) => A(4, fd, fa, fb, fc, 11),
+  ps_add: (fd, fa, fb) => A(4, fd, fa, fb, 0, 21),
+  ps_res: (fd, fb) => A(4, fd, 0, fb, 0, 24),
+  ps_rsqrte: (fd, fb) => A(4, fd, 0, fb, 0, 26),
+  fres: (fd, fb) => A(59, fd, 0, fb, 0, 24),
+  frsqrte: (fd, fb) => A(63, fd, 0, fb, 0, 26),
   frsp: (fd, fb) => X(63, fd, 0, fb, 12),
   fctiw: (fd, fb) => X(63, fd, 0, fb, 14),
   fctiwz: (fd, fb) => X(63, fd, 0, fb, 15),
@@ -73,8 +93,9 @@ export const hex32 = (v) => `0x${(v >>> 0).toString(16).padStart(8, "0")}`;
 // ---- state ----------------------------------------------------------------------
 /**
  * @param {{gpr?: Record<number, number>, fpr?: Record<number, bigint | [bigint, bigint]>,
- *   cr?: number, xer?: number, ctr?: number, fpscr?: number, gqr?: number[]}} init
+ *   cr?: number, xer?: number, ctr?: number, fpscr?: number, gqr?: number[], mem?: ArrayLike<number>}} init
  *   FPR values are 64-bit patterns (ps0, or [ps0, ps1]; ps1 defaults to ps0).
+ *   mem: guest bytes (big-endian order, as in RAM) at SCRATCH, up to 256.
  */
 export function makeState(init = {}) {
   const s = new Uint32Array(STATE_WORDS);
@@ -93,6 +114,10 @@ export function makeState(init = {}) {
     s[w] = Number(a & 0xffffffffn); s[w + 1] = Number(a >> 32n);
     s[w + 2] = Number(b & 0xffffffffn); s[w + 3] = Number(b >> 32n);
   }
+  // The core copies these words to RAM with a host (little-endian) memcpy.
+  const mem = init.mem ?? [];
+  if (mem.length > 256) throw new Error("scratch memory is 256 bytes");
+  for (let i = 0; i < mem.length; i++) s[176 + (i >> 2)] |= (mem[i] & 0xff) << (8 * (i & 3));
   return s;
 }
 
@@ -102,6 +127,7 @@ export const read = {
   xer: (s) => s[33] >>> 0,
   fpscr: (s) => s[36] >>> 0,
   gqr: (s, i) => s[38 + i] >>> 0,
+  mem8: (s, i) => (s[176 + (i >> 2)] >>> (8 * (i & 3))) & 0xff,
   ps0: (s, f) => (BigInt(s[48 + f * 4 + 1]) << 32n) | BigInt(s[48 + f * 4]),
   ps1: (s, f) => (BigInt(s[48 + f * 4 + 3]) << 32n) | BigInt(s[48 + f * 4 + 2])
 };

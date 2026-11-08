@@ -18,7 +18,7 @@ import { parseArgs } from "node:util";
 import { pathToFileURL } from "node:url";
 import { PRODUCTION_DISABLE_MASK, loadOracleCore } from "../tests/helpers/jit-oracle.mjs";
 
-export const SUITES = ["mtspr", "cr", "rlw", "srawix", "frsp", "fctiwz", "fctiw", "ni", "fprf", "fprf-default"];
+export const SUITES = ["mtspr", "cr", "rlw", "srawix", "frsp", "fctiwz", "fctiw", "ni", "fprf", "fprf-default", "load", "nan", "reciprocal", "pairedmove"];
 
 const TIERS = ["interp", "jit"];
 // The production mask, but with blocks of 2 ops allowed (bit 21 clear): a
@@ -51,20 +51,40 @@ export async function runSuites(core, suites = SUITES) {
   return records;
 }
 
-/** Applies the expected-failure list: marks each failure known or not. */
+/**
+ * Applies the expected-failure list: marks each failure known or not.
+ * An entry names one check ({id, tiers}) or a family ({match: regex, tiers,
+ * count: {tier: n}}): any check of the family may fail, but the number of
+ * failures per tier must be exactly `count` (a fix or a new failure changes it).
+ */
 export function judge(records, expectedFailures) {
-  const known = new Map(expectedFailures.map((e) => [e.id, e]));
+  const known = new Map(expectedFailures.filter((e) => e.id).map((e) => [e.id, e]));
+  const families = expectedFailures.filter((e) => e.match).map((e) => ({ ...e, re: new RegExp(e.match), seen: {} }));
   const problems = [];
   for (const rec of records) {
     const entry = known.get(rec.id);
+    const family = families.find((f) => f.re.test(rec.id));
     for (const t of TIERS) {
       const res = rec[t];
+      const failed = res.status === "fail" || res.status === "error";
+      if (family?.tiers.includes(t)) {
+        res.expectedFailure = failed;
+        if (failed) family.seen[t] = (family.seen[t] ?? 0) + 1;
+        continue;
+      }
       const listed = entry?.tiers.includes(t) ?? false;
       res.expectedFailure = listed;
-      if ((res.status === "fail" || res.status === "error") && !listed)
+      if (failed && !listed)
         problems.push(`unexpected ${res.status} [${t}] ${rec.id}: got ${res.got ?? res.detail}, hardware ${res.expected ?? "?"}`);
       if (res.status === "pass" && listed)
         problems.push(`now passes [${t}] ${rec.id}: remove it from compat/expected-failures.json`);
+    }
+  }
+  for (const f of families) {
+    for (const t of f.tiers) {
+      const n = f.seen[t] ?? 0;
+      if (n !== f.count[t])
+        problems.push(`family /${f.match}/ [${t}]: ${n} failures, compat/expected-failures.json says ${f.count[t]}`);
     }
   }
   return problems;
@@ -146,4 +166,4 @@ async function main() {
   process.exit(problems.length ? 1 : 0);
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1]).href) await main();
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) await main();
