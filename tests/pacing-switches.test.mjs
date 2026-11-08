@@ -210,7 +210,7 @@ test("presentvsync: the backbuffer pass renders into a pooled texture, shown at 
   assert.match(present, /copyTextureToTexture\(/);
   // v3: the stream no longer follows the display: nothing captured at the rAF
   assert.doesNotMatch(present, /streamCapture\.offerCanvas\(/);
-  assert.match(present, /recordPresentedFrame\(f\.coreFrame, f\.shownVi\)/);
+  assert.match(present, /recordPresentedFrame\(f\.coreFrame, f\.shownVi, f\.tag, f\.tagEpoch\)/);
   // at the worker's rAF, a timer when no BeginFrame comes; the canvas can be copied to
   assert.match(worker, /self\.requestAnimationFrame\(tick\)/);
   assert.match(worker, /setTimeout\(wgpuVsyncFallbackCheck, WGPU_VSYNC_FALLBACK_MS\)/);

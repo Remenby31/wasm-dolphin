@@ -735,7 +735,16 @@ let harnessVideoBackend = null;
 // Exact capture for video=wgpu: presents tagged with VI outputs (ViTag records).
 const wgpuExactCapture = createWgpuExactCapture();
 const HARNESS_PRESENT_RING = 16384;
-const harnessPresentRing = new Float64Array(HARNESS_PRESENT_RING * 3);
+// per present: host time, core frame, shown VI, frame tag and tag epoch
+// (src/wgpu-new-frames.js; 0, 0 untagged). Allocated when the harness is
+// enabled (harnessPresentRingOn), null for every player: 640 KiB nobody
+// else reads.
+const HARNESS_PRESENT_STRIDE = 5;
+let harnessPresentRing = null;
+function harnessPresentRingOn() {
+  harnessPresentRing ??= new Float64Array(HARNESS_PRESENT_RING * HARNESS_PRESENT_STRIDE);
+}
+export const harnessPresentRingForTest = () => harnessPresentRing;
 let harnessPresentHead = 0;
 // Harness only, when it asks (validationEnableHarness { displayed: true }):
 // what each BeginFrame put on screen (src/wgpu-display-counter.js).
@@ -1550,13 +1559,17 @@ function readEfbSyncStats(payload = {}) {
 // and VI outputs (core). Every entry is returned; `lost` counts entries
 // overwritten before they could be read.
 function readHarnessTimeline() {
-  const presents = { t: [], frame: [], vi: [] };
+  // no ring (the harness never enabled): no presents timeline, never zeros
+  if (!harnessPresentRing) return { error: "presents timeline unavailable: harness not enabled (validationEnableHarness)", presents: null, vi: null, now: harnessNow() };
+  const presents = { t: [], frame: [], vi: [], tag: [], tagEpoch: [] };
   const firstPresent = Math.max(harnessPresentRead, harnessPresentHead - HARNESS_PRESENT_RING);
   for (let n = firstPresent; n < harnessPresentHead; n += 1) {
-    const slot = (n % HARNESS_PRESENT_RING) * 3;
+    const slot = (n % HARNESS_PRESENT_RING) * HARNESS_PRESENT_STRIDE;
     presents.t.push(harnessPresentRing[slot]);
     presents.frame.push(harnessPresentRing[slot + 1]);
     presents.vi.push(harnessPresentRing[slot + 2]);
+    presents.tag.push(harnessPresentRing[slot + 3]);
+    presents.tagEpoch.push(harnessPresentRing[slot + 4]);
   }
   const presentsLost = firstPresent - harnessPresentRead;
   harnessPresentRead = harnessPresentHead;
@@ -2419,6 +2432,7 @@ async function handleMessage(type, payload) {
     case "validationEnableHarness":
       // Applied now if the core is loaded, and again when it loads.
       harnessEnabled = true;
+      harnessPresentRingOn();
       moduleInstance?._DolphinWeb_HarnessEnable?.(1);
       if (payload.displayed && !harnessDisplayStop) {
         harnessDisplayStop = startDisplayLoop(harnessDisplay, { active: () => harnessEnabled });
@@ -6680,14 +6694,17 @@ function recordVisualFrameHash(hash, sampledSourceFrame = false) {
 
 // shownVi: the VI output (since boot) this present shows, when the renderer
 // knows it (video=wgpu: its ViTag); otherwise the core's VI count now, which
-// can already be ahead of the field on screen.
-function recordPresentedFrame(coreFrame, shownVi = null) {
+// can already be ahead of the field on screen. tag, tagEpoch: the frame's new
+// frame tag (patch 0208, src/wgpu-new-frames.js), 0 when untagged.
+function recordPresentedFrame(coreFrame, shownVi = null, tag = 0, tagEpoch = 0) {
   if (aotFirstImageWaiters.length) for (const resolve of aotFirstImageWaiters.splice(0)) resolve(true);
-  if (harnessEnabled) {
-    const slot = (harnessPresentHead % HARNESS_PRESENT_RING) * 3;
+  if (harnessEnabled && harnessPresentRing) {
+    const slot = (harnessPresentHead % HARNESS_PRESENT_RING) * HARNESS_PRESENT_STRIDE;
     harnessPresentRing[slot] = harnessNow();
     harnessPresentRing[slot + 1] = coreFrame;
     harnessPresentRing[slot + 2] = shownVi ?? moduleInstance?._DolphinWeb_HarnessViSinceBoot?.() ?? -1;
+    harnessPresentRing[slot + 3] = tag || 0;
+    harnessPresentRing[slot + 4] = tagEpoch || 0;
     harnessPresentHead += 1;
     if (harnessDisplayStop) harnessDisplay.submit(harnessPresentRing[slot + 2], wgpuVsyncFrameTime);
   }
@@ -9272,6 +9289,7 @@ export const regionMissTopForTest = (heap, m) => harnessRegionMissTop(heap, m);
 export const regionLedgerStaleForTest = (m) => harnessRegionLedgerStale(m);
 export function setHarnessEnabledForTest(on) {
   harnessEnabled = on === true;
+  if (harnessEnabled) harnessPresentRingOn();
   if (!harnessEnabled) aotRegionLedger.clear();
 }
 // A region module of the first launch: compiled off the CPU thread when the
@@ -13593,7 +13611,7 @@ function presentWgpuVsyncFrameOnce({ newest = false, hidden = false, t = null, r
   wgpuVsync.shown(f);
   wgpuNewFrames.shown(f.tag, f.tagEpoch);
   // v3: streamed at queue time (streamWgpuVsyncFrame), not here.
-  recordPresentedFrame(f.coreFrame, f.shownVi);
+  recordPresentedFrame(f.coreFrame, f.shownVi, f.tag, f.tagEpoch);
   return true;
 }
 
@@ -16471,7 +16489,7 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
             // Shown at the submit: queued and shown at once.
             wgpuNewFrames.queued(presentFrameTag, presentFrameTagEpoch);
             wgpuNewFrames.shown(presentFrameTag, presentFrameTagEpoch);
-            recordPresentedFrame(api?.getFrame?.() ?? 0, wgpuExactCapture.currentBoot());
+            recordPresentedFrame(api?.getFrame?.() ?? 0, wgpuExactCapture.currentBoot(), presentFrameTag, presentFrameTagEpoch);
             if (harnessPipeline) harnessPipelineLog.queued(wgpuExactCapture.currentBoot(), harnessNow());
           }
           wgpuStalePresent.present(wgpuLastBackbufferSourceTextureId, presentFrameTag, presentFrameTagEpoch);

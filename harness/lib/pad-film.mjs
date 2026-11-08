@@ -52,8 +52,26 @@ export function validateFilm(film) {
     if (s.auto != null && (typeof s.auto !== "object" || Object.entries(s.auto).some(([k, v]) => !(k in AUTO_DEFAULTS || k === "polls") || !Number.isFinite(v)))) throw new Error(`film step ${i}: auto takes ${[...Object.keys(AUTO_DEFAULTS), "polls"].join(", ")} (numbers)`);
   });
   if (film.end < at) throw new Error(`film: end ${film.end} before its last step (${at})`);
+  if (film.phases != null) {
+    if (!Array.isArray(film.phases)) throw new Error("film: phases must be an array of { at, phase, label? }");
+    let from = -1;
+    film.phases.forEach((p, i) => {
+      if (!(Number.isInteger(p?.at) && p.at > from)) throw new Error(`film phase ${i}: at ${p?.at} must be a poll after the previous phase's`);
+      from = p.at;
+      if (p.phase !== null && !PHASES.includes(p.phase)) throw new Error(`film phase ${i}: phase ${p.phase} is not one of ${PHASES.join(", ")} (or null: the detector's from there)`);
+      if (p.label != null && typeof p.label !== "string") throw new Error(`film phase ${i}: label must be a string`);
+    });
+  }
   return film;
 }
+
+// The film's declared phases (the analysis' phase clock, lib/parcours.mjs
+// filmPhaseLabels): [{ at, phase, label }], each in force from its poll to
+// the next one's (phase null: the detector's from there); none when the
+// film declares none (the detector's phases).
+// Not its markers: a RESYNC marker is recorded once the detector has seen
+// the phase for MIN_PHASE_SEC, seconds after the phase began.
+export const filmPhases = (film) => (film?.phases ?? []).map((p) => ({ at: p.at, phase: p.phase, label: p.label ?? null }));
 
 // The film's markers in order: [{ at, phase, label, timeoutSec }].
 export const filmMarkers = (film) => film.steps.filter((s) => s.phase != null).map((s) => ({ at: s.at, phase: s.phase, label: s.label ?? null, timeoutSec: s.timeoutSec ?? null }));
