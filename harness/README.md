@@ -519,7 +519,9 @@ across bases refused; the worker's own 500 ms rate, kept as `newFpsWorker`,
 saw half the second: one 50 ms hitch read 93.3 %; analysis 5: the content
 reference, the frames produced, on the same grid from the worker's produced
 timeline, `producedBasis: "grid"`, each second judged against what was
-made in it; `"worker"`, its 500 ms rate, for older runs),
+made in it (content only with a regular production: no pause past 1.5
+frame intervals and 2.5 VI periods, analysis 6); `"worker"`, its 500 ms
+rate, for older runs),
 smoothness (new frames against the game's cadence, learnt as the site
 learns it: VI/n snapped, below the VI rate only with occupancy margin, else
 the VI rate; in a content second, where the game itself made fewer frames

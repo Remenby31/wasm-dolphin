@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 
-import { analyzeRun, classifySecond, filmPhaseLabels, newFrameBins, producedBins, regularProduction, contentSecond, gapDetail, completionOf, currentPhase, deriveSeconds, GAME_DRAWS_PER_FRAME, LOAD_DISC_BPS, markerIndexes, MIN_PHASE_SEC, parcoursVerdict, phaseLabels, phaseMetrics, phaseNoise, renderTimeline, sectionsOf, segmentsOf, summarizeSeconds, windowCadence } from "../harness/lib/parcours.mjs";
+import { analyzeRun, classifySecond, filmPhaseLabels, newFrameBins, ANALYSIS_VERSION as AV, producedBins, regularProduction, contentSecond, gapDetail, completionOf, currentPhase, deriveSeconds, GAME_DRAWS_PER_FRAME, LOAD_DISC_BPS, markerIndexes, MIN_PHASE_SEC, parcoursVerdict, phaseLabels, phaseMetrics, phaseNoise, renderTimeline, sectionsOf, segmentsOf, summarizeSeconds, windowCadence } from "../harness/lib/parcours.mjs";
 import { filmMarkers, filmPhases, filmWithMarks, keyToPad, padStateOf, recordPorts, runRecordSteps, validateFilm, validateRecordSteps } from "../harness/lib/pad-film.mjs";
 import { analyzeRaw, countersOf, otherCpuOf, presentGaps, samplerTicksOf, viTimesOf, exitCodeOf, humanSummary, markerStep } from "../harness/probes/parcours.mjs";
 import { decodePng, encodePng } from "../harness/lib/png.mjs";
@@ -921,4 +921,48 @@ test("a worker stall that stops making and showing alike is a loss, not content:
   assert.equal(regularProduction(42, 300), false);
   assert.equal(regularProduction(42, null), false);
   assert.equal(regularProduction(0, 10), false);
+});
+
+// Analysis 6.
+test("pauses of production: two 100 ms stalls in a second stay a loss; 50 frames a second with 2-VI pauses is regular (content)", () => {
+  const VI = 1000 / 59.94;
+  // two 100 ms stalls: nothing made nor shown in (t-800, t-700] and (t-400, t-300]
+  const twice = (t) => presentsIn(t, 60).filter((p) => !((p >= t - 800 && p < t - 700) || (p >= t - 400 && p < t - 300)));
+  const s = withProduced(samplesOf([["menu", 3]]), 60);
+  s[2].producedT = twice(s[2].t);
+  s[2].presents = twice(s[2].t);
+  const rows = deriveSeconds(s, { tps: TPS });
+  assert.equal(rows[1].smoothBins[0].regular, false, "a 100 ms pause is past 2.5 VIs (41.7 ms)");
+  assert.equal(rows[1].smoothness, smoothOfCount(s[2].producedT.length));
+  // 50 a second: a frame every VI, every 6th VI skipped (a 33 ms pause), all shown
+  const at50 = (t) => { const out = []; for (let i = 0, k = 0; out.length < 50; k += 1) { if (k % 6 === 5) continue; out.push(t - 1000 + k * VI); i += 1; } return out; };
+  const g = withProduced(samplesOf([["menu", 3]]), 60);
+  g[2].producedT = at50(g[2].t);
+  g[2].presents = at50(g[2].t);
+  const gr = deriveSeconds(g, { tps: TPS });
+  assert.equal(gr[1].smoothBins[0].regular, true, "2-VI pauses are the game's pace");
+  assert.equal(gr[1].smoothBins[0].content, true);
+  assert.equal(gr[1].smoothness, 100);
+  // the bound: 1.5 frame intervals, never under 2.5 VI periods
+  assert.equal(regularProduction(53, 39), true);
+  assert.equal(regularProduction(53, 45), false);
+  assert.equal(regularProduction(20, 70), true, "1.5 x 50 ms");
+  assert.equal(AV, 6);
+});
+const smoothOfCount = (n) => Math.round((1000 * n) / 60) / 10;
+
+test("the live loop: the newest row owns no complete grid second yet, and is still classified (the worker's produced rate for its signals only)", () => {
+  // readings 5 ms before each grid edge: the newest second is never complete when it is read
+  const s = withProduced(samplesOf([["menu", 3], ["game", 4]]), 60);
+  s.slice(1).forEach((x) => { x.t -= 5; });
+  for (let i = 3; i <= s.length; i += 1) {
+    const live = s.slice(0, i);
+    const rows = deriveSeconds(live, { tps: TPS });
+    const last = rows.at(-1);
+    assert.equal(last.smoothBins.length, 0, `${i}: the newest second is not on the grid yet`);
+    assert.equal(last.producedFrom, "worker");
+    assert.notEqual(classifySecond(last), null, `${i}: the newest row classified`);
+    assert.equal(last.smoothness, null, "no smoothness from the worker's rate");
+  }
+  assert.equal(currentPhase(deriveSeconds(s, { tps: TPS })), "game");
 });
