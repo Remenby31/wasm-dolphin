@@ -1451,6 +1451,9 @@ enum : std::uint32_t
 // HARNESS_XLAT_TABLE_MAX entries (then a source is counted untracked, never
 // stored), behind a mutex taken only while the counters are on. Allocated
 // with the counters' block at the first enable, never static, never freed.
+// The mutex is taken by the translating threads only: the GPU thread and, in
+// the hybrid mode (patch 0223), the async shader compiler threads; never the
+// main runtime thread (the discio worker), which must not block.
 constexpr std::uint32_t HARNESS_XLAT_TABLE_SLOTS = 8192;
 constexpr std::uint32_t HARNESS_XLAT_TABLE_MAX = 6144;
 struct HarnessXlatTable

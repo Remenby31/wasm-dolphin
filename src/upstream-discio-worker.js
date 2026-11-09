@@ -513,8 +513,12 @@ function readWgpuIntegrity() {
       m._free(p);
     }
   }
+  const pthreads = readPthreadUse();
   return wgpuIntegrity.snapshot({
     ...coreIntegrityOf(api?.getWebGpuStateCacheStats?.()),
+    // 0223: pthreads allocated past the pool (fatal since boot), and in use
+    pthreadsOverPool: pthreads.error ? null : Math.max(0, pthreads.allocated - PTHREAD_POOL_SIZE),
+    pthreadsRunning: pthreads.error ? null : pthreads.running,
     stagingUnsafe: webGpuCausalStats.mappedStagingUnsafeCapacityCount || 0,
     stagingCapacityWaits: webGpuCausalStats.mappedStagingCapacityWaitCount || 0,
     stagingOversize: webGpuCausalStats.mappedStagingOversizeCount || 0,
@@ -2215,6 +2219,7 @@ async function handleMessage(type, payload) {
         fifoLog: payload.fifoLog,
         efbCopyRam: payload.efbCopyRam,
         efbNoDefer: payload.efbNoDefer,
+        shaderHybrid: payload.shaderHybrid,
         wgpuMask: payload.wgpuMask,
         wgpuFallback: payload.wgpuFallback,
         dstAlphaTwoPass: payload.dstAlphaTwoPass,
@@ -2552,7 +2557,11 @@ async function handleMessage(type, payload) {
       try {
         stats(ptr);
         const v = new Uint32Array(moduleInstance.HEAPU8.buffer, ptr, 3);
-        return { flushes: v[0], extraDraws: v[1], enabled: v[2] === 1 };
+        // 0223: hybrid flushes drawn in one uber pass while their two pass
+        // pipelines compiled (null: a core without 0223)
+        const uberWaits = typeof moduleInstance._DolphinWeb_DstAlphaUberWaits === "function"
+          ? moduleInstance._DolphinWeb_DstAlphaUberWaits() >>> 0 : null;
+        return { flushes: v[0], extraDraws: v[1], enabled: v[2] === 1, uberWaits };
       } finally {
         moduleInstance._free(ptr);
       }
@@ -2566,6 +2575,21 @@ async function handleMessage(type, payload) {
       return readWgpuIntegrity();
     case "validationReadPthreads":
       return readPthreadUse();
+    case "validationReadUberAtVi": {
+      // Patch 0223: the uber draws of the VI windows that closed at
+      // payload.vi (since the load) and at the tag before it.
+      if (!harnessEnabled) return { error: "harness hooks are off" };
+      const at = moduleInstance?._DolphinWeb_UberDrawsAtVi;
+      if (!at || !moduleInstance._malloc) return { error: "core without patch 0223" };
+      const ptr = moduleInstance._malloc(16);
+      try {
+        at(Number(payload?.vi) >>> 0, ptr);
+        const v = new Uint32Array(moduleInstance.HEAPU8.buffer, ptr, 4);
+        return { vi: Number(payload?.vi) >>> 0, found: v[0] === 1, draws: v[1], drawsBefore: v[2], loadGeneration: v[3] };
+      } finally {
+        moduleInstance._free(ptr);
+      }
+    }
     case "validationReadGeometryCache":
       return harnessGeometryCacheStats();
     case "validationReadJitRegionStats":
@@ -2966,6 +2990,7 @@ async function loadCore({
   fifoLog = false,
   efbCopyRam = false,
   efbNoDefer = false,
+  shaderHybrid = false,
   wgpuMask = "",
   wgpuFallback = false,
   dstAlphaTwoPass = true,
@@ -3533,6 +3558,8 @@ async function loadCore({
     dolphinXfbNoDecode: Boolean(xfbNoDecode),
     dolphinEfbCopyRam: Boolean(efbCopyRam),
     dolphinEfbNoDefer: Boolean(efbNoDefer),
+    // Patch 0223: ?shadermode=hybrid, read by the core's EnsureRuntime.
+    dolphinShaderHybrid: shaderHybrid === true,
     // Ranks the instructions that block JIT compilation (?jitverbose=1).
     dolphinWebVerbosePpcJit: Boolean(jitVerbose),
     dolphinFrameCap: (frameCapTarget = Number(frameCap) || 0),

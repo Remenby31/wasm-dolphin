@@ -83,7 +83,9 @@ export const INTEGRITY_FATAL = Object.freeze([
 // instead (a duplicate shown rather than a jump back).
 // staleXfbHeldPreload: of those, a hold that showed a picture from before
 // the last state load (a stale record; 0 by construction since the review).
-export const INTEGRITY_REPORTED = Object.freeze(["stalePresents", "staleXfbHeld", "staleXfbHeldPreload"]);
+// xlatFailGlslang / xlatFailNaga (patch 0223): shader translations that
+// failed (a pipeline without them is skipped: drawSkippedNoPipeline).
+export const INTEGRITY_REPORTED = Object.freeze(["stalePresents", "staleXfbHeld", "staleXfbHeldPreload", "xlatFailGlslang", "xlatFailNaga"]);
 
 // The first missing resource of a skipped draw (SKIP), or -1 when it has all.
 export function skippedDrawCause(hasPass, hasPipeline, bindGroupsValid, needsVertexBuffer, vertexBufferValid, indexed, indexBufferValid) {
@@ -126,6 +128,12 @@ export function coreIntegrityOf(text) {
   const drop = /\bwgdrop:(\d+)/.exec(s);
   const batch = /\bwgbabort:(\d+)\s+wgboversize:(\d+)\s+wguploadto:(\d+)/.exec(s);
   const skip = /\bwgdrawskip:(\d+)/.exec(s);
+  // 0223: uber draws, VI windows with one (since boot, since the load);
+  // translation failures (glslang, Naga); compiler threads started, their
+  // start wait (total, max ms), background compiling on.
+  const uber = listOf(s, "wguber");
+  const xlatFail = listOf(s, "wgxlatfail");
+  const comp = /\bwgcomp:(\d+),([\d.]+),([\d.]+),([01])/.exec(s);
   // wgupfail: arena, then one per BufferUploadRole, then texture records
   const upfail = listOf(s, "wgupfail");
   return {
@@ -139,6 +147,15 @@ export function coreIntegrityOf(text) {
     ...fieldsOf(listOf(s, "wggfxpoison"), GFX_ABORT_SITES.slice(0, -1), "gfxPoison"),
     ...fieldsOf(listOf(s, "wgrangefail"), RANGE_FAILURES, "rangeFail"),
     drawSkippedNoPipeline: skip ? Number(skip[1]) : null,
+    uberDraws: uber ? uber[0] : null,
+    uberFrames: uber ? uber[1] : null,
+    uberFramesSinceLoad: uber ? uber[2] : null,
+    xlatFailGlslang: xlatFail ? xlatFail[0] : null,
+    xlatFailNaga: xlatFail ? xlatFail[1] : null,
+    compilerThreads: comp ? Number(comp[1]) : null,
+    compilerStartWaitMs: comp ? Number(comp[2]) : null,
+    compilerStartWaitMaxMs: comp ? Number(comp[3]) : null,
+    backgroundCompiling: comp ? comp[4] === "1" : null,
     uploadAllocFailed: upfail ? upfail[0] : null,
     ...fieldsOf(upfail ? upfail.slice(1, 1 + UPLOAD_ROLES.length) : null, UPLOAD_ROLES, "uploadFailed"),
     uploadTextureFailed: upfail && upfail.length === UPLOAD_ROLES.length + 2 ? upfail.at(-1) : null

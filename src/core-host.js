@@ -169,6 +169,10 @@ export class EmulatorHost {
     this.efbCopyRam = new URLSearchParams(window.location.search).get("efbcopyram") === "1";
     // EFB copies to RAM not deferred (Dolphin's DeferEFBCopies=False).
     this.efbNoDefer = new URLSearchParams(window.location.search).get("efbdefer") === "0";
+    // ?shadermode=hybrid (patch 0223): the WebGPU backend on Dolphin's hybrid
+    // ubershaders (AsynchronousUberShaders, 2 translation threads). Off by
+    // default: Synchronous, no compiler thread.
+    this.shaderHybrid = new URLSearchParams(window.location.search).get("shadermode") === "hybrid";
     // Harness: optional WebGPU features withheld from the device, comma-separated
     // (e.g. Safari 26 has no dual-source-blending). Empty for the app.
     this.wgpuMask = new URLSearchParams(window.location.search).get("wgpumask") ?? "";
@@ -575,6 +579,7 @@ export class EmulatorHost {
             fifoLog: this.fifoLog,
             efbCopyRam: this.efbCopyRam,
             efbNoDefer: this.efbNoDefer,
+            shaderHybrid: this.shaderHybrid,
             wgpuMask: this.wgpuMask,
             wgpuFallback: this.wgpuFallback,
             dstAlphaTwoPass: this.dstAlphaTwoPass,
