@@ -58,12 +58,20 @@ export async function runSuites(core, suites = SUITES) {
 /**
  * Applies the expected-failure list: marks each failure known or not.
  * An entry names one check ({id, tiers}) or a family ({match: regex, tiers,
- * count: {tier: n}}): any check of the family may fail, but the number of
- * failures per tier must be exactly `count` (a fix or a new failure changes it).
+ * count: {tier: n}, fingerprint: {tier: hex}}): any check of the family may
+ * fail, but the number of failures per tier must be exactly `count`, and
+ * `fingerprint` (FNV-1a over the id and the value read of every failure, in
+ * run order) pins which checks fail and with what: the same count of
+ * different failures changes it.
  */
+export function fnvText(h, text) {
+  for (const c of Buffer.from(text)) { h ^= c; h = Math.imul(h, 16777619) >>> 0; }
+  return h >>> 0;
+}
+
 export function judge(records, expectedFailures, jitCoverage = null) {
   const known = new Map(expectedFailures.filter((e) => e.id).map((e) => [e.id, e]));
-  const families = expectedFailures.filter((e) => e.match).map((e) => ({ ...e, re: new RegExp(e.match), seen: {} }));
+  const families = expectedFailures.filter((e) => e.match).map((e) => ({ ...e, re: new RegExp(e.match), seen: {}, print: {} }));
   const problems = [];
   const compiledBySuite = {};
   for (const rec of records) {
@@ -78,7 +86,10 @@ export function judge(records, expectedFailures, jitCoverage = null) {
       const failed = res.status === "fail" || res.status === "error";
       if (family?.tiers.includes(t)) {
         res.expectedFailure = failed;
-        if (failed) family.seen[t] = (family.seen[t] ?? 0) + 1;
+        if (failed) {
+          family.seen[t] = (family.seen[t] ?? 0) + 1;
+          family.print[t] = fnvText(family.print[t] ?? 2166136261, `${rec.id}\n${res.got ?? res.detail}\n`);
+        }
         continue;
       }
       const listed = entry?.tiers.includes(t) ?? false;
@@ -101,6 +112,9 @@ export function judge(records, expectedFailures, jitCoverage = null) {
       const n = f.seen[t] ?? 0;
       if (n !== f.count[t])
         problems.push(`family /${f.match}/ [${t}]: ${n} failures, compat/expected-failures.json says ${f.count[t]}`);
+      const print = (f.print[t] ?? 2166136261).toString(16).padStart(8, "0");
+      if (print !== f.fingerprint?.[t])
+        problems.push(`family /${f.match}/ [${t}]: failure fingerprint ${print}, compat/expected-failures.json says ${f.fingerprint?.[t]}`);
     }
   }
   return problems;

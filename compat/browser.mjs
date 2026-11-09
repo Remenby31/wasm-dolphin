@@ -61,6 +61,7 @@ async function runOne(server, iso, query, timeoutSec) {
 // The part of a report the expectations pin.
 export const summarize = (rep) => ({
   tests: rep.tests, testsPassed: rep.testsPassed, subtests: rep.subtests, subtestsPassed: rep.subtestsPassed,
+  fingerprint: rep.fingerprint,
   failures: rep.failures.map((f) => [f.test, f.line, f.msgHash])
 });
 
