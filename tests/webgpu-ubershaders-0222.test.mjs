@@ -33,7 +33,7 @@ test("0222: an uber pixel shader that writes depth falls back to single-source b
   assert.match(pipelineUtils, /api_type == APIType::Vulkan && ps->per_pixel_depth/);
 });
 
-test("0222 changes no default: the web core keeps ShaderCompilationMode::Synchronous", () => {
+test("0222 changes no default: the web core keeps ShaderCompilationMode::Synchronous", { skip: "DIAG branch: the uber mode is forced on purpose (never merged)" }, () => {
   const core = read("core/upstream/dolphin_web_core.cpp");
   assert.match(core, /Config::SetBase\(Config::GFX_SHADER_COMPILATION_MODE,\n\s+ShaderCompilationMode::Synchronous\);/);
   assert.doesNotMatch(patch, /ShaderCompilationMode|GFX_SHADER_COMPILATION_MODE/);
