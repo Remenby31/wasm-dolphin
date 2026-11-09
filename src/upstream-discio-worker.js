@@ -768,6 +768,8 @@ let harnessDisplayStop = null;
 // VI output's way to the screen, the worker's side (src/harness-pipeline-log.js)
 // and the core's swap ring (patch 0214), for harness/lib/no-present.mjs.
 let harnessPipeline = false;
+// Patch 0219: the miss counters asked for (the drop sampler's start)
+let harnessLoadStats = false;
 const harnessPipelineLog = createPipelineLog();
 let harnessSwapRead = null;
 let harnessPresentRead = 0;
@@ -3588,6 +3590,7 @@ async function loadCore({
   harnessVideoBackend = videoBackend;
   if (harnessEnabled) moduleInstance._DolphinWeb_HarnessEnable?.(1);
   if (harnessPipeline) moduleInstance._DolphinWeb_HarnessSwapsEnable?.(1);
+  if (harnessLoadStats) moduleInstance._DolphinWeb_HarnessLoadStatsEnable?.(1);
   if (detTraceRequested) moduleInstance._DolphinWeb_DetTraceEnable?.(1);
   if (gpuSyncDiagEnabled) moduleInstance._DolphinWeb_GpuSyncDiagEnable?.(1);
   // Patch 0129: the FMA emitter uses relaxed_madd only where it is fused,
@@ -3928,8 +3931,35 @@ const DROP_COLUMNS = [
   "jitNewCompiles",
   // this worker's busy time, cumulative ms (replayBusy's clock: the WebGPU
   // replay; null without a replay)
-  "replayBusyMs"
+  "replayBusyMs",
+  // cache misses on the video thread (patch 0219, harness only): textures
+  // created, their decoded bytes, decode and upload time (us); shaders
+  // compiled, their source generation and creation time (us); pipelines made
+  // on a miss and their time (us, their shaders included). null without the
+  // patch or before the sampler started them
+  "texLoads", "texBytes", "texDecodeUs", "texUploadUs",
+  "shaderCompiles", "shaderGenUs", "shaderCreateUs", "pipelineMisses", "pipelineUs"
 ];
+// Patch 0219's words (dolphin_web_discio.cpp HARNESS_LOAD_STATS_*): u32 that
+// wrap, unwrapped here into cumulative numbers (the deltas between rows).
+const LOAD_STATS_COLUMNS = ["texLoads", "texBytes", "texDecodeUs", "texUploadUs", "shaderCompiles", "shaderGenUs", "shaderCreateUs", "pipelineMisses", "pipelineUs"];
+const loadStatsTotals = new Array(LOAD_STATS_COLUMNS.length).fill(0);
+let loadStatsLast = null;
+let loadStatsModule = null;
+function readLoadStats(m, heap, out) {
+  const ptr = m._DolphinWeb_HarnessLoadStats?.() >>> 0;
+  if (!ptr || ptr % 4 !== 0 || ptr + 64 > heap.length) return;
+  const w = new Uint32Array(heap.buffer, ptr, 16);
+  if (w[0] !== 1) return;
+  // a new core (a reboot): the words start over
+  if (loadStatsModule !== m) { loadStatsModule = m; loadStatsLast = null; }
+  LOAD_STATS_COLUMNS.forEach((c, i) => {
+    const v = w[i + 1];
+    if (loadStatsLast) loadStatsTotals[i] += (v - loadStatsLast[i] + 2 ** 32) % 2 ** 32;
+    out[c] = loadStatsTotals[i];
+  });
+  loadStatsLast = Array.from(w.subarray(1, 1 + LOAD_STATS_COLUMNS.length));
+}
 const dropWgpu = { pipelines: 0, pipelineMs: 0, shaders: 0, shaderMs: 0 };
 let dropSampler = null;
 let dropScratch = 0;
@@ -3998,6 +4028,7 @@ function readDropCounters() {
   out.prewarmMisses = pipelinePrewarm?.stats?.misses ?? null;
   out.jitNewCompiles = dolphinJitNewCompileCount;
   out.replayBusyMs = occupancyBusyMs();
+  readLoadStats(m, heap, out);
   return DROP_COLUMNS.map((c) => out[c]);
 }
 // payload.action: "start" (everyMs), "drain", "stop".
@@ -4007,10 +4038,16 @@ function harnessDropSampler(payload = {}) {
   // Patch 0167's timer runs only while the sampler does.
   if (payload.action === "start") {
     moduleInstance?._DolphinWeb_SetJitTimeStatsEnabled?.(1);
+    // Patch 0219's miss counters run only while the sampler does (and again
+    // when a core loads meanwhile)
+    harnessLoadStats = true;
+    moduleInstance?._DolphinWeb_HarnessLoadStatsEnable?.(1);
     return { ...dropSampler.start(payload.everyMs), jitTime: typeof moduleInstance?._DolphinWeb_JitTimeStats === "function" };
   }
   if (payload.action === "stop") {
     moduleInstance?._DolphinWeb_SetJitTimeStatsEnabled?.(0);
+    harnessLoadStats = false;
+    moduleInstance?._DolphinWeb_HarnessLoadStatsEnable?.(0);
     return dropSampler.stop();
   }
   return dropSampler.drain();

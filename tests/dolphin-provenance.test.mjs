@@ -325,8 +325,9 @@ test("committed Dolphin provenance and ABI manifests verify", () => {
   // 0211 (a late XFB shows the last picture) is the first to touch Present.h: 147.
   // 0212 (throttle rate trim) adds Core/WasmThrottleRate.h and is the first to
   // touch Mixer.cpp: 149.
+  // 0219 (harness cache-miss counters) adds VideoCommon/WasmLoadStats.h: 150.
   // Update deliberately when the series changes what it modifies.
-  assert.equal(result.vendorSnapshot.rootPaths, 149);
+  assert.equal(result.vendorSnapshot.rootPaths, 150);
   assert.equal(result.vendorSnapshot.submodulePaths, 2);
   assert.equal(result.core.abiVersion, 1);
   assert.equal(result.core.memoryContract.jsGlue.initialPages, 24576);

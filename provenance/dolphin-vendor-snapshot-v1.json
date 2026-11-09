@@ -3,8 +3,8 @@
   "normalization": "git-blob-lf",
   "root": {
     "baseCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
-    "resultTree": "826f59a487fecb47eab4de0ca2b2e50c28fc2ee8",
-    "changedPathCount": 149,
+    "resultTree": "ade0dda597257e4fd0e7a70c49fee4b7e1c167e5",
+    "changedPathCount": 150,
     "records": [
       {
         "path": "CMakeLists.txt",
@@ -1172,9 +1172,9 @@
         "status": "M",
         "mode": "100644",
         "baseBlob": "2627656d0d8c20dbd17381babc858671ae17eca9",
-        "resultBlob": "d54946b0938305008b709602f6cfcf5d6835bd01",
-        "size": 54851,
-        "sha256": "5469f05d7d9434415ecdfe5b8265f139b101acffb28ee56298a7a4c93351cd82"
+        "resultBlob": "952e7e9816c2a6c18fac4c826083e7e125add35b",
+        "size": 57758,
+        "sha256": "2a74eed8dede56374befca21023f9845c810ebe3d816b4881c6164e459bfea6a"
       },
       {
         "path": "Source/Core/VideoCommon/ShaderGenCommon.cpp",
@@ -1199,9 +1199,9 @@
         "status": "M",
         "mode": "100644",
         "baseBlob": "bbcd1140b4ed2151a3e2e217f384046eadeb5f6e",
-        "resultBlob": "b1770ff6bd4c9f1780b91c9ea997f6d68ccf1f29",
-        "size": 129387,
-        "sha256": "f658d2a9347f10fb990572e2a2fc4e90e10eef601c1d5d0d79d48ffeef016588"
+        "resultBlob": "ad004c5fefd2d409bbcefcdde2c0fe2eb7c5ff2e",
+        "size": 130768,
+        "sha256": "7a7d0ac70597f9e1df1349e920b20be2158d0e231c20250bf6ded8ec75bbed8a"
       },
       {
         "path": "Source/Core/VideoCommon/TextureConversionShader.cpp",
@@ -1303,6 +1303,15 @@
         "sha256": "6d0bdd682a6dfacc34e3f02c664bb2f2f475cd05ac0f63bcf84f2191c942e7cb"
       },
       {
+        "path": "Source/Core/VideoCommon/WasmLoadStats.h",
+        "status": "A",
+        "mode": "100644",
+        "baseBlob": null,
+        "resultBlob": "26aab28805aea464560fe46a18243b93f71afcd5",
+        "size": 1864,
+        "sha256": "9b39236011badfbd18354e81dc0e3c1270b71c1b148be0e8057e638be7bce192"
+      },
+      {
         "path": "Source/Core/VideoCommon/WasmWebGpuDrawProfile.h",
         "status": "A",
         "mode": "100644",
@@ -1383,5 +1392,5 @@
       ]
     }
   ],
-  "contentSha256": "84f2eb078f77b9285c8fa2bdaa919514d255cdc4b32cd6f953998d09578705f0"
+  "contentSha256": "5668bec764645221970720a3ffe25c156ebd815f950a24be4f499e804db5d4f7"
 }

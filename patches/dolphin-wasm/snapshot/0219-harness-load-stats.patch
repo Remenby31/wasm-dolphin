@@ -1,0 +1,316 @@
+diff --git a/Source/Core/VideoCommon/ShaderCache.cpp b/Source/Core/VideoCommon/ShaderCache.cpp
+--- a/Source/Core/VideoCommon/ShaderCache.cpp
++++ b/Source/Core/VideoCommon/ShaderCache.cpp
+@@ -15,6 +15,7 @@
+ #include "VideoCommon/AbstractGfx.h"
+ #include "VideoCommon/ConstantManager.h"
+ #include "VideoCommon/DriverDetails.h"
++#include "VideoCommon/WasmLoadStats.h"
+ #include "VideoCommon/FramebufferManager.h"
+ #include "VideoCommon/FramebufferShaderGen.h"
+ #include "VideoCommon/PipelineUtils.h"
+@@ -133,10 +134,15 @@ const AbstractPipeline* ShaderCache::GetPipelineForUid(const GXPipelineUid& uid)
+     return it->second.first.get();
+ 
+   const bool exists_in_cache = it != m_gx_pipeline_cache.end();
++  // Patch 0219: a pipeline made on a miss (its shaders' compiles included),
++  // timed only under the harness; a hit returned above.
++  const bool load_stats = DolphinWeb::LoadStats::On();
++  const double load_start = DolphinWeb::LoadStats::Now(load_stats);
+   std::unique_ptr<AbstractPipeline> pipeline;
+   std::optional<AbstractPipelineConfig> pipeline_config = GetGXPipelineConfig(uid);
+   if (pipeline_config)
+     pipeline = g_gfx->CreatePipeline(*pipeline_config);
++  DolphinWeb::LoadStats::Pipeline(load_stats, DolphinWeb::LoadStats::Now(load_stats) - load_start);
+   if (g_ActiveConfig.bShaderCache && !exists_in_cache)
+     AppendGXPipelineUID(uid);
+   return InsertGXPipeline(uid, std::move(pipeline));
+@@ -175,10 +181,14 @@ const AbstractPipeline* ShaderCache::GetUberPipelineForUid(const GXUberPipelineU
+   if (it != m_gx_uber_pipeline_cache.end() && !it->second.second)
+     return it->second.first.get();
+ 
++  // Patch 0219: as GetPipelineForUid's miss.
++  const bool load_stats = DolphinWeb::LoadStats::On();
++  const double load_start = DolphinWeb::LoadStats::Now(load_stats);
+   std::unique_ptr<AbstractPipeline> pipeline;
+   std::optional<AbstractPipelineConfig> pipeline_config = GetGXPipelineConfig(uid);
+   if (pipeline_config)
+     pipeline = g_gfx->CreatePipeline(*pipeline_config);
++  DolphinWeb::LoadStats::Pipeline(load_stats, DolphinWeb::LoadStats::Now(load_stats) - load_start);
+   return InsertGXUberPipeline(uid, std::move(pipeline));
+ }
+ 
+@@ -454,34 +464,62 @@ void ShaderCache::CompileMissingPipelines()
+ 
+ std::unique_ptr<AbstractShader> ShaderCache::CompileVertexShader(const VertexShaderUid& uid) const
+ {
++  // Patch 0219: a shader compiled on a miss, timed only under the harness.
++  const bool load_stats = DolphinWeb::LoadStats::On();
++  const double load_start = DolphinWeb::LoadStats::Now(load_stats);
+   const ShaderCode source_code =
+       GenerateVertexShaderCode(m_api_type, m_host_config, uid.GetUidData(), {});
+-  return g_gfx->CreateShaderFromSource(ShaderStage::Vertex, source_code.GetBuffer());
++  const double generated_at = DolphinWeb::LoadStats::Now(load_stats);
++  auto shader = g_gfx->CreateShaderFromSource(ShaderStage::Vertex, source_code.GetBuffer());
++  const double created_at = DolphinWeb::LoadStats::Now(load_stats);
++  DolphinWeb::LoadStats::Shader(load_stats, generated_at - load_start, created_at - generated_at);
++  return shader;
+ }
+ 
+ std::unique_ptr<AbstractShader>
+ ShaderCache::CompileVertexUberShader(const UberShader::VertexShaderUid& uid) const
+ {
++  // Patch 0219: a shader compiled on a miss, timed only under the harness.
++  const bool load_stats = DolphinWeb::LoadStats::On();
++  const double load_start = DolphinWeb::LoadStats::Now(load_stats);
+   const ShaderCode source_code =
+       UberShader::GenVertexShader(m_api_type, m_host_config, uid.GetUidData());
+-  return g_gfx->CreateShaderFromSource(ShaderStage::Vertex, source_code.GetBuffer(), nullptr,
+-                                       fmt::to_string(*uid.GetUidData()));
++  const double generated_at = DolphinWeb::LoadStats::Now(load_stats);
++  auto shader = g_gfx->CreateShaderFromSource(ShaderStage::Vertex, source_code.GetBuffer(), nullptr,
++                                              fmt::to_string(*uid.GetUidData()));
++  const double created_at = DolphinWeb::LoadStats::Now(load_stats);
++  DolphinWeb::LoadStats::Shader(load_stats, generated_at - load_start, created_at - generated_at);
++  return shader;
+ }
+ 
+ std::unique_ptr<AbstractShader> ShaderCache::CompilePixelShader(const PixelShaderUid& uid) const
+ {
++  // Patch 0219: a shader compiled on a miss, timed only under the harness.
++  const bool load_stats = DolphinWeb::LoadStats::On();
++  const double load_start = DolphinWeb::LoadStats::Now(load_stats);
+   const ShaderCode source_code =
+       GeneratePixelShaderCode(m_api_type, m_host_config, uid.GetUidData(), {});
+-  return g_gfx->CreateShaderFromSource(ShaderStage::Pixel, source_code.GetBuffer());
++  const double generated_at = DolphinWeb::LoadStats::Now(load_stats);
++  auto shader = g_gfx->CreateShaderFromSource(ShaderStage::Pixel, source_code.GetBuffer());
++  const double created_at = DolphinWeb::LoadStats::Now(load_stats);
++  DolphinWeb::LoadStats::Shader(load_stats, generated_at - load_start, created_at - generated_at);
++  return shader;
+ }
+ 
+ std::unique_ptr<AbstractShader>
+ ShaderCache::CompilePixelUberShader(const UberShader::PixelShaderUid& uid) const
+ {
++  // Patch 0219: a shader compiled on a miss, timed only under the harness.
++  const bool load_stats = DolphinWeb::LoadStats::On();
++  const double load_start = DolphinWeb::LoadStats::Now(load_stats);
+   const ShaderCode source_code =
+       UberShader::GenPixelShader(m_api_type, m_host_config, uid.GetUidData());
+-  return g_gfx->CreateShaderFromSource(ShaderStage::Pixel, source_code.GetBuffer(), nullptr,
+-                                       fmt::to_string(*uid.GetUidData()));
++  const double generated_at = DolphinWeb::LoadStats::Now(load_stats);
++  auto shader = g_gfx->CreateShaderFromSource(ShaderStage::Pixel, source_code.GetBuffer(), nullptr,
++                                              fmt::to_string(*uid.GetUidData()));
++  const double created_at = DolphinWeb::LoadStats::Now(load_stats);
++  DolphinWeb::LoadStats::Shader(load_stats, generated_at - load_start, created_at - generated_at);
++  return shader;
+ }
+ 
+ const AbstractShader* ShaderCache::InsertVertexShader(const VertexShaderUid& uid,
+@@ -574,11 +612,17 @@ const AbstractShader* ShaderCache::InsertPixelUberShader(const UberShader::Pixel
+ 
+ const AbstractShader* ShaderCache::CreateGeometryShader(const GeometryShaderUid& uid)
+ {
++  // Patch 0219: as Compile*Shader.
++  const bool load_stats = DolphinWeb::LoadStats::On();
++  const double load_start = DolphinWeb::LoadStats::Now(load_stats);
+   const ShaderCode source_code =
+       GenerateGeometryShaderCode(m_api_type, m_host_config, uid.GetUidData());
++  const double generated_at = DolphinWeb::LoadStats::Now(load_stats);
+   std::unique_ptr<AbstractShader> shader =
+       g_gfx->CreateShaderFromSource(ShaderStage::Geometry, source_code.GetBuffer(), nullptr,
+                                     fmt::format("Geometry shader: {}", *uid.GetUidData()));
++  DolphinWeb::LoadStats::Shader(load_stats, generated_at - load_start,
++                                DolphinWeb::LoadStats::Now(load_stats) - generated_at);
+ 
+   auto& entry = m_gs_cache.shader_map[uid];
+   entry.pending = false;
+diff --git a/Source/Core/VideoCommon/TextureCacheBase.cpp b/Source/Core/VideoCommon/TextureCacheBase.cpp
+--- a/Source/Core/VideoCommon/TextureCacheBase.cpp
++++ b/Source/Core/VideoCommon/TextureCacheBase.cpp
+@@ -57,6 +57,7 @@
+ #include "VideoCommon/VertexManagerBase.h"
+ #include "VideoCommon/VideoCommon.h"
+ #include "VideoCommon/VideoConfig.h"
++#include "VideoCommon/WasmLoadStats.h"
+ 
+ #ifdef __EMSCRIPTEN__
+ #include "VideoCommon/CommandProcessor.h"
+@@ -1676,6 +1677,10 @@ RcTcacheEntry TextureCacheBase::CreateTextureEntry(
+   }
+   else
+   {
++    // Patch 0219: a texture made on a miss, timed only under the harness.
++    const bool load_stats = DolphinWeb::LoadStats::On();
++    double decode_ms = 0, upload_ms = 0;
++    u32 decoded_bytes = 0;
+     const u32 texLevels = no_mips ? 1 : texture_info.GetLevelCount();
+     const u32 expanded_width = texture_info.GetExpandedWidth();
+     const u32 expanded_height = texture_info.GetExpandedHeight();
+@@ -1703,12 +1708,20 @@ RcTcacheEntry TextureCacheBase::CreateTextureEntry(
+     // Initialized to null because only software loading uses this buffer
+     u8* dst_buffer = nullptr;
+ 
+-    if (!decode_on_gpu ||
+-        !DecodeTextureOnGPU(
++    double stamp = DolphinWeb::LoadStats::Now(load_stats);
++    const bool decoded_on_gpu =
++        decode_on_gpu &&
++        DecodeTextureOnGPU(
+             entry, 0, texture_info.GetData(), texture_info.GetTextureSize(),
+             texture_info.GetTextureFormat(), width, height, expanded_width, expanded_height,
+             creation_info.bytes_per_block * (expanded_width / texture_info.GetBlockWidth()),
+-            texture_info.GetTlutAddress(), texture_info.GetTlutFormat()))
++            texture_info.GetTlutAddress(), texture_info.GetTlutFormat());
++    if (decoded_on_gpu)
++    {
++      decode_ms += DolphinWeb::LoadStats::Now(load_stats) - stamp;
++      decoded_bytes += expanded_width * sizeof(u32) * expanded_height;
++    }
++    else
+     {
+       size_t decoded_texture_size = expanded_width * sizeof(u32) * expanded_height;
+ 
+@@ -1743,7 +1756,11 @@ RcTcacheEntry TextureCacheBase::CreateTextureEntry(
+                                        expanded_height);
+       }
+ 
++      const double decoded_at = DolphinWeb::LoadStats::Now(load_stats);
++      decode_ms += decoded_at - stamp;
+       entry->texture->Load(0, width, height, expanded_width, dst_buffer, decoded_texture_size);
++      upload_ms += DolphinWeb::LoadStats::Now(load_stats) - decoded_at;
++      decoded_bytes += static_cast<u32>(decoded_texture_size);
+ 
+       arbitrary_mip_detector.AddLevel(width, height, expanded_width, dst_buffer);
+ 
+@@ -1761,14 +1778,22 @@ RcTcacheEntry TextureCacheBase::CreateTextureEntry(
+         continue;
+       }
+ 
+-      if (!decode_on_gpu ||
+-          !DecodeTextureOnGPU(entry, mip_level.GetLevel(), mip_level.GetData(),
+-                              mip_level.GetTextureSize(), texture_info.GetTextureFormat(),
+-                              mip_level.GetRawWidth(), mip_level.GetRawHeight(),
+-                              mip_level.GetExpandedWidth(), mip_level.GetExpandedHeight(),
+-                              creation_info.bytes_per_block *
+-                                  (mip_level.GetExpandedWidth() / texture_info.GetBlockWidth()),
+-                              texture_info.GetTlutAddress(), texture_info.GetTlutFormat()))
++      stamp = DolphinWeb::LoadStats::Now(load_stats);
++      const bool mip_on_gpu =
++          decode_on_gpu &&
++          DecodeTextureOnGPU(entry, mip_level.GetLevel(), mip_level.GetData(),
++                             mip_level.GetTextureSize(), texture_info.GetTextureFormat(),
++                             mip_level.GetRawWidth(), mip_level.GetRawHeight(),
++                             mip_level.GetExpandedWidth(), mip_level.GetExpandedHeight(),
++                             creation_info.bytes_per_block *
++                                 (mip_level.GetExpandedWidth() / texture_info.GetBlockWidth()),
++                             texture_info.GetTlutAddress(), texture_info.GetTlutFormat());
++      if (mip_on_gpu)
++      {
++        decode_ms += DolphinWeb::LoadStats::Now(load_stats) - stamp;
++        decoded_bytes += mip_level.GetExpandedWidth() * sizeof(u32) * mip_level.GetExpandedHeight();
++      }
++      else
+       {
+         // No need to call CheckTempSize here, as the whole buffer is preallocated at the beginning
+         const u32 decoded_mip_size =
+@@ -1776,9 +1801,13 @@ RcTcacheEntry TextureCacheBase::CreateTextureEntry(
+         TexDecoder_Decode(dst_buffer, mip_level.GetData(), mip_level.GetExpandedWidth(),
+                           mip_level.GetExpandedHeight(), texture_info.GetTextureFormat(),
+                           texture_info.GetTlutAddress(), texture_info.GetTlutFormat());
++        const double mip_decoded_at = DolphinWeb::LoadStats::Now(load_stats);
++        decode_ms += mip_decoded_at - stamp;
+         entry->texture->Load(mip_level.GetLevel(), mip_level.GetRawWidth(),
+                              mip_level.GetRawHeight(), mip_level.GetExpandedWidth(), dst_buffer,
+                              decoded_mip_size);
++        upload_ms += DolphinWeb::LoadStats::Now(load_stats) - mip_decoded_at;
++        decoded_bytes += decoded_mip_size;
+ 
+         arbitrary_mip_detector.AddLevel(mip_level.GetRawWidth(), mip_level.GetRawHeight(),
+                                         mip_level.GetExpandedWidth(), dst_buffer);
+@@ -1788,6 +1817,7 @@ RcTcacheEntry TextureCacheBase::CreateTextureEntry(
+     }
+ 
+     entry->has_arbitrary_mips = arbitrary_mip_detector.HasArbitraryMipmaps(dst_buffer);
++    DolphinWeb::LoadStats::Texture(load_stats, decoded_bytes, decode_ms, upload_ms);
+ 
+     if (g_ActiveConfig.bDumpTextures && !skip_texture_dump && texLevels > 0)
+     {
+diff --git a/Source/Core/VideoCommon/WasmLoadStats.h b/Source/Core/VideoCommon/WasmLoadStats.h
+new file mode 100644
+--- /dev/null
++++ b/Source/Core/VideoCommon/WasmLoadStats.h
+@@ -0,0 +1,71 @@
++// Copyright 2026 wasm-dolphin contributors
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++// Patch 0219 (harness only): what a cache miss costs the video thread, to
++// separate a load's GPU work (textures decoded and uploaded, shaders and
++// pipelines created). Counted in dolphin_web_discio.cpp, in a block the
++// harness allocates; with the counters off (players) a miss makes one
++// acquire load of a flag (On) and nothing else: no clock read, no write.
++// Only cache misses call these, never a hit.
++
++#pragma once
++
++#include "Common/CommonTypes.h"
++
++#ifdef __EMSCRIPTEN__
++#include <emscripten/emscripten.h>
++
++extern "C" int DolphinWeb_HarnessLoadStatsOn();
++extern "C" void DolphinWeb_HarnessRecordTextureLoad(u32 bytes, double decode_ms, double upload_ms);
++extern "C" void DolphinWeb_HarnessRecordShaderCompile(double gen_ms, double create_ms);
++extern "C" void DolphinWeb_HarnessRecordPipelineMiss(double ms);
++
++namespace DolphinWeb::LoadStats
++{
++inline bool On()
++{
++  return DolphinWeb_HarnessLoadStatsOn() != 0;
++}
++// A clock read only with the counters on.
++inline double Now(bool on)
++{
++  return on ? emscripten_get_now() : 0.0;
++}
++inline void Texture(bool on, u32 bytes, double decode_ms, double upload_ms)
++{
++  if (on)
++    DolphinWeb_HarnessRecordTextureLoad(bytes, decode_ms, upload_ms);
++}
++inline void Shader(bool on, double gen_ms, double create_ms)
++{
++  if (on)
++    DolphinWeb_HarnessRecordShaderCompile(gen_ms, create_ms);
++}
++inline void Pipeline(bool on, double ms)
++{
++  if (on)
++    DolphinWeb_HarnessRecordPipelineMiss(ms);
++}
++}  // namespace DolphinWeb::LoadStats
++#else
++namespace DolphinWeb::LoadStats
++{
++inline bool On()
++{
++  return false;
++}
++inline double Now(bool)
++{
++  return 0.0;
++}
++inline void Texture(bool, u32, double, double)
++{
++}
++inline void Shader(bool, double, double)
++{
++}
++inline void Pipeline(bool, double)
++{
++}
++}  // namespace DolphinWeb::LoadStats
++#endif

@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 
-import { analyzeRun, classifySecond, filmPhaseLabels, newFrameBins, gamePauseReference, gamePauseSpans, gamePauseGpuSide, nominalViRate, ownRateCadence, PARCOURS_PRIMARY, viBins, ANALYSIS_VERSION as AV, producedBins, regularProduction, contentSecond, gapDetail, completionOf, currentPhase, deriveSeconds, GAME_DRAWS_PER_FRAME, LOAD_DISC_BPS, markerIndexes, MIN_PHASE_SEC, parcoursVerdict, phaseLabels, phaseMetrics, phaseNoise, renderTimeline, sectionsOf, segmentsOf, summarizeSeconds, windowCadence } from "../harness/lib/parcours.mjs";
+import { analyzeRun, classifySecond, filmPhaseLabels, newFrameBins, gamePauseReference, gamePauseSpans, gamePauseGpuSide, gpuSideBusy, productionGapsOf, GPU_ROW_COLUMNS, nominalViRate, ownRateCadence, PARCOURS_PRIMARY, viBins, ANALYSIS_VERSION as AV, producedBins, regularProduction, contentSecond, gapDetail, completionOf, currentPhase, deriveSeconds, GAME_DRAWS_PER_FRAME, LOAD_DISC_BPS, markerIndexes, MIN_PHASE_SEC, parcoursVerdict, phaseLabels, phaseMetrics, phaseNoise, renderTimeline, sectionsOf, segmentsOf, summarizeSeconds, windowCadence } from "../harness/lib/parcours.mjs";
 import { filmMarkers, filmPhases, filmWithMarks, keyToPad, padStateOf, recordPorts, runRecordSteps, validateFilm, validateRecordSteps } from "../harness/lib/pad-film.mjs";
 import { analyzeRaw, countersOf, otherCpuOf, presentGaps, samplerTicksOf, viTimesOf, exitCodeOf, gamePausesText, gpuRowsOf, humanSummary, markerStep } from "../harness/probes/parcours.mjs";
 import { decodePng, encodePng } from "../harness/lib/png.mjs";
@@ -1250,18 +1250,28 @@ test("an emulation stall on top of the game's pause still shows: below full spee
 test("probe: every run keeps the drop sampler's GPU-side rows (gpuRows), in GPU_ROW_COLUMNS order; a failed drain: null", () => {
   const columns = ["t", "lagMs", "xfbCopies", "gpuWorkUs", "gpuConsumerWaitUs", "presentSleepUs", "flushGpuWaitUs", "efbWaitUs", "replayBusyMs", "ticks"];
   const rows = gpuRowsOf({ columns, rows: [[1000.04, 3, 10, 2000.06, 0, 0, 0, 0, 50.25, 9], [1100, 1, 16, 3000, 0, 0, 0, null, 55, 9]] });
-  assert.deepEqual(rows, [[1000, 10, 2000.1, 0, 0, 0, 0, 50.3], [1100, 16, 3000, 0, 0, 0, null, 55]]);
+  const none = Array(9).fill(null); // patch 0219's columns: absent here
+  assert.deepEqual(rows, [[1000, 10, 2000.1, 0, 0, 0, 0, 50.3, ...none], [1100, 16, 3000, 0, 0, 0, null, 55, ...none]]);
   assert.equal(gpuRowsOf({ error: "gone" }), null);
   assert.equal(gpuRowsOf(null), null);
   // a core without the replay column: that field unknown, never 0
-  assert.deepEqual(gpuRowsOf({ columns: columns.slice(0, 8), rows: [[1, 0, 1, 2, 0, 0, 0, 0]] }), [[1, 1, 2, 0, 0, 0, 0, null]]);
+  assert.deepEqual(gpuRowsOf({ columns: columns.slice(0, 8), rows: [[1, 0, 1, 2, 0, 0, 0, 0]] }), [[1, 1, 2, 0, 0, 0, 0, null, ...none]]);
+  // patch 0219's miss counters ride along, by name
+  const c19 = [...columns, "texLoads", "texBytes", "texDecodeUs", "texUploadUs", "shaderCompiles", "shaderGenUs", "shaderCreateUs", "pipelineMisses", "pipelineUs"];
+  assert.deepEqual(gpuRowsOf({ columns: c19, rows: [[1, 0, 2, 3, 0, 0, 0, 0, 4, 9, 1, 2, 3, 4, 5, 6, 7, 8, 9]] })[0].slice(8), [1, 2, 3, 4, 5, 6, 7, 8, 9]);
   // every run records them, not only with --sampler-rows
   const probe = readFileSync(new URL("../harness/probes/parcours.mjs", import.meta.url), "utf8");
   assert.match(probe, /raw\.samples\.push\(\{ t, info, counters: countersOf\(drained\), gpuRows: gpuRowsOf\(drained\),/);
   assert.match(probe, /const drained = raw\.samplerMissing \? null : await workerRequest\(page, "validationDropSampler", \{ action: "drain" \}, 5000\);/);
   // the worker samples the column
   const worker = readFileSync(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
-  assert.match(worker, /"replayBusyMs"\n\];/);
+  assert.match(worker, /"replayBusyMs",\n/);
+  // and patch 0219's miss counters, unwrapped from the core's u32 words, on only while the sampler runs
+  assert.match(worker, /"shaderCompiles", "shaderGenUs", "shaderCreateUs", "pipelineMisses", "pipelineUs"\n\];/);
+  assert.match(worker, /readLoadStats\(m, heap, out\);\n\s+return DROP_COLUMNS\.map/);
+  assert.match(worker, /harnessLoadStats = true;\n\s+moduleInstance\?\._DolphinWeb_HarnessLoadStatsEnable\?\.\(1\);/);
+  assert.match(worker, /harnessLoadStats = false;\n\s+moduleInstance\?\._DolphinWeb_HarnessLoadStatsEnable\?\.\(0\);/);
+  assert.match(worker, /if \(harnessLoadStats\) moduleInstance\._DolphinWeb_HarnessLoadStatsEnable\?\.\(1\);/);
   assert.match(worker, /out\.replayBusyMs = occupancyBusyMs\(\);/);
 });
 
@@ -1328,3 +1338,25 @@ test("a non-excused irregular second without enough regular part falls back to t
   assert.equal(ownRateCadence({ producedT: [100, 700], from: 0, to: 1000, viMs: vi, nominalCadence: 60, ...idle }).cadence, 60);
 });
 const round1 = (x) => Math.round(x * 10) / 10;
+
+test("production gaps: a covered reading of unknown speed makes the gap unknown (counted apart), never dropped", () => {
+  const vi = 1000 / 59.94;
+  const producedT = [0, vi, 2 * vi, 2 * vi + 300, 2 * vi + 300 + vi];
+  const gaps = (speeds) => productionGapsOf({ producedT, origin: 0, binMs: 1000, produced: [60], viMs: vi, speedAt: () => speeds });
+  assert.deepEqual(gaps([100]), [{ k: 0, ms: 300 }]);
+  assert.deepEqual(gaps([100, null]), [{ k: 0, ms: null }]);
+  assert.deepEqual(gaps([]), [{ k: 0, ms: null }]);
+  assert.deepEqual(gaps([93]), [], "below full speed: the speed p5's");
+  // in a run: a reading without counters (no speed) over the gap
+  const rows = pauseRun({ rows: true, copies: 60 });
+  assert.equal(summarizeSeconds(rows).metrics.productionGapsUnknown, 0);
+});
+
+test("the game-pause rule reads only its own GPU-side fields: patch 0219's columns null (an older core) change nothing", () => {
+  const row = (t, extra) => [t, 0, 1000 * (t / 100), 0, 0, 0, 0, t / 20, ...extra];
+  const without = [1200, 1300, 1400, 1500, 1600, 1700].map((t) => row(t, Array(9).fill(null)));
+  const withStats = [1200, 1300, 1400, 1500, 1600, 1700].map((t) => row(t, Array(9).fill(1)));
+  assert.notEqual(gpuSideBusy(without, 1300, 1600), null);
+  assert.deepEqual(gpuSideBusy(without, 1300, 1600), gpuSideBusy(withStats, 1300, 1600));
+  assert.equal(GPU_ROW_COLUMNS.length, 17);
+});

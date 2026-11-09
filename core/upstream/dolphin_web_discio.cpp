@@ -1403,6 +1403,94 @@ EMSCRIPTEN_KEEPALIVE DolphinWebHarnessSwapEntry* DolphinWeb_HarnessSwapRing() { 
 EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_HarnessSwapRingCapacity() { return HARNESS_SWAP_RING_CAPACITY; }
 EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_HarnessSwapRingHead() { return s_harness_swap_head.load(std::memory_order_acquire); }
 
+// Patch 0219 (harness only): what the video thread spends on a cache miss,
+// to separate the causes of a load's GPU work (textures or shaders) before
+// any lever. Cumulative u32 words (they wrap; the reader unwraps), each
+// written with a relaxed fetch_add by any thread that misses (the video
+// thread, the async shader compilers): word 0 the layout version, then
+// textures created (TextureCacheBase::CreateTextureEntry), their decoded
+// bytes, decode time (us, CPU TexDecoder or the GPU decode's dispatch) and
+// upload time (us, AbstractTexture::Load); shaders compiled (ShaderCache
+// Compile*Shader, uber shaders too), their source generation and their
+// creation time (us); pipelines created on a miss (GetPipelineForUid) and
+// their time (us, their shaders' compiles included).
+// Allocated at the first enable, never in the core's static data (a static
+// array ahead of other globals moves the addresses the region translator
+// embeds: tests/regshape-x64.test.mjs), never freed: the address the worker
+// reads (DolphinWeb_HarnessLoadStats) never goes stale.
+constexpr std::uint32_t HARNESS_LOAD_STATS_VERSION = 1;
+constexpr std::uint32_t HARNESS_LOAD_STATS_WORDS = 16;
+enum : std::uint32_t
+{
+  LOAD_TEXTURES = 1,
+  LOAD_TEXTURE_BYTES = 2,
+  LOAD_TEXTURE_DECODE_US = 3,
+  LOAD_TEXTURE_UPLOAD_US = 4,
+  LOAD_SHADERS = 5,
+  LOAD_SHADER_GEN_US = 6,
+  LOAD_SHADER_CREATE_US = 7,
+  LOAD_PIPELINES = 8,
+  LOAD_PIPELINE_US = 9,
+};
+static std::atomic<std::atomic<std::uint32_t>*> s_harness_load_stats{nullptr};
+static std::atomic<int> s_harness_load_stats_enabled{0};
+
+// The worker's thread only (the drop sampler's start and stop, the core's
+// load). The block is stored, then the flag with release; a miss loads the
+// flag with acquire (DolphinWeb_HarnessLoadStatsOn) before the block: a
+// writer that sees the flag sees the block, and nothing is written before.
+EMSCRIPTEN_KEEPALIVE void DolphinWeb_HarnessLoadStatsEnable(int enabled)
+{
+  if (enabled && !s_harness_load_stats.load(std::memory_order_acquire))
+  {
+    auto* words = new std::atomic<std::uint32_t>[HARNESS_LOAD_STATS_WORDS]();
+    words[0].store(HARNESS_LOAD_STATS_VERSION, std::memory_order_relaxed);
+    s_harness_load_stats.store(words, std::memory_order_release);
+  }
+  // release: pairs with the acquire load in DolphinWeb_HarnessLoadStatsOn
+  s_harness_load_stats_enabled.store(enabled ? 1 : 0, std::memory_order_release);
+}
+// The one atomic access a miss makes when the counters are off (players):
+// a single acquire load of the flag.
+extern "C" int DolphinWeb_HarnessLoadStatsOn()
+{
+  return s_harness_load_stats_enabled.load(std::memory_order_acquire);
+}
+static void HarnessLoadAdd(std::uint32_t word, double value)
+{
+  std::atomic<std::uint32_t>* words = s_harness_load_stats.load(std::memory_order_acquire);
+  if (!words || word >= HARNESS_LOAD_STATS_WORDS || !(value > 0))
+    return;
+  words[word].fetch_add(static_cast<std::uint32_t>(value + 0.5), std::memory_order_relaxed);
+}
+// The recorders: called only after DolphinWeb_HarnessLoadStatsOn said on
+// (times in ms, emscripten_get_now deltas).
+extern "C" void DolphinWeb_HarnessRecordTextureLoad(std::uint32_t bytes, double decode_ms,
+                                                    double upload_ms)
+{
+  HarnessLoadAdd(LOAD_TEXTURES, 1);
+  HarnessLoadAdd(LOAD_TEXTURE_BYTES, bytes);
+  HarnessLoadAdd(LOAD_TEXTURE_DECODE_US, decode_ms * 1000);
+  HarnessLoadAdd(LOAD_TEXTURE_UPLOAD_US, upload_ms * 1000);
+}
+extern "C" void DolphinWeb_HarnessRecordShaderCompile(double gen_ms, double create_ms)
+{
+  HarnessLoadAdd(LOAD_SHADERS, 1);
+  HarnessLoadAdd(LOAD_SHADER_GEN_US, gen_ms * 1000);
+  HarnessLoadAdd(LOAD_SHADER_CREATE_US, create_ms * 1000);
+}
+extern "C" void DolphinWeb_HarnessRecordPipelineMiss(double ms)
+{
+  HarnessLoadAdd(LOAD_PIPELINES, 1);
+  HarnessLoadAdd(LOAD_PIPELINE_US, ms * 1000);
+}
+// null until the counters were first enabled.
+EMSCRIPTEN_KEEPALIVE std::atomic<std::uint32_t>* DolphinWeb_HarnessLoadStats()
+{
+  return s_harness_load_stats.load(std::memory_order_acquire);
+}
+EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_HarnessLoadStatsWords() { return HARNESS_LOAD_STATS_WORDS; }
+
 // Patch 0164 (harness only): the video thread's blocking EFB copies to RAM.
 // Per kind (0: a sync point flushing deferred copies, 1: an immediate copy,
 // DeferEFBCopies=False), at word 1 + 16 * kind: flushes, copies, FIFO work
