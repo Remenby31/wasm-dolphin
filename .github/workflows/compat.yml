@@ -3,8 +3,9 @@ name: compat (hardware-value tests, no game)
 # Accuracy checks that need no commercial game: dolphin-emu/hwtests (GPLv2,
 # values measured on a console) ported to the core's JIT oracle
 # (compat/README.md). Each check runs on the interpreter and on the WASM JIT
-# of the committed core, in Node: no browser, no disc. The table goes to the
-# job summary and the compat-cpu artifact.
+# of the committed core, in Node: no browser, no disc (job cpu). Job machine
+# runs the same hwtests built for the GameCube on the whole machine. The
+# tables go to the job summary and the compat-* artifacts.
 #
 # On a pull request the committed core is main's (pull requests carry
 # sources only); a pull request that changes the core is tested on its own
@@ -49,4 +50,59 @@ jobs:
         with:
           name: compat-cpu
           path: compat-cpu.*
+          if-no-files-found: ignore
+
+  # The same cputest hwtests compiled for the GameCube from their sources
+  # (pinned commit, pinned devkitPPC image) and run on the whole emulated
+  # machine in headless Chromium, on the interpreter and the JIT. Each
+  # program's report must match compat/machine-expected.json exactly.
+  machine:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.12.0
+
+      - name: hwtests sources (pinned commit)
+        run: |
+          git init -q "$RUNNER_TEMP/hwtests"
+          git -C "$RUNNER_TEMP/hwtests" fetch -q --depth 1 https://github.com/dolphin-emu/hwtests f28077b139eec18967f60db6ce1e15b182dfeac0
+          git -C "$RUNNER_TEMP/hwtests" checkout -q FETCH_HEAD
+
+      - name: Build the GameCube cputest hwtests (pinned devkitPPC image)
+        run: sh compat/homebrew/build.sh "$RUNNER_TEMP/hwtests" "$RUNNER_TEMP/hwtests-out"
+
+      - name: Chromium
+        run: |
+          npm install --prefix "$RUNNER_TEMP/pw" --no-audit --no-fund playwright@1.56.1
+          (cd "$RUNNER_TEMP/pw" && npx playwright install chromium)
+          chrome=$(cd "$RUNNER_TEMP/pw" && node -p "require('playwright').chromium.executablePath()")
+          if ldd "$chrome" | grep -q "not found"; then (cd "$RUNNER_TEMP/pw" && sudo npx playwright install-deps chromium); fi
+          {
+            echo "PLAYWRIGHT_MODULE=$RUNNER_TEMP/pw/node_modules/playwright/index.mjs"
+            echo "HARNESS_CHROME_PATH=$chrome"
+          } >> "$GITHUB_ENV"
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      - name: Run on the interpreter and the JIT
+        run: node compat/browser.mjs --dir "$RUNNER_TEMP/hwtests-out" --port 8130 --timeout 120 --budget 600 --json compat-machine.json --md compat-machine.md
+
+      - name: Table
+        if: always()
+        run: test -f compat-machine.md && cat compat-machine.md >> "$GITHUB_STEP_SUMMARY" || true
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: compat-machine
+          path: |
+            compat-machine.*
+            ${{ runner.temp }}/hwtests-out/SHA256SUMS
           if-no-files-found: ignore

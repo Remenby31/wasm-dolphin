@@ -1,0 +1,50 @@
+{
+ "comment": "A snapshot of what each hwtests program reports on the current emulator (compat/browser.mjs), per config: test and subtest counts and the first failures as [test, source line, FNV-1a of the hwtest failure message]. Every field must match: a regression gate on the known failures. The pass/fail verdict of each subtest comes from the hardware values compiled into the hwtests binaries. jitBlocks: JIT blocks compiled by each program's JIT run when recorded (2026-11-09); a JIT run must compile at least 80 % of it. For the small programs most of these blocks are libogc's start-up, so the floor proves the JIT ran, not that every test loop compiled.",
+ "jitBlocks": {"cputest_cr": 53, "cputest_fctiwz": 46, "cputest_fprf": 44, "cputest_frsp": 44, "cputest_load": 46, "cputest_mtspr": 46, "cputest_nan": 185, "cputest_ni": 45, "cputest_pairedmove": 487, "cputest_rlw": 45, "cputest_srawix": 69},
+ "programs": {
+  "cputest_cr": {
+   "interp": {"tests":1,"testsPassed":1,"subtests":54,"subtestsPassed":54,"failures":[]},
+   "jit": {"tests":1,"testsPassed":1,"subtests":54,"subtestsPassed":54,"failures":[]}
+  },
+  "cputest_fctiwz": {
+   "interp": {"tests":1,"testsPassed":1,"subtests":12,"subtestsPassed":12,"failures":[]},
+   "jit": {"tests":1,"testsPassed":1,"subtests":12,"subtestsPassed":12,"failures":[]}
+  },
+  "cputest_fprf": {
+   "interp": {"tests":2,"testsPassed":0,"subtests":90,"subtestsPassed":60,"failures":[[1,26,"b0dc94b4"],[1,75,"6385a256"],[1,26,"50d5383f"],[1,75,"7fb81cdb"],[1,75,"02711397"],[1,26,"e1efe5e3"],[1,75,"17775ede"],[1,26,"83426af6"],[1,75,"f3781aa1"],[1,75,"14a74c79"]]},
+   "jit": {"tests":2,"testsPassed":0,"subtests":90,"subtestsPassed":60,"failures":[[1,26,"b0dc94b4"],[1,75,"6385a256"],[1,26,"50d5383f"],[1,75,"7fb81cdb"],[1,75,"02711397"],[1,26,"e1efe5e3"],[1,75,"17775ede"],[1,26,"83426af6"],[1,75,"f3781aa1"],[1,75,"14a74c79"]]}
+  },
+  "cputest_frsp": {
+   "interp": {"tests":1,"testsPassed":1,"subtests":18,"subtestsPassed":18,"failures":[]},
+   "jit": {"tests":1,"testsPassed":1,"subtests":18,"subtestsPassed":18,"failures":[]}
+  },
+  "cputest_load": {
+   "interp": {"tests":16,"testsPassed":16,"subtests":1632,"subtestsPassed":1632,"failures":[]},
+   "jit": {"tests":16,"testsPassed":16,"subtests":1632,"subtestsPassed":1632,"failures":[]}
+  },
+  "cputest_mtspr": {
+   "interp": {"tests":2,"testsPassed":2,"subtests":2,"subtestsPassed":2,"failures":[]},
+   "jit": {"tests":2,"testsPassed":2,"subtests":2,"subtestsPassed":2,"failures":[]}
+  },
+  "cputest_nan": {
+   "interp": {"tests":55,"testsPassed":53,"subtests":626,"subtestsPassed":612,"failures":[[46,824,"5c655909"],[46,824,"5e1265fe"],[46,824,"856847c5"],[46,824,"93f4c626"],[46,824,"2d449c3e"],[46,824,"16ce706e"],[46,824,"00ec8636"],[47,848,"69fa58a2"],[47,848,"b08b7361"],[47,848,"9e088176"]]},
+   "jit": {"tests":55,"testsPassed":53,"subtests":626,"subtestsPassed":612,"failures":[[46,824,"5c655909"],[46,824,"5e1265fe"],[46,824,"856847c5"],[46,824,"93f4c626"],[46,824,"2d449c3e"],[46,824,"16ce706e"],[46,824,"00ec8636"],[47,848,"69fa58a2"],[47,848,"b08b7361"],[47,848,"9e088176"]]}
+  },
+  "cputest_ni": {
+   "interp": {"tests":1,"testsPassed":0,"subtests":10,"subtestsPassed":9,"failures":[[1,61,"90bb44a5"]]},
+   "jit": {"tests":1,"testsPassed":0,"subtests":10,"subtestsPassed":9,"failures":[[1,61,"90bb44a5"]]}
+  },
+  "cputest_pairedmove": {
+   "interp": {"tests":1,"testsPassed":0,"subtests":8800,"subtestsPassed":4852,"failures":[[1,30,"f8681909"],[1,59,"6edfa472"],[1,90,"7083c97d"],[1,125,"1d16815d"],[1,160,"669dcc67"],[1,214,"c579e9e4"],[1,253,"790d7088"],[1,30,"96d13645"],[1,59,"fd95ee4f"],[1,90,"da914de7"]]},
+   "jit": {"tests":1,"testsPassed":0,"subtests":8800,"subtestsPassed":4852,"failures":[[1,30,"f8681909"],[1,59,"6edfa472"],[1,90,"7083c97d"],[1,125,"1d16815d"],[1,160,"669dcc67"],[1,214,"c579e9e4"],[1,253,"790d7088"],[1,30,"96d13645"],[1,59,"fd95ee4f"],[1,90,"da914de7"]]}
+  },
+  "cputest_rlw": {
+   "interp": {"tests":3,"testsPassed":3,"subtests":4200,"subtestsPassed":4200,"failures":[]},
+   "jit": {"tests":3,"testsPassed":3,"subtests":4200,"subtestsPassed":4200,"failures":[]}
+  },
+  "cputest_srawix": {
+   "interp": {"tests":1,"testsPassed":1,"subtests":262144,"subtestsPassed":262144,"failures":[]},
+   "jit": {"tests":1,"testsPassed":1,"subtests":262144,"subtestsPassed":262144,"failures":[]}
+  }
+ }
+}
