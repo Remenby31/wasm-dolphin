@@ -267,11 +267,16 @@ async function playRun(o, server, { side, run, outDir }) {
       const presentTag = one(tl?.presents?.tag) && one(tl?.presents?.tagEpoch) ? tl.presents.tag : null;
       const presentTagEpoch = presentTag ? tl.presents.tagEpoch : null;
       const presentsKnown = Boolean(tl && !tl.error && Array.isArray(tl.presents?.t) && !tl.presents.lost && presentTag);
+      // each frame produced (a new tag queued), its host time: the produced
+      // frames a second on the same grid (lib/parcours.mjs producedBins);
+      // null when the engine has no such timeline
+      const producedT = Array.isArray(tl?.produced?.t) ? tl.produced.t : null;
+      const producedKnown = Boolean(producedT && !tl.error && !tl.produced.lost);
       // per present, the gap before it: its VIs and the worker's stall
       // (lib/drops.mjs parcoursWindowsForAttribution reads gapVis, gapWorkerLagMs)
       const per = presentGaps(raw.samples.at(-1), { presents, viT, samplerTicks });
       if (o.samplerRows && drained?.rows) (raw.samplerRows ??= []).push(drained);
-      raw.samples.push({ t, info, counters: countersOf(drained), presents, presentTag, presentTagEpoch, presentsKnown, vi: tl?.vi?.t?.length ?? null, viT, samplerTicks, gapVis: per.vis, gapWorkerLagMs: per.workerLagMs, audioQ: audioQ?.unavailable ? null : audioQ, integrity: integrity?.unread || integrity?.unavailable ? null : integrity, film: status ? { pos: status.pos, hold: status.hold, polls: status.polls } : null });
+      raw.samples.push({ t, info, counters: countersOf(drained), presents, presentTag, presentTagEpoch, presentsKnown, producedT, producedKnown, vi: tl?.vi?.t?.length ?? null, viT, samplerTicks, gapVis: per.vis, gapWorkerLagMs: per.workerLagMs, audioQ: audioQ?.unavailable ? null : audioQ, integrity: integrity?.unread || integrity?.unavailable ? null : integrity, film: status ? { pos: status.pos, hold: status.hold, polls: status.polls } : null });
       raw.loads.push([Date.now(), os.loadavg()[0]]);
       const sec = Math.round((Date.now() - t0) / 1000);
       // the other processes' CPU every OTHER_CPU_EVERY_SEC, off the loop
@@ -396,6 +401,8 @@ export function readNoise(file, expect) {
   const differ = ["probeVersion", "film", "query", "edge"].filter((k) => JSON.stringify(s[k] ?? null) !== JSON.stringify(expect[k] ?? null));
   // new frames counted by tag or every present: another measure (lib/parcours.mjs newFrameBins)
   if ((s.newFramesBasis ?? null) !== (expect.newFramesBasis ?? null)) differ.push(`newFramesBasis ${s.newFramesBasis ?? "none"} vs ${expect.newFramesBasis ?? "none"}`);
+  // produced frames on the grid or the worker's 500 ms rate: another reference
+  if ((s.producedBasis ?? null) !== (expect.producedBasis ?? null)) differ.push(`producedBasis ${s.producedBasis ?? "none"} vs ${expect.producedBasis ?? "none"}`);
   if (expect.cpuModel && s.machine?.cpuModel && s.machine.cpuModel !== expect.cpuModel) differ.push("cpuModel");
   if (differ.length) throw new Error(`--noise ${file}: another measure (${differ.join(", ")})`);
   if (!s.noise) throw new Error(`--noise ${file}: no A/A noise in it (a comparison, or no usable run)`);
@@ -412,8 +419,8 @@ export function exitCodeOf(summary) {
 }
 
 // The runs' new frames basis: "tag", "all", "mixed", or null (no run analysed).
-export function basisOf(analyses) {
-  const b = [...new Set(analyses.filter((a) => a && !a.error).map((a) => a.newFramesBasis ?? null))];
+export function basisOf(analyses, key = "newFramesBasis") {
+  const b = [...new Set(analyses.filter((a) => a && !a.error).map((a) => a[key] ?? null))];
   return b.length === 0 ? null : b.length === 1 ? b[0] : "mixed";
 }
 
@@ -423,6 +430,7 @@ function writeSummary(outDir, meta, analyses, noise) {
   summary.browserVersions = browserVersionsOf(analyses.map((a) => a.analysis.browserVersion));
   summary.browserMixed = mixedBrowserReason(summary.browserVersions);
   summary.newFramesBasis = basisOf(analyses.map((a) => a.analysis));
+  summary.producedBasis = basisOf(analyses.map((a) => a.analysis), "producedBasis");
   const of = (side) => analyses.filter((a) => a.side === side).map((a) => a.analysis);
   if (meta.sides.baseline) {
     summary.verdict = parcoursVerdict(of("baseline"), of("candidate"), noise);
@@ -430,6 +438,7 @@ function writeSummary(outDir, meta, analyses, noise) {
     if (meta.gaveUp) reasons.push(meta.gaveUp);
     if (summary.browserMixed) reasons.push(summary.browserMixed);
     if (summary.newFramesBasis === "mixed") reasons.push("new frames counted on different bases (tag / all) across runs");
+    if (summary.producedBasis === "mixed") reasons.push("produced frames on different bases (grid / worker) across runs");
     for (const side of ["baseline", "candidate"]) if (of(side).filter(usable).length < 3) reasons.push(`${of(side).filter(usable).length} usable ${side} run(s) (complete, clean, calm), 3 needed`);
     const unreliable = Object.entries(summary.verdict.phases).filter(([, v]) => v.rows.some((r) => r.unreliable)).map(([k]) => k);
     if (unreliable.length) reasons.push(`smoothness p5 unreliable (unknown seconds) in ${unreliable.join(", ")}`);
@@ -464,7 +473,7 @@ async function analyzeDir(dir, { noiseFile, log, film = null }) {
     writeFileSync(path.join(dir, `${side}-${run}.json`), JSON.stringify(analysis) + "\n");
     analyses.push({ side, run: Number(run), analysis });
   }
-  const noise = noiseFile ? readNoise(noiseFile, { ...meta, cpuModel: meta.machine?.cpuModel, newFramesBasis: basisOf(analyses.map((a) => a.analysis)) }) : null;
+  const noise = noiseFile ? readNoise(noiseFile, { ...meta, cpuModel: meta.machine?.cpuModel, newFramesBasis: basisOf(analyses.map((a) => a.analysis)), producedBasis: basisOf(analyses.map((a) => a.analysis), "producedBasis") }) : null;
   const { runs, verdict, noise: n, human, noVerdict, ...rest } = meta;
   const summary = writeSummary(dir, { ...rest, analysisVersion: ANALYSIS_VERSION, reanalyzedAt: new Date().toISOString() }, analyses, noise);
   for (const l of summary.human) log(l);
@@ -521,8 +530,8 @@ async function main() {
   const filmBytes = values.film ? readFileSync(values.film) : null;
   const filmId = filmBytes ? `${path.basename(values.film)}#${createHash("sha256").update(filmBytes).digest("hex").slice(0, 12)}` : null;
   const machine = machineSnapshot();
-  // this probe records the frame tags: its runs count by tag
-  const noise = values.noise ? readNoise(values.noise, { probeVersion: PROBE_VERSION, film: filmId, query: o.query, edge: o.edge, cpuModel: machine.cpuModel, newFramesBasis: "tag" }) : null;
+  // this probe records the frame tags and the produced frames: its runs count by tag, on the grid
+  const noise = values.noise ? readNoise(values.noise, { probeVersion: PROBE_VERSION, film: filmId, query: o.query, edge: o.edge, cpuModel: machine.cpuModel, newFramesBasis: "tag", producedBasis: "grid" }) : null;
   const sides = { candidate: resolveSide("candidate", values.candidate) };
   if (values.baseline) sides.baseline = resolveSide("baseline", values.baseline);
   const lockWait = num(values, "lock-wait", { min: 0 });

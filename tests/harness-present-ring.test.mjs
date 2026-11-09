@@ -17,11 +17,13 @@ test("presents ring: none for a player; allocated when the harness is enabled; r
   });
   const worker = await import(`${workerUrl.href}?present-ring=${Date.now()}`);
   assert.equal(worker.harnessPresentRingForTest(), null, "the product path allocates no ring");
+  assert.equal(worker.harnessProducedRingForTest(), null, "nor the produced ring");
   worker.recordPresentedFrameForTest(1);
   assert.equal(worker.harnessPresentRingForTest(), null, "a present without the harness allocates none");
   worker.setHarnessEnabledForTest(true);
   t.after(() => worker.setHarnessEnabledForTest(false));
   assert.equal(worker.harnessPresentRingForTest()?.length, 16384 * 5);
+  assert.equal(worker.harnessProducedRingForTest()?.length, 16384);
 });
 
 test("presents ring (source): allocated only by harnessPresentRingOn, from the harness's enable; no ring reads as unavailable, never zeros", async () => {
