@@ -156,7 +156,7 @@ test("the worker prefetches with Blob.arrayBuffer when the host asks (?discprefe
   assert.match(w, /discPrefetchEnabled = discPrefetch === true;/);
   assert.match(w, /^let discPrefetchEnabled = false;$/m);
   assert.match(w, /discPrefetch: payload\.discPrefetch,/);
-  assert.match(await read("../src/core-host.js"), /this\.discPrefetch = discPrefetchSetting\(new URLSearchParams\(window\.location\.search\)\.get\("discprefetch"\),\n\s+\{ chromium: isChromium\(\), webgpuVideo: this\.videoBackend === "WebGPU-Real" \}\);/);
+  assert.match(await read("../src/core-host.js"), /return discPrefetchSetting\(new URLSearchParams\(window\.location\.search\)\.get\("discprefetch"\),\n\s+\{ chromium: isChromium\(\), webgpuVideo: backend === "WebGPU-Real" \}\);/);
   const a = await read("../src/upstream-worker-adapter.js");
   assert.match(a, /this\.discPrefetch = discPrefetch === true;/);
   assert.match(a, /discPrefetch: this\.discPrefetch,/);
@@ -221,4 +221,68 @@ test("prefetch never delays a demand read and caps its reads in flight: a slow d
   await new Promise((r) => setTimeout(r, 0));
   ra.read(B, buf, 0, 4, 12); ra.read(B, buf, 0, 4, 16);
   assert.ok(ra.stats.prefetchIssued >= 2);
+});
+
+test("a background read that fails (arrayBuffer() rejected) releases the cap: prefetch keeps working for the session", async () => {
+  // the first background read rejects, every later one succeeds
+  let reads = 0;
+  const ra = createDiscReadahead({
+    readBlob: (blob) => blob.bytes,
+    readBlobAsync: (blob) => { reads += 1; return reads === 1 ? Promise.reject(new Error("NotReadableError")) : Promise.resolve(blob.bytes); },
+    minBytes: 4, maxBytes: 16, heldBytes: 64
+  });
+  const file = (n) => {
+    const data = Uint8Array.from({ length: 256 }, (_, i) => (i + n) & 255);
+    const blob = { size: 256, slice: (a, b) => ({ bytes: data.slice(a, b) }) };
+    return { node: { contents: blob, size: 256 }, data };
+  };
+  const A = file(0), B = file(100);
+  const buf = new Uint8Array(8);
+  ra.read(A, buf, 0, 4, 0); ra.read(A, buf, 0, 4, 4);
+  assert.equal(ra.stats.prefetchIssued, 1);
+  await new Promise((r) => setTimeout(r, 0));
+  // the rejected read freed its slot: a stream on B issues its own, not capped
+  ra.read(B, buf, 0, 4, 0); ra.read(B, buf, 0, 4, 4);
+  assert.equal(ra.stats.prefetchIssued, 2, "the failed read no longer counts in flight");
+  assert.equal(ra.stats.prefetchCapped, 0);
+  await new Promise((r) => setTimeout(r, 0));
+  // and it lands: B's next read is served from it
+  assert.ok(ra.stats.prefetchBytes > 0);
+  assert.equal(ra.read(B, buf, 0, 4, 12), 4);
+  assert.deepEqual([...buf.subarray(0, 4)], [...B.data.subarray(12, 16)]);
+  assert.ok(ra.stats.prefetchUsed >= 1);
+});
+
+test("prefetch follows the FINAL video backend: a fallback to the software renderer turns the default off, in the adapter too; ?discprefetch=1 still wins", async () => {
+  const vm = await import("node:vm");
+  const { discPrefetchSetting } = await import("../src/disc-prefetch-setting.js");
+  const host = await readFile(new URL("../src/core-host.js", import.meta.url), "utf8");
+  const slice = (from, to) => { const a = host.indexOf(from), b = host.indexOf(to, a); assert.ok(a >= 0 && b > a, from); return host.slice(a, b); };
+  const helper = slice("function requestedDiscPrefetch(backend) {", "const DEMO_WIDTH");
+  const apply = slice("  applyVideoBackend(backend) {", "  async mountFile(file) {");
+  const fallback = slice("  async fallBackWithoutWgpuAdapter() {", "  async adapterAvailable() {");
+  const run = async (search, problem = "no adapter") => {
+    const ctx = {
+      window: { location: { search } }, URLSearchParams, discPrefetchSetting, isChromium: () => true, console: { warn() {}, error() {} },
+      requestedCpuThread: () => "dual", requestedPpcWasmJit: () => true, requestedPpcWasmJitWarmupFrames: () => 700,
+      requestedPresentationPacing: () => "tick", requestedWgpuVisualCadence: () => false, wgpuAdapterProblem: async () => problem
+    };
+    vm.createContext(ctx);
+    vm.runInContext(`${helper}
+class Host {
+  constructor() { this.videoBackend = "WebGPU-Real"; this.discPrefetch = requestedDiscPrefetch(this.videoBackend); this.adapter = { loaded: false, discPrefetch: this.discPrefetch }; this.onStatus = () => {}; }
+${apply}
+${fallback}
+}
+globalThis.Host = Host;`, ctx);
+    const h = new ctx.Host();
+    const before = h.discPrefetch;
+    await h.fallBackWithoutWgpuAdapter();
+    return [before, h.discPrefetch, h.adapter.discPrefetch, h.videoBackend];
+  };
+  assert.deepEqual(await run(""), [true, false, false, "Software Renderer"]);
+  assert.deepEqual(await run("?discprefetch=1"), [true, true, true, "Software Renderer"]);
+  assert.deepEqual(await run("", null), [true, true, true, "WebGPU-Real"], "a usable adapter: no fallback, on");
+  // the constructor reads the same helper
+  assert.match(host, /this\.discPrefetch = requestedDiscPrefetch\(this\.videoBackend\);/);
 });

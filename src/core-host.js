@@ -75,6 +75,12 @@ import { requestedWgpuSparseUbo } from "./wgpu-sparse-ubo-copy-forward.js";
 import { captureSessionAfterDeviceLoss, requestedWgpuSessionRecover } from "./wgpu-session-recovery.js";
 import { wgpuAdapterProblem } from "./wgpu-adapter-check.js";
 
+// The disc prefetch for a video backend: the URL's flag, else the default.
+function requestedDiscPrefetch(backend) {
+  return discPrefetchSetting(new URLSearchParams(window.location.search).get("discprefetch"),
+    { chromium: isChromium(), webgpuVideo: backend === "WebGPU-Real" });
+}
+
 const DEMO_WIDTH = 320;
 const DEMO_HEIGHT = 240;
 const SAVE_KEY = "wasm-dolphin.demo-state.0";
@@ -175,9 +181,10 @@ export class EmulatorHost {
     this.discReadahead = new URLSearchParams(window.location.search).get("discreadahead") !== "0";
     // ?discprefetch=1 / =0: the background prefetch of the next segment
     // (0155); by default on where measured: Chromium with the WebGPU video
-    // backend (src/disc-prefetch-setting.js), off elsewhere.
-    this.discPrefetch = discPrefetchSetting(new URLSearchParams(window.location.search).get("discprefetch"),
-      { chromium: isChromium(), webgpuVideo: this.videoBackend === "WebGPU-Real" });
+    // backend (src/disc-prefetch-setting.js), off elsewhere. Follows the
+    // final video backend (applyVideoBackend: a fallback to the software
+    // renderer turns the default off).
+    this.discPrefetch = requestedDiscPrefetch(this.videoBackend);
     // Harness: keep a software WebGL presenter (SwiftShader), which the app
     // refuses for the 2D canvas (cheaper on a CPU).
     this.webglSoftware = new URLSearchParams(window.location.search).get("webglsw") === "1";
@@ -729,6 +736,8 @@ export class EmulatorHost {
     this.wgpuVisualCadence = requestedWgpuVisualCadence(window.location.search, {
       hardwareVideo: backend === "WebGPU-Real"
     });
+    // the disc prefetch's default is measured on the WebGPU video only
+    this.discPrefetch = requestedDiscPrefetch(backend);
     if (this.adapter) {
       this.adapter.videoBackend = backend;
       this.adapter.cpuThread = this.cpuThread;
@@ -736,6 +745,7 @@ export class EmulatorHost {
       this.adapter.ppcWasmJitWarmupFrames = this.ppcWasmJitWarmupFrames;
       this.adapter.presentationPacing = this.presentationPacing;
       this.adapter.wgpuVisualCadence = this.wgpuVisualCadence;
+      this.adapter.discPrefetch = this.discPrefetch;
     }
     return true;
   }
