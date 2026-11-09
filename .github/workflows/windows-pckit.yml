@@ -216,7 +216,9 @@ jobs:
           if (Test-Path C:\salon-kit\jobs\ci6\tmp) { "the job tmp is still there"; exit 1 }
           # securing again refuses a reparse point inside the kit
           cmd /c mklink /J C:\salon-kit\jobs\planted C:\sentinel | Out-Null
+          $ErrorActionPreference = "Continue"  # the refusal comes on stderr, expected
           $r = powershell -NoProfile -ExecutionPolicy Bypass -File "$env:RUNNER_TEMP\secure.ps1" 2>&1 | Out-String
+          $ErrorActionPreference = "Stop"
           if ($r -notmatch "reparse points") { "a planted junction was not refused: $r"; exit 1 }
           [IO.Directory]::Delete("C:\salon-kit\jobs\planted", $false)
           # the logon restore task: a self-contained command, and it restores
