@@ -1,30 +1,63 @@
 # PC kit (Windows, driven from the Mac)
 
-The measure of a Windows PC over ssh, in one command, the machine put back as it was.
-The full write-up (pitfalls, calibration sources, limits) is in the program's `research/pc-windows-kit.md`. The protocol is `research/pc-windows-protocol.md`, hashed before any data.
+The kit measures a Windows PC over ssh in one command, then puts the machine back as it was.
+The full write-up (pitfalls, calibration sources, limits) is in the program's `research/pc-windows-kit.md`.
+The protocol is `research/pc-windows-protocol.md`, hashed before any data.
 
-```sh
-# 1. what the PC is, and whether it can measure (no change but C:\salon-kit\salon-pc.ps1)
-node harness/remote/pc-run.mjs check --host pc --iso 'C:\discs\game.iso'
-# 2. node, Playwright (driver only), this checkout's HEAD and the engine Salon pins, under C:\salon-kit
-node harness/remote/pc-run.mjs setup --host pc
-# 3. the adapter, the bench in Chrome and Edge, unclamped
-node harness/remote/pc-run.mjs smoke --host pc
-# 4. the clamp to the i5-12400 class: calibration.json
-node harness/remote/pc-run.mjs calibrate --host pc
-# 5. the J1b series: parcours 1P and 2P, Chrome and Edge, interleaved, under the calibrated clamp
-node harness/remote/pc-run.mjs run --host pc --iso 'C:\discs\game.iso' \
-  --film 1p=route1-1p-v2.json --film 2p=route2-2p.json --runs 3 --calibration <job>/calibration.json
-# or 2 to 5 at once:
-node harness/remote/pc-run.mjs all --host pc --iso 'C:\discs\game.iso' --film 1p=... --film 2p=...
-# any command: --dry-run (no connection, a simulated PC answers); restore --job ID after a lost Mac
+## Two accounts
+
+- **`--host salonkit@pc`**: a **standard** local account, never an administrator. It does all the work:
+  - the files, under its `%USERPROFILE%\salon-kit`;
+  - node and Playwright;
+  - the measurement jobs, in **its own** desktop session;
+  - the cleanup;
+  - reading the power state.
+  
+  `salon-pc.ps1` runs only there and never writes a power setting.
+- **`--admin-host admin@pc`**: an administrator, used **only** for the closed list below. Every line is checked by `assertAdmin` (`lib/pc-kit.mjs`) before it leaves the Mac.
+
+## The administrator's commands: the complete list
+
+```
+C:\Windows\System32\powercfg.exe /getactivescheme
+C:\Windows\System32\powercfg.exe /duplicatescheme <GUID> 5a10c0de-0b1d-4c1a-9e2f-12400c1a0001
+C:\Windows\System32\powercfg.exe /changename 5a10c0de-0b1d-4c1a-9e2f-12400c1a0001 SalonKitClamp
+C:\Windows\System32\powercfg.exe /set{ac|dc}valueindex 5a10c0de-… 54533251-… <one of 5 processor-setting GUIDs> <integer>
+C:\Windows\System32\powercfg.exe /setactive {5a10c0de-…|<GUID>}
+C:\Windows\System32\powercfg.exe /delete 5a10c0de-0b1d-4c1a-9e2f-12400c1a0001
+C:\Windows\System32\schtasks.exe /create /tn SalonKitRestore /sc onstart /ru SYSTEM /rl highest /f /tr "C:\Windows\System32\cmd.exe /d /c C:\Windows\System32\powercfg.exe /setactive <GUID> & C:\Windows\System32\powercfg.exe /delete 5a10c0de-… & C:\Windows\System32\schtasks.exe /delete /tn SalonKitRestore /f"
+C:\Windows\System32\schtasks.exe /query /tn SalonKitRestore
+C:\Windows\System32\schtasks.exe /delete /tn SalonKitRestore /f
 ```
 
-What a job changes on the PC, all undone at its end (by `pc-run`, and by the job's own task if the Mac is gone):
-- a power scheme with the fixed GUID `5a10c0de-0b1d-4c1a-9e2f-12400c1a0001`, a copy of the active one, carrying the clamp (maximum processor frequency, else maximum processor state). The original scheme is re-activated and the copy deleted; the user's schemes are never edited.
-- one scheduled task `\SalonKit\<job>`, which runs the job in the logged-on session. A browser started from the ssh session would have no screen.
-- files under `C:\salon-kit`.
+- `<GUID>` is the active scheme from the snapshot, matched against `[0-9a-f]{8}-…-[0-9a-f]{12}`.
+- The 5 processor-setting GUIDs are `PROCFREQMAX`, `PROCFREQMAX1`, `PROCTHROTTLEMAX`, `PROCTHROTTLEMAX1` and `PERFBOOSTMODE`.
+- The admin side runs no kit script, no node, no PowerShell module and no `Add-Type`.
 
-The core count is a process affinity of the job (6 cores of the fastest class, with their SMT siblings), so there is nothing to undo. The kit never installs a browser or a driver, and never copies a disc: `--iso` is a path on the PC.
+## The PC, once (Baptiste)
 
-Results go to `$CLAUDE_JOB_DIR/pc-kit/<job>/`, else `../measures/pc-kit/`. That folder holds `report.md` (preflight, clamp and restore, the machine during the job, the J1b table), `kit-record.json`, `sampler.jsonl`, and each probe's own output.
+1. Create a standard local account `salonkit`.
+   - Its public key goes in `C:\Users\salonkit\.ssh\authorized_keys`.
+   - The admin key goes in `C:\ProgramData\ssh\administrators_authorized_keys`.
+2. Set sshd's shell to `cmd.exe /d`, so it skips AutoRun. As an admin, then restart sshd:
+   ```
+   reg add HKLM\SOFTWARE\OpenSSH /v DefaultShell /t REG_SZ /d C:\Windows\System32\cmd.exe /f
+   reg add HKLM\SOFTWARE\OpenSSH /v DefaultShellCommandOption /t REG_SZ /d "/d /c" /f
+   ```
+3. To measure, log on as `salonkit`:
+   - screen at 60 Hz, sleep off, nothing else open;
+   - the disc somewhere `salonkit` can read.
+
+## Commands
+
+```sh
+node harness/remote/pc-run.mjs check     --host salonkit@pc --admin-host admin@pc --iso 'C:\Users\salonkit\discs\game.iso'
+node harness/remote/pc-run.mjs setup     --host salonkit@pc
+node harness/remote/pc-run.mjs smoke     --host salonkit@pc
+node harness/remote/pc-run.mjs calibrate --host salonkit@pc --admin-host admin@pc
+node harness/remote/pc-run.mjs run       --host salonkit@pc --admin-host admin@pc --iso '…' --film 1p=… --film 2p=… --runs 3 --calibration <job>/calibration.json
+```
+
+Every command takes `--dry-run`, which prints each line against a simulated PC without connecting. After a lost Mac, use `restore --job ID`; after a reboot, the boot task has already put the scheme back.
+
+Results go to `$CLAUDE_JOB_DIR/pc-kit/<job>/` (otherwise `../measures/pc-kit/`), as `report.md` and the raw files.
