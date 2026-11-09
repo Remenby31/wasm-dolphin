@@ -406,6 +406,23 @@ function Restore {
   Out-Result ([ordered]@{ action = "restore"; job = $Job; before = $state; after = $after; killed = $r.killed; warnings = $warn })
 }
 
+# A folder deleted without ever following a reparse point (junction,
+# symlink): such an entry is removed itself, never what it points to.
+# Remove-Item -Recurse in 5.1 can follow a junction planted in a writable
+# folder and, run elevated, delete elsewhere.
+function Remove-Tree([string]$dir) {
+  $item = Get-Item -LiteralPath $dir -Force -ErrorAction SilentlyContinue
+  if (-not $item) { return }
+  if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { [IO.Directory]::Delete($item.FullName, $false); return }
+  foreach ($c in @(Get-ChildItem -LiteralPath $dir -Force -ErrorAction SilentlyContinue)) {
+    if ($c.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+      if ($c.PSIsContainer) { [IO.Directory]::Delete($c.FullName, $false) } else { [IO.File]::Delete($c.FullName) }
+    } elseif ($c.PSIsContainer) { Remove-Tree $c.FullName }
+    else { $c.Attributes = 'Normal'; [IO.File]::Delete($c.FullName) }
+  }
+  [IO.Directory]::Delete($item.FullName, $false)
+}
+
 # The kit's own executables: only these are ever killed by command line.
 $KitImages = @("node.exe", "chrome.exe", "msedge.exe", "powershell.exe")
 # $path as a whole path element on a command line: followed by \ or a quote
