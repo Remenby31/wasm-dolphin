@@ -16,8 +16,12 @@
 # restore stops the job first (stop file, task stopped, the job's processes
 # killed: those it wrote down by pid and start time, and every process whose
 # command line holds the job's folder, i.e. its browsers), then puts the
-# power scheme back. No administrator right is needed by design (powercfg on
-# one's own schemes, tasks for one's own logon); to confirm on the PC.
+# power scheme back. Rights: the clamp needs an elevated session (a standard
+# account gets "You do not have the permissions" from powercfg
+# /duplicatescheme: CI windows-2025, 2026-11-09), i.e. ssh as an
+# administrator (Windows OpenSSH gives an admin key a full token). The job's
+# own task stays non-elevated (the browser never runs as admin); the logon
+# restore task runs at the highest level, to delete the kit's scheme.
 # The core-count clamp is a process affinity of the job's own process tree
 # (inherited by node and the browser it starts): nothing to undo.
 #
@@ -235,7 +239,7 @@ function Check {
       overlayAc = Reg-Value "HKLM:\SYSTEM\CurrentControlSet\Control\Power\User\PowerSchemes" "ActiveOverlayAcPowerScheme"
       processor = Processor-Settings $active
     }
-    session = [ordered]@{ sessions = $sessions; lockScreenUp = $locked; sshSession = [bool]$env:SSH_CLIENT }
+    session = [ordered]@{ sessions = $sessions; lockScreenUp = $locked; sshSession = [bool]$env:SSH_CLIENT; elevated = (Is-Elevated) }
     security = [ordered]@{ memoryIntegrity = $hvci; defender = $defender }
     disk = [ordered]@{ drive = $kitDrive; freeGiB = [math]::Round((Get-PSDrive -Name $kitDrive).Free / 1GB, 1) }
     kit = [ordered]@{ dir = $KitDir; node = $node; tasks = @(Get-ScheduledTask -TaskPath $TaskPath -ErrorAction SilentlyContinue | ForEach-Object { $_.TaskName }) }
@@ -278,8 +282,15 @@ function Set-Index($scheme, $name, [int64]$value) {
   return ($ac -eq 0 -and $LASTEXITCODE -eq 0)
 }
 
+function Is-Elevated {
+  # tests only (pwsh on macOS has no WindowsPrincipal): SALONKIT_TEST_ELEVATED=1|0
+  if ($env:SALONKIT_TEST_ELEVATED) { return $env:SALONKIT_TEST_ELEVATED -eq "1" }
+  ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
 function Clamp {
   Need-Job
+  if (-not (Is-Elevated)) { throw "the clamp needs an elevated session (powercfg /duplicatescheme): ssh as an administrator" }
   $state = Read-State
   if ($MaxMhz -lt 0 -or ($MaxMhz -gt 0 -and $MaxMhz -lt 800)) { throw "-MaxMhz: 0 (no cap) or at least 800" }
   if ($StatePct -ne 0 -and ($StatePct -lt 30 -or $StatePct -gt 100)) { throw "-StatePct: 30-100" }
@@ -301,7 +312,7 @@ function Clamp {
   $arg = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$PSCommandPath`" -Action restore -Job $Job -KitDir `"$KitDir`""
   $act = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $arg
   $trg = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
-  $prin = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
+  $prin = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Highest
   Register-ScheduledTask -TaskPath $TaskPath -TaskName "restore-$Job" -Action $act -Trigger $trg -Principal $prin -Force | Out-Null
   & powercfg /setactive $KitScheme | Out-Null
   $now = Active-Scheme
@@ -316,7 +327,9 @@ function Restore-Power($state) {
   # the snapshot's scheme gone (deleted meanwhile): Balanced, which always exists
   if (-not (All-Schemes | Where-Object { $_ -eq $target })) { $target = $Balanced }
   if ((Active-Scheme) -ne $target) { & powercfg /setactive $target | Out-Null }
-  if (All-Schemes | Where-Object { $_ -eq $KitScheme }) { & powercfg /delete $KitScheme | Out-Null }
+  # deleting may need elevation the job's own task lacks: then the scheme
+  # stays, inactive, until restore (elevated) or the logon task removes it
+  if (All-Schemes | Where-Object { $_ -eq $KitScheme }) { try { & powercfg /delete $KitScheme 2>$null | Out-Null } catch {} }
   return Active-Scheme
 }
 

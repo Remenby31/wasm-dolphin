@@ -180,6 +180,7 @@ test("pc-kit: the preflight blocks on each Windows trap it can see", () => {
   assert.deepEqual(blocked((c) => { c.browsers.edge = null; }), ["browser-msedge"]);
   assert.deepEqual(blocked((c) => { c.browsers.edge = null; }, { browsers: ["chrome"] }), [], "Edge not asked");
   assert.deepEqual(blocked((c) => { c.power.kitSchemeActive = true; }), ["kit-scheme-not-left"]);
+  assert.deepEqual(blocked((c) => { c.session.elevated = false; }), ["elevated"], "a standard account cannot clamp");
   assert.deepEqual(blocked((c) => { c.policies.chromeMachine = { DefaultJavaScriptOptimizerSetting: 2 }; }), ["chrome-jit-policy"]);
   assert.deepEqual(blocked((c) => { c.classAffinity = { error: "only 4 cores of the fastest class (asked 6)" }; }), ["class-affinity"]);
   const warns = (mut) => { const c = structuredClone(base); mut(c); return preflight(c).warnings.map((b) => b.id); };
@@ -348,6 +349,7 @@ function global:New-ScheduledTaskAction { param($Execute, $Argument, $WorkingDir
 function global:New-ScheduledTaskTrigger { param([switch]$AtLogOn, $User) 'trigger' }
 function global:New-ScheduledTaskPrincipal { param($UserId, $LogonType, $RunLevel) 'principal' }
 function global:Get-CimInstance { param($ClassName, $ErrorAction) @() }
+$env:SALONKIT_TEST_ELEVATED = '1'
 $s = '${path.join(ROOT, "harness", "remote", "pc-win", "salon-pc.ps1")}'
 $k = '${dir}'
 & $s -Action snapshot -Job t1 -KitDir $k

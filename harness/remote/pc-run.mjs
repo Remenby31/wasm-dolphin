@@ -97,7 +97,7 @@ export function simulatedPc({ cpu = "13th Gen Intel(R) Core(TM) i9-13900K", log 
           memory: { totalGiB: 64, freeGiB: 50 }, gpus: [{ name: "NVIDIA GeForce RTX 4080", driver: "32.0.15.6614", driverDate: "2026-10-01", refreshHz: 60 }],
           browsers: { chrome: { version: "157.0.8103.39", path: "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" }, edge: { version: "157.0.3200.12", path: "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe" } },
           policies: {}, power: { battery: [], activeScheme: st.active, schemes: [...st.schemes], kitSchemeActive: st.active === KIT_SCHEME, overlayAc: null },
-          session: { sessions: ["baptiste|console|1|Active|none|08/11/2026 20:00"], lockScreenUp: false }, disk: { drive: "C", freeGiB: 200 },
+          session: { sessions: ["baptiste|console|1|Active|none|08/11/2026 20:00"], lockScreenUp: false, elevated: true }, disk: { drive: "C", freeGiB: 200 },
           kit: { tasks: [...st.tasks] }, cpuBusy: { otherPctOfOneCore: 3, top: [] }, ...overrides
         });
         case "stat": return reply({ action, path: arg(script, "Path"), exists: true, bytes: 1459978240 });

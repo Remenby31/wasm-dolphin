@@ -146,6 +146,7 @@ export function preflight(check, { browsers = ["chrome", "msedge"], bench = {}, 
   add("windows-11", "warn", Number(os.build) >= 22000, `${os.caption ?? "?"} build ${os.build ?? "?"}`, "J1b's target is Windows 11");
   const bat = check.power?.battery ?? [];
   add("mains", "block", !bat.length || bat.every((b) => b.BatteryStatus !== 1), bat.length ? `battery ${bat.map((b) => `${b.EstimatedChargeRemaining}% status ${b.BatteryStatus}`).join(", ")}` : "no battery (desktop)", "plug the PC in: on battery Windows lowers the QoS and the frequency");
+  add("elevated", "block", check.session?.elevated !== false, `ssh session ${check.session?.elevated ? "elevated (administrator)" : check.session?.elevated === false ? "NOT elevated" : "?"}`, "the clamp needs an administrator: ssh with an admin account (key in C:\\ProgramData\\ssh\\administrators_authorized_keys)");
   add("kit-scheme-not-left", "block", !check.power?.kitSchemeActive, `active scheme ${check.power?.activeScheme}`, "a previous job left the clamp on: pc-run.mjs restore --job <that job>");
   const ovl = String(check.power?.overlayAc ?? "").toLowerCase();
   add("power-mode", "warn", !ovl || ovl === "00000000-0000-0000-0000-000000000000" || ovl === "ded574b5-45a0-4f42-8737-46345c09c238", `power mode overlay (AC) ${ovl || "none"}`, "Settings > System > Power: 'Balanced' or 'Best performance' on mains (best power efficiency throttles)");
