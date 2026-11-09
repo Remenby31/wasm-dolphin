@@ -1,0 +1,133 @@
+diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp b/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp
+--- a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp
++++ b/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp
+@@ -35,6 +35,7 @@
+ #include "VideoCommon/TextureConfig.h"
+ #include "VideoCommon/VertexShaderGen.h"
+ #include "VideoCommon/VideoConfig.h"
++#include "VideoCommon/WasmLoadStats.h"
+ #include "VideoCommon/WasmWebGpuDrawProfile.h"
+ #include "VideoCommon/WasmWebGpuProducerProfile.h"
+ #include "VideoCommon/WasmWebGpuUniformFastPath.h"
+@@ -887,13 +888,22 @@ WebGPUGfx::CreateShaderFromSource(ShaderStage stage, std::string_view source,
+ 
+   std::string wgsl_text;
+   u32 bridge_id = 0;
+-  auto wgsl = GlslToWgsl(stage, source);
++  // Patch 0220 (harness only): the translation's steps, its WGSL size and
++  // whether this source was translated before; one flag load when off.
++  const bool xlat_stats = DolphinWeb::LoadStats::On();
++  XlatTimes xlat_times;
++  auto wgsl = GlslToWgsl(stage, source, xlat_stats ? &xlat_times : nullptr);
++  double push_ms = 0;
+   if (wgsl)
+   {
+     wgsl_text = std::move(*wgsl);
++    const double push_start = DolphinWeb::LoadStats::Now(xlat_stats);
+     bridge_id = m_cmd_stream.PushCreateShader(wgsl_text.data(), wgsl_text.size(),
+                                               static_cast<u32>(stage));
++    push_ms = DolphinWeb::LoadStats::Now(xlat_stats) - push_start;
+   }
++  DolphinWeb::LoadStats::Xlat(xlat_stats, source, static_cast<u32>(wgsl_text.size()),
++                              xlat_times.glslang_ms, xlat_times.naga_ms, push_ms);
+ 
+   if (bridge_id != 0)
+   {
+diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUShaderTranslator.cpp b/Source/Core/VideoBackends/WebGPU/WebGPUShaderTranslator.cpp
+--- a/Source/Core/VideoBackends/WebGPU/WebGPUShaderTranslator.cpp
++++ b/Source/Core/VideoBackends/WebGPU/WebGPUShaderTranslator.cpp
+@@ -155,9 +155,14 @@ std::optional<std::string> SpirvToWgsl(const SpirvModule& spirv)
+   return out;
+ }
+ 
+-std::optional<std::string> GlslToWgsl(ShaderStage stage, std::string_view glsl)
++std::optional<std::string> GlslToWgsl(ShaderStage stage, std::string_view glsl, XlatTimes* times)
+ {
++  // Patch 0220: a clock read only when the harness asked (times non-null).
++  const double xlat_start = times ? emscripten_get_now() : 0.0;
+   auto spirv = GlslToSpirv(stage, glsl);
++  const double spirv_at = times ? emscripten_get_now() : 0.0;
++  if (times)
++    times->glslang_ms = spirv_at - xlat_start;
+   if (!spirv)
+   {
+     // Day-24 diagnostics: which stage fails for real Dolphin shaders?
+@@ -184,6 +189,8 @@ std::optional<std::string> GlslToWgsl(ShaderStage stage, std::string_view glsl)
+   }
+ 
+   auto wgsl = SpirvToWgsl(*spirv);
++  if (times)
++    times->naga_ms = emscripten_get_now() - spirv_at;
+   if (!wgsl)
+   {
+     // §28cx: capture the Naga error FIRST (valid until the next naga call) for
+diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUShaderTranslator.h b/Source/Core/VideoBackends/WebGPU/WebGPUShaderTranslator.h
+--- a/Source/Core/VideoBackends/WebGPU/WebGPUShaderTranslator.h
++++ b/Source/Core/VideoBackends/WebGPU/WebGPUShaderTranslator.h
+@@ -51,7 +51,15 @@ std::optional<SpirvModule> GlslToSpirv(ShaderStage stage, std::string_view glsl)
+ std::optional<std::string> SpirvToWgsl(const SpirvModule& spirv);
+ 
+ // Convenience: full GLSL → WGSL. Returns nullopt if either stage fails.
+-std::optional<std::string> GlslToWgsl(ShaderStage stage, std::string_view glsl);
++// Patch 0220 (harness only): the two steps' host times, filled only when
++// asked (a non-null times, the harness's translation counters on).
++struct XlatTimes
++{
++  double glslang_ms = 0;  // GLSL -> SPIR-V
++  double naga_ms = 0;     // SPIR-V -> WGSL
++};
++std::optional<std::string> GlslToWgsl(ShaderStage stage, std::string_view glsl,
++                                      XlatTimes* times = nullptr);
+ 
+ // §28cx: the FIRST shader-translation failure reason (glslang or Naga),
+ // captured for the on-screen [webgpu-shader] summary so the error survives the
+diff --git a/Source/Core/VideoCommon/WasmLoadStats.h b/Source/Core/VideoCommon/WasmLoadStats.h
+--- a/Source/Core/VideoCommon/WasmLoadStats.h
++++ b/Source/Core/VideoCommon/WasmLoadStats.h
+@@ -17,6 +17,9 @@
+ 
+ #pragma once
+ 
++#include <functional>
++#include <string_view>
++
+ #include "Common/CommonTypes.h"
+ 
+ #ifdef __EMSCRIPTEN__
+@@ -26,6 +29,12 @@ extern "C" int DolphinWeb_HarnessLoadStatsOn();
+ extern "C" void DolphinWeb_HarnessRecordTextureLoad(u32 bytes, double decode_ms, double copy_push_ms);
+ extern "C" void DolphinWeb_HarnessRecordShaderCompile(double gen_ms, double xlat_push_ms);
+ extern "C" void DolphinWeb_HarnessRecordPipelineMiss(double ms);
++// Patch 0220: one shader translation (WebGPU backend): its source's hash (a
++// repeat is counted as a duplicate), its WGSL bytes, glslang, Naga and the
++// ring push times.
++extern "C" void DolphinWeb_HarnessRecordShaderXlat(u64 source_hash, u32 wgsl_bytes,
++                                                   double glslang_ms, double naga_ms,
++                                                   double push_ms);
+ 
+ namespace DolphinWeb::LoadStats
+ {
+@@ -53,6 +62,14 @@ inline void Pipeline(bool on, double ms)
+   if (on)
+     DolphinWeb_HarnessRecordPipelineMiss(ms);
+ }
++// The source hashed only when on.
++inline void Xlat(bool on, std::string_view source, u32 wgsl_bytes, double glslang_ms,
++                 double naga_ms, double push_ms)
++{
++  if (on)
++    DolphinWeb_HarnessRecordShaderXlat(std::hash<std::string_view>{}(source), wgsl_bytes,
++                                       glslang_ms, naga_ms, push_ms);
++}
+ }  // namespace DolphinWeb::LoadStats
+ #else
+ namespace DolphinWeb::LoadStats
+@@ -74,5 +91,8 @@ inline void Shader(bool, double, double)
+ inline void Pipeline(bool, double)
+ {
+ }
++inline void Xlat(bool, std::string_view, u32, double, double, double)
++{
++}
+ }  // namespace DolphinWeb::LoadStats
+ #endif

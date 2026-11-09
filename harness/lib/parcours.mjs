@@ -451,7 +451,10 @@ export function productionGapsOf({ producedT, origin, binMs, produced, viMs, spe
 // never add the two; texture object creation, hi-res textures and async
 // pipelines are not counted)
 export const GPU_ROW_COLUMNS = Object.freeze(["t", "xfbCopies", "gpuWorkUs", "gpuConsumerWaitUs", "presentSleepUs", "flushGpuWaitUs", "efbWaitUs", "replayBusyMs",
-  "texLoads", "texBytes", "texDecodeUs", "texCopyPushUs", "shaderCompiles", "shaderGenUs", "shaderXlatPushUs", "pipelineMisses", "pipelineUs"]);
+  "texLoads", "texBytes", "texDecodeUs", "texCopyPushUs", "shaderCompiles", "shaderGenUs", "shaderXlatPushUs", "pipelineMisses", "pipelineUs",
+  // patch 0220: the WebGPU backend's shader translations (glslang, Naga,
+  // ring push times; WGSL bytes; sources seen before; sources untracked)
+  "xlatGlslangUs", "xlatNagaUs", "xlatPushUs", "xlatWgslBytes", "xlatDuplicates", "xlatUntracked"]);
 export const GAME_PAUSE_MAX_GPU_SHARE = 0.5;
 export const GAME_PAUSE_MAX_GPU_WAIT_MS = 1;
 export const GAME_PAUSE_MAX_ROW_MS = 250;
