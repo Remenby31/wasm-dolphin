@@ -1,0 +1,77 @@
+diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUShaderTranslator.cpp b/Source/Core/VideoBackends/WebGPU/WebGPUShaderTranslator.cpp
+--- a/Source/Core/VideoBackends/WebGPU/WebGPUShaderTranslator.cpp
++++ b/Source/Core/VideoBackends/WebGPU/WebGPUShaderTranslator.cpp
+@@ -9,6 +9,9 @@
+ #include <algorithm>
+ 
+ #include <emscripten/emscripten.h>
++#include <emscripten/stack.h>
++
++#include <cstring>
+ 
+ #include "Common/Logging/Log.h"
+ 
+@@ -155,8 +158,63 @@ std::optional<std::string> SpirvToWgsl(const SpirvModule& spirv)
+   return out;
+ }
+ 
++namespace
++{
++// DIAG (do not merge): stack high-water of one translation (glslang + Naga),
++// on every translation in this DIAG build. The free stack below this frame is painted
++// before the translation and scanned after it: depth = this frame's stack
++// pointer minus the lowest byte written. A new maximum per (stage, uber) is
++// logged as "[xlat-stack]". Measures the linear-memory (shadow) stack only.
++constexpr unsigned char kPaint = 0xA5;
++constexpr uintptr_t kRedZone = 4096;  // the probe's own calls stay above this
++struct XlatStackProbe
++{
++  uintptr_t sp = 0, end = 0;
++  int stage = 0, uber = 0;
++  size_t source = 0;
++  XlatStackProbe(ShaderStage s, std::string_view glsl)
++  {
++    sp = emscripten_stack_get_current();
++    end = emscripten_stack_get_end();
++    stage = static_cast<int>(s);
++    uber = glsl.find("UberShader for") != std::string_view::npos ? 1 : 0;
++    source = glsl.size();
++    if (sp > end + kRedZone)
++      std::memset(reinterpret_cast<void*>(end), kPaint, sp - kRedZone - end);
++  }
++  ~XlatStackProbe()
++  {
++    if (sp <= end + kRedZone)
++      return;
++    const unsigned char* p = reinterpret_cast<const unsigned char*>(end);
++    const uintptr_t limit = sp - kRedZone;
++    uintptr_t a = end;
++    while (a < limit && p[a - end] == kPaint)
++      ++a;
++    const uintptr_t depth = a < limit ? sp - a : kRedZone;
++    static uintptr_t s_max[8][2] = {};
++    static unsigned s_count[8][2] = {};
++    const int st = stage & 7;
++    s_count[st][uber] += 1;
++    if (depth > s_max[st][uber])
++    {
++      s_max[st][uber] = depth;
++      EM_ASM(
++          {
++            console.log('[xlat-stack] stage=' + $0 + ' uber=' + $1 + ' depth=' + $2 + ' source=' + $3 +
++                        ' n=' + $4 + ' stackTotal=' + $5 + ' spOffset=' + $6);
++          },
++          stage, uber, static_cast<double>(depth), static_cast<double>(source), s_count[st][uber],
++          static_cast<double>(emscripten_stack_get_base() - end),
++          static_cast<double>(emscripten_stack_get_base() - sp));
++    }
++  }
++};
++}  // namespace
++
+ std::optional<std::string> GlslToWgsl(ShaderStage stage, std::string_view glsl, XlatTimes* times)
+ {
++  XlatStackProbe stack_probe(stage, glsl);
+   // Patch 0220: a clock read only when the harness asked (times non-null).
+   const double xlat_start = times ? emscripten_get_now() : 0.0;
+   auto spirv = GlslToSpirv(stage, glsl);
