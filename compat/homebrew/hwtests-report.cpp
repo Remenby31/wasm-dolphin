@@ -31,12 +31,17 @@ void network_printf(const char* str, ...)
   va_end(args);
 }
 
-void privStartTest(const char*, int) { rp_start_test(); }
-void privTestPassed() { rp_result(1, 0, 0); }
+// Long tests (one START_TEST around millions of subtests) repaint every
+// 4096 subtests, so a run cut by its timeout still shows its progress.
+static void progress() { if ((rp.subtests & 4095) == 0) rp_paint(0); }
+
+void privStartTest(const char*, int) { rp_start_test(); rp_paint(0); }
+void privTestPassed() { rp_result(1, 0, 0); progress(); }
 
 void privTestFailed(const char* file, int line, const std::string& fail_msg)
 {
   rp_result(0, line, mk_fnv(MK_FNV_INIT, fail_msg.data(), fail_msg.size()));
+  progress();
   OSReport("Subtest %u failed in %s on line %d: %s\n", rp.subtests, file, line, fail_msg.c_str());
 }
 

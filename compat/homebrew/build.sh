@@ -1,8 +1,9 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-2.0-only
-# Builds dolphin-emu/hwtests (cputest) for the GameCube from their sources
-# at a pinned commit, with compat/homebrew/hwtests-report.cpp in place of
-# the network reporter, and wraps each .dol in a GCM image.
+# Builds dolphin-emu/hwtests (cputest, part of gxtest) for the GameCube from
+# their sources at a pinned commit, with compat/homebrew/hwtests-report.cpp
+# in place of the network reporter, plus our own tests (compat/homebrew/<name>),
+# and wraps each .dol in a GCM image.
 #
 #   sh compat/homebrew/build.sh <hwtests checkout> <out dir>
 #
@@ -21,8 +22,11 @@ test -n "$IMAGE"
 
 # reciprocal and fctiw walk 2^32 inputs (hours): the Node port samples them.
 CPU="cr fctiwz fprf frsp load mtspr nan ni pairedmove rlw srawix"
-GX=""
-OWN=""
+# gxtest left out: intensity and copyfilter fill the EFB with CPU pokes,
+# which Dolphin's software renderer ignores (SWEFBInterface::PokeColor is
+# empty), and with tev and lighting they run for hours on it.
+GX="bitfield clipping rasterization"
+OWN="efbpoke"
 
 docker run --rm --platform linux/amd64 -v "$root:/w" -v "$hw:/hw:ro" -v "$out:/out" -w /w "$IMAGE" sh -c '
   set -eu
