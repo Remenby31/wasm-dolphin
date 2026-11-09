@@ -32,7 +32,7 @@ export const CONFIGS = {
 // Cheapest first, so the budget cuts the long GX sweeps (millions of
 // subtests: their partial counts are still reported). gxtest checks the GPU:
 // the JIT config only (the shipped engine); the CPU tests run on both tiers.
-const ORDER = ["battest", "cardtest", "vitest", "cputest_", "gxtest_bitfield", "gxtest_clipping", "gxtest_rasterization",
+const ORDER = ["efbpoke", "battest", "cardtest", "vitest", "cputest_", "gxtest_bitfield", "gxtest_clipping", "gxtest_rasterization",
   "gxtest_tev", "gxtest_lighting", "gxtest_intensity", "gxtest_copyfilter"];
 const rank = (name) => { const i = ORDER.findIndex((p) => name.startsWith(p)); return i < 0 ? ORDER.length : i; };
 export const configsFor = (program, configs) => (program.startsWith("gxtest_") ? configs.filter((c) => c === "jit") : configs);

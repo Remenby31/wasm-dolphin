@@ -23,7 +23,7 @@ test -n "$IMAGE"
 # reciprocal and fctiw walk 2^32 inputs (hours): the Node port samples them.
 CPU="cr fctiwz fprf frsp load mtspr nan ni pairedmove rlw srawix"
 GX="bitfield clipping copyfilter intensity lighting rasterization tev"
-OWN="battest cardtest vitest"
+OWN="battest cardtest vitest efbpoke"
 
 docker run --rm --platform linux/amd64 -v "$root:/w" -v "$hw:/hw:ro" -v "$out:/out" -w /w "$IMAGE" sh -c '
   set -eu
