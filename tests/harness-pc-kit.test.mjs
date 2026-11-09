@@ -22,10 +22,10 @@ import { parseWin32Battery } from "../harness/lib/system.mjs";
 import { buildKernel, reference, SHAPES } from "../harness/lib/wasm-kernel.mjs";
 import { benchScore, classifyJit, summarizeCalls, summarizeRuns } from "../harness/probes/pc-bench.mjs";
 import {
-  assertSendable, benchHold, calibrationTarget, stepWindows, versionOutliers, encodePs, gb6Of, j1bTable, KIT_SCHEME, kitCommand, knobIneffective, nextProbe, parseKitJson, preflight, restoreDiff, samplerVerdict
+  aclSafe, assertSendable, benchHold, calibrationTarget, jobDirScript, secureKitScript, stepWindows, versionOutliers, encodePs, gb6Of, j1bTable, KIT_SCHEME, kitCommand, knobIneffective, nextProbe, parseKitJson, preflight, restoreDiff, samplerVerdict
 } from "../harness/lib/pc-kit.mjs";
 import { calibrate } from "../harness/remote/pc-win/pc-calibrate.mjs";
-import { assertFitsTask, benchFindings, benchSteps, clampOf, jobReport, jobSpec, parcoursSteps, runJob, simulatedPc } from "../harness/remote/pc-run.mjs";
+import { assertFitsTask, benchFindings, benchSteps, calibrateFromMac, clampOf, jobReport, jobSpec, parcoursSteps, runJob, simulatedPc } from "../harness/remote/pc-run.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const quiet = () => {};
@@ -95,6 +95,15 @@ test("pc-kit: remote commands are encoded PowerShell, results read back", () => 
   assert.equal(Buffer.from(b64, "base64").toString("utf16le"), "& 'C:\\salon-kit\\salon-pc.ps1' -Action 'clamp' -Job 'j1' -MaxMhz 4300 -Path 'C:\\it''s here'");
   assert.equal(Buffer.from(encodePs("é"), "base64").toString("utf16le"), "é");
   assert.throws(() => kitCommand("check", { "Bad;Name": 1 }), /bad parameter/);
+  const g = Buffer.from(/-EncodedCommand (\S+)$/.exec(kitCommand("restore", { Job: "j" }, { sha256: "ab".repeat(32) }))[1], "base64").toString("utf16le");
+  assert.match(g, /^\$f = 'C:\\salon-kit\\salon-pc\.ps1'; if \(\(Get-FileHash -LiteralPath \$f -Algorithm SHA256\)\.Hash -ne 'ABAB/, "the PC's script is checked before an elevated run");
+  assert.throws(() => kitCommand("check", {}, { sha256: "x" }), /bad sha256/);
+  assert.match(secureKitScript(), /SetAccessRuleProtection\(\$true, \$false\).*SetOwner\(\$adm\).*ReadAndExecute.*reparse points.*Set-Acl.*icacls\.exe "\$d\\\*" \/reset/s);
+  assert.match(jobDirScript("C:\\salon-kit\\jobs\\j1"), /a job id is used once.*\(OI\)\(CI\)M/s);
+  assert.equal(aclSafe({ protected: true, writers: ["S-1-5-32-544", "S-1-5-18"] }), true);
+  assert.equal(aclSafe({ protected: false, writers: ["S-1-5-32-544"] }), false, "inherited from C:\\: Authenticated Users may write");
+  assert.equal(aclSafe({ protected: true, writers: ["S-1-5-32-544", "S-1-5-11"] }), false);
+  assert.equal(aclSafe(null), false);
   assert.deepEqual(parseKitJson('noise\r\nSALONKIT-JSON {"a":1}\r\nSALONKIT-JSON {"a":2}\r\n'), { a: 2 });
   assert.equal(parseKitJson("nothing"), null);
 });
@@ -181,6 +190,7 @@ test("pc-kit: the preflight blocks on each Windows trap it can see", () => {
   assert.deepEqual(blocked((c) => { c.browsers.edge = null; }, { browsers: ["chrome"] }), [], "Edge not asked");
   assert.deepEqual(blocked((c) => { c.power.kitSchemeActive = true; }), ["kit-scheme-not-left"]);
   assert.deepEqual(blocked((c) => { c.session.elevated = false; }), ["elevated"], "a standard account cannot clamp");
+  assert.deepEqual(blocked((c) => { c.kit.acl = { protected: false, writers: ["S-1-5-11"] }; }), ["kit-acl"], "a kit folder others may write is never run elevated");
   assert.deepEqual(blocked((c) => { c.policies.chromeMachine = { DefaultJavaScriptOptimizerSetting: 2 }; }), ["chrome-jit-policy"]);
   assert.deepEqual(blocked((c) => { c.classAffinity = { error: "only 4 cores of the fastest class (asked 6)" }; }), ["class-affinity"]);
   const warns = (mut) => { const c = structuredClone(base); mut(c); return preflight(c).warnings.map((b) => b.id); };
@@ -288,6 +298,26 @@ test("pc-run: a dead task, or polls failing in a row, end the job and restore it
   }
 });
 
+test("pc-run: the calibration runs from the Mac (elevated clamp), each probe a bench job, and restores", async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "pc-kit-cal-"));
+  try {
+    const pc = simulatedPc({ log: quiet });
+    const before = structuredClone(pc.state);
+    const f = await calibrateFromMac(pc, { job: "cal1", browser: "chrome", engineDir: "C:\\salon-kit\\trees\\e", hostGb6: 2983, turboMhz: 5800, affinity: "0xfff", outDir: dir, harnessDir: "C:\\k", poll: 0, log: quiet });
+    const c = JSON.parse(readFileSync(f, "utf8"));
+    assert.ok(c.chosen.maxMhz > 4100 && c.chosen.maxMhz < 4450, `chose ${c.chosen.maxMhz}`);
+    assert.ok(c.errPct <= 2);
+    const scripts = pc.calls.filter((x) => x.kind === "ssh").map((x) => x.script);
+    assert.ok(scripts.filter((x) => /-Action 'clamp' -Job 'cal1'/.test(x)).length >= 2, "the clamp goes through the elevated ssh session");
+    assert.ok(scripts.some((x) => /-Action 'start' -Job 'cal1-b1'/.test(x)) && scripts.some((x) => /-Action 'cleanup' -Job 'cal1-b1'/.test(x)), "each probe a job of its own, cleaned up");
+    assert.ok(scripts.filter((x) => /-Action/.test(x)).every((x) => /Get-FileHash/.test(x)), "every call checks the script's hash");
+    assert.equal(pc.state.active, before.active);
+    assert.deepEqual(pc.state.tasks, []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("pc-run: the whole flow in --dry-run (no connection)", () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "pc-kit-dry-"));
   try {
@@ -359,6 +389,13 @@ $k = '${dir}'
 & $s -Action restore -Job t1 -KitDir $k
 try { & $s -Action clamp -Job 't1;rm' -MaxMhz 4300 -KitDir $k } catch { "SALONKIT-JSON " + (@{ refused = "$_" } | ConvertTo-Json -Compress) }
 try { & $s -Action clamp -Job t9 -MaxMhz 4300 -KitDir $k } catch { "SALONKIT-JSON " + (@{ refused = "$_" } | ConvertTo-Json -Compress) }
+# a link planted in a job's TEMP: cleanup removes the link, never its target
+$sentinel = Join-Path $k "sentinel"; New-Item -ItemType Directory -Force -Path $sentinel | Out-Null; Set-Content -LiteralPath (Join-Path $sentinel "keep.txt") -Value "keep"
+$t5 = Join-Path (Join-Path (Join-Path $k "jobs") "t5") "tmp"; New-Item -ItemType Directory -Force -Path $t5 | Out-Null
+Set-Content -LiteralPath (Join-Path $t5 "a.txt") -Value "x"
+New-Item -ItemType SymbolicLink -Path (Join-Path $t5 "evil") -Target $sentinel | Out-Null
+& $s -Action cleanup -Job t5 -KitDir $k
+"SALONKIT-JSON " + (@{ sentinelKept = (Test-Path -LiteralPath (Join-Path $sentinel "keep.txt")); tmpGone = -not (Test-Path -LiteralPath $t5) } | ConvertTo-Json -Compress)
 foreach ($j in @("t3", "t4")) { New-Item -ItemType Directory -Force -Path (Join-Path (Join-Path $k "jobs") $j) | Out-Null }
 Set-Content -LiteralPath (Join-Path (Join-Path (Join-Path $k "jobs") "t3") "exit") -Value ""
 Set-Content -LiteralPath (Join-Path (Join-Path (Join-Path $k "jobs") "t4") "exit") -Value "0"
@@ -371,7 +408,9 @@ Set-Content -LiteralPath (Join-Path (Join-Path (Join-Path $k "jobs") "t4") "exit
     const r = spawnSync(PWSH, ["-NoProfile", "-File", f], { encoding: "utf8" });
     assert.equal(r.status, 0, r.stderr + r.stdout);
     const out = r.stdout.split(/\r?\n/).filter((l) => l.startsWith("SALONKIT-JSON ")).map((l) => JSON.parse(l.slice(14)));
-    const [snap, clamp, whileClamped, snap2, restore, badJob, noSnap, st3, st4, final] = out;
+    const [snap, clamp, whileClamped, snap2, restore, badJob, noSnap, cleanup5, link, st3, st4, final] = out;
+    assert.equal(cleanup5.action, "cleanup");
+    assert.deepEqual(link, { sentinelKept: true, tmpGone: true }, "a link in the job's TEMP is removed, its target untouched");
     assert.deepEqual(whileClamped.tasksWhileClamped, ["restore-t1"], "the way back is registered with the clamp");
     assert.deepEqual(restore.after.tasks, [], "and removed by restore");
     assert.deepEqual([st3.state, st3.exit], ["done", -1], "an empty exit file is done, exit unknown (-1), not a crash");

@@ -18,9 +18,13 @@ export const psQuote = (s) => `'${String(s).replace(/'/g, "''")}'`;
 // through ssh and cmd.exe, Windows OpenSSH's default shell.
 export const encodePs = (script) => Buffer.from(script, "utf16le").toString("base64");
 const PARAM = /^[A-Z][A-Za-z]+$/;
-// The remote command line of one salon-pc.ps1 action.
-export function kitCommand(action, params = {}) {
-  const parts = [`& ${psQuote(KIT_SCRIPT)} -Action ${psQuote(action)}`];
+// The remote command line of one salon-pc.ps1 action. With sha256 (the
+// Mac's copy), the script on the PC is checked first and refused if it
+// differs: an elevated session never runs a file it did not send.
+export function kitCommand(action, params = {}, { sha256 = null } = {}) {
+  if (sha256 != null && !/^[0-9a-f]{64}$/.test(sha256)) throw new Error("kitCommand: bad sha256");
+  const guard = sha256 ? `$f = ${psQuote(KIT_SCRIPT)}; if ((Get-FileHash -LiteralPath $f -Algorithm SHA256).Hash -ne ${psQuote(sha256.toUpperCase())}) { throw 'salon-pc.ps1 on the PC differs from the copy pc-run sent: refused' }; ` : "";
+  const parts = [`${guard}& ${psQuote(KIT_SCRIPT)} -Action ${psQuote(action)}`];
   for (const [k, v] of Object.entries(params)) {
     if (v == null) continue;
     if (!PARAM.test(k)) throw new Error(`bad parameter name ${k}`);
@@ -28,6 +32,52 @@ export function kitCommand(action, params = {}) {
   }
   return `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${encodePs(parts.join(" "))}`;
 }
+// The kit folder's ACL, set from the elevated ssh session before anything is
+// copied into it: inheritance cut, owner Administrators, full control for
+// Administrators and SYSTEM, read and execute for the user (whose
+// non-elevated job task runs node from it); every child reset to inherit
+// only that (an explicit ACE planted in a pre-existing folder goes). A user
+// or a program without elevation can then change nothing the elevated
+// session or the logon task runs.
+export function secureKitScript() {
+  return [
+    `$d = ${psQuote(KIT_DIR)}`,
+    `if (Test-Path -LiteralPath $d) { if ((Get-Item -LiteralPath $d -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "$d is a junction or a link: refused" } } else { New-Item -ItemType Directory -Path $d | Out-Null }`,
+    `$me = [Security.Principal.WindowsIdentity]::GetCurrent().User`,
+    `$adm = New-Object Security.Principal.SecurityIdentifier 'S-1-5-32-544'; $sys = New-Object Security.Principal.SecurityIdentifier 'S-1-5-18'`,
+    `$acl = New-Object Security.AccessControl.DirectorySecurity`,
+    `$acl.SetAccessRuleProtection($true, $false); $acl.SetOwner($adm)`,
+    `$inh = [Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'; $none = [Security.AccessControl.PropagationFlags]::None`,
+    `foreach ($r in @(@($adm, 'FullControl'), @($sys, 'FullControl'), @($me, 'ReadAndExecute'))) { $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($r[0], $r[1], $inh, $none, 'Allow'))) }`,
+    // the kit never makes a junction or a link: one inside means someone
+    // planted it (icacls /T or a delete could follow it); walked without
+    // following any, then refused
+    `$stack = New-Object System.Collections.Stack; $stack.Push($d); $bad = @()`,
+    `while ($stack.Count) { foreach ($e in [IO.Directory]::GetFileSystemEntries($stack.Pop())) { $a = [IO.File]::GetAttributes($e); if ($a -band [IO.FileAttributes]::ReparsePoint) { $bad += $e } elseif ($a -band [IO.FileAttributes]::Directory) { $stack.Push($e) } } }`,
+    `if ($bad.Count) { throw "reparse points under $d (the kit makes none), remove them by hand: $($bad -join ', ')" }`,
+    `Set-Acl -LiteralPath $d -AclObject $acl`,
+    `& icacls.exe "$d\\*" /reset /T /C /Q | Out-Null`,
+    `foreach ($sub in @('jobs', 'state', 'films', 'trees')) { $p = Join-Path $d $sub; if (-not (Test-Path -LiteralPath $p)) { New-Item -ItemType Directory -Path $p | Out-Null } }`
+  ].join("; ");
+}
+// A job's folder, the only place the user's non-elevated task may write.
+export function jobDirScript(jobDir) {
+  return [
+    `$j = ${psQuote(jobDir)}`,
+    `if (Test-Path -LiteralPath $j) { throw "$j exists already: a job id is used once" }`,
+    `New-Item -ItemType Directory -Path $j | Out-Null`,
+    `$me = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value`,
+    `& icacls.exe $j /grant "*$($me):(OI)(CI)M" /C /Q | Out-Null; if ($LASTEXITCODE -ne 0) { throw "icacls $j failed" }`
+  ].join("; ");
+}
+// The ACL check reads: protected, and nobody but Administrators and SYSTEM
+// may write (the user's own SID may appear only as read and execute).
+export const KIT_WRITERS = Object.freeze(["S-1-5-32-544", "S-1-5-18"]);
+export function aclSafe(acl) {
+  if (!acl || acl.error) return false;
+  return acl.protected === true && (acl.writers ?? []).every((w) => KIT_WRITERS.includes(w));
+}
+
 // The action's result: the last "SALONKIT-JSON {...}" line.
 export function parseKitJson(stdout) {
   const line = String(stdout ?? "").split(/\r?\n/).filter((l) => l.startsWith(JSON_MARK)).at(-1);
@@ -147,6 +197,7 @@ export function preflight(check, { browsers = ["chrome", "msedge"], bench = {}, 
   const bat = check.power?.battery ?? [];
   add("mains", "block", !bat.length || bat.every((b) => b.BatteryStatus !== 1), bat.length ? `battery ${bat.map((b) => `${b.EstimatedChargeRemaining}% status ${b.BatteryStatus}`).join(", ")}` : "no battery (desktop)", "plug the PC in: on battery Windows lowers the QoS and the frequency");
   add("elevated", "block", check.session?.elevated !== false, `ssh session ${check.session?.elevated ? "elevated (administrator)" : check.session?.elevated === false ? "NOT elevated" : "?"}`, "the clamp needs an administrator: ssh with an admin account (key in C:\\ProgramData\\ssh\\administrators_authorized_keys)");
+  if (check.kit?.acl) add("kit-acl", "block", aclSafe(check.kit.acl), `C:\\salon-kit ${check.kit.acl.error ?? `protected ${check.kit.acl.protected}, writers ${JSON.stringify(check.kit.acl.writers)}`}`, "the kit folder is writable by non-administrators: pc-run re-secures it on the next call; never run elevated from it until this passes");
   add("kit-scheme-not-left", "block", !check.power?.kitSchemeActive, `active scheme ${check.power?.activeScheme}`, "a previous job left the clamp on: pc-run.mjs restore --job <that job>");
   const ovl = String(check.power?.overlayAc ?? "").toLowerCase();
   add("power-mode", "warn", !ovl || ovl === "00000000-0000-0000-0000-000000000000" || ovl === "ded574b5-45a0-4f42-8737-46345c09c238", `power mode overlay (AC) ${ovl || "none"}`, "Settings > System > Power: 'Balanced' or 'Best performance' on mains (best power efficiency throttles)");

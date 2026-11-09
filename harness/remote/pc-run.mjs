@@ -32,7 +32,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 
 import { classifyJit, LIFTOFF_FLAGS, LIFTOFF_GAP } from "../probes/pc-bench.mjs";
-import { assertSendable, benchHold, CLASS_CORES, encodePs, gb6Of, j1bMarkdown, j1bTable, JOB_ID, KIT_DIR, KIT_SCHEME, kitCommand, newJobId, parseKitJson, preflight, preflightMarkdown, psQuote, restoreDiff, rowsIn, samplerVerdict, stepWindows, versionOutliers } from "../lib/pc-kit.mjs";
+import { calibrate } from "./pc-win/pc-calibrate.mjs";
+import { assertSendable, benchHold, jobDirScript, MAX_TURBO_MHZ, secureKitScript, CLASS_CORES, encodePs, gb6Of, j1bMarkdown, j1bTable, JOB_ID, KIT_DIR, KIT_SCHEME, kitCommand, newJobId, parseKitJson, preflight, preflightMarkdown, psQuote, restoreDiff, rowsIn, samplerVerdict, stepWindows, versionOutliers } from "../lib/pc-kit.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, "..", "..");
@@ -108,14 +109,19 @@ export function simulatedPc({ cpu = "13th Gen Intel(R) Core(TM) i9-13900K", log 
           if (!st.snapshots[job]) return { status: 1, out: "", err: "no snapshot" };
           if (!st.schemes.includes(KIT_SCHEME)) st.schemes.push(KIT_SCHEME);
           st.active = KIT_SCHEME;
-          return reply({ action, job, maxMhz: Number(arg(script, "MaxMhz") ?? 0) });
+          st.maxMhz = Number(arg(script, "MaxMhz") ?? 0);
+          st.statePct = Number(arg(script, "StatePct") ?? 0);
+          if (!st.tasks.includes(`restore-${job}`)) st.tasks.push(`restore-${job}`);
+          return reply({ action, job, maxMhz: st.maxMhz });
+        case "cleanup": st.tasks = st.tasks.filter((x) => x !== job); return reply({ action, job, killed: [], jobProcesses: [], jobTmp: false, warnings: [] });
         case "start": st.tasks.push(job); return reply({ action, job, state: "running" });
         case "status": return reply({ action, job, state: "done", exit: 0, logTail: ["[dry-run] step done"] });
         case "restore": {
           const before = st.snapshots[job] ?? null;
           if (before) st.active = before.activeScheme;
           st.schemes = st.schemes.filter((s) => s !== KIT_SCHEME);
-          st.tasks = st.tasks.filter((t) => t !== job);
+          st.tasks = st.tasks.filter((x) => x !== job && x !== `restore-${job}`);
+          st.maxMhz = 0; st.statePct = 0;
           return reply({ action, job, before, after: { activeScheme: st.active, schemes: [...st.schemes], processor: structuredClone(proc), tasks: [...st.tasks], kitProcesses: [], jobProcesses: [], jobTmp: false }, killed: [], warnings: [] });
         }
         case "uninstall": return st.tasks.length || st.schemes.includes(KIT_SCHEME) ? { status: 1, out: "", err: "restore first" } : reply({ action, kitDir: KIT_DIR, removed: true });
@@ -123,21 +129,36 @@ export function simulatedPc({ cpu = "13th Gen Intel(R) Core(TM) i9-13900K", log 
       }
     },
     put(local, remoteWin) { calls.push({ kind: "put", local, remote: remoteWin }); st.files.add(remoteWin); log(`[dry-run] scp ${local} -> ${scpPath(remoteWin)}`); },
-    getDir(remoteWin, localParent) { calls.push({ kind: "get", remote: remoteWin, local: localParent }); log(`[dry-run] scp -r ${scpPath(remoteWin)} -> ${localParent}`); mkdirSync(path.join(localParent, path.win32.basename(remoteWin)), { recursive: true }); }
+    getDir(remoteWin, localParent) {
+      calls.push({ kind: "get", remote: remoteWin, local: localParent });
+      log(`[dry-run] scp -r ${scpPath(remoteWin)} -> ${localParent}`);
+      const dir = path.join(localParent, path.win32.basename(remoteWin));
+      mkdirSync(dir, { recursive: true });
+      // a calibration probe: a bench whose score follows the clamp (a model
+      // CPU: 5800 MHz turbo, score proportional to the clock)
+      if (/-b\d+$/.test(dir)) {
+        const clock = Math.min(5800, st.maxMhz || 5800) * (st.statePct ? st.statePct / 100 : 1);
+        writeFileSync(path.join(dir, "bench.json"), JSON.stringify({ score: Math.round(clock * 0.02 * 1000) / 1000, perRun: [{ state: { visibility: "visible", focus: true, rafMs: { p50: 16.7 } } }] }));
+      }
+    }
   };
 }
 
 // ---- PC operations
+// The Mac's copy of salon-pc.ps1: every call checks the PC's against it.
+export const KIT_SHA256 = createHash("sha256").update(readFileSync(path.join(HERE, "pc-win", "salon-pc.ps1"))).digest("hex");
 const kit = (t, action, params = {}) => {
-  const r = t.ssh(kitCommand(action, params), { timeoutSec: action === "check" ? 180 : 120 });
+  const r = t.ssh(kitCommand(action, params, { sha256: KIT_SHA256 }), { timeoutSec: action === "check" ? 180 : 120 });
   const j = parseKitJson(r.out);
   if (!j) throw new Error(`salon-pc.ps1 -Action ${action}: no result: ${(r.err || r.out).trim().slice(-600)}`);
   return j;
 };
 const ps = (t, script, opts) => t.ssh(`powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${encodePs(script)}`, opts);
 
+// The kit folder secured (ACL, no reparse point) BEFORE anything is copied
+// into it, then the script; every later call checks its sha256.
 export function pushKitScript(t) {
-  ps(t, `New-Item -ItemType Directory -Force -Path ${psQuote(KIT_DIR)}, ${psQuote(W(KIT_DIR, "jobs"))}, ${psQuote(W(KIT_DIR, "state"))}, ${psQuote(W(KIT_DIR, "films"))}, ${psQuote(W(KIT_DIR, "trees"))} | Out-Null`);
+  ps(t, secureKitScript());
   t.put(path.join(HERE, "pc-win", "salon-pc.ps1"), W(KIT_DIR, "salon-pc.ps1"));
 }
 
@@ -326,34 +347,7 @@ export async function runJob(t, { job, steps, affinity, clamp, outDir, env = {},
   try {
     record.snapshot = kit(t, "snapshot", { Job: job }).state;
     if (clamp) record.clamped = kit(t, "clamp", { Job: job, MaxMhz: clamp.maxMhz ?? 0, StatePct: clamp.statePct ?? 0, BoostMode: clamp.boostMode ?? -1 });
-    const spec = jobSpec({ harnessDir, steps, affinity, env });
-    writeFileSync(path.join(local, "spec.json"), JSON.stringify(spec, null, 1) + "\n");
-    ps(t, `New-Item -ItemType Directory -Force -Path ${psQuote(jobDir)} | Out-Null`);
-    t.put(path.join(local, "spec.json"), W(jobDir, "spec.json"));
-    record.start = kit(t, "start", { Job: job });
-    const shown = new Set();
-    let failures = 0;
-    const deadline = Date.now() + (record.ceilingSec + 600) * 1000;
-    for (;;) {
-      let s;
-      try {
-        s = kit(t, "status", { Job: job });
-        failures = 0;
-      } catch (e) {
-        failures += 1;
-        log(`[pc-run] status failed (${failures}/${POLL_FAILURES_MAX}): ${e.message}`);
-        if (failures >= POLL_FAILURES_MAX) throw new Error(`job ${job}: no status for ${failures} polls in a row`);
-        await sleep(poll);
-        continue;
-      }
-      for (const l of s.logTail ?? []) if (!shown.has(l)) { shown.add(l); log(`[pc] ${l}`); }
-      if (s.state === "done") { record.exit = s.exit; break; }
-      if (s.state === "missing") throw new Error(`job ${job}: the task is gone and left no exit`);
-      if (s.state === "dead") throw new Error(`job ${job}: the task stopped without an exit (time limit, logoff, crash)`);
-      if (Date.now() > deadline) throw new Error(`job ${job}: past its ceiling of ${Math.round(record.ceilingSec / 60)} min`);
-      await sleep(poll);
-    }
-    t.getDir(jobDir, outDir);
+    record.exit = await runSteps(t, { job, steps, affinity, outDir, env, harnessDir, poll, sleep, log, ceilingSec: record.ceilingSec });
   } finally {
     liveJob = null;
     try {
@@ -368,6 +362,87 @@ export async function runJob(t, { job, steps, affinity, clamp, outDir, env = {},
     else log("[pc-run] machine restored (power scheme, schemes, processor settings, tasks as before)");
   }
   return record;
+}
+
+// A job's steps through its task, power untouched: the job's folder (the
+// only one the user may write), spec, start, polling, fetch. Its task
+// and processes are stopped in the end, whatever happened (cleanup; the
+// power is the caller's: runJob's restore, or the calibration's).
+export async function runSteps(t, { job, steps, affinity, outDir, env = {}, harnessDir, poll = POLL_SEC, sleep = (s) => new Promise((r) => setTimeout(r, s * 1000)), log = console.error, ceilingSec = assertFitsTask(steps) }) {
+  const jobDir = W(KIT_DIR, "jobs", job);
+  const local = path.join(outDir, job);
+  mkdirSync(local, { recursive: true });
+  let exit = null;
+  try {
+    const spec = jobSpec({ harnessDir, steps, affinity, env });
+    writeFileSync(path.join(local, "spec.json"), JSON.stringify(spec, null, 1) + "\n");
+    ps(t, jobDirScript(jobDir));
+    t.put(path.join(local, "spec.json"), W(jobDir, "spec.json"));
+    kit(t, "start", { Job: job });
+    const shown = new Set();
+    let failures = 0;
+    const deadline = Date.now() + (ceilingSec + 600) * 1000;
+    for (;;) {
+      let s;
+      try {
+        s = kit(t, "status", { Job: job });
+        failures = 0;
+      } catch (e) {
+        failures += 1;
+        log(`[pc-run] status failed (${failures}/${POLL_FAILURES_MAX}): ${e.message}`);
+        if (failures >= POLL_FAILURES_MAX) throw new Error(`job ${job}: no status for ${failures} polls in a row`);
+        await sleep(poll);
+        continue;
+      }
+      for (const l of s.logTail ?? []) if (!shown.has(l)) { shown.add(l); log(`[pc] ${l}`); }
+      if (s.state === "done") { exit = s.exit; break; }
+      if (s.state === "missing") throw new Error(`job ${job}: the task is gone and left no exit`);
+      if (s.state === "dead") throw new Error(`job ${job}: the task stopped without an exit (time limit, logoff, crash)`);
+      if (Date.now() > deadline) throw new Error(`job ${job}: past its ceiling of ${Math.round(ceilingSec / 60)} min`);
+      await sleep(poll);
+    }
+    t.getDir(jobDir, outDir);
+  } finally {
+    try { kit(t, "cleanup", { Job: job }); } catch (e) { log(`[pc-run] cleanup of ${job} failed (${e.message})`); }
+  }
+  return exit;
+}
+
+// The calibration, driven from here (the clamp needs the elevated ssh
+// session; the job's own task is not elevated): one snapshot and clamp
+// state (job), each probe a bench sub-job <job>-bN on the game's origin
+// under the clamp just set. Restored in the end, whatever happened.
+export async function calibrateFromMac(t, { job, browser, engineDir, hostGb6, turboMhz, affinity, outDir, harnessDir, runs = 3, poll = POLL_SEC, sleep, log = console.error }) {
+  const local = path.join(outDir, job);
+  mkdirSync(local, { recursive: true });
+  liveJob = job;
+  let n = 0, restore = null, result = null;
+  try {
+    kit(t, "snapshot", { Job: job });
+    const bench = async () => {
+      n += 1;
+      const sub = `${job}-b${n}`;
+      const step = { ...benchStep("bench", browser, W(KIT_DIR, "jobs", sub), { root: engineDir }) };
+      step.args = step.args.map((a, i, xs) => (xs[i - 1] === "--runs" ? String(runs) : a));
+      await runSteps(t, { job: sub, steps: [step], affinity, outDir: local, harnessDir, poll, sleep, log });
+      const f = path.join(local, sub, "bench.json");
+      const b = existsSync(f) ? JSON.parse(readFileSync(f, "utf8")) : null;
+      const st = b?.perRun?.[0]?.state;
+      if (!(b?.score > 0)) throw new Error(`${sub}: no bench score`);
+      if (st && (st.visibility !== "visible" || (st.rafMs?.p50 ?? 0) >= 25)) throw new Error(`${sub}: page ${st.visibility}, rAF ${st.rafMs?.p50} ms: see the preflight`);
+      return b.score;
+    };
+    const clamp = (o) => kit(t, "clamp", { Job: job, MaxMhz: o.maxMhz ?? 0, StatePct: o.statePct ?? 0, BoostMode: o.boostMode ?? -1 });
+    result = await calibrate({ bench, clamp, hostGb6, turboMhz, log: (m) => log(`[calibrate] ${m}`) });
+  } finally {
+    liveJob = null;
+    restore = kit(t, "restore", { Job: job });
+    const diff = restoreDiff(restore.before, restore.after, job);
+    log(diff.length ? `[pc-run] RESTORE DIFFERS: ${diff.join("; ")}` : "[pc-run] machine restored after the calibration");
+  }
+  const report = { probe: "pc-calibrate", at: new Date().toISOString(), browser, probes: n, ...result };
+  writeFileSync(path.join(local, "calibration.json"), JSON.stringify(report, null, 1) + "\n");
+  return path.join(local, "calibration.json");
 }
 
 // The clamp to measure with: a calibration file's choice, --clamp-mhz, or none.
@@ -508,9 +583,13 @@ async function main() {
   if (cmd === "bench") return void (await go(job, benchSteps("bench", browsers, jobDir(job), st.trees.engine.dest), clampOf(values)));
 
   const calibrateJob = async (j) => {
-    const hostGb6 = values["host-gb6"] ?? (gb6Of(pre.check.cpu?.name ?? "") ? null : (() => { throw new Error(`${pre.check.cpu?.name}: not in the public table, pass --host-gb6 N (with its source)`); })());
-    await go(j, [{ name: "calibrate", env: { HARNESS_BROWSER_CHANNEL: channelOf(browsers[0]) }, args: ["harness/remote/pc-win/pc-calibrate.mjs", "--job", j, "--port", String(JOB_PORT), "--root", st.trees.engine.dest, "--out", W(jobDir(j), "calibration.json"), ...(hostGb6 ? ["--host-gb6", String(hostGb6)] : [])] }], { maxMhz: 0 });
-    return path.join(outDir, j, "calibration.json");
+    const known = gb6Of(pre.check.cpu?.name ?? "");
+    const hostGb6 = values["host-gb6"] ? Number(values["host-gb6"]) : known?.gb6;
+    if (!(hostGb6 > 0)) throw new Error(`${pre.check.cpu?.name}: not in the public table, pass --host-gb6 N (with its source)`);
+    const f = await calibrateFromMac(t, { job: j, browser: browsers[0], engineDir: st.trees.engine.dest, hostGb6, turboMhz: known ? MAX_TURBO_MHZ[known.name] ?? null : null, affinity, outDir, harnessDir, poll: dry ? 0 : POLL_SEC, log });
+    const c = JSON.parse(readFileSync(f, "utf8"));
+    log(`[pc-run] calibration: chosen ${JSON.stringify(c.chosen)} (${c.why}${c.errPct != null ? `, ${c.errPct} % off` : ""}): ${f}`);
+    return f;
   };
   if (cmd === "calibrate") return void (await calibrateJob(job));
 
