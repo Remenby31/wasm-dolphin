@@ -33,7 +33,7 @@ import { parseArgs } from "node:util";
 
 import { classifyJit, LIFTOFF_FLAGS, LIFTOFF_GAP } from "../probes/pc-bench.mjs";
 import { calibrate } from "./pc-win/pc-calibrate.mjs";
-import { assertSendable, benchHold, jobDirScript, MAX_TURBO_MHZ, secureKitScript, CLASS_CORES, encodePs, gb6Of, j1bMarkdown, j1bTable, JOB_ID, KIT_DIR, KIT_SCHEME, kitCommand, newJobId, parseKitJson, preflight, preflightMarkdown, psQuote, restoreDiff, rowsIn, samplerVerdict, stepWindows, versionOutliers } from "../lib/pc-kit.mjs";
+import { assertSendable, benchHold, jobDirScript, MAX_TURBO_MHZ, ownScript, secureKitScript, CLASS_CORES, encodePs, gb6Of, j1bMarkdown, j1bTable, JOB_ID, KIT_DIR, KIT_SCHEME, kitCommand, newJobId, parseKitJson, preflight, preflightMarkdown, psQuote, restoreDiff, rowsIn, samplerVerdict, stepWindows, versionOutliers } from "../lib/pc-kit.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, "..", "..");
@@ -158,13 +158,20 @@ const ps = (t, script, opts) => t.ssh(`powershell.exe -NoProfile -NonInteractive
 // The kit folder secured (ACL, no reparse point) BEFORE anything is copied
 // into it, then the script; every later call checks its sha256.
 export function pushKitScript(t) {
-  ps(t, secureKitScript());
+  // throws (ssh exit != 0) on a folder that is not the kit's own: nothing
+  // is copied, nothing runs elevated from it
+  const r = ps(t, secureKitScript());
+  const v = parseKitJson(r.out);
+  if (!t.dry && v?.action !== "secure") throw new Error(`securing ${KIT_DIR}: no verification came back (${(r.err || r.out).trim().slice(-300)})`);
   t.put(path.join(HERE, "pc-win", "salon-pc.ps1"), W(KIT_DIR, "salon-pc.ps1"));
+  ps(t, ownScript([W(KIT_DIR, "salon-pc.ps1")]));
+  return v;
 }
 
 export function check(t, { iso = null, browsers = ["chrome", "msedge"], cores = CLASS_CORES } = {}) {
-  pushKitScript(t);
+  const verified = pushKitScript(t);
   const c = kit(t, "check", { Cores: cores });
+  c.kitVerify = verified ?? null;
   if (iso) c.iso = kit(t, "stat", { Path: iso });
   return { check: c, preflight: preflight(c, { browsers, needIso: iso }) };
 }
@@ -193,8 +200,13 @@ export function setup(t, { tmp, engine, dry }) {
       if (!want || want !== sha256(nodeZip)) throw new Error(`${zip}: sha256 does not match SHASUMS256.txt`);
     }
   }
-  const have = ps(t, `$n = ${psQuote(W(KIT_DIR, "node", "node.exe"))}; if (Test-Path -LiteralPath $n) { & $n -v }`, { quiet: true }).out.trim();
-  if (have !== NODE_VERSION) {
+  // node.exe is never run elevated unless its hash is the official zip's
+  // (read here from the verified zip): present = same hash, else replaced
+  const nodeSha = dry ? "0".repeat(64) : createHash("sha256").update(execFileSync("unzip", ["-p", nodeZip, `node-${NODE_VERSION}-win-x64/node.exe`], { maxBuffer: 1 << 28 })).digest("hex");
+  const nodeExe = W(KIT_DIR, "node", "node.exe");
+  const nodeCheck = `if ((Get-FileHash -LiteralPath ${psQuote(nodeExe)} -Algorithm SHA256).Hash -ne ${psQuote(nodeSha.toUpperCase())}) { throw 'node.exe differs from the official zip: refused' }`;
+  const have = ps(t, `$n = ${psQuote(nodeExe)}; if ((Test-Path -LiteralPath $n) -and (Get-FileHash -LiteralPath $n -Algorithm SHA256).Hash -eq ${psQuote(nodeSha.toUpperCase())}) { 'present' }`, { quiet: true }).out.trim();
+  if (have !== "present") {
     t.put(nodeZip, W(KIT_DIR, zip));
     ps(t, [`$z = ${psQuote(W(KIT_DIR, zip))}; $d = ${psQuote(W(KIT_DIR, "node-tmp"))}`,
       `if (Test-Path -LiteralPath $d) { Remove-Item -LiteralPath $d -Recurse -Force }`,
@@ -202,17 +214,21 @@ export function setup(t, { tmp, engine, dry }) {
       `if (Test-Path -LiteralPath ${psQuote(W(KIT_DIR, "node"))}) { Remove-Item -LiteralPath ${psQuote(W(KIT_DIR, "node"))} -Recurse -Force }`,
       `Move-Item -LiteralPath (Join-Path $d ${psQuote(`node-${NODE_VERSION}-win-x64`)}) -Destination ${psQuote(W(KIT_DIR, "node"))}`,
       `Remove-Item -LiteralPath $d -Recurse -Force; Remove-Item -LiteralPath $z -Force`].join("; "));
+    ps(t, ownScript([W(KIT_DIR, "node")]));
+    if (!dry) ps(t, nodeCheck);
   }
   const pwHave = ps(t, `$p = ${psQuote(W(KIT_DIR, "pw", "node_modules", "playwright", "package.json"))}; if (Test-Path -LiteralPath $p) { (Get-Content -Raw $p | ConvertFrom-Json).version }`, { quiet: true }).out.trim();
   if (pwHave !== PLAYWRIGHT_VERSION) {
     const tgz = [`playwright-core-${PLAYWRIGHT_VERSION}.tgz`, `playwright-${PLAYWRIGHT_VERSION}.tgz`];
     if (!dry && tgz.some((f) => !existsSync(path.join(tmp, f)))) execFileSync("npm", ["pack", `playwright-core@${PLAYWRIGHT_VERSION}`, `playwright@${PLAYWRIGHT_VERSION}`, "--silent"], { cwd: tmp, stdio: ["ignore", "ignore", "inherit"] });
     for (const f of tgz) t.put(path.join(tmp, f), W(KIT_DIR, f));
-    ps(t, [`$env:PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = '1'; $env:Path = ${psQuote(W(KIT_DIR, "node"))} + ';' + $env:Path`,
+    ps(t, [`$ErrorActionPreference = 'Stop'`, ...(dry ? [] : [nodeCheck]),
+      `$env:PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = '1'; $env:Path = ${psQuote(W(KIT_DIR, "node"))} + ';' + $env:Path`,
       `$env:npm_config_cache = ${psQuote(W(KIT_DIR, "npm-cache"))}; $env:TEMP = ${psQuote(W(KIT_DIR, "npm-tmp"))}; $env:TMP = $env:TEMP; New-Item -ItemType Directory -Force -Path $env:TEMP | Out-Null`,
       `New-Item -ItemType Directory -Force -Path ${psQuote(W(KIT_DIR, "pw"))} | Out-Null`,
-      `& ${psQuote(W(KIT_DIR, "node", "npm.cmd"))} install --prefix ${psQuote(W(KIT_DIR, "pw"))} --no-audit --no-fund --offline ${tgz.map((f) => psQuote(W(KIT_DIR, f))).join(" ")}`,
+      `& ${psQuote(W(KIT_DIR, "node", "npm.cmd"))} install --prefix ${psQuote(W(KIT_DIR, "pw"))} --no-audit --no-fund --offline --ignore-scripts ${tgz.map((f) => psQuote(W(KIT_DIR, f))).join(" ")}`,
       `if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }`].join("; "));
+    ps(t, ownScript([W(KIT_DIR, "pw"), W(KIT_DIR, "npm-cache"), W(KIT_DIR, "npm-tmp")]));
   }
   const trees = {};
   for (const [name, ref] of [["harness", "HEAD"], ["engine", engine]]) {
@@ -228,6 +244,7 @@ export function setup(t, { tmp, engine, dry }) {
     ps(t, [`$d = ${psQuote(dest)}; New-Item -ItemType Directory -Force -Path $d | Out-Null`,
       `tar.exe -xf ${psQuote(W(KIT_DIR, `tree-${sha.slice(0, 12)}.tar`))} -C $d; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }`,
       `Remove-Item -LiteralPath ${psQuote(W(KIT_DIR, `tree-${sha.slice(0, 12)}.tar`))} -Force`].join("; "));
+    ps(t, ownScript([dest]));
   }
   return { node: NODE_VERSION, playwright: PLAYWRIGHT_VERSION, trees };
 }
@@ -575,6 +592,7 @@ async function main() {
     if (values.homebrew) {
       assertSendable(path.resolve(values.homebrew), { homebrewDirs: [path.join(REPO, "harness", "homebrew", "out")] });
       t.put(path.resolve(values.homebrew), W(KIT_DIR, "films", path.basename(values.homebrew)));
+      ps(t, ownScript([W(KIT_DIR, "films", path.basename(values.homebrew))]));
       steps.push({ name: "presenter-homebrew", continueOnError: true, args: ["harness/probes/presenter-check.mjs", "--iso", W(KIT_DIR, "films", path.basename(values.homebrew)), "--port", String(JOB_PORT), "--query", "core=upstream&video=wgpu&presenter=webgpu&cpu=dual&speed=1", "--out", W(jobDir(job), "presenter-homebrew.json")] });
     }
     await go(job, steps, null);
@@ -601,6 +619,7 @@ async function main() {
     const sum = createHash("sha256").update(readFileSync(file)).digest("hex").slice(0, 12);
     const remote = W(KIT_DIR, "films", `${path.basename(file, ".json")}-${sum}.json`);
     t.put(path.resolve(file), remote);
+    ps(t, ownScript([remote]));
     films[scene] = remote;
   }
   const clamp = cmd === "all" && !values.calibration && !values["clamp-mhz"] && !values["no-clamp"]

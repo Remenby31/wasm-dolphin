@@ -22,7 +22,7 @@ import { parseWin32Battery } from "../harness/lib/system.mjs";
 import { buildKernel, reference, SHAPES } from "../harness/lib/wasm-kernel.mjs";
 import { benchScore, classifyJit, summarizeCalls, summarizeRuns } from "../harness/probes/pc-bench.mjs";
 import {
-  aclSafe, assertSendable, benchHold, calibrationTarget, jobDirScript, secureKitScript, stepWindows, versionOutliers, encodePs, gb6Of, j1bTable, KIT_SCHEME, kitCommand, knobIneffective, nextProbe, parseKitJson, preflight, restoreDiff, samplerVerdict
+  aclSafe, assertSendable, benchHold, calibrationTarget, jobDirScript, ownScript, secureKitScript, stepWindows, versionOutliers, encodePs, gb6Of, j1bTable, KIT_SCHEME, kitCommand, knobIneffective, nextProbe, parseKitJson, preflight, restoreDiff, samplerVerdict
 } from "../harness/lib/pc-kit.mjs";
 import { calibrate } from "../harness/remote/pc-win/pc-calibrate.mjs";
 import { assertFitsTask, benchFindings, benchSteps, calibrateFromMac, clampOf, jobReport, jobSpec, parcoursSteps, runJob, simulatedPc } from "../harness/remote/pc-run.mjs";
@@ -98,11 +98,20 @@ test("pc-kit: remote commands are encoded PowerShell, results read back", () => 
   const g = Buffer.from(/-EncodedCommand (\S+)$/.exec(kitCommand("restore", { Job: "j" }, { sha256: "ab".repeat(32) }))[1], "base64").toString("utf16le");
   assert.match(g, /^\$f = 'C:\\salon-kit\\salon-pc\.ps1'; if \(\(Get-FileHash -LiteralPath \$f -Algorithm SHA256\)\.Hash -ne 'ABAB/, "the PC's script is checked before an elevated run");
   assert.throws(() => kitCommand("check", {}, { sha256: "x" }), /bad sha256/);
-  assert.match(secureKitScript(), /SetAccessRuleProtection\(\$true, \$false\).*SetOwner\(\$adm\).*ReadAndExecute.*reparse points.*Set-Acl.*icacls\.exe "\$d\\\*" \/reset/s);
+  const sec = secureKitScript();
+  assert.match(sec, /^\$ErrorActionPreference = 'Stop'/, "a failure throws: the ssh call fails, nothing is copied");
+  assert.match(sec, /CreateDirectory\(\$d, \$acl\)/, "created atomically with its ACL");
+  assert.match(sec, /SetAccessRuleProtection\(\$true, \$false\).*SetOwner\(\$adm\).*ReadAndExecute/s);
+  assert.match(sec, /is not the kit's own.*remove it by hand/s, "a pre-existing folder that fails the check is refused, never repaired");
+  assert.doesNotMatch(sec, /\/reset|\/T /, "no recursive icacls over a tree that may hold the user's junctions");
+  assert.match(ownScript(["C:\\salon-kit\\node"]), /setowner '\*S-1-5-32-544' \/T/);
+  assert.throws(() => ownScript(["C:\\salon-kit\\jobs\\j1"]), /not an admin-only kit path/, "never on the user's jobs");
+  assert.throws(() => ownScript(["C:\\Windows"]), /not an admin-only kit path/);
   assert.match(jobDirScript("C:\\salon-kit\\jobs\\j1"), /a job id is used once.*\(OI\)\(CI\)M/s);
-  assert.equal(aclSafe({ protected: true, writers: ["S-1-5-32-544", "S-1-5-18"] }), true);
-  assert.equal(aclSafe({ protected: false, writers: ["S-1-5-32-544"] }), false, "inherited from C:\\: Authenticated Users may write");
-  assert.equal(aclSafe({ protected: true, writers: ["S-1-5-32-544", "S-1-5-11"] }), false);
+  assert.equal(aclSafe({ protected: true, ownerSid: "S-1-5-32-544", writers: ["S-1-5-32-544", "S-1-5-18"] }), true);
+  assert.equal(aclSafe({ protected: true, ownerSid: "S-1-5-21-1-2-3-1001", writers: ["S-1-5-32-544"] }), false, "owned by a user account: it could rewrite the ACL");
+  assert.equal(aclSafe({ protected: false, ownerSid: "S-1-5-32-544", writers: ["S-1-5-32-544"] }), false, "inherited from C:\\: Authenticated Users may write");
+  assert.equal(aclSafe({ protected: true, ownerSid: "S-1-5-32-544", writers: ["S-1-5-32-544", "S-1-5-11"] }), false);
   assert.equal(aclSafe(null), false);
   assert.deepEqual(parseKitJson('noise\r\nSALONKIT-JSON {"a":1}\r\nSALONKIT-JSON {"a":2}\r\n'), { a: 2 });
   assert.equal(parseKitJson("nothing"), null);
@@ -375,13 +384,16 @@ function global:Get-ScheduledTask { param($TaskPath, $TaskName, $ErrorAction) @(
 function global:Unregister-ScheduledTask { param($TaskPath, $TaskName, $Confirm) $global:tasks.Remove($TaskName) }
 function global:Register-ScheduledTask { param($TaskPath, $TaskName, $Action, $Trigger, $Principal, $Settings, [switch]$Force) if (-not $global:tasks.Contains($TaskName)) { [void]$global:tasks.Add($TaskName) } }
 function global:Stop-ScheduledTask { param($TaskPath, $TaskName, $ErrorAction) }
+function global:Start-ScheduledTask { param($TaskPath, $TaskName) if ($TaskName -like 'purge-*') { & $global:kitScript -Action purge -Job ($TaskName -replace '^purge-', '') -Scope tmp -KitDir $global:kitDir } }
 function global:New-ScheduledTaskAction { param($Execute, $Argument, $WorkingDirectory) 'action' }
 function global:New-ScheduledTaskTrigger { param([switch]$AtLogOn, $User) 'trigger' }
 function global:New-ScheduledTaskPrincipal { param($UserId, $LogonType, $RunLevel) 'principal' }
-function global:Get-CimInstance { param($ClassName, $ErrorAction) @() }
+function global:Get-CimInstance { param($ClassName, $Filter, $ErrorAction) @() }
+function global:icacls.exe { $global:LASTEXITCODE = 0 }
 $env:SALONKIT_TEST_ELEVATED = '1'
 $s = '${path.join(ROOT, "harness", "remote", "pc-win", "salon-pc.ps1")}'
 $k = '${dir}'
+$global:kitScript = $s; $global:kitDir = $k
 & $s -Action snapshot -Job t1 -KitDir $k
 & $s -Action clamp -Job t1 -MaxMhz 4300 -KitDir $k
 "SALONKIT-JSON " + (@{ tasksWhileClamped = @($global:tasks) } | ConvertTo-Json -Compress)

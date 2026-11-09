@@ -32,40 +32,65 @@ export function kitCommand(action, params = {}, { sha256 = null } = {}) {
   }
   return `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${encodePs(parts.join(" "))}`;
 }
-// The kit folder's ACL, set from the elevated ssh session before anything is
-// copied into it: inheritance cut, owner Administrators, full control for
-// Administrators and SYSTEM, read and execute for the user (whose
-// non-elevated job task runs node from it); every child reset to inherit
-// only that (an explicit ACE planted in a pre-existing folder goes). A user
-// or a program without elevation can then change nothing the elevated
-// session or the logon task runs.
+// The kit folder, from the elevated ssh session, BEFORE anything is
+// copied into it or run from it. All under 'Stop': any failure throws and
+// the ssh call fails (pc-run stops there).
+// - Absent: created atomically with its own ACL (inheritance cut, owner
+//   Administrators, full control for Administrators and SYSTEM, read and
+//   execute for the user; children inherit it).
+// - Present: verified, never repaired. A folder the kit did not make (a
+//   planted node.exe would run elevated at the next setup) is refused.
+// - Then re-read in the same session: the top's ACL protected, owner
+//   Administrators, no writer but Administrators and SYSTEM; every entry
+//   outside jobs\<job>\ owned by Administrators or SYSTEM, writable by
+//   nobody else, no junction or link anywhere outside jobs\<job>\ (walked
+//   without following any). jobs\<job> itself (made by jobDirScript) may
+//   grant the user write; its content is the user's and never walked.
+// Prints one SALONKIT-JSON line: the verification.
 export function secureKitScript() {
   return [
+    `$ErrorActionPreference = 'Stop'`,
     `$d = ${psQuote(KIT_DIR)}`,
-    `if (Test-Path -LiteralPath $d) { if ((Get-Item -LiteralPath $d -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "$d is a junction or a link: refused" } } else { New-Item -ItemType Directory -Path $d | Out-Null }`,
-    `$me = [Security.Principal.WindowsIdentity]::GetCurrent().User`,
     `$adm = New-Object Security.Principal.SecurityIdentifier 'S-1-5-32-544'; $sys = New-Object Security.Principal.SecurityIdentifier 'S-1-5-18'`,
-    `$acl = New-Object Security.AccessControl.DirectorySecurity`,
-    `$acl.SetAccessRuleProtection($true, $false); $acl.SetOwner($adm)`,
-    `$inh = [Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'; $none = [Security.AccessControl.PropagationFlags]::None`,
-    `foreach ($r in @(@($adm, 'FullControl'), @($sys, 'FullControl'), @($me, 'ReadAndExecute'))) { $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($r[0], $r[1], $inh, $none, 'Allow'))) }`,
-    // the kit never makes a junction or a link: one inside means someone
-    // planted it (icacls /T or a delete could follow it); walked without
-    // following any, then refused
-    `$stack = New-Object System.Collections.Stack; $stack.Push($d); $bad = @()`,
-    `while ($stack.Count) { foreach ($e in [IO.Directory]::GetFileSystemEntries($stack.Pop())) { $a = [IO.File]::GetAttributes($e); if ($a -band [IO.FileAttributes]::ReparsePoint) { $bad += $e } elseif ($a -band [IO.FileAttributes]::Directory) { $stack.Push($e) } } }`,
-    `if ($bad.Count) { throw "reparse points under $d (the kit makes none), remove them by hand: $($bad -join ', ')" }`,
-    `Set-Acl -LiteralPath $d -AclObject $acl`,
-    `& icacls.exe "$d\\*" /reset /T /C /Q | Out-Null`,
-    `foreach ($sub in @('jobs', 'state', 'films', 'trees')) { $p = Join-Path $d $sub; if (-not (Test-Path -LiteralPath $p)) { New-Item -ItemType Directory -Path $p | Out-Null } }`
+    `$me = [Security.Principal.WindowsIdentity]::GetCurrent().User`,
+    `$ok = @($adm.Value, $sys.Value)`,
+    `$created = $false`,
+    `if (-not (Test-Path -LiteralPath $d)) { $acl = New-Object Security.AccessControl.DirectorySecurity; $acl.SetAccessRuleProtection($true, $false); $acl.SetOwner($adm); $inh = [Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'; foreach ($r in @(@($adm, 'FullControl'), @($sys, 'FullControl'), @($me, 'ReadAndExecute'))) { $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($r[0], $r[1], $inh, 'None', 'Allow'))) }; [void][IO.Directory]::CreateDirectory($d, $acl); $created = $true }`,
+    `$W = [Security.AccessControl.FileSystemRights]'WriteData, AppendData, WriteExtendedAttributes, WriteAttributes, Delete, DeleteSubdirectoriesAndFiles, ChangePermissions, TakeOwnership'`,
+    `function Sid($i) { try { $i.Translate([Security.Principal.SecurityIdentifier]).Value } catch { "$i" } }`,
+    `function Bad($path, $isJobDir) { $a = Get-Acl -LiteralPath $path; $o = Sid ([Security.Principal.NTAccount]$a.Owner); $why = @(); if ($ok -notcontains $o) { $why += "owner $($a.Owner)" }; foreach ($e in $a.Access) { if ($e.AccessControlType -ne 'Allow' -or -not ($e.FileSystemRights -band $W)) { continue }; $s = Sid $e.IdentityReference; if ($ok -contains $s) { continue }; if ($isJobDir -and $s -eq $me.Value) { continue }; $why += "$($e.IdentityReference) may write" }; $why }`,
+    `$problems = @()`,
+    `$top = Get-Acl -LiteralPath $d; if (-not $top.AreAccessRulesProtected) { $problems += "$d inherits its ACL" }`,
+    `if ((Get-Item -LiteralPath $d -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "$d is a junction or a link: refused" }`,
+    `foreach ($w in (Bad $d $false)) { $problems += "$d $w" }`,
+    `$jobs = Join-Path $d 'jobs'`,
+    `$stack = New-Object System.Collections.Stack; $stack.Push($d)`,
+    `while ($stack.Count) { $dir = $stack.Pop(); foreach ($e in [IO.Directory]::GetFileSystemEntries($dir)) { $attr = [IO.File]::GetAttributes($e); $isJob = ([IO.Path]::GetDirectoryName($e) -eq $jobs); if ($attr -band [IO.FileAttributes]::ReparsePoint) { $problems += "$e is a junction or a link"; continue }; foreach ($w in (Bad $e $isJob)) { $problems += "$e $w" }; if (($attr -band [IO.FileAttributes]::Directory) -and -not $isJob) { $stack.Push($e) } } }`,
+    `if ($problems.Count) { throw "C:\\salon-kit is not the kit's own (made or changed by someone else?); check it, remove it by hand, then retry: $(($problems | Select-Object -First 8) -join '; ')" }`,
+    `foreach ($sub in @('jobs', 'state', 'films', 'trees')) { $p = Join-Path $d $sub; if (-not (Test-Path -LiteralPath $p)) { [void](New-Item -ItemType Directory -Path $p); & icacls.exe $p /setowner '*S-1-5-32-544' /C /Q | Out-Null; if ($LASTEXITCODE -ne 0) { throw "icacls /setowner $p failed" } } }`,
+    `'SALONKIT-JSON ' + (@{ action = 'secure'; created = $created; owner = (Get-Acl -LiteralPath $d).Owner; protected = $true; checked = 'top, every entry outside jobs\\<job>\\' } | ConvertTo-Json -Compress)`
+  ].join("; ");
+}
+// After the kit's own elevated writes: the paths it just wrote owned by
+// Administrators (by default Windows may make the creating account the
+// owner, and an owner can always rewrite the ACL). Never on jobs\ (the
+// user's), never before secureKitScript's check (it would hide a planted
+// file).
+export function ownScript(paths) {
+  for (const p of paths) if (!p.startsWith(`${KIT_DIR}\\`) || /\\jobs(\\|$)/i.test(p.slice(KIT_DIR.length))) throw new Error(`ownScript: ${p} is not an admin-only kit path`);
+  return [
+    `$ErrorActionPreference = 'Stop'`,
+    `foreach ($p in @(${paths.map(psQuote).join(", ")})) { if (Test-Path -LiteralPath $p) { if ((Get-Item -LiteralPath $p -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "$p is a junction or a link" }; & icacls.exe $p /setowner '*S-1-5-32-544' /T /C /Q | Out-Null; if ($LASTEXITCODE -ne 0) { throw "icacls /setowner $p failed" } } }`
   ].join("; ");
 }
 // A job's folder, the only place the user's non-elevated task may write.
 export function jobDirScript(jobDir) {
   return [
+    `$ErrorActionPreference = 'Stop'`,
     `$j = ${psQuote(jobDir)}`,
     `if (Test-Path -LiteralPath $j) { throw "$j exists already: a job id is used once" }`,
     `New-Item -ItemType Directory -Path $j | Out-Null`,
+    `& icacls.exe $j /setowner '*S-1-5-32-544' /C /Q | Out-Null; if ($LASTEXITCODE -ne 0) { throw "icacls /setowner $j failed" }`,
     `$me = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value`,
     `& icacls.exe $j /grant "*$($me):(OI)(CI)M" /C /Q | Out-Null; if ($LASTEXITCODE -ne 0) { throw "icacls $j failed" }`
   ].join("; ");
@@ -75,7 +100,7 @@ export function jobDirScript(jobDir) {
 export const KIT_WRITERS = Object.freeze(["S-1-5-32-544", "S-1-5-18"]);
 export function aclSafe(acl) {
   if (!acl || acl.error) return false;
-  return acl.protected === true && (acl.writers ?? []).every((w) => KIT_WRITERS.includes(w));
+  return acl.protected === true && KIT_WRITERS.includes(acl.ownerSid) && (acl.writers ?? []).every((w) => KIT_WRITERS.includes(w));
 }
 
 // The action's result: the last "SALONKIT-JSON {...}" line.

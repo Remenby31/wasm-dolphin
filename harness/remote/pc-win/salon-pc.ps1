@@ -17,7 +17,11 @@
 # execute; only jobs\<job> is writable by the user (the job's own,
 # non-elevated task writes there). Every elevated call checks this file's
 # sha256 against the Mac's copy first (lib/pc-kit.mjs kitCommand).
-# Elevated deletions never follow a junction or a symlink (Remove-Tree).
+# Nothing elevated ever deletes inside jobs\<job> (user-writable: a junction
+# could replace a folder between a check and a delete): the job's TEMP, and
+# the job folders at uninstall, are deleted by a non-elevated task
+# (\SalonKit\purge-<job>, -Action purge), as the user. Elevated code kills
+# only a process that is one of the kit's 4 images AND owned by the user.
 #   - files under $KitDir only: the job's TEMP/TMP (browser profiles,
 #     Playwright's files) is $KitDir\jobs\<job>\tmp, deleted on restore.
 # restore stops the job first (stop file, task stopped, the job's processes
@@ -42,13 +46,14 @@
 # -ExecutionPolicy Bypass on the command line holds for this process only.
 
 param(
-  [Parameter(Mandatory = $true)][ValidateSet("check", "snapshot", "clamp", "unclamp", "restore", "start", "status", "inner", "sampler", "affinity", "stat", "uninstall", "cleanup")][string]$Action,
+  [Parameter(Mandatory = $true)][ValidateSet("check", "snapshot", "clamp", "unclamp", "restore", "start", "status", "inner", "sampler", "affinity", "stat", "uninstall", "cleanup", "purge")][string]$Action,
   [string]$Job = "",
   [int]$MaxMhz = 0,
   [int]$StatePct = 0,
   [int]$BoostMode = -1,
   [int]$Cores = 6,
   [string]$Path = "",
+  [ValidateSet("tmp", "all")][string]$Scope = "tmp",
   [string]$KitDir = "C:\salon-kit"
 )
 
@@ -227,7 +232,8 @@ function Check {
   try {
     $a = Get-Acl -LiteralPath $KitDir
     $writers = @($a.Access | Where-Object { $_.AccessControlType -eq 'Allow' -and ($_.FileSystemRights -band [Security.AccessControl.FileSystemRights]'Write, Modify, FullControl, Delete, ChangePermissions, TakeOwnership') } | ForEach-Object { try { $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value } catch { "$($_.IdentityReference)" } })
-    $acl = [ordered]@{ protected = $a.AreAccessRulesProtected; owner = $a.Owner; writers = @($writers | Select-Object -Unique) }
+    $ownerSid = try { ([Security.Principal.NTAccount]$a.Owner).Translate([Security.Principal.SecurityIdentifier]).Value } catch { "$($a.Owner)" }
+    $acl = [ordered]@{ protected = $a.AreAccessRulesProtected; owner = $a.Owner; ownerSid = $ownerSid; writers = @($writers | Select-Object -Unique) }
   } catch { $acl = [ordered]@{ error = "$_" } }
   $affinity = $null
   try { $affinity = Class-Affinity $Cores } catch { $affinity = [ordered]@{ error = "$_" } }
@@ -279,6 +285,8 @@ function Snapshot {
     kitFiles = @(Get-ChildItem -LiteralPath $KitDir -Force -ErrorAction SilentlyContinue | ForEach-Object { [string]$_.Name } | Sort-Object)
   }
   ($state | ConvertTo-Json -Depth 8) | Set-Content -LiteralPath $sf -Encoding UTF8
+  # owned by Administrators (state\ is admin-only; secureKitScript checks owners)
+  & icacls.exe $sf /setowner '*S-1-5-32-544' /C /Q 2>$null | Out-Null
   Out-Result ([ordered]@{ action = "snapshot"; job = $Job; existing = $false; state = $state })
 }
 
@@ -379,8 +387,11 @@ function Stop-KitJob([string]$jd) {
   $still = @(Job-Processes $jd | ForEach-Object { [ordered]@{ pid = $_.ProcessId; name = $_.Name } })
   if ($still.Count) { $warn += "processes of the job still running: $(($still | ForEach-Object { "$($_.name) $($_.pid)" }) -join ', ')" }
   if (Get-ScheduledTask -TaskPath $TaskPath -TaskName $Job -ErrorAction SilentlyContinue) { Unregister-ScheduledTask -TaskPath $TaskPath -TaskName $Job -Confirm:$false }
+  # the job's TEMP: deleted as the user, never by this elevated session
   $tmp = Join-Path $jd "tmp"
-  try { Remove-Tree $tmp } catch { $warn += "job tmp not fully removed: $_" }
+  if (Test-Path -LiteralPath $tmp) {
+    try { if (-not (Purge-AsUser $Job "tmp")) { $warn += "job tmp left (the purge task could not run: nobody logged on?); user data under jobs\$Job, harmless" } } catch { $warn += "purge task failed: $_" }
+  }
   return [ordered]@{ killed = @($killed | Select-Object -Unique); still = $still; tmpLeft = (Test-Path -LiteralPath $tmp); warnings = $warn }
 }
 
@@ -442,7 +453,7 @@ function Job-Processes([string]$jd) {
   $all = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $KitImages -contains $_.Name })
   $ids = @{}
   foreach ($q in $all) {
-    if ((Holds-Path $q.CommandLine $jd) -and $q.ProcessId -ne $me -and $q.CommandLine -notmatch 'salon-pc\.ps1') { $ids[[int]$q.ProcessId] = $true }
+    if ((Holds-Path $q.CommandLine $jd) -and $q.ProcessId -ne $me -and $q.CommandLine -notmatch 'salon-pc\.ps1' -and (Is-UsersKitProcess $q)) { $ids[[int]$q.ProcessId] = $true }
   }
   # a child is born after its parent (else the parent pid was reused)
   $born = @{}; foreach ($q in $all) { $born[[int]$q.ProcessId] = $q.CreationDate }
@@ -450,7 +461,7 @@ function Job-Processes([string]$jd) {
     $grew = $false
     foreach ($q in $all) {
       $pp = [int]$q.ParentProcessId
-      if (-not $ids.ContainsKey([int]$q.ProcessId) -and $ids.ContainsKey($pp) -and $q.ProcessId -ne $me -and $q.CreationDate -ge $born[$pp]) { $ids[[int]$q.ProcessId] = $true; $grew = $true }
+      if (-not $ids.ContainsKey([int]$q.ProcessId) -and $ids.ContainsKey($pp) -and $q.ProcessId -ne $me -and $q.CreationDate -ge $born[$pp] -and (Is-UsersKitProcess $q)) { $ids[[int]$q.ProcessId] = $true; $grew = $true }
     }
   } while ($grew)
   @($all | Where-Object { $ids.ContainsKey([int]$_.ProcessId) })
@@ -475,7 +486,42 @@ function Read-PidFile($file) {
   $p = Get-Process -Id ([int]$f[0]) -ErrorAction SilentlyContinue
   if (-not $p) { return $null }
   try { if ($p.StartTime.ToUniversalTime().Ticks -ne [int64]$f[1]) { return $null } } catch { return $null }
+  # the pid file is the user's to write: it counts only for one of the
+  # kit's images owned by the user (never csrss, never another account's)
+  $cim = Get-CimInstance Win32_Process -Filter "ProcessId = $($p.Id)" -ErrorAction SilentlyContinue
+  if (-not $cim -or -not (Is-UsersKitProcess $cim)) { return $null }
   return $p
+}
+# One of the kit's images, owned by the account running this script.
+function Is-UsersKitProcess($cim) {
+  if ($KitImages -notcontains $cim.Name) { return $false }
+  try { $o = Invoke-CimMethod -InputObject $cim -MethodName GetOwner -ErrorAction Stop } catch { return $false }
+  return ($o.ReturnValue -eq 0 -and $o.User -eq $env:USERNAME -and $o.Domain -eq $env:USERDOMAIN)
+}
+# The job's TEMP (or its whole folder), deleted as the user by a
+# non-elevated task; waited for (60 s), then the task removed. False when it
+# could not run (nobody logged on): the folder stays, user data, harmless.
+function Purge-AsUser([string]$jobName, [string]$scope) {
+  $name = "purge-$jobName"
+  $arg = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$PSCommandPath`" -Action purge -Job $jobName -Scope $scope -KitDir `"$KitDir`""
+  $act = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $arg
+  $prin = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
+  Register-ScheduledTask -TaskPath $TaskPath -TaskName $name -Action $act -Principal $prin -Force | Out-Null
+  $target = Join-Path (Join-Path $KitDir "jobs") $jobName
+  if ($scope -eq "tmp") { $target = Join-Path $target "tmp" }
+  try {
+    Start-ScheduledTask -TaskPath $TaskPath -TaskName $name
+    for ($i = 0; $i -lt 60 -and (Test-Path -LiteralPath $target); $i++) { Start-Sleep 1 }
+  } finally {
+    if (Get-ScheduledTask -TaskPath $TaskPath -TaskName $name -ErrorAction SilentlyContinue) { Unregister-ScheduledTask -TaskPath $TaskPath -TaskName $name -Confirm:$false }
+  }
+  return -not (Test-Path -LiteralPath $target)
+}
+# -Action purge: run by Purge-AsUser's task, as the user (not elevated).
+function Purge {
+  Need-Job
+  $jd = Job-Dir
+  if ($Scope -eq "tmp") { Remove-Tree (Join-Path $jd "tmp") } else { Remove-Tree $jd }
 }
 
 function Start-Job-Task {
@@ -585,6 +631,8 @@ function Inner {
     "[$((Get-Date).ToString('o'))] inner failed: $_" | Out-File -LiteralPath $log -Append -Encoding UTF8
     $code = 99
   } finally {
+    # this task runs as the user: it deletes its own TEMP (never an elevated session)
+    try { Remove-Tree (Join-Path $jd "tmp") } catch { "tmp not removed: $_" | Out-File -LiteralPath $log -Append -Encoding UTF8 }
     if ($spec -and $spec.restoreAtEnd) {
       try { $a = Restore-Power (Read-State); "[$((Get-Date).ToString('o'))] power restored: $a" | Out-File -LiteralPath $log -Append -Encoding UTF8 } catch { "power restore failed: $_" | Out-File -LiteralPath $log -Append -Encoding UTF8 }
     }
@@ -626,8 +674,16 @@ function Uninstall {
   if ((Active-Scheme) -eq $KitScheme -or (All-Schemes | Where-Object { $_ -eq $KitScheme })) { throw "the kit's power scheme exists: restore first" }
   $procs = @(Kit-Processes)
   if ($procs.Count) { throw "kit processes running: $(($procs | ForEach-Object { "$($_.name) $($_.pid)" }) -join ', ')" }
-  try { $svc = New-Object -ComObject Schedule.Service; $svc.Connect(); $svc.GetFolder("\").DeleteFolder("SalonKit", 0) } catch {}
   if ($KitDir -notmatch '^[A-Za-z]:\\salon-kit$') { throw "refused: -KitDir $KitDir is not <drive>:\salon-kit" }
+  # the job folders (user-writable) by the user's own purge task; this
+  # elevated session then deletes only what only administrators could write
+  $jobs = Join-Path $KitDir "jobs"
+  foreach ($j in @(Get-ChildItem -LiteralPath $jobs -Force -ErrorAction SilentlyContinue)) {
+    if ($j.Name -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$') { throw "unexpected entry in jobs: $($j.Name)" }
+    if (-not (Purge-AsUser $j.Name "all")) { throw "jobs\$($j.Name) could not be removed as the user (log on at the PC and retry)" }
+  }
+  if (Test-Path -LiteralPath $jobs) { [IO.Directory]::Delete($jobs, $false) }
+  try { $svc = New-Object -ComObject Schedule.Service; $svc.Connect(); $svc.GetFolder("\").DeleteFolder("SalonKit", 0) } catch {}
   Remove-Tree $KitDir
   Out-Result ([ordered]@{ action = "uninstall"; kitDir = $KitDir; removed = -not (Test-Path -LiteralPath $KitDir) })
 }
@@ -644,6 +700,7 @@ switch ($Action) {
   "sampler" { Sampler }
   "uninstall" { Uninstall }
   "cleanup" { Cleanup }
+  "purge" { Purge }
   "stat" { $i = Get-Item -LiteralPath $Path -ErrorAction SilentlyContinue; Out-Result ([ordered]@{ action = "stat"; path = $Path; exists = [bool]$i; bytes = $(if ($i) { $i.Length } else { $null }) }) }
   "affinity" { Out-Result ([ordered]@{ action = "affinity"; coreMap = @(Core-Map); classAffinity = (Class-Affinity $Cores) }) }
 }
