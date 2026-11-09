@@ -116,8 +116,9 @@ export function simulatedPc({ cpu = "13th Gen Intel(R) Core(TM) i9-13900K", log 
           if (before) st.active = before.activeScheme;
           st.schemes = st.schemes.filter((s) => s !== KIT_SCHEME);
           st.tasks = st.tasks.filter((t) => t !== job);
-          return reply({ action, job, before, after: { activeScheme: st.active, schemes: [...st.schemes], processor: structuredClone(proc), tasks: [...st.tasks] }, killed: [], warnings: [] });
+          return reply({ action, job, before, after: { activeScheme: st.active, schemes: [...st.schemes], processor: structuredClone(proc), tasks: [...st.tasks], kitProcesses: [], jobProcesses: [], jobTmp: false }, killed: [], warnings: [] });
         }
+        case "uninstall": return st.tasks.length || st.schemes.includes(KIT_SCHEME) ? { status: 1, out: "", err: "restore first" } : reply({ action, kitDir: KIT_DIR, removed: true });
         default: return { status: 0, out: "", err: "" }; // mkdir, expand, npm: nothing to answer
       }
     },
@@ -187,6 +188,7 @@ export function setup(t, { tmp, engine, dry }) {
     if (!dry && tgz.some((f) => !existsSync(path.join(tmp, f)))) execFileSync("npm", ["pack", `playwright-core@${PLAYWRIGHT_VERSION}`, `playwright@${PLAYWRIGHT_VERSION}`, "--silent"], { cwd: tmp, stdio: ["ignore", "ignore", "inherit"] });
     for (const f of tgz) t.put(path.join(tmp, f), W(KIT_DIR, f));
     ps(t, [`$env:PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = '1'; $env:Path = ${psQuote(W(KIT_DIR, "node"))} + ';' + $env:Path`,
+      `$env:npm_config_cache = ${psQuote(W(KIT_DIR, "npm-cache"))}; $env:TEMP = ${psQuote(W(KIT_DIR, "npm-tmp"))}; $env:TMP = $env:TEMP; New-Item -ItemType Directory -Force -Path $env:TEMP | Out-Null`,
       `New-Item -ItemType Directory -Force -Path ${psQuote(W(KIT_DIR, "pw"))} | Out-Null`,
       `& ${psQuote(W(KIT_DIR, "node", "npm.cmd"))} install --prefix ${psQuote(W(KIT_DIR, "pw"))} --no-audit --no-fund --offline ${tgz.map((f) => psQuote(W(KIT_DIR, f))).join(" ")}`,
       `if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }`].join("; "));
@@ -225,12 +227,14 @@ export function jobSpec({ harnessDir, steps, affinity, env = {} }) {
   };
 }
 const channelOf = (b) => ({ chrome: "chrome", edge: "msedge", msedge: "msedge" })[b] ?? (() => { throw new Error(`--browser ${b}: chrome or msedge`); })();
-const benchStep = (name, browser, jobDir, extra = {}) => ({ name, env: { HARNESS_BROWSER_CHANNEL: channelOf(browser), ...(extra.env ?? {}) }, continueOnError: extra.continueOnError, args: ["harness/probes/pc-bench.mjs", "--runs", "3", "--out", W(jobDir, `${name}.json`)] });
+// The bench runs on the game's origin (http://127.0.0.1:JOB_PORT, the engine
+// tree served): Edge's enhanced security is decided per site.
+const benchStep = (name, browser, jobDir, extra = {}) => ({ name, env: { HARNESS_BROWSER_CHANNEL: channelOf(browser), ...(extra.env ?? {}) }, continueOnError: extra.continueOnError, args: ["harness/probes/pc-bench.mjs", "--runs", "3", "--port", String(JOB_PORT), ...(extra.root ? ["--root", extra.root] : []), "--out", W(jobDir, `${name}.json`)] });
 // The benches of a job's start (or end): every browser, plus Chrome with the
 // optimizer off, the Liftoff reference classifyJit needs.
-export const benchSteps = (prefix, browsers, jobDir) => [
-  ...browsers.map((b) => benchStep(`${prefix}-${channelOf(b)}`, b, jobDir, { continueOnError: true })),
-  benchStep(`${prefix}-chrome-liftoff`, "chrome", jobDir, { continueOnError: true, env: { HARNESS_CHROME_ARGS: LIFTOFF_FLAGS } })
+export const benchSteps = (prefix, browsers, jobDir, root = null) => [
+  ...browsers.map((b) => benchStep(`${prefix}-${channelOf(b)}`, b, jobDir, { continueOnError: true, root })),
+  benchStep(`${prefix}-chrome-liftoff`, "chrome", jobDir, { continueOnError: true, root, env: { HARNESS_CHROME_ARGS: LIFTOFF_FLAGS } })
 ];
 // A job's benches read together: score, the hold against the target, the
 // JIT verdict of each against its group's Chrome and Liftoff references.
@@ -262,14 +266,31 @@ export function benchFindings(benches, target) {
 
 // The parcours steps: one run per call, interleaved run by run over the
 // browsers and the scenes (a drift touches every cell alike, as J1a did).
+// The origin every page of a job is served from (Edge decides enhanced
+// security per site: the bench must run where the game runs).
+export const JOB_PORT = 8301;
+// A parcours run's ceiling (parcours --max-sec) and the task's (salon-pc.ps1
+// $TaskHours): a job that could outlast it is refused before it starts.
+export const PARCOURS_MAX_SEC = 1200;
+export const TASK_HOURS = 8;
+export const stepCeilingSec = (step) => (/^parcours-/.test(step.name) ? PARCOURS_MAX_SEC + 180 : /calibrate/.test(step.name) ? 1800 : 300);
+export function assertFitsTask(steps, hours = TASK_HOURS) {
+  const sec = steps.reduce((a, st) => a + stepCeilingSec(st), 0);
+  if (sec > hours * 3600 * 0.9) throw new Error(`${steps.length} steps could last ${Math.round(sec / 60)} min, over the task's ${hours} h: split the series (fewer --runs per job)`);
+  return sec;
+}
+// One run per call; each round visits every browser and scene, and the
+// order flips round by round (A B / B A), browsers and scenes alike, so a
+// drift or a warm-up touches every cell alike.
 export function parcoursSteps({ jobDir, iso, films, browsers, runs, query, engineDir }) {
   const steps = [];
   for (let i = 1; i <= runs; i += 1) {
-    for (const b of browsers) {
-      for (const [scene, film] of Object.entries(films)) {
+    const flip = (xs) => (i % 2 ? xs : [...xs].reverse());
+    for (const b of flip(browsers)) {
+      for (const [scene, film] of flip(Object.entries(films))) {
         steps.push({
           name: `parcours-${scene}-${channelOf(b)}-${i}`, continueOnError: true, env: { HARNESS_BROWSER_CHANNEL: channelOf(b) },
-          args: ["harness/probes/parcours.mjs", "--iso", iso, "--film", film, "--port", "8301", "--runs", "1", "--no-lock", "--candidate", engineDir, "--query", query, "--sampler-rows", "--out", W(jobDir, `parcours-${scene}-${channelOf(b)}-${i}`)]
+          args: ["harness/probes/parcours.mjs", "--iso", iso, "--film", film, "--port", String(JOB_PORT), "--runs", "1", "--no-lock", "--max-sec", String(PARCOURS_MAX_SEC), "--candidate", engineDir, "--query", query, "--sampler-rows", "--out", W(jobDir, `parcours-${scene}-${channelOf(b)}-${i}`)]
         });
       }
     }
@@ -279,12 +300,29 @@ export function parcoursSteps({ jobDir, iso, films, browsers, runs, query, engin
 
 // A job's life: snapshot, clamp, spec, the task, polling, fetch, restore
 // and the check that the machine is as before. Always restores.
+// Status polls that may fail in a row (a network blip) before the job is
+// given up, and restored (which stops it first).
+export const POLL_FAILURES_MAX = 10;
+// The job whose restore a Ctrl-C or a SIGTERM must run.
+let liveJob = null;
+export function installSignalRestore(t, log = console.error) {
+  for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+    process.once(sig, () => {
+      if (liveJob) {
+        log(`[pc-run] ${sig}: stopping and restoring job ${liveJob}`);
+        try { const r = kit(t, "restore", { Job: liveJob }); const d = restoreDiff(r.before, r.after, liveJob); log(d.length ? `[pc-run] RESTORE DIFFERS: ${d.join("; ")}` : "[pc-run] machine restored"); } catch (e) { log(`[pc-run] restore failed (${e.message}): run pc-run.mjs restore --job ${liveJob}; the PC also restores at its next logon`); }
+      }
+      process.exit(130);
+    });
+  }
+}
 export async function runJob(t, { job, steps, affinity, clamp, outDir, env = {}, harnessDir, poll = POLL_SEC, sleep = (s) => new Promise((r) => setTimeout(r, s * 1000)), log = console.error }) {
   const jobDir = W(KIT_DIR, "jobs", job);
   const local = path.join(outDir, job);
   mkdirSync(local, { recursive: true });
-  const record = { job, started: new Date().toISOString(), clamp: clamp ?? null, affinity };
+  const record = { job, started: new Date().toISOString(), clamp: clamp ?? null, affinity, ceilingSec: assertFitsTask(steps) };
   let restore = null;
+  liveJob = job;
   try {
     record.snapshot = kit(t, "snapshot", { Job: job }).state;
     if (clamp) record.clamped = kit(t, "clamp", { Job: job, MaxMhz: clamp.maxMhz ?? 0, StatePct: clamp.statePct ?? 0, BoostMode: clamp.boostMode ?? -1 });
@@ -294,16 +332,36 @@ export async function runJob(t, { job, steps, affinity, clamp, outDir, env = {},
     t.put(path.join(local, "spec.json"), W(jobDir, "spec.json"));
     record.start = kit(t, "start", { Job: job });
     const shown = new Set();
+    let failures = 0;
+    const deadline = Date.now() + (record.ceilingSec + 600) * 1000;
     for (;;) {
-      const s = kit(t, "status", { Job: job });
+      let s;
+      try {
+        s = kit(t, "status", { Job: job });
+        failures = 0;
+      } catch (e) {
+        failures += 1;
+        log(`[pc-run] status failed (${failures}/${POLL_FAILURES_MAX}): ${e.message}`);
+        if (failures >= POLL_FAILURES_MAX) throw new Error(`job ${job}: no status for ${failures} polls in a row`);
+        await sleep(poll);
+        continue;
+      }
       for (const l of s.logTail ?? []) if (!shown.has(l)) { shown.add(l); log(`[pc] ${l}`); }
       if (s.state === "done") { record.exit = s.exit; break; }
       if (s.state === "missing") throw new Error(`job ${job}: the task is gone and left no exit`);
+      if (s.state === "dead") throw new Error(`job ${job}: the task stopped without an exit (time limit, logoff, crash)`);
+      if (Date.now() > deadline) throw new Error(`job ${job}: past its ceiling of ${Math.round(record.ceilingSec / 60)} min`);
       await sleep(poll);
     }
     t.getDir(jobDir, outDir);
   } finally {
-    restore = kit(t, "restore", { Job: job });
+    liveJob = null;
+    try {
+      restore = kit(t, "restore", { Job: job });
+    } catch (e) {
+      log(`[pc-run] RESTORE FAILED (${e.message}): run pc-run.mjs restore --job ${job} as soon as the PC answers; the PC restores this job itself at its next logon`);
+      throw e;
+    }
     record.restore = { after: restore.after, warnings: restore.warnings, killed: restore.killed, diff: restoreDiff(restore.before, restore.after, job) };
     writeFileSync(path.join(local, "kit-record.json"), JSON.stringify(record, null, 1) + "\n");
     if (record.restore.diff.length) log(`[pc-run] RESTORE DIFFERS: ${record.restore.diff.join("; ")}`);
@@ -393,11 +451,12 @@ async function main() {
     }
   });
   const cmd = positionals[0];
-  const cmds = ["check", "setup", "smoke", "calibrate", "bench", "run", "all", "status", "fetch", "restore"];
+  const cmds = ["check", "setup", "smoke", "calibrate", "bench", "run", "all", "status", "fetch", "restore", "uninstall"];
   if (!cmds.includes(cmd) || !values.host) throw new Error(`usage: pc-run.mjs <${cmds.join("|")}> --host <ssh host> [options] (header of this file)`);
   const log = (m) => console.error(m);
   const dry = values["dry-run"];
   const t = dry ? simulatedPc({ log }) : sshTransport(values.host, { log });
+  installSignalRestore(t, log);
   const jobBase = process.env.CLAUDE_JOB_DIR ? path.join(process.env.CLAUDE_JOB_DIR, "pc-kit") : path.join(REPO, "..", "measures", "pc-kit");
   const outDir = path.resolve(values.out ?? jobBase);
   const tmp = path.join(outDir, "cache");
@@ -411,6 +470,7 @@ async function main() {
 
   if (cmd === "status") return console.log(JSON.stringify(kit(t, "status", { Job: job }), null, 1));
   if (cmd === "restore") { const r = kit(t, "restore", { Job: job }); const d = restoreDiff(r.before, r.after, job); console.log(d.length ? `restore differs: ${d.join("; ")}` : "restored"); return void (process.exitCode = d.length ? 1 : 0); }
+  if (cmd === "uninstall") { console.log(JSON.stringify(kit(t, "uninstall"))); return; }
   if (cmd === "fetch") { t.getDir(W(KIT_DIR, "jobs", job), outDir); console.log(jobReport(path.join(outDir, job))); return; }
 
   const pre = check(t, { iso: values.iso ?? null, browsers: browsers.map(channelOf), cores: Number(values.cores) });
@@ -434,22 +494,22 @@ async function main() {
 
   if (cmd === "smoke") {
     const steps = [
-      { name: "webgpu-adapter", continueOnError: true, args: ["harness/probes/webgpu-adapter.mjs", "--port", "8301", "--no-unsafe-webgpu", "--expect", "adapter", "--out", W(jobDir(job), "webgpu-adapter.json")] },
-      ...benchSteps("bench", browsers, jobDir(job))
+      { name: "webgpu-adapter", continueOnError: true, args: ["harness/probes/webgpu-adapter.mjs", "--port", String(JOB_PORT), "--no-unsafe-webgpu", "--expect", "adapter", "--out", W(jobDir(job), "webgpu-adapter.json")] },
+      ...benchSteps("bench", browsers, jobDir(job), st.trees.engine.dest)
     ];
     if (values.homebrew) {
       assertSendable(path.resolve(values.homebrew), { homebrewDirs: [path.join(REPO, "harness", "homebrew", "out")] });
       t.put(path.resolve(values.homebrew), W(KIT_DIR, "films", path.basename(values.homebrew)));
-      steps.push({ name: "presenter-homebrew", continueOnError: true, args: ["harness/probes/presenter-check.mjs", "--iso", W(KIT_DIR, "films", path.basename(values.homebrew)), "--port", "8301", "--query", "core=upstream&video=wgpu&presenter=webgpu&cpu=dual&speed=1", "--out", W(jobDir(job), "presenter-homebrew.json")] });
+      steps.push({ name: "presenter-homebrew", continueOnError: true, args: ["harness/probes/presenter-check.mjs", "--iso", W(KIT_DIR, "films", path.basename(values.homebrew)), "--port", String(JOB_PORT), "--query", "core=upstream&video=wgpu&presenter=webgpu&cpu=dual&speed=1", "--out", W(jobDir(job), "presenter-homebrew.json")] });
     }
     await go(job, steps, null);
     return;
   }
-  if (cmd === "bench") return void (await go(job, browsers.map((b) => benchStep(`bench-${channelOf(b)}`, b, jobDir(job))), clampOf(values)));
+  if (cmd === "bench") return void (await go(job, benchSteps("bench", browsers, jobDir(job), st.trees.engine.dest), clampOf(values)));
 
   const calibrateJob = async (j) => {
     const hostGb6 = values["host-gb6"] ?? (gb6Of(pre.check.cpu?.name ?? "") ? null : (() => { throw new Error(`${pre.check.cpu?.name}: not in the public table, pass --host-gb6 N (with its source)`); })());
-    await go(j, [{ name: "calibrate", env: { HARNESS_BROWSER_CHANNEL: channelOf(browsers[0]) }, args: ["harness/remote/pc-win/pc-calibrate.mjs", "--job", j, "--out", W(jobDir(j), "calibration.json"), ...(hostGb6 ? ["--host-gb6", String(hostGb6)] : [])] }], { maxMhz: 0 });
+    await go(j, [{ name: "calibrate", env: { HARNESS_BROWSER_CHANNEL: channelOf(browsers[0]) }, args: ["harness/remote/pc-win/pc-calibrate.mjs", "--job", j, "--port", String(JOB_PORT), "--root", st.trees.engine.dest, "--out", W(jobDir(j), "calibration.json"), ...(hostGb6 ? ["--host-gb6", String(hostGb6)] : [])] }], { maxMhz: 0 });
     return path.join(outDir, j, "calibration.json");
   };
   if (cmd === "calibrate") return void (await calibrateJob(job));
@@ -468,9 +528,9 @@ async function main() {
     ? clampOf({ calibration: await calibrateJob(`${job}-cal`) })
     : clampOf(values);
   const steps = [
-    ...benchSteps("bench-pre", browsers, jobDir(job)),
+    ...benchSteps("bench-pre", browsers, jobDir(job), st.trees.engine.dest),
     ...parcoursSteps({ jobDir: jobDir(job), iso: values.iso, films, browsers, runs: Number(values.runs), query: values.query, engineDir: st.trees.engine.dest }),
-    ...benchSteps("bench-post", browsers, jobDir(job))
+    ...benchSteps("bench-post", browsers, jobDir(job), st.trees.engine.dest)
   ];
   await go(job, steps, clamp);
 }

@@ -8,8 +8,16 @@
 #   - a power scheme with the fixed GUID $KitScheme, a copy of the scheme
 #     that was active, carrying the CPU clamp; the original is re-activated
 #     and the copy deleted on restore (the user's schemes are never edited);
-#   - scheduled tasks under \SalonKit\ (one per job, removed on restore);
-#   - files under $KitDir only.
+#   - scheduled tasks under \SalonKit\: the job's own, and while a clamp is
+#     on, restore-<job> (at logon: a reboot or a lost Mac never leaves the
+#     clamp on past the next session); both removed on restore;
+#   - files under $KitDir only: the job's TEMP/TMP (browser profiles,
+#     Playwright's files) is $KitDir\jobs\<job>\tmp, deleted on restore.
+# restore stops the job first (stop file, task stopped, the job's processes
+# killed: those it wrote down by pid and start time, and every process whose
+# command line holds the job's folder, i.e. its browsers), then puts the
+# power scheme back. No administrator right is needed by design (powercfg on
+# one's own schemes, tasks for one's own logon); to confirm on the PC.
 # The core-count clamp is a process affinity of the job's own process tree
 # (inherited by node and the browser it starts): nothing to undo.
 #
@@ -23,7 +31,7 @@
 # -ExecutionPolicy Bypass on the command line holds for this process only.
 
 param(
-  [Parameter(Mandatory = $true)][ValidateSet("check", "snapshot", "clamp", "unclamp", "restore", "start", "status", "inner", "sampler", "affinity", "stat")][string]$Action,
+  [Parameter(Mandatory = $true)][ValidateSet("check", "snapshot", "clamp", "unclamp", "restore", "start", "status", "inner", "sampler", "affinity", "stat", "uninstall")][string]$Action,
   [string]$Job = "",
   [int]$MaxMhz = 0,
   [int]$StatePct = 0,
@@ -49,6 +57,9 @@ $Settings = [ordered]@{
   PERFBOOSTMODE   = "be337238-0d82-4146-a960-4f3749d470c7"   # processor performance boost mode (0 = disabled)
 }
 $TaskPath = "\SalonKit\"
+# A job's task is stopped by Windows past this; pc-run refuses a job whose
+# steps could last longer (parcours --max-sec per run, benches).
+$TaskHours = 8
 
 function Out-Result($obj) {
   Write-Output ("SALONKIT-JSON " + ($obj | ConvertTo-Json -Depth 8 -Compress))
@@ -164,7 +175,7 @@ function Reg-Policies($path) {
 
 # Busy CPU of the machine and the processes using it, over $sec seconds
 # (CPU time deltas: locale-independent, unlike the perf counters' names).
-function Cpu-Busy([int]$sec = 3, [string[]]$exclude = @()) {
+function Cpu-Busy([int]$sec = 3, [string[]]$exclude = @(), [int[]]$excludePids = @()) {
   $a = @{}; foreach ($p in Get-Process) { try { $a[$p.Id] = $p.TotalProcessorTime.TotalMilliseconds } catch {} }
   $t0 = Get-Date
   Start-Sleep -Seconds $sec
@@ -177,7 +188,7 @@ function Cpu-Busy([int]$sec = 3, [string[]]$exclude = @()) {
       if ($d -gt 0) { $rows += [pscustomobject]@{ name = $p.ProcessName; pid = $p.Id; pct = [math]::Round(100 * $d / $wall, 1) } }
     } catch {}
   }
-  $others = @($rows | Where-Object { $exclude -notcontains $_.name })
+  $others = @($rows | Where-Object { $exclude -notcontains $_.name -and $excludePids -notcontains $_.pid })
   $sum = ($others | Measure-Object -Property pct -Sum).Sum
   if (-not $sum) { $sum = 0 }
   return [ordered]@{ seconds = $sec; otherPctOfOneCore = [math]::Round($sum, 1); top = @($others | Sort-Object pct -Descending | Select-Object -First 5) }
@@ -247,6 +258,8 @@ function Snapshot {
     job = $Job; at = (Get-Date).ToString("o"); activeScheme = $active; schemes = @(All-Schemes)
     processor = Processor-Settings $active
     tasks = @(Get-ScheduledTask -TaskPath $TaskPath -ErrorAction SilentlyContinue | ForEach-Object { $_.TaskName })
+    kitProcesses = @(Kit-Processes)
+    kitFiles = @(Get-ChildItem -LiteralPath $KitDir -Force -ErrorAction SilentlyContinue | ForEach-Object { [string]$_.Name } | Sort-Object)
   }
   ($state | ConvertTo-Json -Depth 8) | Set-Content -LiteralPath $sf -Encoding UTF8
   Out-Result ([ordered]@{ action = "snapshot"; job = $Job; existing = $false; state = $state })
@@ -283,6 +296,13 @@ function Clamp {
     $applied.PROCTHROTTLEMAX1 = Set-Index $KitScheme "PROCTHROTTLEMAX1" $StatePct
   }
   if ($BoostMode -ge 0) { $applied.PERFBOOSTMODE = Set-Index $KitScheme "PERFBOOSTMODE" $BoostMode }
+  # first the way back: at the next logon, restore this job (a reboot, a
+  # crash or a lost Mac never leaves the clamp on past it)
+  $arg = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$PSCommandPath`" -Action restore -Job $Job -KitDir `"$KitDir`""
+  $act = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $arg
+  $trg = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
+  $prin = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
+  Register-ScheduledTask -TaskPath $TaskPath -TaskName "restore-$Job" -Action $act -Trigger $trg -Principal $prin -Force | Out-Null
   & powercfg /setactive $KitScheme | Out-Null
   $now = Active-Scheme
   if ($now -ne $KitScheme) { throw "the kit's scheme did not become active (active: $now)" }
@@ -293,7 +313,8 @@ function Clamp {
 function Restore-Power($state) {
   $target = $Balanced
   if ($state) { $target = $state.activeScheme }
-  if (-not (All-Schemes | Where-Object { $_ -eq $target })) { throw "the snapshot's scheme $target no longer exists" }
+  # the snapshot's scheme gone (deleted meanwhile): Balanced, which always exists
+  if (-not (All-Schemes | Where-Object { $_ -eq $target })) { $target = $Balanced }
   if ((Active-Scheme) -ne $target) { & powercfg /setactive $target | Out-Null }
   if (All-Schemes | Where-Object { $_ -eq $KitScheme }) { & powercfg /delete $KitScheme | Out-Null }
   return Active-Scheme
@@ -310,20 +331,69 @@ function Restore {
   $state = $null; $warn = @()
   try { $state = Read-State } catch { $warn += "no snapshot: the Balanced scheme is activated if the kit's was active" }
   $jd = Job-Dir
-  # the job's processes only: a pid it wrote down AND that process's start
-  # time (Windows reuses pids at once: a pid alone once named the CI step's
-  # own shell); one process each, never its tree
+  # 1. stop the job: the stop file (inner runs no further step), the task
+  # stopped, then its processes killed: those written down (pid AND start
+  # time: Windows reuses pids at once, a pid alone once named the CI step's
+  # own shell) and every process whose command line holds the job's folder
+  # (its browsers and their helpers; Baptiste's own browser never does)
   $killed = @()
-  foreach ($f in @("node.pid", "sampler.pid")) {
+  if (Test-Path -LiteralPath $jd) { "stop $((Get-Date).ToString('o'))" | Set-Content -LiteralPath (Join-Path $jd "stop") }
+  $task = Get-ScheduledTask -TaskPath $TaskPath -TaskName $Job -ErrorAction SilentlyContinue
+  if ($task) { Stop-ScheduledTask -TaskPath $TaskPath -TaskName $Job -ErrorAction SilentlyContinue }
+  foreach ($f in @("inner.pid", "node.pid", "sampler.pid")) {
     $p = Read-PidFile (Join-Path $jd $f)
     if ($p) { try { $p.Kill(); $killed += $p.Id } catch {} }
   }
-  $task = Get-ScheduledTask -TaskPath $TaskPath -TaskName $Job -ErrorAction SilentlyContinue
-  if ($task) { Unregister-ScheduledTask -TaskPath $TaskPath -TaskName $Job -Confirm:$false }
+  for ($round = 0; $round -lt 5; $round++) {
+    $left = @(Job-Processes $jd)
+    if (-not $left.Count) { break }
+    foreach ($q in $left) { try { Stop-Process -Id $q.ProcessId -Force -ErrorAction Stop; $killed += $q.ProcessId } catch {} }
+    Start-Sleep -Milliseconds 500
+  }
+  $stillRunning = @(Job-Processes $jd | ForEach-Object { [ordered]@{ pid = $_.ProcessId; name = $_.Name } })
+  if ($stillRunning.Count) { $warn += "processes of the job still running: $(($stillRunning | ForEach-Object { "$($_.name) $($_.pid)" }) -join ', ')" }
+  foreach ($n in @($Job, "restore-$Job")) {
+    if (Get-ScheduledTask -TaskPath $TaskPath -TaskName $n -ErrorAction SilentlyContinue) { Unregister-ScheduledTask -TaskPath $TaskPath -TaskName $n -Confirm:$false }
+  }
+  # 2. the job's TEMP (browser profiles, Playwright's files)
+  $tmp = Join-Path $jd "tmp"
+  if (Test-Path -LiteralPath $tmp) { try { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction Stop } catch { $warn += "job tmp not fully removed: $_" } }
   if ($state -or (Active-Scheme) -eq $KitScheme -or (All-Schemes | Where-Object { $_ -eq $KitScheme })) { $active = Restore-Power $state } else { $active = Active-Scheme }
-  $after = [ordered]@{ activeScheme = $active; schemes = @(All-Schemes); processor = Processor-Settings $active; tasks = @(Get-ScheduledTask -TaskPath $TaskPath -ErrorAction SilentlyContinue | ForEach-Object { $_.TaskName }) }
-  # a job's profiles are throwaway (the browser's own profile dirs live under the job dir)
-  Out-Result ([ordered]@{ action = "restore"; job = $Job; before = $state; after = $after; killed = $killed; warnings = $warn })
+  $after = [ordered]@{
+    activeScheme = $active; schemes = @(All-Schemes); processor = Processor-Settings $active
+    tasks = @(Get-ScheduledTask -TaskPath $TaskPath -ErrorAction SilentlyContinue | ForEach-Object { $_.TaskName })
+    kitProcesses = @(Kit-Processes); jobProcesses = $stillRunning; jobTmp = (Test-Path -LiteralPath $tmp)
+  }
+  Out-Result ([ordered]@{ action = "restore"; job = $Job; before = $state; after = $after; killed = @($killed | Select-Object -Unique); warnings = $warn })
+}
+
+# Every process whose command line holds the job's folder (its browsers and
+# their helpers, its node), never this script's own (restore, status).
+# Their descendants too (a browser helper without the folder on its line).
+function Job-Processes([string]$jd) {
+  $me = $PID
+  $all = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+  $ids = @{}
+  foreach ($q in $all) {
+    if ($q.CommandLine -and $q.CommandLine.IndexOf($jd, [StringComparison]::OrdinalIgnoreCase) -ge 0 -and $q.ProcessId -ne $me -and $q.CommandLine -notmatch 'salon-pc\.ps1') { $ids[[int]$q.ProcessId] = $true }
+  }
+  # a child is born after its parent (else the parent pid was reused)
+  $born = @{}; foreach ($q in $all) { $born[[int]$q.ProcessId] = $q.CreationDate }
+  do {
+    $grew = $false
+    foreach ($q in $all) {
+      $pp = [int]$q.ParentProcessId
+      if (-not $ids.ContainsKey([int]$q.ProcessId) -and $ids.ContainsKey($pp) -and $q.ProcessId -ne $me -and $q.CreationDate -ge $born[$pp]) { $ids[[int]$q.ProcessId] = $true; $grew = $true }
+    }
+  } while ($grew)
+  @($all | Where-Object { $ids.ContainsKey([int]$_.ProcessId) })
+}
+# Any process of the kit at all (command line under $KitDir, not this script).
+function Kit-Processes {
+  $me = $PID
+  @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+    $_.CommandLine -and $_.CommandLine.IndexOf($KitDir, [StringComparison]::OrdinalIgnoreCase) -ge 0 -and $_.ProcessId -ne $me -and $_.CommandLine -notmatch 'salon-pc\.ps1 .*-Action (restore|status|check|snapshot|uninstall)'
+  } | ForEach-Object { [ordered]@{ pid = $_.ProcessId; name = $_.Name } })
 }
 
 # "pid start-time-ticks": a process is the job's only if both match.
@@ -344,14 +414,14 @@ function Start-Job-Task {
   Need-Job
   $jd = Job-Dir
   if (-not (Test-Path -LiteralPath (Join-Path $jd "spec.json"))) { throw "no $jd\spec.json (pc-run.mjs writes it)" }
-  foreach ($f in @("exit", "log", "node.pid")) { $p = Join-Path $jd $f; if (Test-Path -LiteralPath $p) { throw "job $Job ran already ($p): use a new job id" } }
+  foreach ($f in @("exit", "log", "node.pid", "stop")) { $p = Join-Path $jd $f; if (Test-Path -LiteralPath $p) { throw "job $Job ran already ($p): use a new job id" } }
   $self = $PSCommandPath
   $arg = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$self`" -Action inner -Job $Job -KitDir `"$KitDir`""
   $act = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $arg -WorkingDirectory $jd
   # Interactive: runs in the logged-on user's desktop session (a browser
   # started from the ssh session would have no screen: session 0 has none).
   $prin = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
-  $set = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours 6) -MultipleInstances IgnoreNew
+  $set = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours $TaskHours) -MultipleInstances IgnoreNew
   Register-ScheduledTask -TaskPath $TaskPath -TaskName $Job -Action $act -Principal $prin -Settings $set -Force | Out-Null
   Start-ScheduledTask -TaskPath $TaskPath -TaskName $Job
   Start-Sleep -Seconds 3
@@ -373,7 +443,20 @@ function Status {
   # ConvertTo-Json -Depth 8 walks for minutes (CI windows-2025)
   if (Test-Path -LiteralPath (Join-Path $jd "log")) { $tail = @(Get-Content -LiteralPath (Join-Path $jd "log") -Tail 15 | ForEach-Object { [string]$_ }) }
   $task = Get-ScheduledTask -TaskPath $TaskPath -TaskName $Job -ErrorAction SilentlyContinue
-  $state = "missing"; if ($done) { $state = "done" } elseif ($task) { $state = "$($task.State)".ToLower() }
+  $inner = Read-PidFile (Join-Path $jd "inner.pid")
+  $state = "missing"
+  if ($done) { $state = "done" }
+  elseif ($task -and "$($task.State)" -eq "Running") { $state = "running" }
+  elseif ($inner) { $state = "running" }
+  elseif ($task -and (Test-Path -LiteralPath (Join-Path $jd "inner.pid"))) {
+    # the task ran, its inner is gone and wrote no exit: killed (time limit,
+    # logoff, crash). Never "ready" forever with the clamp on.
+    $state = "dead"
+  } elseif ($task) {
+    $info = Get-ScheduledTaskInfo -TaskPath $TaskPath -TaskName $Job -ErrorAction SilentlyContinue
+    $state = "queued"
+    if ($info -and $info.LastRunTime -and $info.LastRunTime.Year -gt 2000) { $state = "dead" }
+  }
   Out-Result ([ordered]@{ action = "status"; job = $Job; state = $state; exit = $exit; logTail = $tail })
 }
 
@@ -399,12 +482,20 @@ function Inner {
     # ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED, for this thread's life only
     [void][SalonKitAwake]::SetThreadExecutionState([uint32]2147483651)
     $me = [System.Diagnostics.Process]::GetCurrentProcess()
+    Write-PidFile (Join-Path $jd "inner.pid") $me
+    # everything the job writes stays in its folder: TEMP/TMP (browser
+    # profiles, Playwright), npm's cache
+    $tmp = Join-Path $jd "tmp"
+    New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+    foreach ($v in @("TEMP", "TMP")) { [Environment]::SetEnvironmentVariable($v, $tmp, "Process") }
+    [Environment]::SetEnvironmentVariable("npm_config_cache", (Join-Path $KitDir "npm-cache"), "Process")
     if ($spec.affinity) { $me.ProcessorAffinity = [IntPtr][Convert]::ToInt64($spec.affinity.Substring(2), 16) }
     "[$((Get-Date).ToString('o'))] job $Job, affinity $("0x{0:x}" -f $me.ProcessorAffinity.ToInt64()), session $($me.SessionId)" | Out-File -LiteralPath $log -Encoding UTF8
     $sampler = Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$PSCommandPath`" -Action sampler -Job $Job -KitDir `"$KitDir`"" -WindowStyle Hidden -PassThru
     Write-PidFile (Join-Path $jd "sampler.pid") $sampler
     $code = 0
     foreach ($step in $spec.steps) {
+      if (Test-Path -LiteralPath (Join-Path $jd "stop")) { "[$((Get-Date).ToString('o'))] stop file: no further step" | Out-File -LiteralPath $log -Append -Encoding UTF8; $code = 97; break }
       foreach ($p in $spec.env.PSObject.Properties) { [Environment]::SetEnvironmentVariable($p.Name, [string]$p.Value, "Process") }
       if ($step.env) { foreach ($p in $step.env.PSObject.Properties) { [Environment]::SetEnvironmentVariable($p.Name, [string]$p.Value, "Process") } }
       "[$((Get-Date).ToString('o'))] step $($step.name): node $($step.args -join ' ')" | Out-File -LiteralPath $log -Append -Encoding UTF8
@@ -440,10 +531,13 @@ function Sampler {
   Need-Job
   $jd = Job-Dir
   $csv = Join-Path $jd "sampler.jsonl"
-  $mine = @("node", "chrome", "msedge", "powershell", "conhost", "Idle")
   while (-not (Test-Path -LiteralPath (Join-Path $jd "exit"))) {
-    $b = Cpu-Busy 5 $mine
-    $aff = @(Get-Process -Name chrome, msedge -ErrorAction SilentlyContinue | Select-Object -First 1 | ForEach-Object { try { "0x{0:x}" -f $_.ProcessorAffinity.ToInt64() } catch { $null } })
+    # the job's own processes by command line (its browsers carry the job's
+    # profile folder): Baptiste's own Chrome counts as "other", as it should
+    $ours = @(Job-Processes $jd | ForEach-Object { [int]$_.ProcessId }) + @($PID)
+    foreach ($f in @("inner.pid", "node.pid")) { $q = Read-PidFile (Join-Path $jd $f); if ($q) { $ours += $q.Id } }
+    $b = Cpu-Busy 5 @("Idle") $ours
+    $aff = @(Get-Process -Id ($ours | Select-Object -Unique) -ErrorAction SilentlyContinue | Where-Object { @("chrome", "msedge") -contains $_.ProcessName } | Select-Object -First 1 | ForEach-Object { try { "0x{0:x}" -f $_.ProcessorAffinity.ToInt64() } catch { $null } })
     $eff = $null
     try {
       # the busiest core's effective clock: frequency x % performance (a
@@ -456,6 +550,20 @@ function Sampler {
   }
 }
 
+# C:\salon-kit and the \SalonKit\ task folder gone; refused while a job or a
+# clamp is on.
+function Uninstall {
+  $tasks = @(Get-ScheduledTask -TaskPath $TaskPath -ErrorAction SilentlyContinue | ForEach-Object { $_.TaskName })
+  if ($tasks.Count) { throw "kit tasks still registered ($($tasks -join ', ')): restore their jobs first" }
+  if ((Active-Scheme) -eq $KitScheme -or (All-Schemes | Where-Object { $_ -eq $KitScheme })) { throw "the kit's power scheme exists: restore first" }
+  $procs = @(Kit-Processes)
+  if ($procs.Count) { throw "kit processes running: $(($procs | ForEach-Object { "$($_.name) $($_.pid)" }) -join ', ')" }
+  try { $svc = New-Object -ComObject Schedule.Service; $svc.Connect(); $svc.GetFolder("\").DeleteFolder("SalonKit", 0) } catch {}
+  if ($KitDir -notmatch '^[A-Za-z]:\\salon-kit$') { throw "refused: -KitDir $KitDir is not <drive>:\salon-kit" }
+  if (Test-Path -LiteralPath $KitDir) { Remove-Item -LiteralPath $KitDir -Recurse -Force }
+  Out-Result ([ordered]@{ action = "uninstall"; kitDir = $KitDir; removed = -not (Test-Path -LiteralPath $KitDir) })
+}
+
 switch ($Action) {
   "check" { Check }
   "snapshot" { Snapshot }
@@ -466,6 +574,7 @@ switch ($Action) {
   "status" { Status }
   "inner" { Inner }
   "sampler" { Sampler }
+  "uninstall" { Uninstall }
   "stat" { $i = Get-Item -LiteralPath $Path -ErrorAction SilentlyContinue; Out-Result ([ordered]@{ action = "stat"; path = $Path; exists = [bool]$i; bytes = $(if ($i) { $i.Length } else { $null }) }) }
   "affinity" { Out-Result ([ordered]@{ action = "affinity"; coreMap = @(Core-Map); classAffinity = (Class-Affinity $Cores) }) }
 }

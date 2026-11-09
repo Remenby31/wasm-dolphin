@@ -14,7 +14,7 @@
 // (harness/remote/pc-calibrate.mjs). Also the page's state: rAF interval
 // (30 Hz = an energy saver), visibility, focus, the brand.
 //
-//   node harness/probes/pc-bench.mjs [--runs 3] [--warm-sec 4] [--out file.json]
+//   node harness/probes/pc-bench.mjs [--runs 3] [--warm-sec 4] [--port N [--root tree]] [--out file.json]
 //   HARNESS_BROWSER_CHANNEL=msedge HARNESS_DISPLAY=windows node harness/probes/pc-bench.mjs
 //
 // A timed run: on the Mac only under acquirePerfLock (never in tests).
@@ -24,7 +24,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 
-import { launchChrome } from "../lib/browser.mjs";
+import { ensureServer, launchChrome, REPO_ROOT } from "../lib/browser.mjs";
 import { median, round } from "../lib/stats.mjs";
 import { buildKernel, reference, SCORE_KERNELS, SHAPES } from "../lib/wasm-kernel.mjs";
 
@@ -149,7 +149,7 @@ async function pageState(page) {
   }));
 }
 
-export async function benchOnce({ warmSec = 4, log = () => {} } = {}) {
+export async function benchOnce({ warmSec = 4, url = "about:blank", log = () => {} } = {}) {
   const kernels = Object.fromEntries(Object.entries(SHAPES).map(([name, shape]) => [name, {
     b64: Buffer.from(buildKernel(shape)).toString("base64"), checkN: CHECK_N, expect: reference(shape, CHECK_N),
     cold: Array.from({ length: COLD_CALLS }, (_, i) => Buffer.from(buildKernel({ ...shape, seed: shape.seed + 1 + i })).toString("base64"))
@@ -159,7 +159,7 @@ export async function benchOnce({ warmSec = 4, log = () => {} } = {}) {
   try {
     await context.assertInvisible?.("after launch");
     const page = context.pages()[0] ?? (await context.newPage());
-    await page.goto("about:blank");
+    await page.goto(url);
     await page.bringToFront().catch(() => {});
     const state = await pageState(page);
     log(`page: ${state.visibility}, focus ${state.focus}, rAF p50 ${state.rafMs?.p50?.toFixed(1)} ms`);
@@ -195,17 +195,22 @@ export function summarizeRuns(runs) {
 }
 
 async function main() {
-  const { values } = parseArgs({ options: { runs: { type: "string", default: "3" }, "warm-sec": { type: "string", default: "4" }, out: { type: "string" } } });
+  const { values } = parseArgs({ options: { runs: { type: "string", default: "3" }, "warm-sec": { type: "string", default: "4" }, out: { type: "string" }, port: { type: "string" }, root: { type: "string" } } });
   const log = (m) => console.error(`[pc-bench] ${m}`);
+  // --port: the bench page on that origin (the tree --root served, as the
+  // game is): Edge decides enhanced security per site, about:blank is not
+  // the game's site. A static file of the tree, so no engine page runs.
+  const server = values.port ? await ensureServer({ port: Number(values.port), root: values.root ?? REPO_ROOT }) : null;
+  const url = server ? `${server.base}package.json` : "about:blank";
   const runs = [];
   for (let i = 0; i < Number(values.runs); i += 1) {
-    const r = await benchOnce({ warmSec: Number(values["warm-sec"]), log });
+    const r = await benchOnce({ warmSec: Number(values["warm-sec"]), url, log });
     log(`run ${i + 1}: score ${r.score}, ${Object.entries(r.kernels).map(([k, v]) => `${k} ${v.hotNs} ns (cold ${v.coldNs})`).join(", ")}`);
     runs.push(r);
   }
   const report = {
     probe: "pc-bench", benchVersion: BENCH_VERSION, at: new Date().toISOString(),
-    browser: { channel: process.env.HARNESS_BROWSER_CHANNEL || "chrome", path: process.env.HARNESS_CHROME_PATH || null, args: process.env.HARNESS_CHROME_ARGS || "", display: process.env.HARNESS_DISPLAY || "headless" },
+    url, browser: { channel: process.env.HARNESS_BROWSER_CHANNEL || "chrome", path: process.env.HARNESS_CHROME_PATH || null, args: process.env.HARNESS_CHROME_ARGS || "", display: process.env.HARNESS_DISPLAY || "headless" },
     machine: { platform: `${os.platform()} ${os.release()}`, cpuModel: os.cpus()[0]?.model ?? "", cpus: os.cpus().length },
     ...summarizeRuns(runs), perRun: runs
   };
@@ -214,5 +219,6 @@ async function main() {
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
-  main().catch((e) => { console.error(e); process.exit(1); });
+  // the server keeps node alive: exit explicitly
+  main().then(() => process.exit(0), (e) => { console.error(e); process.exit(1); });
 }

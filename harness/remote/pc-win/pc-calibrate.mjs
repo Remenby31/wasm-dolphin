@@ -78,7 +78,7 @@ function psClamp(job, { maxMhz = 0, statePct = 0, boostMode = -1 }) {
 }
 
 async function main() {
-  const { values } = parseArgs({ options: { job: { type: "string" }, out: { type: "string" }, "host-gb6": { type: "string" }, runs: { type: "string", default: "3" }, "warm-sec": { type: "string", default: "4" }, tol: { type: "string", default: "0.02" } } });
+  const { values } = parseArgs({ options: { job: { type: "string" }, out: { type: "string" }, "host-gb6": { type: "string" }, port: { type: "string" }, root: { type: "string" }, runs: { type: "string", default: "3" }, "warm-sec": { type: "string", default: "4" }, tol: { type: "string", default: "0.02" } } });
   if (!values.job || !values.out) throw new Error("usage: pc-calibrate.mjs --job ID --out calibration.json [--host-gb6 N]");
   const log = (m) => console.error(`[pc-calibrate] ${m}`);
   const cpu = os.cpus()[0]?.model ?? "";
@@ -86,9 +86,13 @@ async function main() {
   const hostGb6 = values["host-gb6"] ? Number(values["host-gb6"]) : known?.gb6;
   if (!(hostGb6 > 0)) throw new Error(`${cpu}: not in the public table, pass --host-gb6 <Geekbench 6 single-core average> (and cite it)`);
   const { benchOnce, summarizeRuns } = await import("../../probes/pc-bench.mjs");
+  // the bench on the game's origin, as in the job's own benches
+  const { ensureServer, REPO_ROOT } = await import("../../lib/browser.mjs");
+  const server = values.port ? await ensureServer({ port: Number(values.port), root: values.root ?? REPO_ROOT }) : null;
+  const url = server ? `${server.base}package.json` : "about:blank";
   const bench = async () => {
     const runs = [];
-    for (let i = 0; i < Number(values.runs); i += 1) runs.push(await benchOnce({ warmSec: Number(values["warm-sec"]), log }));
+    for (let i = 0; i < Number(values.runs); i += 1) runs.push(await benchOnce({ warmSec: Number(values["warm-sec"]), url, log }));
     const bad = runs.find((r) => r.state.visibility !== "visible" || (r.state.rafMs?.p50 ?? 0) >= 25);
     if (bad) throw new Error(`a bench run is not usable for calibration (${bad.state.visibility}, rAF ${bad.state.rafMs?.p50} ms): see the preflight`);
     return summarizeRuns(runs).score;
@@ -101,5 +105,5 @@ async function main() {
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
-  main().catch((e) => { console.error(e); process.exit(1); });
+  main().then(() => process.exit(process.exitCode ?? 0), (e) => { console.error(e); process.exit(1); });
 }

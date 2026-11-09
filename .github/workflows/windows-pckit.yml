@@ -143,6 +143,48 @@ jobs:
           if ($st -notmatch '"exit":0') { "the job did not exit 0"; exit 1 }
           if ((Get-Content "$k\jobs\ci2\hello.out") -ne "1") { "the spec's env did not reach the step"; exit 1 }
           if ((Get-Content "$k\jobs\ci2\log" -Raw) -notmatch 'session [1-9]') { "the task did not run in a user session"; exit 1 }
+      - name: Restore in the middle of a running job stops it (the step killed, no further step, task gone)
+        timeout-minutes: 4
+        shell: powershell
+        run: |
+          $k = "$env:RUNNER_TEMP\salon-kit"; $s = "$PWD\harness\remote\pc-win\salon-pc.ps1"
+          New-Item -ItemType Directory -Force -Path "$k\jobs\ci3" | Out-Null
+          @{ cwd = "$PWD"; affinity = $null; restoreAtEnd = $true; env = @{}; steps = @(
+            @{ name = "long"; args = @("-e", "setTimeout(() => {}, 600000)"); env = @{}; continueOnError = $true },
+            @{ name = "after"; args = @("-e", "console.log(2)"); env = @{}; continueOnError = $false }) } | ConvertTo-Json -Depth 5 | Set-Content -Encoding UTF8 "$k\jobs\ci3\spec.json"
+          powershell -NoProfile -ExecutionPolicy Bypass -File $s -Action snapshot -Job ci3 -KitDir $k | Select-Object -Last 1
+          powershell -NoProfile -ExecutionPolicy Bypass -File $s -Action clamp -Job ci3 -MaxMhz 2000 -KitDir $k | Select-Object -Last 1
+          powershell -NoProfile -ExecutionPolicy Bypass -File $s -Action start -Job ci3 -KitDir $k | Select-Object -Last 1
+          for ($i = 0; $i -lt 20 -and -not (Test-Path "$k\jobs\ci3\node.pid"); $i++) { Start-Sleep 1 }
+          Start-Sleep 2
+          $nodePid = [int]("$(Get-Content -Raw "$k\jobs\ci3\node.pid")".Trim() -split '\s+')[0]
+          "node of the job: $nodePid"
+          $r = powershell -NoProfile -ExecutionPolicy Bypass -File $s -Action restore -Job ci3 -KitDir $k | Select-Object -Last 1
+          $r
+          Start-Sleep 5
+          Get-Content "$k\jobs\ci3\log" -ErrorAction SilentlyContinue
+          if (Get-Process -Id $nodePid -ErrorAction SilentlyContinue) { "the job's node still runs"; exit 1 }
+          if (Test-Path "$k\jobs\ci3\after.out") { "a step ran after the stop"; exit 1 }
+          if (Get-ScheduledTask -TaskPath "\SalonKit\" -ErrorAction SilentlyContinue | Where-Object { $_.TaskName -match 'ci3' }) { "a ci3 task is still registered"; exit 1 }
+          if (((powercfg /getactivescheme) -join "") -match "5a10c0de") { "the clamp is still active"; exit 1 }
+          if ($r -notmatch '"jobTmp":false') { "the job TEMP was not removed"; exit 1 }
+      - name: The power round trip under a standard (non-admin) account (report only)
+        continue-on-error: true
+        timeout-minutes: 4
+        shell: powershell
+        run: |
+          $pw = "Kit-" + [guid]::NewGuid().ToString("N").Substring(0, 16) + "!a1"
+          $sec = ConvertTo-SecureString $pw -AsPlainText -Force
+          New-LocalUser -Name kitstd -Password $sec -AccountNeverExpires | Out-Null
+          $cred = New-Object System.Management.Automation.PSCredential("$env:COMPUTERNAME\kitstd", $sec)
+          $k = "C:\kitstd-kit"; New-Item -ItemType Directory -Force -Path $k | Out-Null
+          Copy-Item harness\remote\pc-win\salon-pc.ps1 "$k\salon-pc.ps1"
+          icacls $k /grant "kitstd:(OI)(CI)F" | Out-Null
+          $cmd = "& '$k\salon-pc.ps1' -Action snapshot -Job std1 -KitDir '$k' | Select-Object -Last 1; & '$k\salon-pc.ps1' -Action clamp -Job std1 -MaxMhz 2000 -KitDir '$k' 2>&1 | Select-Object -Last 1; & '$k\salon-pc.ps1' -Action restore -Job std1 -KitDir '$k' | Select-Object -Last 1"
+          $p = Start-Process powershell.exe -Credential $cred -LoadUserProfile -ArgumentList "-NoProfile -ExecutionPolicy Bypass -Command `"$cmd *> $k\out.txt`"" -WorkingDirectory $k -Wait -PassThru
+          "exit $($p.ExitCode)"
+          Get-Content "$k\out.txt" -ErrorAction SilentlyContinue
+          Remove-LocalUser -Name kitstd
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:

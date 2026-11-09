@@ -288,5 +288,11 @@ export function restoreDiff(before, after, job) {
   if (set(after.schemes) !== set(before.schemes)) d.push(`schemes ${set(after.schemes)}, were ${set(before.schemes)}`);
   if (JSON.stringify(after.processor) !== JSON.stringify(before.processor)) d.push(`processor settings ${JSON.stringify(after.processor)}, were ${JSON.stringify(before.processor)}`);
   if ((after.tasks ?? []).includes(job)) d.push(`scheduled task \\SalonKit\\${job} still registered`);
+  if ((after.tasks ?? []).includes(`restore-${job}`)) d.push(`scheduled task \\SalonKit\\restore-${job} still registered`);
+  if ((after.jobProcesses ?? []).length) d.push(`job processes still running: ${after.jobProcesses.map((p) => `${p.name} ${p.pid}`).join(", ")}`);
+  const was = new Set((before.kitProcesses ?? []).map((p) => p.pid));
+  const extra = (after.kitProcesses ?? []).filter((p) => !was.has(p.pid));
+  if (extra.length) d.push(`kit processes left: ${extra.map((p) => `${p.name} ${p.pid}`).join(", ")}`);
+  if (after.jobTmp) d.push("the job's TEMP folder is still there");
   return d;
 }

@@ -25,7 +25,7 @@ import {
   assertSendable, benchHold, calibrationTarget, stepWindows, versionOutliers, encodePs, gb6Of, j1bTable, KIT_SCHEME, kitCommand, knobIneffective, nextProbe, parseKitJson, preflight, restoreDiff, samplerVerdict
 } from "../harness/lib/pc-kit.mjs";
 import { calibrate } from "../harness/remote/pc-win/pc-calibrate.mjs";
-import { benchFindings, benchSteps, clampOf, jobReport, jobSpec, parcoursSteps, runJob, simulatedPc } from "../harness/remote/pc-run.mjs";
+import { assertFitsTask, benchFindings, benchSteps, clampOf, jobReport, jobSpec, parcoursSteps, runJob, simulatedPc } from "../harness/remote/pc-run.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const quiet = () => {};
@@ -216,15 +216,20 @@ test("pc-kit: sampler contamination and the J1b table", () => {
 test("pc-kit: restore diff", () => {
   const before = { activeScheme: "a", schemes: ["a", "b"], processor: { X: { ac: 0 } }, tasks: [] };
   assert.deepEqual(restoreDiff(before, structuredClone(before), "j"), []);
-  const d = restoreDiff(before, { activeScheme: KIT_SCHEME, schemes: ["a", "b", KIT_SCHEME], processor: { X: { ac: 1 } }, tasks: ["j"] }, "j");
-  assert.equal(d.length, 5);
+  const d = restoreDiff(before, { activeScheme: KIT_SCHEME, schemes: ["a", "b", KIT_SCHEME], processor: { X: { ac: 1 } }, tasks: ["j", "restore-j"], jobProcesses: [{ name: "msedge.exe", pid: 9 }], kitProcesses: [{ name: "node.exe", pid: 8 }], jobTmp: true }, "j");
+  assert.equal(d.length, 9);
+  assert.match(d.join(), /restore-j still registered.*msedge\.exe 9.*node\.exe 8.*TEMP/);
 });
 
 test("pc-run: steps interleave runs, browsers and scenes; clamps are explicit", () => {
   const s = parcoursSteps({ jobDir: "C:\\k\\jobs\\j", iso: "C:\\d\\g.iso", films: { "1p": "C:\\k\\films\\a.json", "2p": "C:\\k\\films\\b.json" }, browsers: ["chrome", "msedge"], runs: 2, query: "q=1", engineDir: "C:\\k\\trees\\e" });
-  assert.deepEqual(s.map((x) => x.name), ["parcours-1p-chrome-1", "parcours-2p-chrome-1", "parcours-1p-msedge-1", "parcours-2p-msedge-1", "parcours-1p-chrome-2", "parcours-2p-chrome-2", "parcours-1p-msedge-2", "parcours-2p-msedge-2"]);
+  assert.deepEqual(s.map((x) => x.name), ["parcours-1p-chrome-1", "parcours-2p-chrome-1", "parcours-1p-msedge-1", "parcours-2p-msedge-1", "parcours-2p-msedge-2", "parcours-1p-msedge-2", "parcours-2p-chrome-2", "parcours-1p-chrome-2"], "the order flips round by round");
   assert.ok(s.every((x) => x.args.includes("--no-lock") && x.args.includes("--runs") && x.args[x.args.indexOf("--runs") + 1] === "1"));
   assert.equal(s[2].env.HARNESS_BROWSER_CHANNEL, "msedge");
+  assert.ok(s.every((x) => x.args[x.args.indexOf("--port") + 1] === "8301"), "one origin for the game and the bench");
+  assert.ok(benchSteps("b", ["msedge"], "C:\\j", "C:\\e").every((x) => x.args.includes("--port") && x.args.includes("C:\\e")), "the bench on the game's origin, its tree");
+  assert.ok(assertFitsTask(s) < 8 * 3600);
+  assert.throws(() => assertFitsTask(parcoursSteps({ jobDir: "j", iso: "i", films: { a: "a", b: "b" }, browsers: ["chrome", "msedge"], runs: 6, query: "q", engineDir: "e" })), /split the series/);
   const spec = jobSpec({ harnessDir: "C:\\k\\trees\\h", steps: s, affinity: "0xfff" });
   assert.equal(spec.env.HARNESS_DISPLAY, "windows");
   assert.equal(spec.restoreAtEnd, true);
@@ -253,6 +258,30 @@ test("pc-run: a job against a simulated PC restores the machine, even when it fa
     await assert.rejects(runJob(broken, { job: "t2", steps: [], affinity: null, clamp: { maxMhz: 4000 }, outDir: dir, harnessDir: "C:\\k", poll: 0, log: quiet }), /start refused/);
     assert.equal(broken.state.active, before.active);
     assert.ok(!broken.state.schemes.includes(KIT_SCHEME));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("pc-run: a dead task, or polls failing in a row, end the job and restore it", async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "pc-kit-dead-"));
+  try {
+    const script = (c) => Buffer.from(/-EncodedCommand (\S+)/.exec(c)?.[1] ?? "", "base64").toString("utf16le");
+    const dead = simulatedPc({ log: quiet });
+    const ssh = dead.ssh.bind(dead);
+    dead.ssh = (c) => (/-Action 'status'/.test(script(c)) ? { status: 0, out: 'SALONKIT-JSON {"state":"dead","exit":null,"logTail":[]}', err: "" } : ssh(c));
+    await assert.rejects(runJob(dead, { job: "d1", steps: [{ name: "x", args: [] }], affinity: null, clamp: { maxMhz: 4000 }, outDir: dir, harnessDir: "C:\\k", poll: 0, log: quiet }), /stopped without an exit/);
+    assert.ok(!dead.state.schemes.includes(KIT_SCHEME), "restored");
+    const flaky = simulatedPc({ log: quiet });
+    const ssh2 = flaky.ssh.bind(flaky);
+    let n = 0;
+    flaky.ssh = (c) => (/-Action 'status'/.test(script(c)) && ++n < 4 ? (() => { throw new Error("ssh: timeout"); })() : ssh2(c));
+    const rec = await runJob(flaky, { job: "f1", steps: [{ name: "x", args: [] }], affinity: null, clamp: null, outDir: dir, harnessDir: "C:\\k", poll: 0, log: quiet });
+    assert.equal(rec.exit, 0, "3 failed polls in a row are a blip, not the end");
+    const down = simulatedPc({ log: quiet });
+    const ssh3 = down.ssh.bind(down);
+    down.ssh = (c) => (/-Action 'status'/.test(script(c)) ? (() => { throw new Error("ssh: timeout"); })() : ssh3(c));
+    await assert.rejects(runJob(down, { job: "g1", steps: [{ name: "x", args: [] }], affinity: null, clamp: null, outDir: dir, harnessDir: "C:\\k", poll: 0, log: quiet }), /no status for 10 polls/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -310,12 +339,20 @@ function global:powercfg {
     }
   }
 }
-function global:Get-ScheduledTask { @() }
-function global:Unregister-ScheduledTask { }
+$global:tasks = [System.Collections.ArrayList]@()
+function global:Get-ScheduledTask { param($TaskPath, $TaskName, $ErrorAction) @($global:tasks | Where-Object { -not $TaskName -or $_ -eq $TaskName } | ForEach-Object { [pscustomobject]@{ TaskName = $_; State = 'Ready' } }) }
+function global:Unregister-ScheduledTask { param($TaskPath, $TaskName, $Confirm) $global:tasks.Remove($TaskName) }
+function global:Register-ScheduledTask { param($TaskPath, $TaskName, $Action, $Trigger, $Principal, $Settings, [switch]$Force) if (-not $global:tasks.Contains($TaskName)) { [void]$global:tasks.Add($TaskName) } }
+function global:Stop-ScheduledTask { param($TaskPath, $TaskName, $ErrorAction) }
+function global:New-ScheduledTaskAction { param($Execute, $Argument, $WorkingDirectory) 'action' }
+function global:New-ScheduledTaskTrigger { param([switch]$AtLogOn, $User) 'trigger' }
+function global:New-ScheduledTaskPrincipal { param($UserId, $LogonType, $RunLevel) 'principal' }
+function global:Get-CimInstance { param($ClassName, $ErrorAction) @() }
 $s = '${path.join(ROOT, "harness", "remote", "pc-win", "salon-pc.ps1")}'
 $k = '${dir}'
 & $s -Action snapshot -Job t1 -KitDir $k
 & $s -Action clamp -Job t1 -MaxMhz 4300 -KitDir $k
+"SALONKIT-JSON " + (@{ tasksWhileClamped = @($global:tasks) } | ConvertTo-Json -Compress)
 & $s -Action snapshot -Job t1 -KitDir $k
 & $s -Action restore -Job t1 -KitDir $k
 try { & $s -Action clamp -Job 't1;rm' -MaxMhz 4300 -KitDir $k } catch { "SALONKIT-JSON " + (@{ refused = "$_" } | ConvertTo-Json -Compress) }
@@ -332,7 +369,9 @@ Set-Content -LiteralPath (Join-Path (Join-Path (Join-Path $k "jobs") "t4") "exit
     const r = spawnSync(PWSH, ["-NoProfile", "-File", f], { encoding: "utf8" });
     assert.equal(r.status, 0, r.stderr + r.stdout);
     const out = r.stdout.split(/\r?\n/).filter((l) => l.startsWith("SALONKIT-JSON ")).map((l) => JSON.parse(l.slice(14)));
-    const [snap, clamp, snap2, restore, badJob, noSnap, st3, st4, final] = out;
+    const [snap, clamp, whileClamped, snap2, restore, badJob, noSnap, st3, st4, final] = out;
+    assert.deepEqual(whileClamped.tasksWhileClamped, ["restore-t1"], "the way back is registered with the clamp");
+    assert.deepEqual(restore.after.tasks, [], "and removed by restore");
     assert.deepEqual([st3.state, st3.exit], ["done", -1], "an empty exit file is done, exit unknown (-1), not a crash");
     assert.deepEqual([st4.state, st4.exit], ["done", 0]);
     assert.equal(snap.state.activeScheme, "381b4222-f694-41f0-9685-ff5bb260df2e");
