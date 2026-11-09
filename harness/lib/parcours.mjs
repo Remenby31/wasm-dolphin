@@ -419,10 +419,11 @@ export function productionGapsOf({ producedT, origin, binMs, produced, viMs, spe
     if (made == null) { out.push({ k, ms: null }); continue; }
     if (b - a <= Math.max(made > 0 ? REGULAR_GAP_FACTOR * (1000 / made) : Infinity, REGULAR_GAP_VIS * viMs)) continue;
     const speeds = speedAt(a, b);
-    // a reading it covers with no speed known: a gap of unknown standing,
-    // counted unknown (never dropped as if below full speed)
+    // a known speed below full: the speed p5's, never a gap (whatever the
+    // other readings); then a reading with no speed known: a gap of unknown
+    // standing, counted unknown (never dropped as if below full speed)
+    if (speeds.some((x) => Number.isFinite(x) && x < GAME_PAUSE_FULL_SPEED)) continue;
     if (!speeds.length || speeds.some((x) => !Number.isFinite(x))) { out.push({ k, ms: null }); continue; }
-    if (!speeds.every((x) => x >= GAME_PAUSE_FULL_SPEED)) continue;
     out.push({ k, ms: round(b - a, 1) });
   }
   return out;
@@ -444,9 +445,13 @@ export function productionGapsOf({ producedT, origin, binMs, produced, viMs, spe
 // GAME_PAUSE_MAX_ROW_MS apart), a counter unknown or going back: unknown.
 // (patch 0219's cache-miss counters after them: what a load's GPU work was,
 // textures or shaders; null on a core without them, never read by the
-// game-pause rule)
+// game-pause rule. texCopyPushUs: the copy into the command ring, its waits
+// included; shaderXlatPushUs: GLSL -> SPIR-V -> WGSL + the ring push, the
+// replay worker makes the modules; pipelineUs includes its shaders' time,
+// never add the two; texture object creation, hi-res textures and async
+// pipelines are not counted)
 export const GPU_ROW_COLUMNS = Object.freeze(["t", "xfbCopies", "gpuWorkUs", "gpuConsumerWaitUs", "presentSleepUs", "flushGpuWaitUs", "efbWaitUs", "replayBusyMs",
-  "texLoads", "texBytes", "texDecodeUs", "texUploadUs", "shaderCompiles", "shaderGenUs", "shaderCreateUs", "pipelineMisses", "pipelineUs"]);
+  "texLoads", "texBytes", "texDecodeUs", "texCopyPushUs", "shaderCompiles", "shaderGenUs", "shaderXlatPushUs", "pipelineMisses", "pipelineUs"]);
 export const GAME_PAUSE_MAX_GPU_SHARE = 0.5;
 export const GAME_PAUSE_MAX_GPU_WAIT_MS = 1;
 export const GAME_PAUSE_MAX_ROW_MS = 250;

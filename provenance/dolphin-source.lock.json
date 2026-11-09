@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "db6cbbd1d61347063416544b5d04a086c32f51b912db14ab986b2c37990cbd84",
+  "patchSeriesSha256": "fae89daae08ca84a16591163a08a8eca56027d14b735af4dbd69d8663a940d72",
   "patches": [
     {
       "order": 1,
@@ -1216,8 +1216,8 @@
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0219-harness-load-stats.patch",
-      "size": 15070,
-      "sha256": "e2fb362aea94c6198d24a46095cb804987d8651bca4f2b797904369f4cf99473"
+      "size": 15670,
+      "sha256": "3f2c8ac22b6f2c833c9288e096280b056abb1e287a327770bc1ff3889f6313be"
     },
     {
       "order": 150,

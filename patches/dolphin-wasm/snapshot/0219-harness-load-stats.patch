@@ -52,8 +52,8 @@ diff --git a/Source/Core/VideoCommon/ShaderCache.cpp b/Source/Core/VideoCommon/S
 -  return g_gfx->CreateShaderFromSource(ShaderStage::Vertex, source_code.GetBuffer());
 +  const double generated_at = DolphinWeb::LoadStats::Now(load_stats);
 +  auto shader = g_gfx->CreateShaderFromSource(ShaderStage::Vertex, source_code.GetBuffer());
-+  const double created_at = DolphinWeb::LoadStats::Now(load_stats);
-+  DolphinWeb::LoadStats::Shader(load_stats, generated_at - load_start, created_at - generated_at);
++  const double pushed_at = DolphinWeb::LoadStats::Now(load_stats);
++  DolphinWeb::LoadStats::Shader(load_stats, generated_at - load_start, pushed_at - generated_at);
 +  return shader;
  }
  
@@ -70,8 +70,8 @@ diff --git a/Source/Core/VideoCommon/ShaderCache.cpp b/Source/Core/VideoCommon/S
 +  const double generated_at = DolphinWeb::LoadStats::Now(load_stats);
 +  auto shader = g_gfx->CreateShaderFromSource(ShaderStage::Vertex, source_code.GetBuffer(), nullptr,
 +                                              fmt::to_string(*uid.GetUidData()));
-+  const double created_at = DolphinWeb::LoadStats::Now(load_stats);
-+  DolphinWeb::LoadStats::Shader(load_stats, generated_at - load_start, created_at - generated_at);
++  const double pushed_at = DolphinWeb::LoadStats::Now(load_stats);
++  DolphinWeb::LoadStats::Shader(load_stats, generated_at - load_start, pushed_at - generated_at);
 +  return shader;
  }
  
@@ -85,8 +85,8 @@ diff --git a/Source/Core/VideoCommon/ShaderCache.cpp b/Source/Core/VideoCommon/S
 -  return g_gfx->CreateShaderFromSource(ShaderStage::Pixel, source_code.GetBuffer());
 +  const double generated_at = DolphinWeb::LoadStats::Now(load_stats);
 +  auto shader = g_gfx->CreateShaderFromSource(ShaderStage::Pixel, source_code.GetBuffer());
-+  const double created_at = DolphinWeb::LoadStats::Now(load_stats);
-+  DolphinWeb::LoadStats::Shader(load_stats, generated_at - load_start, created_at - generated_at);
++  const double pushed_at = DolphinWeb::LoadStats::Now(load_stats);
++  DolphinWeb::LoadStats::Shader(load_stats, generated_at - load_start, pushed_at - generated_at);
 +  return shader;
  }
  
@@ -103,8 +103,8 @@ diff --git a/Source/Core/VideoCommon/ShaderCache.cpp b/Source/Core/VideoCommon/S
 +  const double generated_at = DolphinWeb::LoadStats::Now(load_stats);
 +  auto shader = g_gfx->CreateShaderFromSource(ShaderStage::Pixel, source_code.GetBuffer(), nullptr,
 +                                              fmt::to_string(*uid.GetUidData()));
-+  const double created_at = DolphinWeb::LoadStats::Now(load_stats);
-+  DolphinWeb::LoadStats::Shader(load_stats, generated_at - load_start, created_at - generated_at);
++  const double pushed_at = DolphinWeb::LoadStats::Now(load_stats);
++  DolphinWeb::LoadStats::Shader(load_stats, generated_at - load_start, pushed_at - generated_at);
 +  return shader;
  }
  
@@ -144,7 +144,7 @@ diff --git a/Source/Core/VideoCommon/TextureCacheBase.cpp b/Source/Core/VideoCom
    {
 +    // Patch 0219: a texture made on a miss, timed only under the harness.
 +    const bool load_stats = DolphinWeb::LoadStats::On();
-+    double decode_ms = 0, upload_ms = 0;
++    double decode_ms = 0, copy_push_ms = 0;
 +    u32 decoded_bytes = 0;
      const u32 texLevels = no_mips ? 1 : texture_info.GetLevelCount();
      const u32 expanded_width = texture_info.GetExpandedWidth();
@@ -180,7 +180,7 @@ diff --git a/Source/Core/VideoCommon/TextureCacheBase.cpp b/Source/Core/VideoCom
 +      const double decoded_at = DolphinWeb::LoadStats::Now(load_stats);
 +      decode_ms += decoded_at - stamp;
        entry->texture->Load(0, width, height, expanded_width, dst_buffer, decoded_texture_size);
-+      upload_ms += DolphinWeb::LoadStats::Now(load_stats) - decoded_at;
++      copy_push_ms += DolphinWeb::LoadStats::Now(load_stats) - decoded_at;
 +      decoded_bytes += static_cast<u32>(decoded_texture_size);
  
        arbitrary_mip_detector.AddLevel(width, height, expanded_width, dst_buffer);
@@ -225,7 +225,7 @@ diff --git a/Source/Core/VideoCommon/TextureCacheBase.cpp b/Source/Core/VideoCom
          entry->texture->Load(mip_level.GetLevel(), mip_level.GetRawWidth(),
                               mip_level.GetRawHeight(), mip_level.GetExpandedWidth(), dst_buffer,
                               decoded_mip_size);
-+        upload_ms += DolphinWeb::LoadStats::Now(load_stats) - mip_decoded_at;
++        copy_push_ms += DolphinWeb::LoadStats::Now(load_stats) - mip_decoded_at;
 +        decoded_bytes += decoded_mip_size;
  
          arbitrary_mip_detector.AddLevel(mip_level.GetRawWidth(), mip_level.GetRawHeight(),
@@ -234,7 +234,7 @@ diff --git a/Source/Core/VideoCommon/TextureCacheBase.cpp b/Source/Core/VideoCom
      }
  
      entry->has_arbitrary_mips = arbitrary_mip_detector.HasArbitraryMipmaps(dst_buffer);
-+    DolphinWeb::LoadStats::Texture(load_stats, decoded_bytes, decode_ms, upload_ms);
++    DolphinWeb::LoadStats::Texture(load_stats, decoded_bytes, decode_ms, copy_push_ms);
  
      if (g_ActiveConfig.bDumpTextures && !skip_texture_dump && texLevels > 0)
      {
@@ -242,13 +242,20 @@ diff --git a/Source/Core/VideoCommon/WasmLoadStats.h b/Source/Core/VideoCommon/W
 new file mode 100644
 --- /dev/null
 +++ b/Source/Core/VideoCommon/WasmLoadStats.h
-@@ -0,0 +1,71 @@
+@@ -0,0 +1,78 @@
 +// Copyright 2026 wasm-dolphin contributors
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
 +// Patch 0219 (harness only): what a cache miss costs the video thread, to
-+// separate a load's GPU work (textures decoded and uploaded, shaders and
-+// pipelines created). Counted in dolphin_web_discio.cpp, in a block the
++// separate a load's GPU work (textures decoded and handed to the replay,
++// shaders translated and pipelines made). What each time is, on WebGPU:
++// a texture's "copy + push" is AbstractTexture::Load, the copy into the
++// command ring with its waits for ring space (the GPU texture is made by
++// the replay worker); a shader's "translate + push" is CreateShaderFromSource,
++// GLSL -> SPIR-V -> WGSL and the ring push (the replay worker makes the
++// GPUShaderModule); a pipeline's time includes its shaders' (never add them).
++// Not counted: the texture object's creation (AllocateCacheEntry), the custom
++// (hi-res) texture branch, pipelines compiled asynchronously. Counted in dolphin_web_discio.cpp, in a block the
 +// harness allocates; with the counters off (players) a miss makes one
 +// acquire load of a flag (On) and nothing else: no clock read, no write.
 +// Only cache misses call these, never a hit.
@@ -261,8 +268,8 @@ new file mode 100644
 +#include <emscripten/emscripten.h>
 +
 +extern "C" int DolphinWeb_HarnessLoadStatsOn();
-+extern "C" void DolphinWeb_HarnessRecordTextureLoad(u32 bytes, double decode_ms, double upload_ms);
-+extern "C" void DolphinWeb_HarnessRecordShaderCompile(double gen_ms, double create_ms);
++extern "C" void DolphinWeb_HarnessRecordTextureLoad(u32 bytes, double decode_ms, double copy_push_ms);
++extern "C" void DolphinWeb_HarnessRecordShaderCompile(double gen_ms, double xlat_push_ms);
 +extern "C" void DolphinWeb_HarnessRecordPipelineMiss(double ms);
 +
 +namespace DolphinWeb::LoadStats
@@ -276,15 +283,15 @@ new file mode 100644
 +{
 +  return on ? emscripten_get_now() : 0.0;
 +}
-+inline void Texture(bool on, u32 bytes, double decode_ms, double upload_ms)
++inline void Texture(bool on, u32 bytes, double decode_ms, double copy_push_ms)
 +{
 +  if (on)
-+    DolphinWeb_HarnessRecordTextureLoad(bytes, decode_ms, upload_ms);
++    DolphinWeb_HarnessRecordTextureLoad(bytes, decode_ms, copy_push_ms);
 +}
-+inline void Shader(bool on, double gen_ms, double create_ms)
++inline void Shader(bool on, double gen_ms, double xlat_push_ms)
 +{
 +  if (on)
-+    DolphinWeb_HarnessRecordShaderCompile(gen_ms, create_ms);
++    DolphinWeb_HarnessRecordShaderCompile(gen_ms, xlat_push_ms);
 +}
 +inline void Pipeline(bool on, double ms)
 +{

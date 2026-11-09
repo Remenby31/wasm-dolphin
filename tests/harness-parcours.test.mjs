@@ -1257,7 +1257,7 @@ test("probe: every run keeps the drop sampler's GPU-side rows (gpuRows), in GPU_
   // a core without the replay column: that field unknown, never 0
   assert.deepEqual(gpuRowsOf({ columns: columns.slice(0, 8), rows: [[1, 0, 1, 2, 0, 0, 0, 0]] }), [[1, 1, 2, 0, 0, 0, 0, null, ...none]]);
   // patch 0219's miss counters ride along, by name
-  const c19 = [...columns, "texLoads", "texBytes", "texDecodeUs", "texUploadUs", "shaderCompiles", "shaderGenUs", "shaderCreateUs", "pipelineMisses", "pipelineUs"];
+  const c19 = [...columns, "texLoads", "texBytes", "texDecodeUs", "texCopyPushUs", "shaderCompiles", "shaderGenUs", "shaderXlatPushUs", "pipelineMisses", "pipelineUs"];
   assert.deepEqual(gpuRowsOf({ columns: c19, rows: [[1, 0, 2, 3, 0, 0, 0, 0, 4, 9, 1, 2, 3, 4, 5, 6, 7, 8, 9]] })[0].slice(8), [1, 2, 3, 4, 5, 6, 7, 8, 9]);
   // every run records them, not only with --sampler-rows
   const probe = readFileSync(new URL("../harness/probes/parcours.mjs", import.meta.url), "utf8");
@@ -1267,7 +1267,7 @@ test("probe: every run keeps the drop sampler's GPU-side rows (gpuRows), in GPU_
   const worker = readFileSync(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
   assert.match(worker, /"replayBusyMs",\n/);
   // and patch 0219's miss counters, unwrapped from the core's u32 words, on only while the sampler runs
-  assert.match(worker, /"shaderCompiles", "shaderGenUs", "shaderCreateUs", "pipelineMisses", "pipelineUs"\n\];/);
+  assert.match(worker, /"shaderCompiles", "shaderGenUs", "shaderXlatPushUs", "pipelineMisses", "pipelineUs"\n\];/);
   assert.match(worker, /readLoadStats\(m, heap, out\);\n\s+return DROP_COLUMNS\.map/);
   assert.match(worker, /harnessLoadStats = true;\n\s+moduleInstance\?\._DolphinWeb_HarnessLoadStatsEnable\?\.\(1\);/);
   assert.match(worker, /harnessLoadStats = false;\n\s+moduleInstance\?\._DolphinWeb_HarnessLoadStatsEnable\?\.\(0\);/);
@@ -1347,9 +1347,31 @@ test("production gaps: a covered reading of unknown speed makes the gap unknown 
   assert.deepEqual(gaps([100, null]), [{ k: 0, ms: null }]);
   assert.deepEqual(gaps([]), [{ k: 0, ms: null }]);
   assert.deepEqual(gaps([93]), [], "below full speed: the speed p5's");
-  // in a run: a reading without counters (no speed) over the gap
-  const rows = pauseRun({ rows: true, copies: 60 });
-  assert.equal(summarizeSeconds(rows).metrics.productionGapsUnknown, 0);
+  // a known speed below full excludes the gap, whatever the readings with no speed (review of #473)
+  assert.deepEqual(gaps([93, null]), []);
+  assert.deepEqual(gaps([null, 93]), []);
+  assert.deepEqual(gaps([100, 99, null]), [{ k: 0, ms: null }]);
+  // in a run: every speed known (counters on every reading): the gap measured, none unknown
+  const known = summarizeSeconds(pauseRun({ rows: true, copies: 60 })).metrics;
+  assert.equal(known.productionGapsUnknown, 0);
+  assert.equal(known.productionGaps, 1);
+  // in a run read without counters (no sampler rows, no speed in the worker's info): the gap counted unknown, its ms not summed
+  const s = rvBase();
+  const g = rvPause(s[2].t);
+  s[2].producedT = g(s[2].producedT); s[2].presents = g(s[2].presents);
+  for (const x of s) { x.counters = null; delete x.info.speed; }
+  const unknown = summarizeSeconds(deriveSeconds(s, { tps: TPS })).metrics;
+  assert.equal(unknown.productionGapsUnknown, 1);
+  assert.equal(unknown.productionGapMs, 0);
+  // a reading below full speed over the gap with others unknown: not a gap, not unknown
+  const slow = rvBase();
+  slow[2].producedT = g(slow[2].producedT); slow[2].presents = g(slow[2].presents);
+  rvCounters(slow, () => 60);
+  slow[2].counters = { ...slow[2].counters, ticks: slow[1].counters.ticks + TPS * 0.93 };
+  slow[3].counters = { ...slow[3].counters, ticks: slow[2].counters.ticks + TPS };
+  const sm = summarizeSeconds(deriveSeconds(slow, { tps: TPS })).metrics;
+  assert.equal(sm.productionGapsUnknown, 0);
+  assert.equal(sm.productionGapMs, 0);
 });
 
 test("the game-pause rule reads only its own GPU-side fields: patch 0219's columns null (an older core) change nothing", () => {

@@ -588,6 +588,18 @@ transfer lasts what our emulated DVD timing (Dolphin's FastDiscSpeed
 setting) makes it, not necessarily what a console takes; that is not
 measurable without a console.
 
+`gpuRows` also carry patch 0219's cache-miss counters (harness only, null on
+a core without them, never read by the game-pause rule), to split a load's
+GPU-thread work: `texLoads`, `texBytes` (decoded), `texDecodeUs`,
+`texCopyPushUs` (AbstractTexture::Load on WebGPU: the copy into the command
+ring, its waits for ring space included; the replay worker makes the GPU
+texture), `shaderCompiles`, `shaderGenUs` (source generation),
+`shaderXlatPushUs` (CreateShaderFromSource: GLSL -> SPIR-V -> WGSL and the
+ring push; the replay worker makes the GPUShaderModule), `pipelineMisses`,
+`pipelineUs` (a pipeline made on a miss, its shaders' time INCLUDED: never add
+it to the shaders'). Not counted: the texture object's creation, the custom
+(hi-res) texture branch, pipelines compiled asynchronously.
+
 A film may declare its phases on its own clock, `"phases": [{ "at": 1240,
 "phase": "cinematic", "label": "intro" }, { "at": 2130, "phase": "menu" }]`
 (each from its poll to the next one's; null: the detector's from there): each second then takes the declared

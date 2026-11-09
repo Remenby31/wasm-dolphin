@@ -1410,10 +1410,15 @@ EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_HarnessSwapRingHead() { return s_h
 // thread, the async shader compilers): word 0 the layout version, then
 // textures created (TextureCacheBase::CreateTextureEntry), their decoded
 // bytes, decode time (us, CPU TexDecoder or the GPU decode's dispatch) and
-// upload time (us, AbstractTexture::Load); shaders compiled (ShaderCache
-// Compile*Shader, uber shaders too), their source generation and their
-// creation time (us); pipelines created on a miss (GetPipelineForUid) and
-// their time (us, their shaders' compiles included).
+// copy + push time (us, AbstractTexture::Load: on WebGPU the copy into the
+// command ring, its waits for ring space included; the replay worker makes
+// the GPU texture); shaders compiled (ShaderCache Compile*Shader, uber
+// shaders too), their source generation and their translate + push time
+// (us, CreateShaderFromSource: GLSL -> SPIR-V -> WGSL and the ring push; the
+// replay worker makes the GPUShaderModule); pipelines created on a miss
+// (GetPipelineForUid) and their time (us, their shaders' included: never add
+// the two). Not counted: the texture object's creation, the custom (hi-res)
+// texture branch, pipelines compiled asynchronously.
 // Allocated at the first enable, never in the core's static data (a static
 // array ahead of other globals moves the addresses the region translator
 // embeds: tests/regshape-x64.test.mjs), never freed: the address the worker
@@ -1425,10 +1430,10 @@ enum : std::uint32_t
   LOAD_TEXTURES = 1,
   LOAD_TEXTURE_BYTES = 2,
   LOAD_TEXTURE_DECODE_US = 3,
-  LOAD_TEXTURE_UPLOAD_US = 4,
+  LOAD_TEXTURE_COPY_PUSH_US = 4,
   LOAD_SHADERS = 5,
   LOAD_SHADER_GEN_US = 6,
-  LOAD_SHADER_CREATE_US = 7,
+  LOAD_SHADER_XLAT_PUSH_US = 7,
   LOAD_PIPELINES = 8,
   LOAD_PIPELINE_US = 9,
 };
@@ -1466,18 +1471,18 @@ static void HarnessLoadAdd(std::uint32_t word, double value)
 // The recorders: called only after DolphinWeb_HarnessLoadStatsOn said on
 // (times in ms, emscripten_get_now deltas).
 extern "C" void DolphinWeb_HarnessRecordTextureLoad(std::uint32_t bytes, double decode_ms,
-                                                    double upload_ms)
+                                                    double copy_push_ms)
 {
   HarnessLoadAdd(LOAD_TEXTURES, 1);
   HarnessLoadAdd(LOAD_TEXTURE_BYTES, bytes);
   HarnessLoadAdd(LOAD_TEXTURE_DECODE_US, decode_ms * 1000);
-  HarnessLoadAdd(LOAD_TEXTURE_UPLOAD_US, upload_ms * 1000);
+  HarnessLoadAdd(LOAD_TEXTURE_COPY_PUSH_US, copy_push_ms * 1000);
 }
-extern "C" void DolphinWeb_HarnessRecordShaderCompile(double gen_ms, double create_ms)
+extern "C" void DolphinWeb_HarnessRecordShaderCompile(double gen_ms, double xlat_push_ms)
 {
   HarnessLoadAdd(LOAD_SHADERS, 1);
   HarnessLoadAdd(LOAD_SHADER_GEN_US, gen_ms * 1000);
-  HarnessLoadAdd(LOAD_SHADER_CREATE_US, create_ms * 1000);
+  HarnessLoadAdd(LOAD_SHADER_XLAT_PUSH_US, xlat_push_ms * 1000);
 }
 extern "C" void DolphinWeb_HarnessRecordPipelineMiss(double ms)
 {

@@ -3933,16 +3933,20 @@ const DROP_COLUMNS = [
   // replay; null without a replay)
   "replayBusyMs",
   // cache misses on the video thread (patch 0219, harness only): textures
-  // created, their decoded bytes, decode and upload time (us); shaders
-  // compiled, their source generation and creation time (us); pipelines made
-  // on a miss and their time (us, their shaders included). null without the
-  // patch or before the sampler started them
-  "texLoads", "texBytes", "texDecodeUs", "texUploadUs",
-  "shaderCompiles", "shaderGenUs", "shaderCreateUs", "pipelineMisses", "pipelineUs"
+  // created, their decoded bytes, decode time and copy + ring push time (us,
+  // ring waits included; this worker makes the GPU texture); shaders
+  // compiled, their source generation and translate (GLSL -> SPIR-V -> WGSL)
+  // + ring push time (us; this worker makes the GPUShaderModule); pipelines
+  // made on a miss and their time (us, their shaders' included: never add
+  // the two). Not counted: texture object creation, the hi-res texture
+  // branch, async pipelines. null without the patch or before the sampler
+  // started them
+  "texLoads", "texBytes", "texDecodeUs", "texCopyPushUs",
+  "shaderCompiles", "shaderGenUs", "shaderXlatPushUs", "pipelineMisses", "pipelineUs"
 ];
 // Patch 0219's words (dolphin_web_discio.cpp HARNESS_LOAD_STATS_*): u32 that
 // wrap, unwrapped here into cumulative numbers (the deltas between rows).
-const LOAD_STATS_COLUMNS = ["texLoads", "texBytes", "texDecodeUs", "texUploadUs", "shaderCompiles", "shaderGenUs", "shaderCreateUs", "pipelineMisses", "pipelineUs"];
+const LOAD_STATS_COLUMNS = ["texLoads", "texBytes", "texDecodeUs", "texCopyPushUs", "shaderCompiles", "shaderGenUs", "shaderXlatPushUs", "pipelineMisses", "pipelineUs"];
 const loadStatsTotals = new Array(LOAD_STATS_COLUMNS.length).fill(0);
 let loadStatsLast = null;
 let loadStatsModule = null;
@@ -3951,11 +3955,12 @@ function readLoadStats(m, heap, out) {
   if (!ptr || ptr % 4 !== 0 || ptr + 64 > heap.length) return;
   const w = new Uint32Array(heap.buffer, ptr, 16);
   if (w[0] !== 1) return;
-  // a new core (a reboot): the words start over
-  if (loadStatsModule !== m) { loadStatsModule = m; loadStatsLast = null; }
+  // a new core (a reboot, or the first read): its block starts at zero, so
+  // its first read counts in full (nothing of its first ~100 ms is lost)
+  if (loadStatsModule !== m) { loadStatsModule = m; loadStatsLast = new Array(LOAD_STATS_COLUMNS.length).fill(0); }
   LOAD_STATS_COLUMNS.forEach((c, i) => {
     const v = w[i + 1];
-    if (loadStatsLast) loadStatsTotals[i] += (v - loadStatsLast[i] + 2 ** 32) % 2 ** 32;
+    loadStatsTotals[i] += (v - loadStatsLast[i] + 2 ** 32) % 2 ** 32;
     out[c] = loadStatsTotals[i];
   });
   loadStatsLast = Array.from(w.subarray(1, 1 + LOAD_STATS_COLUMNS.length));

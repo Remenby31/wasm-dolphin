@@ -55,7 +55,7 @@ test("0219: a pipeline cache HIT makes no access at all (the miss counters come 
   // each pipeline miss is timed as a whole, recorded once
   assert.equal((shaders.match(/DolphinWeb::LoadStats::Pipeline\(load_stats,/g) ?? []).length, 2);
   // the texture: one record per created entry, after its levels
-  assert.equal((textures.match(/DolphinWeb::LoadStats::Texture\(load_stats, decoded_bytes, decode_ms, upload_ms\);/g) ?? []).length, 1);
+  assert.equal((textures.match(/DolphinWeb::LoadStats::Texture\(load_stats, decoded_bytes, decode_ms, copy_push_ms\);/g) ?? []).length, 1);
 });
 
 test("0219: the counters live in a block allocated at the first enable, never in the core's static data; release/acquire", () => {
@@ -86,19 +86,20 @@ test("0219 in the worker: the u32 words unwrapped into cumulative columns; none 
   const read = (mod = m) => { const out = {}; ctx.readLoadStats(mod, heap, out); return out; };
   assert.deepEqual(read(), {}, "not allocated: no column");
   ptr = 256; words[0] = 1;
-  words[1] = 4294967290; words[2] = 10;
-  assert.equal(read().texLoads, 0, "the first read is the origin");
-  words[1] = 5; words[2] = 30; // texLoads wrapped: +11
-  const r = read();
-  assert.equal(r.texLoads, 11);
-  assert.equal(r.texBytes, 20);
+  // the block starts at zero: the first read counts in full (its first ~100 ms are not lost)
+  words[1] = 4; words[2] = 10;
+  assert.deepEqual([read().texLoads, read().texBytes], [4, 10]);
+  words[1] = 4294967290; words[2] = 30;
+  assert.equal(read().texLoads, 4294967290);
+  words[1] = 5; // wrapped: +11
+  assert.equal(read().texLoads, 4294967301);
   words[0] = 2;
   assert.deepEqual(read(), {}, "another layout: nothing read");
   words[0] = 1;
-  // a new core (a reboot): its words start over, the totals keep going
+  // a new core (a reboot): its block starts at zero again, counted in full from its first read
   const m2 = { _DolphinWeb_HarnessLoadStats: () => ptr };
   words[1] = 3;
-  assert.equal(read(m2).texLoads, 11);
+  assert.equal(read(m2).texLoads, 4294967304);
   words[1] = 7;
-  assert.equal(read(m2).texLoads, 15);
+  assert.equal(read(m2).texLoads, 4294967308);
 });
