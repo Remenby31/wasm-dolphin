@@ -10,13 +10,13 @@ import { judgeMachine, markdown, summarize } from "../compat/browser.mjs";
 
 const rows = () => {
   const r = new Array(REPORT_ROWS).fill(0);
-  Object.assign(r, { 0: 0x48575431, 1: 1 | (7 << 8), 2: 6, 3: 1200, 4: 1190, 5: 2, 6: (3 << 24) | 241, 7: 0xdeadbeef, 8: (3 << 24) | 245, 9: 0x01020304 });
+  Object.assign(r, { 0: 0x48575431, 1: 1 | (7 << 8), 2: 6, 3: 1200, 4: 1190, 5: 2, 6: (3 << 24) | 241, 7: 0xdeadbeef, 8: (3 << 24) | 245, 9: 0x01020304, 26: 0xcafe0001 });
   return r;
 };
 
 test("report rows: counts and failures round-trip through a frame", () => {
   const rep = decodeReport(paintReport(rows()));
-  assert.deepEqual(rep, { done: true, tests: 7, testsPassed: 6, subtests: 1200, subtestsPassed: 1190,
+  assert.deepEqual(rep, { done: true, tests: 7, testsPassed: 6, subtests: 1200, subtestsPassed: 1190, fingerprint: "cafe0001",
     failures: [{ test: 3, line: 241, msgHash: "deadbeef" }, { test: 3, line: 245, msgHash: "01020304" }] });
   const md = markdown([{ program: "cputest_x", config: "jit", status: "done", seconds: 12, report: rep, jitBlocksCompiled: 40 }], []);
   assert.match(md, /\| cputest_x \| jit \| done \| 6\/7 \| 1190\/1200 \| 3:241 3:245 \| 40 \| 12 \|/);
@@ -47,6 +47,9 @@ test("machine: every field, the JIT's activity and every expected run are checke
   assert.match(judgeMachine([run("interp"), run("jit")], expected, {}).join("\n"), /no jitBlocks count/);
   const off = { p: { interp: want, jit: { ...want, subtestsPassed: want.subtestsPassed + 1 } } };
   assert.match(judgeMachine([run("interp"), run("jit")], off, blocks)[0], /^p jit: got /);
+  // Same counts and first failures, other failures beyond the tenth: the fingerprint differs.
+  const moved = { p: { interp: want, jit: { ...want, fingerprint: "00000000" } } };
+  assert.match(judgeMachine([run("interp"), run("jit")], moved, blocks)[0], /^p jit: got .*"fingerprint":"cafe0001"/);
   assert.match(judgeMachine([run("interp"), run("jit", { jitBlocksCompiled: 0 })], expected, blocks)[0], /the JIT compiled 0 /);
   assert.match(judgeMachine([run("interp", { jitBlocksCompiled: 3 }), run("jit")], expected, blocks)[0], /interpreter config compiled 3/);
   assert.match(judgeMachine([run("interp"), run("jit", { status: "timeout" })], expected, blocks)[0], /p jit: timeout/);

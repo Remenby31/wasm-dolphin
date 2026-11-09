@@ -9,7 +9,7 @@
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import test from "node:test";
-import { judge, runSuites } from "../compat/run.mjs";
+import { fnvText, judge, runSuites } from "../compat/run.mjs";
 import { loadOracleCore } from "./helpers/jit-oracle.mjs";
 
 const coreWasm = new URL("../cores/dolphin/dolphin-core-upstream.wasm", import.meta.url);
@@ -37,7 +37,8 @@ test("judge: an unlisted failure and a listed pass are both problems", () => {
 test("judge: the JIT differing from the interpreter is a problem even on a listed failure", () => {
   const rec = { id: "f/x 1", suite: "f", code: 1, compiled: true,
     interp: { status: "fail", got: "1", expected: "3" }, jit: { status: "fail", got: "2", expected: "3" } };
-  const problems = judge([rec], [{ match: "^f/x ", tiers: ["interp", "jit"], count: { interp: 1, jit: 1 } }]);
+  const print = (got) => fnvText(2166136261, `f/x 1\n${got}\n`).toString(16).padStart(8, "0");
+  const problems = judge([rec], [{ match: "^f/x ", tiers: ["interp", "jit"], count: { interp: 1, jit: 1 }, fingerprint: { interp: print(1), jit: print(2) } }]);
   assert.equal(problems.length, 1);
   assert.match(problems[0], /JIT differs from the interpreter: f\/x 1: interp 1, jit 2/);
 });
@@ -52,6 +53,8 @@ test("judge: a suite's count of fully compiled checks must stay exact", () => {
 test("judge: a family of failures must keep its exact count", () => {
   const rec = (id, s) => ({ id, interp: { status: s }, jit: { status: "n/c" } });
   const records = [rec("f/x 1", "fail"), rec("f/x 2", "pass"), rec("f/x 3", "fail")];
-  assert.deepEqual(judge(records, [{ match: "^f/x ", tiers: ["interp"], count: { interp: 2 } }]), []);
-  assert.match(judge(records, [{ match: "^f/x ", tiers: ["interp"], count: { interp: 3 } }])[0], /2 failures, .* says 3/);
+  const fp = (ids) => ({ interp: ids.reduce((h, id) => fnvText(h, `${id}\n${undefined}\n`), 2166136261).toString(16).padStart(8, "0") });
+  assert.deepEqual(judge(records, [{ match: "^f/x ", tiers: ["interp"], count: { interp: 2 }, fingerprint: fp(["f/x 1", "f/x 3"]) }]), []);
+  assert.match(judge(records, [{ match: "^f/x ", tiers: ["interp"], count: { interp: 2 }, fingerprint: fp(["f/x 1", "f/x 2"]) }])[0], /failure fingerprint/);
+  assert.match(judge(records, [{ match: "^f/x ", tiers: ["interp"], count: { interp: 3 }, fingerprint: fp(["f/x 1", "f/x 3"]) }])[0], /2 failures, .* says 3/);
 });
