@@ -43,7 +43,7 @@ import { parseArgs } from "node:util";
 
 import { classifyJit, LIFTOFF_FLAGS, LIFTOFF_GAP } from "../probes/pc-bench.mjs";
 import { calibrate } from "./pc-win/pc-calibrate.mjs";
-import { ADMIN, assertAdmin, assertSendable, BALANCED, benchHold, MAX_TURBO_MHZ, CLASS_CORES, encodePs, gb6Of, j1bMarkdown, j1bTable, JOB_ID, KIT_DIR, KIT_SCHEME, kitCommand, newJobId, parseKitJson, POWERCFG, POWERSHELL, preflight, preflightMarkdown, psQuote, restoreDiff, rowsIn, samplerVerdict, SCHTASKS, SETTINGS, setKitDir, stepWindows, versionOutliers } from "../lib/pc-kit.mjs";
+import { ADMIN, assertAdmin, origFromGetActive, sshdShellOk, assertSendable, BALANCED, benchHold, MAX_TURBO_MHZ, CLASS_CORES, encodePs, gb6Of, j1bMarkdown, j1bTable, JOB_ID, KIT_DIR, KIT_SCHEME, kitCommand, newJobId, parseKitJson, POWERCFG, POWERSHELL, preflight, preflightMarkdown, psQuote, restoreDiff, rowsIn, samplerVerdict, SCHTASKS, SETTINGS, setKitDir, stepWindows, versionOutliers } from "../lib/pc-kit.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, "..", "..");
@@ -144,6 +144,7 @@ export function simulatedPc({ cpu = "13th Gen Intel(R) Core(TM) i9-13900K", log 
           if (!st.snapshots[job]) st.snapshots[job] = { activeScheme: st.active, schemes: [...st.schemes], processor: structuredClone(proc), tasks: [...st.tasks], kitProcesses: [] };
           return reply({ action, job, state: st.snapshots[job] });
         case "power": return reply({ action, power: power(), tasks: [...st.tasks] });
+        case "sshd": return reply({ action, sshd: st.sshd ?? { defaultShell: "C:\\Windows\\System32\\cmd.exe", defaultShellCommandOption: "/d /c" } });
         case "cleanup": st.tasks = st.tasks.filter((x) => x !== job); return reply({ action, job, killed: [], jobProcesses: [], jobTmp: false, warnings: [], power: power(), tasks: [...st.tasks], kitProcesses: [] });
         case "start": st.tasks.push(job); return reply({ action, job, state: "running" });
         case "status": return reply({ action, job, state: "done", exit: 0, logTail: ["[dry-run] step done"] });
@@ -178,10 +179,23 @@ const kit = (t, action, params = {}) => {
   return j;
 };
 // One line of the closed admin list, as the administrator. Anything else is
-// refused here, before it leaves the Mac.
+// refused here, before it leaves the Mac. Before the FIRST admin line of a
+// transport (whatever the command: run, restore, Ctrl-C), the standard
+// account re-reads OpenSSH's shell: cmd.exe with exactly "/d /c", else
+// HKCU AutoRun would run as the admin before the line.
+export function adminTransport(t, ssh) {
+  if (!ssh) return null;
+  return { ssh, kitTransport: t, shellChecked: false };
+}
 export function admin(a, line, { quiet = false } = {}) {
   if (!a) throw new Error("this needs --admin-host (an administrator): the clamp is the kit's only elevated operation");
-  return a.ssh(assertAdmin(line), { quiet, timeoutSec: 60 });
+  const checked = assertAdmin(line);
+  if (!a.shellChecked) {
+    const sh = kit(a.kitTransport, "sshd").sshd;
+    if (!sshdShellOk(sh)) throw new Error(`refused: OpenSSH's shell is ${sh?.defaultShell ?? "unset"} ${sh?.defaultShellCommandOption ?? ""}, not cmd.exe /d /c (HKCU AutoRun would run as the admin)`);
+    a.shellChecked = true;
+  }
+  return a.ssh.ssh(checked, { quiet, timeoutSec: 60 });
 }
 const ps = (t, script, opts) => t.ssh(`${POWERSHELL} -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${encodePs(script)}`, opts);
 
@@ -201,24 +215,33 @@ export function pushKitScript(t) {
 // boot task (the way back, before anything is activated), then activated;
 // read back as the standard account.
 export function applyClamp(t, a, { orig, maxMhz = 0, statePct = 0, boostMode = -1 }) {
+  if (!orig || orig === KIT_SCHEME) throw new Error("applyClamp: the way back must be a scheme other than the kit's (read by the admin's /getactivescheme)");
   const p = kit(t, "power").power;
   if (!p.schemes.includes(KIT_SCHEME)) { admin(a, ADMIN.duplicate(orig)); admin(a, ADMIN.rename()); }
   const set = (name, v) => { for (const acdc of ["ac", "dc"]) admin(a, ADMIN.setIndex(acdc, name, v), { quiet: /1$/.test(name) }); };
   set("PROCFREQMAX", maxMhz); set("PROCFREQMAX1", maxMhz);
   set("PROCTHROTTLEMAX", statePct || 100); set("PROCTHROTTLEMAX1", statePct || 100);
   if (boostMode >= 0) set("PERFBOOSTMODE", boostMode);
+  // delete then create: never overwrite a task someone else may have made
+  if (admin(a, ADMIN.queryBootTask(), { quiet: true }).status === 0) admin(a, ADMIN.deleteBootTask());
   admin(a, ADMIN.bootTask(orig));
   admin(a, ADMIN.activateKit());
   const after = kit(t, "power").power;
   if (after.activeScheme !== KIT_SCHEME) throw new Error(`the kit's scheme did not become active (active ${after.activeScheme})`);
   return after.kitScheme;
 }
+// The way back as the administrator reads it (never the standard account's
+// snapshot file), kept on the Mac.
+export function adminOrig(a) {
+  return origFromGetActive(admin(a, ADMIN.getActive()).out);
+}
 // Back: the snapshot's scheme (Balanced if it is gone), the kit's scheme
 // deleted, the boot task deleted. Idempotent. Returns whether the boot task
 // still exists.
 export function restorePower(t, a, before) {
   const p = kit(t, "power").power;
-  const target = before?.activeScheme && p.schemes.includes(before.activeScheme) && before.activeScheme !== KIT_SCHEME ? before.activeScheme : BALANCED;
+  const want = before?.adminOrig ?? before?.activeScheme;
+  const target = want && p.schemes.includes(want) && want !== KIT_SCHEME ? want : BALANCED;
   if (p.activeScheme !== target || p.activeScheme === KIT_SCHEME) admin(a, ADMIN.activate(target));
   if (p.schemes.includes(KIT_SCHEME)) admin(a, ADMIN.deleteKit());
   if (admin(a, ADMIN.queryBootTask(), { quiet: true }).status === 0) admin(a, ADMIN.deleteBootTask());
@@ -433,9 +456,13 @@ export async function runJob(t, { a = null, job, steps, affinity, clamp, outDir,
   const record = { job, started: new Date().toISOString(), clamp: clamp ?? null, affinity, ceilingSec: assertFitsTask(steps) };
   if (clamp && !a) throw new Error("a clamp needs --admin-host");
   record.snapshot = kit(t, "snapshot", { Job: job }).state;
+  if (clamp) {
+    record.snapshot.adminOrig = adminOrig(a);
+    writeFileSync(path.join(local, "orig.json"), JSON.stringify({ job, adminOrig: record.snapshot.adminOrig }) + "\n");
+  }
   live = { job, before: record.snapshot };
   try {
-    if (clamp) record.clamped = applyClamp(t, a, { orig: record.snapshot.activeScheme, ...clamp });
+    if (clamp) record.clamped = applyClamp(t, a, { orig: record.snapshot.adminOrig, ...clamp });
     record.exit = await runSteps(t, { job, steps, affinity, outDir, env, harnessDir, poll, sleep, log, ceilingSec: record.ceilingSec });
   } finally {
     live = null;
@@ -507,6 +534,8 @@ export async function calibrateFromMac(t, { a, job, browser, engineDir, hostGb6,
   mkdirSync(local, { recursive: true });
   let n = 0, result = null;
   const before = kit(t, "snapshot", { Job: job }).state;
+  before.adminOrig = adminOrig(a);
+  writeFileSync(path.join(local, "orig.json"), JSON.stringify({ job, adminOrig: before.adminOrig }) + "\n");
   live = { job, before };
   try {
     const bench = async () => {
@@ -522,7 +551,7 @@ export async function calibrateFromMac(t, { a, job, browser, engineDir, hostGb6,
       if (st && (st.visibility !== "visible" || (st.rafMs?.p50 ?? 0) >= 25)) throw new Error(`${sub}: page ${st.visibility}, rAF ${st.rafMs?.p50} ms: see the preflight`);
       return b.score;
     };
-    const clamp = (o) => applyClamp(t, a, { orig: before.activeScheme, ...o });
+    const clamp = (o) => applyClamp(t, a, { orig: before.adminOrig, ...o });
     result = await calibrate({ bench, clamp, hostGb6, turboMhz, log: (m) => log(`[calibrate] ${m}`) });
   } finally {
     live = null;
@@ -621,7 +650,7 @@ async function main() {
   const log = (m) => console.error(m);
   const dry = values["dry-run"];
   const t = dry ? simulatedPc({ log }) : sshTransport(values.host, { log });
-  const a = values["admin-host"] ? (dry ? t : sshTransport(values["admin-host"], { log })) : null;
+  const a = adminTransport(t, values["admin-host"] ? (dry ? t : sshTransport(values["admin-host"], { log })) : null);
   installSignalRestore(t, a, log);
   const jobBase = process.env.CLAUDE_JOB_DIR ? path.join(process.env.CLAUDE_JOB_DIR, "pc-kit") : path.join(REPO, "..", "measures", "pc-kit");
   const outDir = path.resolve(values.out ?? jobBase);
@@ -641,6 +670,9 @@ async function main() {
   if (cmd === "restore") {
     // the job's own snapshot (the first one taken; a new one if none)
     const before = kit(t, "snapshot", { Job: job }).state;
+    // the way back the admin read at clamp time, kept on this Mac
+    const origFile = path.join(outDir, job, "orig.json");
+    if (existsSync(origFile)) before.adminOrig = JSON.parse(readFileSync(origFile, "utf8")).adminOrig;
     const r = restoreJob(t, a, job, before);
     const d = restoreDiff(before, r.after, job);
     console.log(d.length ? `restore differs: ${d.join("; ")}` : "restored");

@@ -22,10 +22,10 @@ import { parseWin32Battery } from "../harness/lib/system.mjs";
 import { buildKernel, reference, SHAPES } from "../harness/lib/wasm-kernel.mjs";
 import { benchScore, classifyJit, summarizeCalls, summarizeRuns } from "../harness/probes/pc-bench.mjs";
 import {
-  ADMIN, ADMIN_PATTERNS, assertAdmin, assertSendable, benchHold, calibrationTarget, setKitDir, stepWindows, versionOutliers, encodePs, gb6Of, j1bTable, KIT_SCHEME, kitCommand, knobIneffective, nextProbe, parseKitJson, preflight, restoreDiff, samplerVerdict
+  ADMIN, ADMIN_PATTERNS, assertAdmin, origFromGetActive, sshdShellOk, assertSendable, benchHold, calibrationTarget, setKitDir, stepWindows, versionOutliers, encodePs, gb6Of, j1bTable, KIT_SCHEME, kitCommand, knobIneffective, nextProbe, parseKitJson, preflight, restoreDiff, samplerVerdict
 } from "../harness/lib/pc-kit.mjs";
 import { calibrate } from "../harness/remote/pc-win/pc-calibrate.mjs";
-import { assertFitsTask, benchFindings, benchSteps, calibrateFromMac, clampOf, jobReport, jobSpec, parcoursSteps, runJob, simulatedPc } from "../harness/remote/pc-run.mjs";
+import { admin, adminTransport, assertFitsTask, benchFindings, benchSteps, calibrateFromMac, clampOf, jobReport, jobSpec, parcoursSteps, runJob, simulatedPc } from "../harness/remote/pc-run.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const quiet = () => {};
@@ -134,6 +134,16 @@ test("pc-kit: the administrator's commands are a closed list of fixed lines", ()
   assert.throws(() => ADMIN.setIndex("ac", "SOMETHING", 1), /unknown setting/);
   assert.throws(() => ADMIN.setIndex("ac", "PROCFREQMAX", -1), /not an integer/);
   assert.equal(ADMIN_PATTERNS.length, 9, "nine line shapes; adding one is a review");
+  assert.throws(() => ADMIN.bootTask(KIT_SCHEME), /cannot be the kit's/, "the way back is never the kit's own scheme");
+  assert.throws(() => ADMIN.activate(KIT_SCHEME), /cannot be the kit's/);
+  assert.equal(origFromGetActive(`Power Scheme GUID: 8C5E7FDA-E8BF-4A96-9A85-A6E23A8C635C  (High performance)`), o);
+  assert.throws(() => origFromGetActive(`Power Scheme GUID: ${KIT_SCHEME}  (SalonKitClamp)`), /active already/);
+  assert.throws(() => origFromGetActive("nothing"), /no scheme GUID/);
+  const cmd = "C:\\Windows\\System32\\cmd.exe";
+  assert.equal(sshdShellOk({ defaultShell: cmd, defaultShellCommandOption: "/d /c" }), true);
+  assert.equal(sshdShellOk({ defaultShell: cmd, defaultShellCommandOption: "/D /C " }), true);
+  for (const bad of ["/c /d", "/c", "/d /c /k", "/d  /c", "/s /d /c", ""]) assert.equal(sshdShellOk({ defaultShell: cmd, defaultShellCommandOption: bad }), false, `option "${bad}"`);
+  assert.equal(sshdShellOk({ defaultShell: "cmd.exe", defaultShellCommandOption: "/d /c" }), false, "the shell by absolute path");
 });
 
 test("pc-kit: no disc image is ever sent, homebrews are", () => {
@@ -283,12 +293,15 @@ test("pc-run: a job against a simulated PC restores the machine, even when it fa
   try {
     const pc = simulatedPc({ log: quiet });
     const before = structuredClone(pc.state);
-    const rec = await runJob(pc, { a: pc, job: "t1", steps: [{ name: "x", args: ["a.mjs"] }], affinity: "0xfff", clamp: { maxMhz: 4300 }, outDir: dir, harnessDir: "C:\\k", poll: 0, log: quiet });
+    const rec = await runJob(pc, { a: adminTransport(pc, pc), job: "t1", steps: [{ name: "x", args: ["a.mjs"] }], affinity: "0xfff", clamp: { maxMhz: 4300 }, outDir: dir, harnessDir: "C:\\k", poll: 0, log: quiet });
     assert.deepEqual(rec.restore.diff, []);
     assert.equal(pc.state.active, before.active);
     assert.deepEqual(pc.state.schemes, before.schemes);
     assert.deepEqual(pc.state.tasks, []);
     assert.equal(pc.state.bootTask, false);
+    const adm = pc.calls.filter((x) => x.kind === "admin").map((x) => x.command);
+    assert.ok(adm.indexOf(ADMIN.getActive()) < adm.findIndex((l) => /\/create /.test(l)), "the way back read by the admin before the boot task");
+    assert.equal(JSON.parse(readFileSync(path.join(dir, "t1", "orig.json"), "utf8")).adminOrig, before.active, "kept on the Mac");
     assert.ok(pc.calls.filter((x) => x.kind === "ssh").every((x) => !/powercfg \/(set|dup|delete)|Register-ScheduledTask.*Highest/i.test(x.script)), "the standard account never writes power settings");
     const spec = JSON.parse(readFileSync(path.join(dir, "t1", "spec.json"), "utf8"));
     assert.equal(spec.affinity, "0xfff");
@@ -296,7 +309,7 @@ test("pc-run: a job against a simulated PC restores the machine, even when it fa
     const broken = simulatedPc({ log: quiet });
     const ssh = broken.ssh.bind(broken);
     broken.ssh = (c) => (/-Action 'start'/.test(Buffer.from(/-EncodedCommand (\S+)/.exec(c)?.[1] ?? "", "base64").toString("utf16le")) ? (() => { throw new Error("start refused"); })() : ssh(c));
-    await assert.rejects(runJob(broken, { a: broken, job: "t2", steps: [], affinity: null, clamp: { maxMhz: 4000 }, outDir: dir, harnessDir: "C:\\k", poll: 0, log: quiet }), /start refused/);
+    await assert.rejects(runJob(broken, { a: adminTransport(broken, broken), job: "t2", steps: [], affinity: null, clamp: { maxMhz: 4000 }, outDir: dir, harnessDir: "C:\\k", poll: 0, log: quiet }), /start refused/);
     assert.equal(broken.state.active, before.active);
     assert.ok(!broken.state.schemes.includes(KIT_SCHEME));
     assert.equal(broken.state.bootTask, false, "the boot task removed too");
@@ -313,7 +326,7 @@ test("pc-run: a dead task, or polls failing in a row, end the job and restore it
     const dead = simulatedPc({ log: quiet });
     const ssh = dead.ssh.bind(dead);
     dead.ssh = (c) => (/-Action 'status'/.test(script(c)) ? { status: 0, out: 'SALONKIT-JSON {"state":"dead","exit":null,"logTail":[]}', err: "" } : ssh(c));
-    await assert.rejects(runJob(dead, { a: dead, job: "d1", steps: [{ name: "x", args: [] }], affinity: null, clamp: { maxMhz: 4000 }, outDir: dir, harnessDir: "C:\\k", poll: 0, log: quiet }), /stopped without an exit/);
+    await assert.rejects(runJob(dead, { a: adminTransport(dead, dead), job: "d1", steps: [{ name: "x", args: [] }], affinity: null, clamp: { maxMhz: 4000 }, outDir: dir, harnessDir: "C:\\k", poll: 0, log: quiet }), /stopped without an exit/);
     assert.ok(!dead.state.schemes.includes(KIT_SCHEME), "restored");
     const flaky = simulatedPc({ log: quiet });
     const ssh2 = flaky.ssh.bind(flaky);
@@ -330,12 +343,26 @@ test("pc-run: a dead task, or polls failing in a row, end the job and restore it
   }
 });
 
+test("pc-run: no admin line leaves the Mac until the standard account has read OpenSSH's shell as cmd /d /c", () => {
+  const pc = simulatedPc({ log: quiet });
+  pc.state.sshd = { defaultShell: "C:\\Windows\\System32\\cmd.exe", defaultShellCommandOption: "/c /d" };
+  const a = adminTransport(pc, pc);
+  assert.throws(() => admin(a, ADMIN.getActive()), /not cmd\.exe \/d \/c/);
+  assert.equal(pc.calls.filter((x) => x.kind === "admin").length, 0, "nothing sent");
+  pc.state.sshd = undefined;
+  const ok = adminTransport(pc, pc);
+  assert.equal(admin(ok, ADMIN.getActive()).status, 0);
+  assert.equal(pc.calls.filter((x) => x.kind === "ssh" && /-Action 'sshd'/.test(x.script)).length, 2, "read before the first line of each admin session");
+  admin(ok, ADMIN.getActive());
+  assert.equal(pc.calls.filter((x) => x.kind === "ssh" && /-Action 'sshd'/.test(x.script)).length, 2, "once per session");
+});
+
 test("pc-run: the calibration runs from the Mac (clamp by the admin list), each probe a bench job, and restores", async () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "pc-kit-cal-"));
   try {
     const pc = simulatedPc({ log: quiet });
     const before = structuredClone(pc.state);
-    const f = await calibrateFromMac(pc, { a: pc, job: "cal1", browser: "chrome", engineDir: "C:\\salon-kit\\trees\\e", hostGb6: 2983, turboMhz: 5800, affinity: "0xfff", outDir: dir, harnessDir: "C:\\k", poll: 0, log: quiet });
+    const f = await calibrateFromMac(pc, { a: adminTransport(pc, pc), job: "cal1", browser: "chrome", engineDir: "C:\\salon-kit\\trees\\e", hostGb6: 2983, turboMhz: 5800, affinity: "0xfff", outDir: dir, harnessDir: "C:\\k", poll: 0, log: quiet });
     const c = JSON.parse(readFileSync(f, "utf8"));
     assert.ok(c.chosen.maxMhz > 4100 && c.chosen.maxMhz < 4450, `chose ${c.chosen.maxMhz}`);
     assert.ok(c.errPct <= 2);

@@ -47,6 +47,7 @@ export const BOOT_TASK = "SalonKitRestore";
 export const BOOT_TR_MAX = 240;
 const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const guid = (g) => { if (!GUID.test(String(g))) throw new Error(`not a GUID: ${g}`); return g; };
+const notKit = (g) => { if (g === KIT_SCHEME) throw new Error("the way back cannot be the kit's own scheme"); return g; };
 const uint = (n) => { if (!Number.isInteger(n) || n < 0 || n > 100000) throw new Error(`not an integer 0-100000: ${n}`); return String(n); };
 export const ADMIN = Object.freeze({
   getActive: () => `${POWERCFG} /getactivescheme`,
@@ -58,9 +59,9 @@ export const ADMIN = Object.freeze({
     return `${POWERCFG} /set${acdc}valueindex ${KIT_SCHEME} ${SUB_PROCESSOR} ${SETTINGS[name]} ${uint(value)}`;
   },
   activateKit: () => `${POWERCFG} /setactive ${KIT_SCHEME}`,
-  activate: (orig) => `${POWERCFG} /setactive ${guid(orig)}`,
+  activate: (orig) => `${POWERCFG} /setactive ${notKit(guid(orig))}`,
   deleteKit: () => `${POWERCFG} /delete ${KIT_SCHEME}`,
-  bootTask: (orig) => `${SCHTASKS} /create /tn ${BOOT_TASK} /sc onstart /ru SYSTEM /rl highest /f /tr "${CMD} /d /c ${POWERCFG} /setactive ${guid(orig)} & ${SCHTASKS} /delete /tn ${BOOT_TASK} /f"`,
+  bootTask: (orig) => `${SCHTASKS} /create /tn ${BOOT_TASK} /sc onstart /ru SYSTEM /rl highest /f /tr "${CMD} /d /c ${POWERCFG} /setactive ${notKit(guid(orig))} & ${SCHTASKS} /delete /tn ${BOOT_TASK} /f"`,
   queryBootTask: () => `${SCHTASKS} /query /tn ${BOOT_TASK}`,
   deleteBootTask: () => `${SCHTASKS} /delete /tn ${BOOT_TASK} /f`
 });
@@ -80,6 +81,20 @@ export const ADMIN_PATTERNS = Object.freeze([
   new RegExp(`^${S} /query /tn ${BOOT_TASK}$`),
   new RegExp(`^${S} /delete /tn ${BOOT_TASK} /f$`)
 ]);
+// OpenSSH's shell for the admin's commands: cmd.exe, option exactly "/d /c"
+// (in "/c /d" the /d is text of the command and AutoRun still runs).
+export function sshdShellOk(sh) {
+  return /^C:\\Windows\\System32\\cmd\.exe$/i.test(String(sh?.defaultShell ?? "").trim()) && /^\/d \/c$/i.test(String(sh?.defaultShellCommandOption ?? "").trim());
+}
+// The snapshot scheme from the admin's own /getactivescheme (never from a
+// file the standard account writes); never the kit's own.
+export function origFromGetActive(out) {
+  const m = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i.exec(String(out ?? ""));
+  if (!m) throw new Error(`no scheme GUID in /getactivescheme: ${String(out).slice(0, 120)}`);
+  const g = m[1].toLowerCase();
+  if (g === KIT_SCHEME) throw new Error("the kit's scheme is active already: pc-run.mjs restore first");
+  return g;
+}
 export function assertAdmin(line) {
   if (typeof line !== "string" || !ADMIN_PATTERNS.some((re) => re.test(line))) throw new Error(`refused: not one of the kit's administrator commands: ${String(line).slice(0, 160)}`);
   if (line.includes("/tr ") && line.slice(line.indexOf('"') + 1, -1).length > BOOT_TR_MAX) throw new Error(`schtasks /tr over ${BOOT_TR_MAX} characters (schtasks truncates silently)`);
@@ -227,7 +242,7 @@ export function preflight(check, { browsers = ["chrome", "msedge"], bench = {}, 
   add("mains", "block", !bat.length || bat.every((b) => b.BatteryStatus !== 1), bat.length ? `battery ${bat.map((b) => `${b.EstimatedChargeRemaining}% status ${b.BatteryStatus}`).join(", ")}` : "no battery (desktop)", "plug the PC in: on battery Windows lowers the QoS and the frequency");
   add("kit-not-elevated", "block", check.session?.elevated === false, `kit account ${check.session?.user ?? "?"}: ${check.session?.elevated ? "ELEVATED" : check.session?.elevated === false ? "standard" : "?"}`, "the kit's ssh must be a standard (non-administrator) account (salonkit): everything but the closed admin list runs there");
   const sh = check.sshd ?? {};
-  const shellOk = /^C:\\Windows\\System32\\cmd\.exe$/i.test(sh.defaultShell ?? "") && /(^|\s)\/d(\s|$)/i.test(sh.defaultShellCommandOption ?? "") && /(^|\s)\/c(\s|$)/i.test(sh.defaultShellCommandOption ?? "");
+  const shellOk = sshdShellOk(sh);
   add("sshd-shell", "block", shellOk, `OpenSSH DefaultShell ${sh.defaultShell ?? "unset"}, DefaultShellCommandOption ${sh.defaultShellCommandOption ?? "unset"}`, "as admin, once: HKLM\\SOFTWARE\\OpenSSH DefaultShell = C:\\Windows\\System32\\cmd.exe and DefaultShellCommandOption = /d /c (no AutoRun before the admin commands)");
   add("kit-scheme-not-left", "block", !check.power?.kitSchemeActive && !(check.power?.schemes ?? []).includes(KIT_SCHEME), `active scheme ${check.power?.activeScheme}`, "a previous job left the kit's scheme: pc-run.mjs restore --job <that job>");
   const ovl = String(check.power?.overlayAc ?? "").toLowerCase();

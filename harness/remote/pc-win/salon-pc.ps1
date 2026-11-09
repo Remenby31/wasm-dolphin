@@ -29,11 +29,12 @@
 #   ... -Action inner -Job ID   (the scheduled task itself, in the account's session)
 #   ... -Action sampler -Job ID (started by inner: other processes' CPU every 5 s)
 #   ... -Action stat -Path FILE (does the disc exist; never read) | affinity | uninstall
+#   ... -Action sshd (OpenSSH's shell for the admin's commands, read before any)
 # Every action prints one line "SALONKIT-JSON {...}" (its result) last.
 # -ExecutionPolicy Bypass on the command line holds for this process only.
 
 param(
-  [Parameter(Mandatory = $true)][ValidateSet("check", "snapshot", "power", "start", "status", "inner", "sampler", "affinity", "stat", "uninstall", "cleanup")][string]$Action,
+  [Parameter(Mandatory = $true)][ValidateSet("check", "snapshot", "power", "start", "status", "inner", "sampler", "affinity", "stat", "uninstall", "cleanup", "sshd")][string]$Action,
   [string]$Job = "",
   [int]$Cores = 6,
   [string]$Path = "",
@@ -594,5 +595,6 @@ switch ($Action) {
   "uninstall" { Uninstall }
   "cleanup" { Cleanup }
   "stat" { $i = Get-Item -LiteralPath $Path -ErrorAction SilentlyContinue; Out-Result ([ordered]@{ action = "stat"; path = $Path; exists = [bool]$i; bytes = $(if ($i) { $i.Length } else { $null }) }) }
+  "sshd" { Out-Result ([ordered]@{ action = "sshd"; sshd = [ordered]@{ defaultShell = Reg-Value "HKLM:\SOFTWARE\OpenSSH" "DefaultShell"; defaultShellCommandOption = Reg-Value "HKLM:\SOFTWARE\OpenSSH" "DefaultShellCommandOption" } }) }
   "affinity" { Out-Result ([ordered]@{ action = "affinity"; coreMap = @(Core-Map); classAffinity = (Class-Affinity $Cores) }) }
 }
