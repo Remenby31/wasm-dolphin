@@ -7,9 +7,12 @@
   "cputest_fprf": "FPRF off by default (Config::MAIN_FPRF).",
   "cputest_nan": "ps_sum0/ps_sum1 quiet the signalling NaN they pass through.",
   "cputest_ni": "NI: the hardware flushes a result that is tiny before rounding.",
-  "cputest_pairedmove": "Paired-single moves after lfd: the hardware rounds ps0's mantissa to single and truncates ps1's; ps_res/ps_rsqrte estimate edge cases."
+  "cputest_pairedmove": "Paired-single moves after lfd: the hardware rounds ps0's mantissa to single and truncates ps1's; ps_res/ps_rsqrte estimate edge cases.",
+  "battest": "Our own test: architectural BAT rules (PowerPC 750 manual), not values measured on a console. The code check calls a 9-instruction function 50 times per version, so the JIT compiles it before the rewrite; that a block at 0x50000000 was compiled is not shown (no block dump on the machine path).",
+  "cardtest": "Our own test through libogc's CARD API, one CARD_Write per sector: libogc's multi-sector write stops after the first sector (libogc/card.c __write_callback, line 1183 in libogc v3.2.1, the version the pinned devkitPPC image ships (build.sh prints it), unchanged since 6bc0317c7d of 2021-10-16: file->len = sector_size - file->len goes negative), on hardware as on the emulator.",
+  "vitest": "Our own test: expected field rates computed from libogc's VI timing table (lines per field, 858 or 864 clocks per line at 13.5 MHz), not measured on a console. Tolerance 0.02 % (emulated time on both sides)."
  },
- "jitBlocks": {"cputest_cr": 45, "cputest_fctiwz": 44, "cputest_fprf": 44, "cputest_frsp": 44, "cputest_load": 46, "cputest_mtspr": 46, "cputest_nan": 185, "cputest_ni": 45, "cputest_pairedmove": 487, "cputest_rlw": 45, "cputest_srawix": 69, "efbpoke": 52, "gxtest_bitfield": 59, "gxtest_clipping": 72, "gxtest_rasterization": 312},
+ "jitBlocks": {"cputest_cr": 45, "cputest_fctiwz": 44, "cputest_fprf": 44, "cputest_frsp": 44, "cputest_load": 46, "cputest_mtspr": 46, "cputest_nan": 185, "cputest_ni": 45, "cputest_pairedmove": 487, "cputest_rlw": 45, "cputest_srawix": 69, "efbpoke": 52, "gxtest_bitfield": 59, "gxtest_clipping": 72, "gxtest_rasterization": 312, "battest": 73375, "cardtest": 412, "vitest": 142},
  "programs": {
   "cputest_cr": {
    "interp": {"tests":1,"testsPassed":1,"subtests":54,"subtestsPassed":54,"fingerprint":"811c9dc5","failures":[]},
@@ -70,6 +73,18 @@
   "gxtest_rasterization": {
    "interp": {"tests":1,"testsPassed":0,"subtests":519,"subtestsPassed":5,"fingerprint":"8132ae8c","failures":[[1,70,"e5f4fb3e"],[1,119,"01573f48"],[1,119,"35666d77"],[1,119,"4926c273"],[1,119,"2ed07cd3"],[1,119,"0bfb107a"],[1,119,"bc2fe56e"],[1,119,"3f8a8bbc"],[1,119,"d908a60f"],[1,119,"d65db5b6"]]},
    "jit": {"tests":1,"testsPassed":0,"subtests":519,"subtestsPassed":5,"fingerprint":"8132ae8c","failures":[[1,70,"e5f4fb3e"],[1,119,"01573f48"],[1,119,"35666d77"],[1,119,"4926c273"],[1,119,"2ed07cd3"],[1,119,"0bfb107a"],[1,119,"bc2fe56e"],[1,119,"3f8a8bbc"],[1,119,"d908a60f"],[1,119,"d65db5b6"]]}
+  },
+  "battest": {
+   "interp": {"tests":1800,"testsPassed":1800,"subtests":3600,"subtestsPassed":3600,"fingerprint":"811c9dc5","failures":[]},
+   "jit": {"tests":1800,"testsPassed":1800,"subtests":3600,"subtestsPassed":3600,"fingerprint":"811c9dc5","failures":[]}
+  },
+  "cardtest": {
+   "interp": {"tests":2,"testsPassed":2,"subtests":26,"subtestsPassed":26,"fingerprint":"811c9dc5","failures":[]},
+   "jit": {"tests":2,"testsPassed":2,"subtests":26,"subtestsPassed":26,"fingerprint":"811c9dc5","failures":[]}
+  },
+  "vitest": {
+   "interp": {"tests":7,"testsPassed":7,"subtests":7,"subtestsPassed":7,"fingerprint":"811c9dc5","failures":[]},
+   "jit": {"tests":7,"testsPassed":7,"subtests":7,"subtestsPassed":7,"fingerprint":"811c9dc5","failures":[]}
   }
  }
 }

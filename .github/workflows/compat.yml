@@ -105,4 +105,5 @@ jobs:
           path: |
             compat-machine.*
             ${{ runner.temp }}/hwtests-out/SHA256SUMS
+            ${{ runner.temp }}/hwtests-out/*.dol
           if-no-files-found: ignore
