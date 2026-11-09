@@ -199,7 +199,9 @@ test("the worker reads the counters once per window, turns the headroom counters
   // product path: no harness gate
   assert.doesNotMatch(read, /harnessEnabled/);
   // the worker's busy time: the clock plus the pool's remap callbacks, with a WebGPU replay
-  assert.match(read, /const busyMs = webGpuCmdRing && renderGpu && !wgpuReplayFatal\n\s+\? workerBusy\.totalMs\(\) \+ occupancyRemapMs\(\)\n\s+: null;/);
+  // (one function, read by the occupancy window and by the drop sampler's replayBusyMs column)
+  assert.match(read, /return \{ headroom, busyMs: occupancyBusyMs\(\) \};/);
+  assert.match(read, /function occupancyBusyMs\(\) \{\n\s+return webGpuCmdRing && renderGpu && !wgpuReplayFatal \? workerBusy\.totalMs\(\) \+ occupancyRemapMs\(\) : null;\n\}/);
   // The pool's remap callbacks (getMappedRange) run outside any drain: counted, across pools.
   const remap = worker.slice(worker.indexOf("function occupancyRemapMs()"), worker.indexOf("function readOccupancyCounters()"));
   assert.match(remap, /occupancyRemapBaseMs \+= occupancyRemapPool\?\.remapCallbackTotalMs\?\.\(\) \?\? 0;/);

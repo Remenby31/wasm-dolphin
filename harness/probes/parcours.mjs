@@ -61,7 +61,7 @@ import { calmLock, defaultMaxLoad, loadGaveUp, loadLimit } from "../lib/env.mjs"
 import { readIntegrity, treeHasIntegrity } from "../lib/integrity.mjs";
 import { claim } from "../lib/ownership.mjs";
 import { filmMarkers, filmPhases, filmWithMarks, padFilmStatus, recordPorts, releaseMarker, runRecordSteps, signalStuck, startPadFilm, stopPadFilm, validateFilm, validateRecordSteps } from "../lib/pad-film.mjs";
-import { ANALYSIS_VERSION, analyzeRun, currentPhase, deriveSeconds, frameDiff, gapDetail, markerIndexes, STILL_DIFF, phaseNoise, parcoursVerdict, renderTimeline, usable } from "../lib/parcours.mjs";
+import { ANALYSIS_VERSION, GPU_ROW_COLUMNS, analyzeRun, currentPhase, deriveSeconds, frameDiff, gapDetail, markerIndexes, STILL_DIFF, phaseNoise, parcoursVerdict, renderTimeline, usable } from "../lib/parcours.mjs";
 import { acquirePerfLock } from "../lib/perf-lock.mjs";
 import { descendantsOf } from "../lib/lock-run.mjs";
 import { chromeInfo, isLocalOnly, probeOutDir } from "../lib/probe-out.mjs";
@@ -76,7 +76,7 @@ import { num, sideOrder } from "./race-perf.mjs";
 
 // What this probe runs in the page and the worker: an A/A's noise holds only
 // for the same version. Raised with each such change.
-export const PROBE_VERSION = 2; // 2: the drop sampler every SAMPLER_MS (100 ms, was 1 s), its stalls and the VI times kept per second (present gap detail)
+export const PROBE_VERSION = 3; // 2: the drop sampler every SAMPLER_MS (100 ms, was 1 s), its stalls and the VI times kept per second (present gap detail); 3: its GPU-side subset kept every run (gpuRows: analysis 8's game pauses)
 
 // The drop sampler's period: its counters are drained once a second, its
 // rows' lateness says when the presenting worker was blocked.
@@ -175,6 +175,17 @@ export function otherCpuOf(psOutput, { profileDir, ownPids = [], selfPid = proce
 }
 function otherCpu(profileDir, ownPids = []) {
   return new Promise((resolve) => execFile("ps", ["-A", "-o", "pid=,ppid=,pcpu=,command="], { maxBuffer: 32 << 20, timeout: 5000 }, (error, out) => resolve(error ? null : otherCpuOf(out, { profileDir, ownPids }))));
+}
+
+// The drop sampler's GPU side, every 100 ms row of a drain, kept in every
+// run (lib/parcours.mjs gamePauseGpuSide: a game pause is excused only with
+// the GPU thread and the replay worker idle over it): the copies, the GPU
+// thread's work and waits, the CPU thread's waits for the GPU, this worker's
+// busy time. ~8 numbers a row; null when the drain failed.
+export function gpuRowsOf(drained) {
+  if (!drained || drained.error || !Array.isArray(drained.rows) || !Array.isArray(drained.columns)) return null;
+  const ix = GPU_ROW_COLUMNS.map((k) => drained.columns.indexOf(k));
+  return drained.rows.map((r) => ix.map((i) => (i < 0 || !Number.isFinite(r[i]) ? null : Math.round(r[i] * 10) / 10)));
 }
 
 // The drop sampler's last row of a drain, as named counters (null: no row).
@@ -276,7 +287,7 @@ async function playRun(o, server, { side, run, outDir }) {
       // (lib/drops.mjs parcoursWindowsForAttribution reads gapVis, gapWorkerLagMs)
       const per = presentGaps(raw.samples.at(-1), { presents, viT, samplerTicks });
       if (o.samplerRows && drained?.rows) (raw.samplerRows ??= []).push(drained);
-      raw.samples.push({ t, info, counters: countersOf(drained), presents, presentTag, presentTagEpoch, presentsKnown, producedT, producedKnown, vi: tl?.vi?.t?.length ?? null, viT, samplerTicks, gapVis: per.vis, gapWorkerLagMs: per.workerLagMs, audioQ: audioQ?.unavailable ? null : audioQ, integrity: integrity?.unread || integrity?.unavailable ? null : integrity, film: status ? { pos: status.pos, hold: status.hold, polls: status.polls } : null });
+      raw.samples.push({ t, info, counters: countersOf(drained), gpuRows: gpuRowsOf(drained), presents, presentTag, presentTagEpoch, presentsKnown, producedT, producedKnown, vi: tl?.vi?.t?.length ?? null, viT, samplerTicks, gapVis: per.vis, gapWorkerLagMs: per.workerLagMs, audioQ: audioQ?.unavailable ? null : audioQ, integrity: integrity?.unread || integrity?.unavailable ? null : integrity, film: status ? { pos: status.pos, hold: status.hold, polls: status.polls } : null });
       raw.loads.push([Date.now(), os.loadavg()[0]]);
       const sec = Math.round((Date.now() - t0) / 1000);
       // the other processes' CPU every OTHER_CPU_EVERY_SEC, off the loop

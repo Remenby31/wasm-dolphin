@@ -545,7 +545,19 @@ A pause is a production gap over 2.5 VI periods at full speed (98 % or more
 in every reading it covers), with the VIs continuous over it (at most 1
 missing, none late by 3 periods or more: a stall caught up in a burst is
 ours) and no burst of frames after it (frames held by a stall of ours come
-out at once). A second is the game's pause only when its counter window is
+out at once) and the GPU side idle over it, from the drop sampler's 100 ms
+rows every run keeps (`gpuRows`; never the worker's 500 ms window): the GPU
+thread's work (its waits for the replay included) and the replay worker's
+busy time each at most half the gap (each row's busy time counted whole
+within its overlap with the gap: an upper bound), no CPU wait for the GPU
+(FlushGpu, EFB syncs, 1 ms at most), and the copies over those rows at most
+the frames produced in them + 1. In dual core without SyncOnSkipIdle a
+stall of ours on the GPU side looks like the game's pause in every other
+signal (the guest CPU spins at full speed waiting for draw-done, the VIs go
+on, no copy is asked, nothing bursts after). Rows missing or a field
+unknown: no excuse (analysis 8). In an A/B the pauses' count and total time
+are primaries: a rise past the noise is a regression, so even a stall the
+rule took for the game's is caught. A second is the game's pause only when its counter window is
 a fresh sampler row covering 95 % of it, the copies in that window at most
 the frames produced in the same window + 1, and every gap it holds is such
 a pause, excused in every second it covers; it is then judged against what
