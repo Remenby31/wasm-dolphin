@@ -203,7 +203,7 @@ jobs:
           New-LocalUser -Name kitstd2 -Password $sec -AccountNeverExpires | Out-Null
           $cred = New-Object System.Management.Automation.PSCredential("$env:COMPUTERNAME\kitstd2", $sec)
           New-Item -ItemType Directory -Force -Path C:\kitstd2-out | Out-Null; icacls C:\kitstd2-out /grant "kitstd2:(OI)(CI)F" | Out-Null
-          $p = Start-Process powershell.exe -Credential $cred -LoadUserProfile -WorkingDirectory C:\kitstd2-out -ArgumentList '-NoProfile -Command "try { Add-Content -LiteralPath C:\salon-kit\salon-pc.ps1 -Value pwned -ErrorAction Stop; ''WROTE'' } catch { ''DENIED'' } *> C:\kitstd2-out\w.txt"' -Wait -PassThru
+          $p = Start-Process powershell.exe -Credential $cred -LoadUserProfile -WorkingDirectory C:\kitstd2-out -ArgumentList '-NoProfile -Command "$(try { Add-Content -LiteralPath C:\salon-kit\salon-pc.ps1 -Value pwned -ErrorAction Stop; ''WROTE'' } catch { ''DENIED'' }) | Out-File C:\kitstd2-out\w.txt"' -Wait -PassThru
           $w = (Get-Content C:\kitstd2-out\w.txt -Raw).Trim(); "standard account writing the script: $w"
           Remove-LocalUser -Name kitstd2
           if ($w -ne "DENIED") { "a standard account could write the kit script"; exit 1 }
