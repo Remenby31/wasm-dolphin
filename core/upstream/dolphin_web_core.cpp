@@ -927,6 +927,9 @@ void EnsureRuntime()
                   s_video_backend == "WebGPU" ? ShaderCompilationMode::SynchronousUberShaders :
                                                 ShaderCompilationMode::Synchronous);
   Config::SetBase(Config::GFX_SHADER_COMPILER_THREADS, 0);
+  // DIAG (do not merge): every texture sampled nearest (min, mag and mip
+  // filter), the uber vs specialized sampling diagnosis of lever 1.
+  Config::SetBase(Config::GFX_ENHANCE_FORCE_TEXTURE_FILTERING, TextureFilteringMode::Nearest);
   Config::SetBase(Config::GFX_SHADER_PRECOMPILER_THREADS, 0);
   VideoBackendBase::ActivateBackend(s_video_backend);
 
