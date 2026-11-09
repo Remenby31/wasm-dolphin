@@ -520,8 +520,10 @@ saw half the second: one 50 ms hitch read 93.3 %; analysis 5: the content
 reference, the frames produced, on the same grid from the worker's produced
 timeline, `producedBasis: "grid"`, each second judged against what was
 made in it (content only with a regular production: no pause past 1.5
-frame intervals and 2.5 VI periods, analysis 6); `"worker"`, its 500 ms
-rate, for older runs),
+frame intervals and 2.5 VI periods, analysis 6; or the game's own pause:
+a production pause while the core copied no XFB that was not produced, judged
+against what was made plus the VIs the emulation missed, at the run's
+nominal VI cadence, analysis 7); `"worker"`, its 500 ms rate, for older runs),
 smoothness (new frames against the game's cadence, learnt as the site
 learns it: VI/n snapped, below the VI rate only with occupancy margin, else
 the VI rate; in a content second, where the game itself made fewer frames
@@ -529,6 +531,62 @@ at full speed with margin on every thread, against what it made), present
 hitches over 50 and 100 ms, and summarises each phase
 and each film section: min, p5 and median of speed, new frames and
 smoothness, the 3 worst seconds, hitches, integrity, occupancy, seconds.
+
+A generous choice, owned as such: a second at full speed with every thread
+under 70 % whose new frames fall short of a 60 cadence by 4 or more isolated
+frames is excused as the game's content (lib/drops.mjs contentRule), not
+counted as lost.
+
+The game's own pauses are published next to every smoothness p5, never
+hidden in it: each phase's and section's `gamePauses` (summary.json, the
+run's report, the A/B lines run by run) holds their count, the seconds they
+excused, their durations and each one's start, duration and film position.
+A pause is a production gap over 2.5 VI periods at full speed (98 % or more
+in every reading it covers), with the VIs continuous over it (at most 1
+missing, none late by 3 periods or more: a stall caught up in a burst is
+ours) and no burst of frames after it (frames held by a stall of ours come
+out at once) and the GPU side idle over it, from the drop sampler's 100 ms
+rows every run keeps (`gpuRows`; never the worker's 500 ms window): the GPU
+thread's whole work (its waits for the replay and its present sleep
+included) and the worker's busy clock (the replay and all else it runs:
+disc reads served, JIT messages) each at most half the gap, the CPU's waits
+for the GPU (FlushGpu, EFB syncs) 1 ms at most (each counter credited when
+a pass or wait ends, so a row's time x is bounded by min(x, the overlap of
+[row start - x, row end] with the gap), rows read up to 1 s past the gap),
+and the copies over the rows covering the gap at most
+the frames produced in them + 1. In dual core without SyncOnSkipIdle a
+stall of ours on the GPU side looks like the game's pause in every other
+signal (the guest CPU spins at full speed waiting for draw-done, the VIs go
+on, no copy is asked, nothing bursts after). Rows missing or a field
+unknown: no excuse (analysis 8). In an A/B the primary is the production gaps' total time
+at full speed, per phase and run (`productionGapMs`): every interval between
+two produced frames past the regularity rule's bound for its second
+(max(1.5 frame intervals, 2.5 VI periods)) with every reading it covers at
+98 % or more, excused as the game's pause or not, so a change that only
+flips an excuse (GPU timing near the bound) does not move it while an
+emulator stall the rule took for the game's raises it. A rise of the medians
+past the noise's threshold (the A/A's sd, else the sides' pooled sd) and
+past 100 ms is a regression; a gap of unknown length (production unknown)
+makes that row judged neither way. The pauses' count and time are
+published, not judged. An irregular second that is not the
+game's pause is judged against the rate of its own regular part (its frame
+intervals that are no gap, each rounded to a VI multiple k, covering half
+the second or more with 80 % on one k: the nominal cadence / k; for k > 1
+only with k at most 3, full speed and the GPU side under 70 % over the
+second), else the
+nominal cadence (60 or 50), never a learnt one: we judge what the game was
+doing in that second, our gaps count in full. A second is the game's pause only when its counter window is
+a fresh sampler row covering 95 % of it, the copies in that window at most
+the frames produced in the same window + 1, and every gap it holds is such
+a pause, excused in every second it covers; it is then judged against what
+was made plus the VIs missed, at the run's nominal VI cadence (60 at
+59.94 Hz, 50 at PAL, never one second's measured rate). Anything else is
+judged against the scene's cadence, a loss. "0 XFB copies" is read at the
+counters' resolution (about 1 s: there are no copy timestamps). Caveat:
+"coming from the guest" means in EMULATED time. A pause that waits on a disc
+transfer lasts what our emulated DVD timing (Dolphin's FastDiscSpeed
+setting) makes it, not necessarily what a console takes; that is not
+measurable without a console.
 
 A film may declare its phases on its own clock, `"phases": [{ "at": 1240,
 "phase": "cinematic", "label": "intro" }, { "at": 2130, "phase": "menu" }]`
