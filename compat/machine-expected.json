@@ -9,7 +9,7 @@
   "cputest_ni": "NI: the hardware flushes a result that is tiny before rounding.",
   "cputest_pairedmove": "Paired-single moves after lfd: the hardware rounds ps0's mantissa to single and truncates ps1's; ps_res/ps_rsqrte estimate edge cases."
  },
- "jitBlocks": {"cputest_cr": 53, "cputest_fctiwz": 46, "cputest_fprf": 44, "cputest_frsp": 44, "cputest_load": 46, "cputest_mtspr": 46, "cputest_nan": 185, "cputest_ni": 45, "cputest_pairedmove": 487, "cputest_rlw": 45, "cputest_srawix": 69, "efbpoke": 52, "gxtest_bitfield": 59, "gxtest_clipping": 72, "gxtest_rasterization": 312},
+ "jitBlocks": {"cputest_cr": 45, "cputest_fctiwz": 44, "cputest_fprf": 44, "cputest_frsp": 44, "cputest_load": 46, "cputest_mtspr": 46, "cputest_nan": 185, "cputest_ni": 45, "cputest_pairedmove": 487, "cputest_rlw": 45, "cputest_srawix": 69, "efbpoke": 52, "gxtest_bitfield": 59, "gxtest_clipping": 72, "gxtest_rasterization": 312},
  "programs": {
   "cputest_cr": {
    "interp": {"tests":1,"testsPassed":1,"subtests":54,"subtestsPassed":54,"failures":[]},
