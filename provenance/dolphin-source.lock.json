@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "5ff006d20b87f2ec0dfd45c69a19ce29a2871c3c91f0a9b5d65125a98a0d04a5",
+  "patchSeriesSha256": "bfc792910e1668eb4bb7993495311254f96e30045a8f5913444d656d66296f27",
   "patches": [
     {
       "order": 1,
@@ -1232,8 +1232,8 @@
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0222-webgpu-ubershaders-posmtx-dual-source.patch",
-      "size": 6869,
-      "sha256": "38b4583b98573387695720e3d6ac23d0a539de4ac80ded4781f8a5a5e04bb09f"
+      "size": 8241,
+      "sha256": "8850082ace003a8ff0d88992efe3e51c3373466463050933827c2a6c6dd60227"
     },
     {
       "order": 152,
