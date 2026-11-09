@@ -599,6 +599,12 @@ ring push; the replay worker makes the GPUShaderModule), `pipelineMisses`,
 `pipelineUs` (a pipeline made on a miss, its shaders' time INCLUDED: never add
 it to the shaders'). Not counted: the texture object's creation, the custom
 (hi-res) texture branch, pipelines compiled asynchronously.
+Patch 0220 adds the WebGPU backend's shader translations (inside
+`shaderXlatPushUs`): `xlatGlslangUs` (GLSL -> SPIR-V), `xlatNagaUs` (SPIR-V ->
+WGSL), `xlatPushUs` (the ring push), `xlatWgslBytes`, `xlatDuplicates`
+(sources translated before, by hash: a cache by source would save those) and
+`xlatUntracked` (sources past the table's bound, 6144: neither stored nor
+judged).
 
 A film may declare its phases on its own clock, `"phases": [{ "at": 1240,
 "phase": "cinematic", "label": "intro" }, { "at": 2130, "phase": "menu" }]`

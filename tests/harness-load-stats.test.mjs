@@ -93,13 +93,75 @@ test("0219 in the worker: the u32 words unwrapped into cumulative columns; none 
   assert.equal(read().texLoads, 4294967290);
   words[1] = 5; // wrapped: +11
   assert.equal(read().texLoads, 4294967301);
-  words[0] = 2;
-  assert.deepEqual(read(), {}, "another layout: nothing read");
+  words[0] = 3;
+  assert.deepEqual(read(), {}, "an unknown layout: nothing read");
   words[0] = 1;
+  assert.equal(read().xlatGlslangUs, undefined, "layout 1 (0219 only): 0220's columns absent, never 0");
   // a new core (a reboot): its block starts at zero again, counted in full from its first read
   const m2 = { _DolphinWeb_HarnessLoadStats: () => ptr };
   words[1] = 3;
   assert.equal(read(m2).texLoads, 4294967304);
   words[1] = 7;
   assert.equal(read(m2).texLoads, 4294967308);
+  // layout 2 (0220): its six words read too, from zero
+  const m3 = { _DolphinWeb_HarnessLoadStats: () => ptr };
+  words[0] = 2; words[10] = 7000; words[14] = 3; words[15] = 1;
+  const v2 = read(m3);
+  assert.deepEqual([v2.xlatGlslangUs, v2.xlatDuplicates, v2.xlatUntracked], [7000, 3, 1]);
+});
+
+// Patch 0220: the WebGPU backend's shader translations, in the same block (layout 2, words 10-15).
+const patch20 = read("patches/dolphin-wasm/snapshot/0220-harness-xlat-counters.patch");
+const added20 = (file) => {
+  const at = patch20.indexOf(`+++ b/${file}`);
+  assert.ok(at >= 0, file);
+  const next = patch20.indexOf("\ndiff --git", at);
+  return patch20.slice(at, next < 0 ? undefined : next).split("\n").filter((l) => l.startsWith("+") && !l.startsWith("+++")).map((l) => l.slice(1)).join("\n");
+};
+const translator = added20("Source/Core/VideoBackends/WebGPU/WebGPUShaderTranslator.cpp");
+const gfx = added20("Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp");
+const header20 = added20("Source/Core/VideoCommon/WasmLoadStats.h");
+
+test("0220 off: one acquire load of the flag per translation, no clock read, no hash, no lock, no write", () => {
+  // the backend: one On() per CreateShaderFromSource; the times asked only when on (a null XlatTimes otherwise)
+  assert.equal((gfx.match(/DolphinWeb::LoadStats::On\(\)/g) ?? []).length, 1);
+  assert.match(gfx, /GlslToWgsl\(stage, source, xlat_stats \? &xlat_times : nullptr\)/);
+  assert.doesNotMatch(gfx, /emscripten_get_now|DolphinWeb_HarnessRecord|std::hash/);
+  assert.match(gfx, /DolphinWeb::LoadStats::Xlat\(xlat_stats, source,/);
+  // the translator reads the clock only when asked
+  for (const line of translator.split("\n").filter((l) => /emscripten_get_now/.test(l))) assert.match(line, /times \?|if \(times\)|^\s+times->/, line);
+  assert.match(translator, /const double xlat_start = times \? emscripten_get_now\(\) : 0\.0;/);
+  // the header hashes the source only when on
+  assert.match(header20, /inline void Xlat\(bool on, std::string_view source,[^)]*\)\n\{\n\s+if \(on\)\n\s+DolphinWeb_HarnessRecordShaderXlat\(std::hash<std::string_view>\{\}\(source\),/);
+});
+
+test("0220: the duplicate table is bounded, allocated with the block, locked only when recording (on)", () => {
+  const section = discio.slice(discio.indexOf("// Patch 0219 (harness only)"), discio.indexOf("DolphinWeb_HarnessLoadStatsWords()"));
+  assert.match(section, /constexpr std::uint32_t HARNESS_LOAD_STATS_VERSION = 2;/);
+  assert.match(section, /constexpr std::uint32_t HARNESS_XLAT_TABLE_SLOTS = 8192;\nconstexpr std::uint32_t HARNESS_XLAT_TABLE_MAX = 6144;/);
+  // the table on the heap at the first enable, before the block is published (release)
+  assert.match(section, /s_harness_xlat_table\.store\(new HarnessXlatTable\(\), std::memory_order_release\);\n\s+s_harness_load_stats\.store\(words, std::memory_order_release\);/);
+  assert.match(section, /static std::atomic<HarnessXlatTable\*> s_harness_xlat_table\{nullptr\};/);
+  // the bound: past HARNESS_XLAT_TABLE_MAX a new source is counted untracked, never stored
+  const rec = section.slice(section.indexOf('extern "C" void DolphinWeb_HarnessRecordShaderXlat'));
+  assert.match(rec, /if \(table->entries >= HARNESS_XLAT_TABLE_MAX\)\n\s+\{\n\s+HarnessLoadAdd\(LOAD_XLAT_UNTRACKED, 1\);\n\s+return;/);
+  assert.match(rec, /if \(slot == key\)\n\s+\{\n\s+HarnessLoadAdd\(LOAD_XLAT_DUPLICATES, 1\);/);
+  // the lock: only in the recorder, which the backend calls only when on (Xlat's if (on))
+  assert.equal((section.match(/std::lock_guard<std::mutex>/g) ?? []).length, 1);
+  assert.ok(rec.indexOf("std::lock_guard") > rec.indexOf("if (!table)"));
+  // no static table (regshape): the struct is only ever made by new
+  assert.doesNotMatch(section, /static HarnessXlatTable|static\s+std::uint64_t\s+\w+\[/);
+});
+
+test("0220: a model of the table: repeats counted, the bound respected, overflow untracked", () => {
+  // the C++ table's logic, transcribed (same slots, same bound, same probe)
+  const model = (slotsN, max) => { const slots = new Array(slotsN).fill(0n); let entries = 0, dup = 0, untracked = 0;
+    return { add(h) { const key = h ? h : 1n; for (let p = 0; p < slotsN; p += 1) { const i = Number((key + BigInt(p)) % BigInt(slotsN)); if (slots[i] === key) { dup += 1; return; } if (slots[i] === 0n) { if (entries >= max) { untracked += 1; return; } slots[i] = key; entries += 1; return; } } untracked += 1; }, get: () => ({ entries, dup, untracked }) }; };
+  const t = model(8, 6);
+  for (const h of [5n, 13n, 5n, 21n, 13n]) t.add(h);
+  assert.deepEqual(t.get(), { entries: 3, dup: 2, untracked: 0 });
+  for (const h of [1n, 2n, 3n, 4n]) t.add(h);
+  assert.deepEqual(t.get(), { entries: 6, dup: 2, untracked: 1 }, "past the bound: untracked");
+  t.add(5n);
+  assert.equal(t.get().dup, 3, "a known source is still found once full");
 });

@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "fae89daae08ca84a16591163a08a8eca56027d14b735af4dbd69d8663a940d72",
+  "patchSeriesSha256": "1c16182c3400d7b4993539b5824c4ddffb3da5643c7055063be4f9ba38079f25",
   "patches": [
     {
       "order": 1,
@@ -1221,6 +1221,14 @@
     },
     {
       "order": 150,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0220-harness-xlat-counters.patch",
+      "size": 5935,
+      "sha256": "6bbe41a7f150ed485bfd8721090ca1d30aab3791d8f2fee9c2d2b01af68e335f"
+    },
+    {
+      "order": 151,
       "cwd": "Externals/SFML/SFML",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0001-sfml-emscripten-config.patch",
@@ -1228,7 +1236,7 @@
       "sha256": "f82197a21fe982ad83f6ee7bbf5a03839b1cebd4d64da3eab11263842bf61d89"
     },
     {
-      "order": 151,
+      "order": 152,
       "cwd": "Externals/xxhash/xxHash",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0002-xxhash-wasm-simd-scalar.patch",

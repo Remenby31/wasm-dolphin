@@ -1423,7 +1423,10 @@ EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_HarnessSwapRingHead() { return s_h
 // array ahead of other globals moves the addresses the region translator
 // embeds: tests/regshape-x64.test.mjs), never freed: the address the worker
 // reads (DolphinWeb_HarnessLoadStats) never goes stale.
-constexpr std::uint32_t HARNESS_LOAD_STATS_VERSION = 1;
+// Version 2 (patch 0220): words 10-15, the WebGPU backend's shader
+// translations (glslang, Naga, ring push times, WGSL bytes; sources seen
+// before, and sources not tracked once the table is full).
+constexpr std::uint32_t HARNESS_LOAD_STATS_VERSION = 2;
 constexpr std::uint32_t HARNESS_LOAD_STATS_WORDS = 16;
 enum : std::uint32_t
 {
@@ -1436,7 +1439,27 @@ enum : std::uint32_t
   LOAD_SHADER_XLAT_PUSH_US = 7,
   LOAD_PIPELINES = 8,
   LOAD_PIPELINE_US = 9,
+  LOAD_XLAT_GLSLANG_US = 10,
+  LOAD_XLAT_NAGA_US = 11,
+  LOAD_XLAT_PUSH_US = 12,
+  LOAD_XLAT_WGSL_BYTES = 13,
+  LOAD_XLAT_DUPLICATES = 14,
+  LOAD_XLAT_UNTRACKED = 15,
 };
+// Patch 0220: the sources translated so far, by hash: an open-addressing
+// table of HARNESS_XLAT_TABLE_SLOTS u64 (0 = empty), at most
+// HARNESS_XLAT_TABLE_MAX entries (then a source is counted untracked, never
+// stored), behind a mutex taken only while the counters are on. Allocated
+// with the counters' block at the first enable, never static, never freed.
+constexpr std::uint32_t HARNESS_XLAT_TABLE_SLOTS = 8192;
+constexpr std::uint32_t HARNESS_XLAT_TABLE_MAX = 6144;
+struct HarnessXlatTable
+{
+  std::mutex lock;
+  std::uint32_t entries = 0;
+  std::uint64_t slots[HARNESS_XLAT_TABLE_SLOTS] = {};
+};
+static std::atomic<HarnessXlatTable*> s_harness_xlat_table{nullptr};
 static std::atomic<std::atomic<std::uint32_t>*> s_harness_load_stats{nullptr};
 static std::atomic<int> s_harness_load_stats_enabled{0};
 
@@ -1450,6 +1473,7 @@ EMSCRIPTEN_KEEPALIVE void DolphinWeb_HarnessLoadStatsEnable(int enabled)
   {
     auto* words = new std::atomic<std::uint32_t>[HARNESS_LOAD_STATS_WORDS]();
     words[0].store(HARNESS_LOAD_STATS_VERSION, std::memory_order_relaxed);
+    s_harness_xlat_table.store(new HarnessXlatTable(), std::memory_order_release);
     s_harness_load_stats.store(words, std::memory_order_release);
   }
   // release: pairs with the acquire load in DolphinWeb_HarnessLoadStatsOn
@@ -1488,6 +1512,43 @@ extern "C" void DolphinWeb_HarnessRecordPipelineMiss(double ms)
 {
   HarnessLoadAdd(LOAD_PIPELINES, 1);
   HarnessLoadAdd(LOAD_PIPELINE_US, ms * 1000);
+}
+// Patch 0220: one shader translation (only after DolphinWeb_HarnessLoadStatsOn
+// said on): its times, its WGSL size, and whether its source was seen before.
+extern "C" void DolphinWeb_HarnessRecordShaderXlat(std::uint64_t source_hash,
+                                                   std::uint32_t wgsl_bytes, double glslang_ms,
+                                                   double naga_ms, double push_ms)
+{
+  HarnessLoadAdd(LOAD_XLAT_GLSLANG_US, glslang_ms * 1000);
+  HarnessLoadAdd(LOAD_XLAT_NAGA_US, naga_ms * 1000);
+  HarnessLoadAdd(LOAD_XLAT_PUSH_US, push_ms * 1000);
+  HarnessLoadAdd(LOAD_XLAT_WGSL_BYTES, wgsl_bytes);
+  HarnessXlatTable* table = s_harness_xlat_table.load(std::memory_order_acquire);
+  if (!table)
+    return;
+  const std::uint64_t key = source_hash ? source_hash : 1;  // 0 marks an empty slot
+  std::lock_guard<std::mutex> guard(table->lock);
+  for (std::uint32_t probe = 0; probe < HARNESS_XLAT_TABLE_SLOTS; ++probe)
+  {
+    std::uint64_t& slot = table->slots[(key + probe) % HARNESS_XLAT_TABLE_SLOTS];
+    if (slot == key)
+    {
+      HarnessLoadAdd(LOAD_XLAT_DUPLICATES, 1);
+      return;
+    }
+    if (slot == 0)
+    {
+      if (table->entries >= HARNESS_XLAT_TABLE_MAX)
+      {
+        HarnessLoadAdd(LOAD_XLAT_UNTRACKED, 1);
+        return;
+      }
+      slot = key;
+      ++table->entries;
+      return;
+    }
+  }
+  HarnessLoadAdd(LOAD_XLAT_UNTRACKED, 1);
 }
 // null until the counters were first enabled.
 EMSCRIPTEN_KEEPALIVE std::atomic<std::uint32_t>* DolphinWeb_HarnessLoadStats()

@@ -3942,11 +3942,19 @@ const DROP_COLUMNS = [
   // branch, async pipelines. null without the patch or before the sampler
   // started them
   "texLoads", "texBytes", "texDecodeUs", "texCopyPushUs",
-  "shaderCompiles", "shaderGenUs", "shaderXlatPushUs", "pipelineMisses", "pipelineUs"
+  "shaderCompiles", "shaderGenUs", "shaderXlatPushUs", "pipelineMisses", "pipelineUs",
+  // the WebGPU backend's shader translations (patch 0220, harness only):
+  // glslang (GLSL -> SPIR-V), Naga (SPIR-V -> WGSL) and ring push times (us),
+  // WGSL bytes, sources translated before (duplicates) and sources not
+  // tracked (the table full); null on a core without 0220
+  "xlatGlslangUs", "xlatNagaUs", "xlatPushUs", "xlatWgslBytes", "xlatDuplicates", "xlatUntracked"
 ];
 // Patch 0219's words (dolphin_web_discio.cpp HARNESS_LOAD_STATS_*): u32 that
 // wrap, unwrapped here into cumulative numbers (the deltas between rows).
-const LOAD_STATS_COLUMNS = ["texLoads", "texBytes", "texDecodeUs", "texCopyPushUs", "shaderCompiles", "shaderGenUs", "shaderXlatPushUs", "pipelineMisses", "pipelineUs"];
+const LOAD_STATS_COLUMNS = ["texLoads", "texBytes", "texDecodeUs", "texCopyPushUs", "shaderCompiles", "shaderGenUs", "shaderXlatPushUs", "pipelineMisses", "pipelineUs",
+  "xlatGlslangUs", "xlatNagaUs", "xlatPushUs", "xlatWgslBytes", "xlatDuplicates", "xlatUntracked"];
+// the words each layout version has (1: patch 0219; 2: 0220's after them)
+const LOAD_STATS_VERSION_WORDS = { 1: 9, 2: 15 };
 const loadStatsTotals = new Array(LOAD_STATS_COLUMNS.length).fill(0);
 let loadStatsLast = null;
 let loadStatsModule = null;
@@ -3954,11 +3962,14 @@ function readLoadStats(m, heap, out) {
   const ptr = m._DolphinWeb_HarnessLoadStats?.() >>> 0;
   if (!ptr || ptr % 4 !== 0 || ptr + 64 > heap.length) return;
   const w = new Uint32Array(heap.buffer, ptr, 16);
-  if (w[0] !== 1) return;
+  const n = LOAD_STATS_VERSION_WORDS[w[0]];
+  if (!n) return;
   // a new core (a reboot, or the first read): its block starts at zero, so
   // its first read counts in full (nothing of its first ~100 ms is lost)
   if (loadStatsModule !== m) { loadStatsModule = m; loadStatsLast = new Array(LOAD_STATS_COLUMNS.length).fill(0); }
   LOAD_STATS_COLUMNS.forEach((c, i) => {
+    // a column the core's layout has not: absent (null), never 0
+    if (i >= n) return;
     const v = w[i + 1];
     loadStatsTotals[i] += (v - loadStatsLast[i] + 2 ** 32) % 2 ** 32;
     out[c] = loadStatsTotals[i];
