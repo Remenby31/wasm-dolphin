@@ -101,12 +101,12 @@ jobs:
           # Windows, Android and test-only submodules are left out.
           subs=$(git -C "$src" config -f .gitmodules --get-regexp '\.path$' | awk '{print $2}' \
             | grep -v -E '^Externals/(Qt|FFmpeg-bin|libadrenotools|wil|gtest|mGBA/mgba)$')
-          git -C "$src" submodule update --init --depth 1 --jobs 8 -- $subs
+          git -C "$src" submodule update --init --recursive --depth 1 --jobs 8 -- $subs
           git -C "$src" status --short | head -5
           cmake -S "$src" -B "$RUNNER_TEMP/dolphin-build" -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DENABLE_QT=OFF -DENABLE_NOGUI=ON -DENABLE_TESTS=OFF -DENABLE_ANALYTICS=OFF -DENABLE_AUTOUPDATE=OFF \
             -DUSE_DISCORD_PRESENCE=OFF -DUSE_MGBA=OFF -DUSE_RETRO_ACHIEVEMENTS=OFF -DENCODE_FRAMEDUMPS=OFF \
-            -DENABLE_LLVM=OFF -DENABLE_VULKAN=OFF -DUSE_UPNP=OFF
+            -DENABLE_LLVM=OFF -DENABLE_VULKAN=OFF -DUSE_UPNP=OFF -DUSE_SANITIZERS=OFF
           ninja -C "$RUNNER_TEMP/dolphin-build" dolphin-nogui
           mkdir -p "$NATIVE"
           cp -a "$RUNNER_TEMP/dolphin-build/Binaries" "$NATIVE/"
