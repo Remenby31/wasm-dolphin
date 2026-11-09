@@ -46,7 +46,8 @@ export function kitCommand(action, params = {}, { sha256 = null } = {}) {
 //   nobody else, no junction or link anywhere outside jobs\<job>\ (walked
 //   without following any). jobs\<job> itself (made by jobDirScript) may
 //   grant the user write; its content is the user's and never walked.
-// Prints one SALONKIT-JSON line: the verification.
+// Prints one SALONKIT-JSON line: the verification. (PowerShell names are
+// case-insensitive: $msg, never $w beside $W; CI caught that once.)
 export function secureKitScript() {
   return [
     `$ErrorActionPreference = 'Stop'`,
@@ -56,16 +57,16 @@ export function secureKitScript() {
     `$ok = @($adm.Value, $sys.Value)`,
     `$created = $false`,
     `if (-not (Test-Path -LiteralPath $d)) { $acl = New-Object Security.AccessControl.DirectorySecurity; $acl.SetAccessRuleProtection($true, $false); $acl.SetOwner($adm); $inh = [Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'; foreach ($r in @(@($adm, 'FullControl'), @($sys, 'FullControl'), @($me, 'ReadAndExecute'))) { $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($r[0], $r[1], $inh, 'None', 'Allow'))) }; [void][IO.Directory]::CreateDirectory($d, $acl); $created = $true }`,
-    `$W = [Security.AccessControl.FileSystemRights]'WriteData, AppendData, WriteExtendedAttributes, WriteAttributes, Delete, DeleteSubdirectoriesAndFiles, ChangePermissions, TakeOwnership'`,
+    `$WriteMask = [Security.AccessControl.FileSystemRights]'WriteData, AppendData, WriteExtendedAttributes, WriteAttributes, Delete, DeleteSubdirectoriesAndFiles, ChangePermissions, TakeOwnership'`,
     `function Sid($i) { try { $i.Translate([Security.Principal.SecurityIdentifier]).Value } catch { "$i" } }`,
-    `function Bad($path, $isJobDir) { $a = Get-Acl -LiteralPath $path; $o = Sid ([Security.Principal.NTAccount]$a.Owner); $why = @(); if ($ok -notcontains $o) { $why += "owner $($a.Owner)" }; foreach ($e in $a.Access) { if ($e.AccessControlType -ne 'Allow' -or -not ($e.FileSystemRights -band $W)) { continue }; $s = Sid $e.IdentityReference; if ($ok -contains $s) { continue }; if ($isJobDir -and $s -eq $me.Value) { continue }; $why += "$($e.IdentityReference) may write" }; $why }`,
+    `function Bad($path, $isJobDir) { $a = Get-Acl -LiteralPath $path; $o = Sid ([Security.Principal.NTAccount]$a.Owner); $why = @(); if ($ok -notcontains $o) { $why += "owner $($a.Owner)" }; foreach ($e in $a.Access) { if ($e.AccessControlType -ne 'Allow' -or -not ($e.FileSystemRights -band $WriteMask)) { continue }; $s = Sid $e.IdentityReference; if ($ok -contains $s) { continue }; if ($isJobDir -and $s -eq $me.Value) { continue }; $why += "$($e.IdentityReference) may write" }; $why }`,
     `$problems = @()`,
     `$top = Get-Acl -LiteralPath $d; if (-not $top.AreAccessRulesProtected) { $problems += "$d inherits its ACL" }`,
     `if ((Get-Item -LiteralPath $d -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "$d is a junction or a link: refused" }`,
-    `foreach ($w in (Bad $d $false)) { $problems += "$d $w" }`,
+    `foreach ($msg in (Bad $d $false)) { $problems += "$d $msg" }`,
     `$jobs = Join-Path $d 'jobs'`,
     `$stack = New-Object System.Collections.Stack; $stack.Push($d)`,
-    `while ($stack.Count) { $dir = $stack.Pop(); foreach ($e in [IO.Directory]::GetFileSystemEntries($dir)) { $attr = [IO.File]::GetAttributes($e); $isJob = ([IO.Path]::GetDirectoryName($e) -eq $jobs); if ($attr -band [IO.FileAttributes]::ReparsePoint) { $problems += "$e is a junction or a link"; continue }; foreach ($w in (Bad $e $isJob)) { $problems += "$e $w" }; if (($attr -band [IO.FileAttributes]::Directory) -and -not $isJob) { $stack.Push($e) } } }`,
+    `while ($stack.Count) { $dir = $stack.Pop(); foreach ($e in [IO.Directory]::GetFileSystemEntries($dir)) { $attr = [IO.File]::GetAttributes($e); $isJob = ([IO.Path]::GetDirectoryName($e) -eq $jobs); if ($attr -band [IO.FileAttributes]::ReparsePoint) { $problems += "$e is a junction or a link"; continue }; foreach ($msg in (Bad $e $isJob)) { $problems += "$e $msg" }; if (($attr -band [IO.FileAttributes]::Directory) -and -not $isJob) { $stack.Push($e) } } }`,
     `if ($problems.Count) { throw "C:\\salon-kit is not the kit's own (made or changed by someone else?); check it, remove it by hand, then retry: $(($problems | Select-Object -First 8) -join '; ')" }`,
     `foreach ($sub in @('jobs', 'state', 'films', 'trees')) { $p = Join-Path $d $sub; if (-not (Test-Path -LiteralPath $p)) { [void](New-Item -ItemType Directory -Path $p); & icacls.exe $p /setowner '*S-1-5-32-544' /C /Q | Out-Null; if ($LASTEXITCODE -ne 0) { throw "icacls /setowner $p failed" } } }`,
     `'SALONKIT-JSON ' + (@{ action = 'secure'; created = $created; owner = (Get-Acl -LiteralPath $d).Owner; protected = $true; checked = 'top, every entry outside jobs\\<job>\\' } | ConvertTo-Json -Compress)`
