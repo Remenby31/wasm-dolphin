@@ -364,10 +364,17 @@ export function gamePauseWindow(win, bin, producedT) {
 // 0.34 VI for 99 % of the 2P run's intervals). Regular enough: covering at
 // least OWN_RATE_MIN_COVER of the second, OWN_RATE_MIN_SHARE of its
 // intervals on one k; then the nominal cadence / k (60, 30, 20 at 59.94 Hz).
-// Else the nominal cadence: never a learnt one.
+// A rate below the VI rate (k > 1) is the game's only when it is not ours:
+// k at most OWN_RATE_MAX_K, the emulation at full speed (the row's speed >=
+// GAME_PAUSE_FULL_SPEED) and the GPU side with margin over the second
+// (gpuSideBusy: the GPU thread and this worker each under
+// OWN_RATE_MAX_GPU_SHARE of it; unknown: not); a render-starved 7 a second
+// at full guest speed is ours. Else the nominal cadence: never a learnt one.
 export const OWN_RATE_MIN_COVER = 0.5;
 export const OWN_RATE_MIN_SHARE = 0.8;
-export function ownRateCadence({ producedT, from, to, viMs, nominalCadence }) {
+export const OWN_RATE_MAX_K = 3;
+export const OWN_RATE_MAX_GPU_SHARE = 0.7;
+export function ownRateCadence({ producedT, from, to, viMs, nominalCadence, speed = null, gpuRows = null }) {
   const ts = producedT.filter((t) => t >= from && t < to);
   const ds = ts.slice(1).map((t, i) => t - ts[i]);
   const bound = Math.max(REGULAR_GAP_FACTOR * (median(ds) ?? 0), REGULAR_GAP_VIS * viMs);
@@ -383,51 +390,73 @@ export function ownRateCadence({ producedT, from, to, viMs, nominalCadence }) {
   for (const k of ks) counts.set(k, (counts.get(k) ?? 0) + 1);
   const [k, n] = [...counts].sort((a, b) => b[1] - a[1])[0];
   if (n < OWN_RATE_MIN_SHARE * ks.length) return { cadence: nominalCadence, from: "nominal" };
+  if (k > 1) {
+    if (k > OWN_RATE_MAX_K || !(Number.isFinite(speed) && speed >= GAME_PAUSE_FULL_SPEED)) return { cadence: nominalCadence, from: "nominal" };
+    const busy = gpuSideBusy(gpuRows, from, to);
+    const limit = OWN_RATE_MAX_GPU_SHARE * (to - from);
+    if (!busy || busy.gpuMs > limit || busy.replayMs > limit) return { cadence: nominalCadence, from: "nominal" };
+  }
   return { cadence: round(nominalCadence / k, 2), from: "own" };
 }
 
-// The GPU side over a gap, from the drop sampler's 100 ms rows (the probe's
-// gpuRows, GPU_ROW_COLUMNS; never the worker's 500 ms window): a stall of
-// ours on the GPU side (in dual core without SyncOnSkipIdle the guest CPU
-// spins at full speed waiting for draw-done, the VIs go on, no copy is asked,
-// nothing bursts after) looks like the game's pause in every other signal.
-// Over the rows covering the gap (each row's share spread at most over its
-// overlap with the gap: an upper bound, a 45 ms stall inside a 100 ms row
-// counts whole): the GPU thread's work (its waits for this worker included:
-// the replay held it) and this worker's busy time each at most
-// GAME_PAUSE_MAX_GPU_SHARE of the gap; the CPU thread's waits for the GPU
-// (FlushGpu, EFB syncs) at most GAME_PAUSE_MAX_GPU_WAIT_MS; the copies at
-// most the frames produced over the same rows + 1. Rows missing, a drain
-// lost (a row interval over GAME_PAUSE_MAX_ROW_MS) or a field unknown:
-// unknown, never excused.
+// The GPU side over a span, from the drop sampler's 100 ms rows (the probe's
+// gpuRows, GPU_ROW_COLUMNS; never the worker's 500 ms window). The counters
+// are credited when a pass or a wait ENDS (patch 0113: a GPU-loop pass adds
+// its whole time at its end, its waits for this worker and its present sleep
+// inside it), so a row's time x may have run anywhere in [row start - x, row
+// end]: its share of the span is bounded by min(x, overlap of that window
+// with the span), summed over every row up to GAME_PAUSE_PASS_SCAN_MS past
+// the span (a pass running through the span is credited after it). The GPU
+// thread's whole work (its waits for this worker and its present sleep
+// counted: a pacer sleeping through the span is ours too); this worker's
+// busy clock (createBusyClock: the replay, and everything else it runs, disc
+// reads served and JIT messages included); the CPU thread's waits for the
+// GPU (FlushGpu, EFB syncs). Rows missing, a drain lost (rows over
+// GAME_PAUSE_MAX_ROW_MS apart), a counter unknown or going back: unknown.
 export const GPU_ROW_COLUMNS = Object.freeze(["t", "xfbCopies", "gpuWorkUs", "gpuConsumerWaitUs", "presentSleepUs", "flushGpuWaitUs", "efbWaitUs", "replayBusyMs"]);
 export const GAME_PAUSE_MAX_GPU_SHARE = 0.5;
 export const GAME_PAUSE_MAX_GPU_WAIT_MS = 1;
 export const GAME_PAUSE_MAX_ROW_MS = 250;
+export const GAME_PAUSE_PASS_SCAN_MS = 1000;
+const [ROW_T, ROW_XFB, ROW_WORK, , ROW_PRESENT, ROW_FLUSH, ROW_EFB, ROW_REPLAY] = GPU_ROW_COLUMNS.map((_, i) => i);
+export function gpuSideBusy(rows, a, b) {
+  if (!Array.isArray(rows) || !(b > a)) return null;
+  const first = rows.findLastIndex((r) => r[ROW_T] <= a);
+  if (first < 0 || !rows.some((r) => r[ROW_T] >= b)) return null;
+  const share = (x, p, c) => Math.min(x, Math.max(0, Math.min(c, b) - Math.max(p - x, a)));
+  let gpuMs = 0, replayMs = 0, waitMs = 0;
+  for (let i = first + 1; i < rows.length && rows[i - 1][ROW_T] < b + GAME_PAUSE_PASS_SCAN_MS; i += 1) {
+    const p = rows[i - 1], c = rows[i];
+    if (c.some((x) => x == null) || p.some((x) => x == null)) return null;
+    const span = c[ROW_T] - p[ROW_T];
+    if (!(span > 0) || span > GAME_PAUSE_MAX_ROW_MS) return null;
+    const d = (k) => c[k] - p[k];
+    if ([ROW_XFB, ROW_WORK, ROW_PRESENT, ROW_FLUSH, ROW_EFB, ROW_REPLAY].some((k) => d(k) < 0)) return null;
+    gpuMs += share(d(ROW_WORK) / 1000, p[ROW_T], c[ROW_T]);
+    replayMs += share(d(ROW_REPLAY), p[ROW_T], c[ROW_T]);
+    waitMs += share((d(ROW_FLUSH) + d(ROW_EFB)) / 1000, p[ROW_T], c[ROW_T]);
+  }
+  return { gpuMs: round(gpuMs, 1), replayMs: round(replayMs, 1), waitMs: round(waitMs, 1) };
+}
+
+// A gap is the game's pause on the GPU side when, over it (gpuSideBusy), the
+// GPU thread and this worker each ran at most GAME_PAUSE_MAX_GPU_SHARE of
+// it, the CPU thread waited for the GPU at most GAME_PAUSE_MAX_GPU_WAIT_MS,
+// and the copies over the rows covering it are at most the frames produced
+// over the same rows + 1. In dual core without SyncOnSkipIdle a stall of ours
+// on the GPU side looks like the game's pause in every other signal (the
+// guest CPU spins at full speed waiting for draw-done, the VIs go on, no copy
+// is asked, nothing bursts after). Unknown: never excused.
 export function gamePauseGpuSide({ rows, a, b, producedT }) {
   const unknown = { known: false, ok: false };
-  if (!Array.isArray(rows) || !(b > a)) return unknown;
-  const [T, XFB, WORK, , PRESENT, FLUSH, EFB, REPLAY] = GPU_ROW_COLUMNS.map((_, i) => i);
-  const first = rows.findLastIndex((r) => r[T] <= a), last = rows.findIndex((r) => r[T] >= b);
-  if (first < 0 || last < 0) return unknown;
-  let gpuMs = 0, replayMs = 0, waitMs = 0, copies = 0;
-  for (let i = first + 1; i <= last; i += 1) {
-    const p = rows[i - 1], c = rows[i];
-    if (c.some((x) => x == null) || p.some((x) => x == null)) return unknown;
-    const span = c[T] - p[T];
-    if (!(span > 0) || span > GAME_PAUSE_MAX_ROW_MS) return unknown;
-    const d = (k) => c[k] - p[k];
-    if ([XFB, WORK, PRESENT, FLUSH, EFB, REPLAY].some((k) => d(k) < 0)) return unknown;
-    const overlap = Math.min(c[T], b) - Math.max(p[T], a);
-    gpuMs += Math.min(overlap, (d(WORK) - d(PRESENT)) / 1000);
-    replayMs += Math.min(overlap, d(REPLAY));
-    waitMs += (d(FLUSH) + d(EFB)) / 1000;
-    copies += d(XFB);
-  }
-  const produced = producedT.filter((t) => t > rows[first][T] && t <= rows[last][T]).length;
+  const busy = gpuSideBusy(rows, a, b);
+  if (!busy) return unknown;
+  const first = rows.findLastIndex((r) => r[ROW_T] <= a), last = rows.findIndex((r) => r[ROW_T] >= b);
+  const copies = rows[last][ROW_XFB] - rows[first][ROW_XFB];
+  const produced = producedT.filter((t) => t > rows[first][ROW_T] && t <= rows[last][ROW_T]).length;
   const gap = b - a;
-  const ok = gpuMs <= GAME_PAUSE_MAX_GPU_SHARE * gap && replayMs <= GAME_PAUSE_MAX_GPU_SHARE * gap && waitMs <= GAME_PAUSE_MAX_GPU_WAIT_MS && copies <= produced + 1;
-  return { known: true, ok, gpuMs: round(Math.max(0, gpuMs), 1), replayMs: round(Math.max(0, replayMs), 1), waitMs: round(waitMs, 1), copies, produced };
+  const ok = busy.gpuMs <= GAME_PAUSE_MAX_GPU_SHARE * gap && busy.replayMs <= GAME_PAUSE_MAX_GPU_SHARE * gap && busy.waitMs <= GAME_PAUSE_MAX_GPU_WAIT_MS && copies <= produced + 1;
+  return { known: true, ok, ...busy, copies, produced };
 }
 
 export const GAME_PAUSE_FULL_SPEED = 98;
@@ -588,7 +617,7 @@ export function deriveSeconds(samples, { tps = null } = {}) {
         const win = !regular && made != null ? gamePauseWindow(counterWindow, x, allProduced) : null;
         const pauseRef = win ? gamePauseReference({ made, xfbCopies: win.copies, producedInWindow: win.produced, vis: vis?.[x.k] ?? null, viRate: nominalVi }) : null;
         // irregular, not (yet) the game's pause: its own regular part's rate
-        const own = !regular && made != null ? ownRateCadence({ producedT: allProduced, from: x.from, to: x.to, viMs: nominalViMs, nominalCadence: viCadence(nominalVi) }) : null;
+        const own = !regular && made != null ? ownRateCadence({ producedT: allProduced, from: x.from, to: x.to, viMs: nominalViMs, nominalCadence: viCadence(nominalVi), speed, gpuRows }) : null;
         const reference = binContent ? made : own ? own.cadence : sceneCadence;
         const smoothness = made == null ? null : smoothOf(x.newFrames, reference);
         if (pauseRef != null) pauseBins.set(x.k, { row: rowIndex, i, from: x.from, to: x.to, smoothPause: smoothOf(x.newFrames, pauseRef) });
@@ -913,7 +942,7 @@ export function parcoursVerdict(baseline, candidate, noise = null) {
       v.inconclusive = true;
     }
     // the game's pauses each side's p5 excused, run by run (published next
-    // to the p5, never judged: the game's, not the emulator's)
+    // to the p5; their count and time are also primaries, judged above)
     const pausesOf = (xs) => xs.map((a) => gamePausesOf(a, k)).filter(Boolean);
     v.gamePauses = { baseline: pausesOf(b), candidate: pausesOf(c) };
     phases[k] = v;

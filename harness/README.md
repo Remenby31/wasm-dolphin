@@ -547,10 +547,13 @@ missing, none late by 3 periods or more: a stall caught up in a burst is
 ours) and no burst of frames after it (frames held by a stall of ours come
 out at once) and the GPU side idle over it, from the drop sampler's 100 ms
 rows every run keeps (`gpuRows`; never the worker's 500 ms window): the GPU
-thread's work (its waits for the replay included) and the replay worker's
-busy time each at most half the gap (each row's busy time counted whole
-within its overlap with the gap: an upper bound), no CPU wait for the GPU
-(FlushGpu, EFB syncs, 1 ms at most), and the copies over those rows at most
+thread's whole work (its waits for the replay and its present sleep
+included) and the worker's busy clock (the replay and all else it runs:
+disc reads served, JIT messages) each at most half the gap, the CPU's waits
+for the GPU (FlushGpu, EFB syncs) 1 ms at most (each counter credited when
+a pass or wait ends, so a row's time x is bounded by min(x, the overlap of
+[row start - x, row end] with the gap), rows read up to 1 s past the gap),
+and the copies over the rows covering the gap at most
 the frames produced in them + 1. In dual core without SyncOnSkipIdle a
 stall of ours on the GPU side looks like the game's pause in every other
 signal (the guest CPU spins at full speed waiting for draw-done, the VIs go
@@ -560,7 +563,9 @@ are primaries: a rise past the noise is a regression, so even a stall the
 rule took for the game's is caught. An irregular second that is not the
 game's pause is judged against the rate of its own regular part (its frame
 intervals that are no gap, each rounded to a VI multiple k, covering half
-the second or more with 80 % on one k: the nominal cadence / k), else the
+the second or more with 80 % on one k: the nominal cadence / k; for k > 1
+only with k at most 3, full speed and the GPU side under 70 % over the
+second), else the
 nominal cadence (60 or 50), never a learnt one: we judge what the game was
 doing in that second, our gaps count in full. A second is the game's pause only when its counter window is
 a fresh sampler row covering 95 % of it, the copies in that window at most

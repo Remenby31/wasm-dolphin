@@ -1174,6 +1174,19 @@ test("a stall on OUR GPU side (VIs on, full speed, no copy asked, no burst after
   assert.equal(spans(cum([row(1200), row(1300), row(1400, { xfb: 3 }), row(1500), row(1600), row(1700)])).ok, false, "copies inside the gap");
   // a 45 ms GPU stall inside one 100 ms row counts whole (upper bound, not spread over the row)
   assert.equal(gamePauseGpuSide({ rows: cum([row(1300), row(1400, { work: 45 }), row(1500)]), a: 1330, b: 1375, producedT: [] }).ok, false);
+  // the counters are credited when a pass ENDS: one 310 ms pass through the gap, ending at 1610 (credited in the
+  // row ending at 1700), or just before b, or with rows offset by 50 ms: all counted, not excused
+  const flat = (ts, at, work) => cum(ts.map((t) => row(t, { work: t === at ? work : 0, replay: 0 })));
+  const ts = [1200, 1300, 1400, 1500, 1600, 1700, 1800];
+  assert.equal(spans(flat(ts, 1700, 310)).ok, false, "credited after the gap");
+  assert.equal(spans(flat(ts, 1600, 300)).ok, false, "credited at the gap's end");
+  assert.equal(spans(flat(ts.map((t) => t + 50), 1650, 310)).ok, false, "rows offset");
+  assert.ok(spans(flat(ts, 1700, 310)).gpuMs >= 290);
+  // the present sleep is the GPU thread's too (a pacer sleeping through the gap is ours): never subtracted
+  const sleepy = cum([row(1200), row(1300), row(1400, { work: 100 }), row(1500, { work: 100 }), row(1600), row(1700)]).map((r, i) => { r[4] = i >= 2 ? 200000 : 0; return r; });
+  assert.equal(spans(sleepy).ok, false);
+  // a wait for the GPU before the gap is not counted in it
+  assert.equal(spans(cum([row(1100), row(1200, { flush: 5 }), row(1300), row(1400), row(1500), row(1600), row(1700)])).ok, true);
   // rows missing (a lost drain), or a field unknown: unknown, never excused
   const lost = pauseRun({ gpu: { drop: [2] }, rows: true });
   assert.equal(lost[1].smoothBins[0].gamePause, false);
@@ -1224,6 +1237,10 @@ test("probe: every run keeps the drop sampler's GPU-side rows (gpuRows), in GPU_
   assert.equal(gpuRowsOf(null), null);
   // a core without the replay column: that field unknown, never 0
   assert.deepEqual(gpuRowsOf({ columns: columns.slice(0, 8), rows: [[1, 0, 1, 2, 0, 0, 0, 0]] }), [[1, 1, 2, 0, 0, 0, 0, null]]);
+  // every run records them, not only with --sampler-rows
+  const probe = readFileSync(new URL("../harness/probes/parcours.mjs", import.meta.url), "utf8");
+  assert.match(probe, /raw\.samples\.push\(\{ t, info, counters: countersOf\(drained\), gpuRows: gpuRowsOf\(drained\),/);
+  assert.match(probe, /const drained = raw\.samplerMissing \? null : await workerRequest\(page, "validationDropSampler", \{ action: "drain" \}, 5000\);/);
   // the worker samples the column
   const worker = readFileSync(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
   assert.match(worker, /"replayBusyMs"\n\];/);
@@ -1271,13 +1288,25 @@ test("a non-excused irregular second without enough regular part falls back to t
   const vi = 1000 / 59.94;
   const alt = []; for (let t = 0, i = 0; t < 1000; t += (i++ % 2 ? 2 : 1) * vi) alt.push(t);
   assert.deepEqual(ownRateCadence({ producedT: alt, from: 0, to: 1000, viMs: vi, nominalCadence: 60 }), { cadence: 60, from: "nominal" });
+  // the GPU side's rows over [-500, 1500]: idle (5 %), or the GPU thread busy 90 %
+  const sideRows = (busy) => { const out = []; for (let t = -500, w = 0; t <= 1500; t += 100) { out.push([t, 0, w * 1000, 0, 0, 0, 0, 5 * (out.length)]); w += busy * 100; } return out; };
+  const idle = { speed: 100, gpuRows: sideRows(0.05) };
   const at20 = Array.from({ length: 20 }, (_, i) => i * 3 * vi);
-  assert.deepEqual(ownRateCadence({ producedT: at20, from: 0, to: 1000, viMs: vi, nominalCadence: 60 }), { cadence: 20, from: "own" });
+  assert.deepEqual(ownRateCadence({ producedT: at20, from: 0, to: 1000, viMs: vi, nominalCadence: 60, ...idle }), { cadence: 20, from: "own" });
   // host jitter of a third of a VI still rounds to the same multiple
   const jit = Array.from({ length: 30 }, (_, i) => i * 2 * vi + (i % 2 ? 2.5 : -2.5)); // intervals 2 VIs ± 5 ms
-  assert.deepEqual(ownRateCadence({ producedT: jit, from: -10, to: 990, viMs: vi, nominalCadence: 60 }), { cadence: 30, from: "own" });
+  assert.deepEqual(ownRateCadence({ producedT: jit, from: -10, to: 990, viMs: vi, nominalCadence: 60, ...idle }), { cadence: 30, from: "own" });
   // PAL: the nominal 50 and 50 / k
-  assert.deepEqual(ownRateCadence({ producedT: [], from: 0, to: 1000, viMs: 20, nominalCadence: 50 }), { cadence: 50, from: "nominal" });
-  assert.deepEqual(ownRateCadence({ producedT: Array.from({ length: 25 }, (_, i) => i * 40), from: 0, to: 1000, viMs: 20, nominalCadence: 50 }), { cadence: 25, from: "own" });
+  assert.deepEqual(ownRateCadence({ producedT: [], from: 0, to: 1000, viMs: 20, nominalCadence: 50, ...idle }), { cadence: 50, from: "nominal" });
+  assert.deepEqual(ownRateCadence({ producedT: Array.from({ length: 25 }, (_, i) => i * 40), from: 0, to: 1000, viMs: 20, nominalCadence: 50, ...idle }), { cadence: 25, from: "own" });
+  // below the VI rate, ours unless proven otherwise: below full speed, the GPU thread busy 90 %, the GPU side
+  // unknown, or k past 3 (10 a second: a render-starved rate at full guest speed) all give the nominal 60
+  assert.equal(ownRateCadence({ producedT: at20, from: 0, to: 1000, viMs: vi, nominalCadence: 60, speed: 93, gpuRows: idle.gpuRows }).cadence, 60);
+  assert.equal(ownRateCadence({ producedT: at20, from: 0, to: 1000, viMs: vi, nominalCadence: 60, speed: 100, gpuRows: sideRows(0.9) }).cadence, 60);
+  assert.equal(ownRateCadence({ producedT: at20, from: 0, to: 1000, viMs: vi, nominalCadence: 60, speed: 100 }).cadence, 60);
+  const at10 = Array.from({ length: 10 }, (_, i) => i * 6 * vi);
+  assert.equal(ownRateCadence({ producedT: at10, from: 0, to: 1000, viMs: vi, nominalCadence: 60, ...idle }).cadence, 60);
+  // a single long interval is no regular part (k 36)
+  assert.equal(ownRateCadence({ producedT: [100, 700], from: 0, to: 1000, viMs: vi, nominalCadence: 60, ...idle }).cadence, 60);
 });
 const round1 = (x) => Math.round(x * 10) / 10;
