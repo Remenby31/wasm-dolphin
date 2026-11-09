@@ -52,7 +52,7 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp b/Source/Core/VideoB
  #include <cstring>
  #include <iterator>
  #include <sstream>
-@@ -450,6 +453,24 @@ static std::array<std::atomic<u64>, static_cast<u32>(GfxAbortSite::Count)> s_abo
+@@ -450,6 +453,25 @@ static std::array<std::atomic<u64>, static_cast<u32>(GfxAbortSite::Count)> s_abo
  static std::array<std::atomic<u64>, static_cast<u32>(GfxAbortSite::Count)> s_poison_by_site{};
  static std::atomic<u64> s_draw_skipped_no_pipeline{0};
  
@@ -71,13 +71,14 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp b/Source/Core/VideoB
 +  std::atomic<u32> generation{0};
 +  std::atomic<u32> draws{0};
 +};
-+static std::array<UberViSlot, UBER_VI_RING> s_uber_vi_ring{};
++// Allocated at the first VI tag (the harness's), never freed: no static array.
++static std::atomic<UberViSlot*> s_uber_vi_ring{nullptr};
 +static std::atomic<u32> s_uber_last_generation{0xffffffffu};
 +
  // 0207: comma-separated counters for the stats line.
  static std::string AbortCauses()
  {
-@@ -489,6 +510,15 @@ static std::string UploadFailedRoles()
+@@ -489,6 +511,15 @@ static std::string UploadFailedRoles()
    return out;
  }
  
@@ -93,7 +94,7 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp b/Source/Core/VideoB
  extern "C" EMSCRIPTEN_KEEPALIVE const char* GetWebGpuStateCacheStats()
  {
    static std::string stats;
-@@ -512,6 +542,14 @@ extern "C" EMSCRIPTEN_KEEPALIVE const char* GetWebGpuStateCacheStats()
+@@ -512,6 +543,14 @@ extern "C" EMSCRIPTEN_KEEPALIVE const char* GetWebGpuStateCacheStats()
        << " wggfxpoison:" << PoisonSites()
        << " wgrangefail:" << RangeFailures()
        << " wgdrawskip:" << s_draw_skipped_no_pipeline.load(std::memory_order_relaxed)
@@ -108,7 +109,7 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp b/Source/Core/VideoB
        << " wgupfail:" << GetCommandStream().GetUploadAllocFailedCount() << "," << UploadFailedRoles()
        << "," << GetCommandStream().GetUploadTextureFailedCount()
        << " wgubo:" << ((s_ubo_control_mode.load(std::memory_order_relaxed) & 1u) ? 1 : 0)
-@@ -720,9 +758,66 @@ WebGPUGfx::~WebGPUGfx()
+@@ -720,9 +759,72 @@ WebGPUGfx::~WebGPUGfx()
    UpdateActiveConfig();
  }
  
@@ -129,7 +130,14 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp b/Source/Core/VideoB
 +    s_uber_frames.fetch_add(1, std::memory_order_relaxed);
 +    s_uber_frames_since_load.fetch_add(1, std::memory_order_relaxed);
 +  }
-+  UberViSlot& slot = s_uber_vi_ring[vi_since_load % UBER_VI_RING];
++  // VI tags come from the GPU thread only: one allocation, then published.
++  UberViSlot* ring = s_uber_vi_ring.load(std::memory_order_acquire);
++  if (!ring)
++  {
++    ring = new UberViSlot[UBER_VI_RING];
++    s_uber_vi_ring.store(ring, std::memory_order_release);
++  }
++  UberViSlot& slot = ring[vi_since_load % UBER_VI_RING];
 +  slot.draws.store(draws, std::memory_order_relaxed);
 +  slot.generation.store(load_generation, std::memory_order_relaxed);
 +  slot.vi.store(vi_since_load, std::memory_order_release);
@@ -144,15 +152,14 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp b/Source/Core/VideoB
 +extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_UberDrawsAtVi(u32 vi_since_load, u32* out)
 +{
 +  const u32 gen = s_uber_last_generation.load(std::memory_order_relaxed);
-+  u32 found = 1, cur = 0, prev = 0;
++  const UberViSlot* ring = s_uber_vi_ring.load(std::memory_order_acquire);
++  u32 found = ring ? 1 : 0, cur = 0, prev = 0;
 +  for (u32 k = 0; k < 2; ++k)
 +  {
-+    if (vi_since_load < k)
-+    {
++    if (!ring || vi_since_load < k)
 +      continue;
-+    }
 +    const u32 vi = vi_since_load - k;
-+    const UberViSlot& slot = s_uber_vi_ring[vi % UBER_VI_RING];
++    const UberViSlot& slot = ring[vi % UBER_VI_RING];
 +    if (slot.vi.load(std::memory_order_acquire) != vi ||
 +        slot.generation.load(std::memory_order_relaxed) != gen)
 +    {
@@ -175,7 +182,7 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp b/Source/Core/VideoB
    if (!m_cmd_stream.ready())
      return;
    // Keep the tag out of any pass, so it orders cleanly against the
-@@ -854,8 +949,8 @@ public:
+@@ -854,8 +956,8 @@ public:
    // producer-assigned id the consumer keyed its module under; 0 means
    // translation failed / no module (Software fallback). m_wgsl kept
    // for the Day-29 pipeline opcode + debugging.
@@ -186,7 +193,7 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp b/Source/Core/VideoB
    {
    }
    ~WebGPUShader() override = default;
-@@ -864,9 +959,20 @@ public:
+@@ -864,9 +966,20 @@ public:
    const std::string& GetWgsl() const { return m_wgsl; }
    BinaryData GetBinary() const override { return {}; }
  
@@ -208,7 +215,7 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp b/Source/Core/VideoB
  };
  
  std::unique_ptr<AbstractShader>
-@@ -874,6 +980,25 @@ WebGPUGfx::CreateShaderFromSource(ShaderStage stage, std::string_view source,
+@@ -874,6 +987,25 @@ WebGPUGfx::CreateShaderFromSource(ShaderStage stage, std::string_view source,
                                    VideoCommon::ShaderIncluder* /* shader_includer */,
                                    std::string_view /* name */)
  {
@@ -234,7 +241,7 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp b/Source/Core/VideoB
    DolphinWeb::WebGpuProducerProfile::ScopedSample producer_profile(
        DolphinWeb::WebGpuProducerProfile::Phase::ShaderTranslateEmit);
    // Day-28: Dolphin GLSL → glslang → SPIR-V → Naga → WGSL (all C++,
-@@ -907,7 +1032,7 @@ WebGPUGfx::CreateShaderFromSource(ShaderStage stage, std::string_view source,
+@@ -907,7 +1039,7 @@ WebGPUGfx::CreateShaderFromSource(ShaderStage stage, std::string_view source,
  
    if (bridge_id != 0)
    {
@@ -243,7 +250,7 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp b/Source/Core/VideoB
      // Day-29/32: remember the first translatable vertex AND pixel
      // shader so ShowImage can build a real pipeline from a real
      // Dolphin VS+FS pair (Day-32 proves shader-interface
-@@ -918,10 +1043,12 @@ WebGPUGfx::CreateShaderFromSource(ShaderStage stage, std::string_view source,
+@@ -918,10 +1050,12 @@ WebGPUGfx::CreateShaderFromSource(ShaderStage stage, std::string_view source,
        m_test_fs_id = bridge_id;
    }
    else
@@ -259,7 +266,7 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp b/Source/Core/VideoB
        (total <= 64 || (total % 256) == 0))
    {
      EM_ASM(
-@@ -931,7 +1058,7 @@ WebGPUGfx::CreateShaderFromSource(ShaderStage stage, std::string_view source,
+@@ -931,7 +1065,7 @@ WebGPUGfx::CreateShaderFromSource(ShaderStage stage, std::string_view source,
                          ' (stage=' + $2 + ' xlat=' + $3 + ' id=' + $4 + ') firstErr=' +
                          (UTF8ToString($5) || '<none>'));
          },
@@ -268,7 +275,7 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp b/Source/Core/VideoB
          wgsl_text.empty() ? 0 : 1, static_cast<int>(bridge_id),
          LastShaderTranslateError().c_str());
    }
-@@ -964,7 +1091,19 @@ public:
+@@ -964,7 +1098,19 @@ public:
    u32 GetBridgeId() const { return m_bridge_id; }
  
  private:
@@ -289,7 +296,7 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp b/Source/Core/VideoB
  };
  
  // ---- Day-33 A2: AbstractPipelineConfig → WebGPU pipeline blob -----
-@@ -1247,6 +1386,16 @@ std::unique_ptr<AbstractPipeline>
+@@ -1247,6 +1393,16 @@ std::unique_ptr<AbstractPipeline>
  WebGPUGfx::CreatePipeline(const AbstractPipelineConfig& config,
                            const void* /* cache_data */, size_t /* cache_data_length */)
  {
@@ -306,7 +313,7 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp b/Source/Core/VideoB
    DolphinWeb::WebGpuProducerProfile::ScopedSample producer_profile(
        DolphinWeb::WebGpuProducerProfile::Phase::PipelineSerializeEmit);
    // Day-33 A2: serialize the real Dolphin pipeline state and ship it
-@@ -1259,10 +1408,10 @@ WebGPUGfx::CreatePipeline(const AbstractPipelineConfig& config,
+@@ -1259,10 +1415,10 @@ WebGPUGfx::CreatePipeline(const AbstractPipelineConfig& config,
    m_cmd_stream.EnsureRing();
  
    u32 bridge_id = 0;
@@ -321,7 +328,7 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp b/Source/Core/VideoB
    if (m_cmd_stream.ready() && vs_id != 0 && fs_id != 0)
    {
      const std::vector<u8> blob = SerializePipelineConfig(config, vs_id, fs_id);
-@@ -2494,10 +2643,52 @@ bool WebGPUGfx::PrepareDrawResources()
+@@ -2494,10 +2650,52 @@ bool WebGPUGfx::PrepareDrawResources()
    return true;
  }
  
@@ -376,7 +383,7 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp b/Source/Core/VideoB
    m_pipeline_uses_utility_uniforms =
        pipeline && pipeline->m_config.usage == AbstractPipelineUsage::Utility;
  }
-@@ -2839,6 +3030,8 @@ void WebGPUGfx::Draw(u32 base_vertex, u32 num_vertices)
+@@ -2839,6 +3037,8 @@ void WebGPUGfx::Draw(u32 base_vertex, u32 num_vertices)
      AbortRecordedPass(GfxAbortSite::PushDraw);
      return;
    }
@@ -385,7 +392,7 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp b/Source/Core/VideoB
  }
  
  void WebGPUGfx::DrawIndexed(u32 base_index, u32 num_indices, u32 base_vertex)
-@@ -2889,6 +3082,8 @@ void WebGPUGfx::DrawIndexed(u32 base_index, u32 num_indices, u32 base_vertex)
+@@ -2889,6 +3089,8 @@ void WebGPUGfx::DrawIndexed(u32 base_index, u32 num_indices, u32 base_vertex)
      AbortRecordedPass(GfxAbortSite::PushDraw);
      return;
    }
