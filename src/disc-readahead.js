@@ -19,6 +19,11 @@
 export const DISC_READAHEAD_MIN_BYTES = 64 << 10;
 export const DISC_READAHEAD_MAX_BYTES = 1 << 20;
 export const DISC_READAHEAD_HELD_BYTES = 8 << 20;
+// Prefetch (0155): background reads in flight at most, all files together.
+// Memory: a prefetched segment is held under the same DISC_READAHEAD_HELD_BYTES
+// cap as the demand reads (oldest out first); at most this many segments
+// (<= DISC_READAHEAD_MAX_BYTES each) are in flight on top: 8 + 1 MiB peak.
+export const DISC_PREFETCH_MAX_IN_FLIGHT = 1;
 
 // A WORKERFS stream_ops.read reading ahead. `readBlob(blob)` returns the
 // bytes of a Blob slice (FileReaderSync in the worker). Stats: segment reads
@@ -30,11 +35,14 @@ export function createDiscReadahead({
   minBytes = DISC_READAHEAD_MIN_BYTES,
   maxBytes = DISC_READAHEAD_MAX_BYTES,
   heldBytes = DISC_READAHEAD_HELD_BYTES,
+  maxPrefetchInFlight = DISC_PREFETCH_MAX_IN_FLIGHT,
 }) {
   const stats = {
     blockReads: 0, blockHits: 0, bytesRead: 0, heldBytes: 0, maxHeldBytes: 0,
-    prefetchIssued: 0, prefetchUsed: 0, prefetchWasted: 0, syncMissInflight: 0, prefetchBytes: 0,
+    prefetchIssued: 0, prefetchUsed: 0, prefetchWasted: 0, syncMissInflight: 0, prefetchBytes: 0, prefetchCapped: 0,
   };
+  // background reads in flight, every file's together (capped)
+  let inFlight = 0;
   // Segments held, every file's together (oldest first): one cap for all,
   // so a disc change lets the previous disc's segments go first.
   const segments = [];
@@ -76,12 +84,17 @@ export function createDiscReadahead({
   // to maxBytes; one in flight per file.
   function prefetchFrom(f, blob, size, at) {
     if (!readBlobAsync || f.pending || at >= size || heldAt(blob, at)) return;
+    // at most maxPrefetchInFlight background reads at once (all files): on a
+    // slow disc they never pile up; a demand read never waits for them
+    if (inFlight >= maxPrefetchInFlight) { stats.prefetchCapped += 1; return; }
+    inFlight += 1;
     f.next = Math.min(maxBytes, f.next * 2);
     const end = Math.min(size, at + f.next);
     const pending = { start: at, end };
     f.pending = pending;
     stats.prefetchIssued += 1;
     Promise.resolve(readBlobAsync(blob.slice(at, end))).then((buffer) => {
+      inFlight -= 1;
       if (f.pending === pending) f.pending = null;
       const bytes = new Uint8Array(buffer);
       // Read synchronously meanwhile, or nothing there: this one is dropped.
@@ -92,6 +105,7 @@ export function createDiscReadahead({
       stats.prefetchBytes += bytes.length;
       hold({ blob, start: at, bytes, prefetched: true, used: false });
     }, () => {
+      inFlight -= 1;
       if (f.pending === pending) f.pending = null;
     });
   }
