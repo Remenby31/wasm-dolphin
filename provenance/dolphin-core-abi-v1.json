@@ -44,8 +44,8 @@
     {
       "path": "core/upstream/dolphin_web_core.cpp",
       "hashMode": "lf-normalized",
-      "size": 80536,
-      "sha256": "c9fe8f882df26ec00a32ad8bac90940a27ee79754a37931c310ec2dc0fb435d5"
+      "size": 80812,
+      "sha256": "062e993b0f7da585418cc66330d80a60c6c0f271079c4fd8fa438a3d7e57f05f"
     },
     {
       "path": "src/app.js",

@@ -921,8 +921,11 @@ void EnsureRuntime()
   // previously got "characters appear" — if the EFB goes non-black here, the
   // black is uber-specific (alpha-test discard / bpmem-konst UBO not uploaded in
   // uber mode); if still black, it's a deeper scene-pass write issue.
+  // DIAG (do not merge): the WebGPU backend on ubershaders, for gate (1) of
+  // lever 1 on patch 0222 (G3 exact against the specialized reference).
   Config::SetBase(Config::GFX_SHADER_COMPILATION_MODE,
-                  ShaderCompilationMode::Synchronous);
+                  s_video_backend == "WebGPU" ? ShaderCompilationMode::SynchronousUberShaders :
+                                                ShaderCompilationMode::Synchronous);
   Config::SetBase(Config::GFX_SHADER_COMPILER_THREADS, 0);
   Config::SetBase(Config::GFX_SHADER_PRECOMPILER_THREADS, 0);
   VideoBackendBase::ActivateBackend(s_video_backend);
