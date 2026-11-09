@@ -37,6 +37,9 @@ function latestFrames(dir) {
 async function runOne({ bin, file, core, timeoutSec, platform, configs, logFile, keepUser }) {
   const user = keepUser ?? mkdtempSync(path.join(os.tmpdir(), "native-dolphin-"));
   mkdirSync(path.join(user, "Config"), { recursive: true });
+  // The logger reads its own file at start-up (a -C value comes too late).
+  writeFileSync(path.join(user, "Config", "Logger.ini"), "[Options]\nWriteToFile = True\nWriteToConsole = True\nVerbosity = 4\n[Logs]\n" +
+    ["BOOT", "CORE", "VIDEO", "COMMON", "FRAMEDUMP", "OSREPORT", "VIDEOINTERFACE", "HOST_GPU", "MASTER"].map((t) => `${t} = True\n`).join(""));
   const args = ["-u", user, "-p", platform, "-v", "Software Renderer", "-e", file,
     "-C", `Dolphin.Core.CPUCore=${core}`, "-C", "Dolphin.Core.EmulationSpeed=0",
     "-C", "Dolphin.Movie.DumpFrames=True", "-C", "GFX.Settings.DumpFramesAsImages=True",
@@ -45,9 +48,6 @@ async function runOne({ bin, file, core, timeoutSec, platform, configs, logFile,
     // "duplicate", which Dolphin skips presenting (and dumping) by default.
     "-C", "GFX.Hacks.SkipDuplicateXFBs=False",
     "-C", "Dolphin.DSP.Backend=No Audio Output", "-C", "Dolphin.Interface.ConfirmStop=False",
-    // Dolphin's own log (User/Logs/dolphin.log), kept with --keep-user.
-    "-C", "Logger.Options.WriteToFile=True", "-C", "Logger.Options.Verbosity=4",
-    ...["BOOT", "CORE", "VIDEO", "COMMON", "FRAMEDUMP", "OSREPORT"].flatMap((t) => ["-C", `Logger.Logs.${t}=True`]),
     ...configs.flatMap((c) => ["-C", c])];
   const log = openSync(logFile, "w");
   const child = spawn(bin, args, { stdio: ["ignore", log, log] });
