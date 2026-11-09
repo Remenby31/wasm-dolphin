@@ -557,7 +557,12 @@ signal (the guest CPU spins at full speed waiting for draw-done, the VIs go
 on, no copy is asked, nothing bursts after). Rows missing or a field
 unknown: no excuse (analysis 8). In an A/B the pauses' count and total time
 are primaries: a rise past the noise is a regression, so even a stall the
-rule took for the game's is caught. A second is the game's pause only when its counter window is
+rule took for the game's is caught. An irregular second that is not the
+game's pause is judged against the rate of its own regular part (its frame
+intervals that are no gap, each rounded to a VI multiple k, covering half
+the second or more with 80 % on one k: the nominal cadence / k), else the
+nominal cadence (60 or 50), never a learnt one: we judge what the game was
+doing in that second, our gaps count in full. A second is the game's pause only when its counter window is
 a fresh sampler row covering 95 % of it, the copies in that window at most
 the frames produced in the same window + 1, and every gap it holds is such
 a pause, excused in every second it covers; it is then judged against what

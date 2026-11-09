@@ -60,7 +60,10 @@ import { median, percentile, round } from "./stats.mjs";
 // count, seconds, durations, start, film position).
 // 8: a gap is the game's pause only with the GPU side idle over it, from the
 // drop sampler's 100 ms rows (gamePauseGpuSide; unknown: no excuse); the
-// pauses' count and total time are A/B primaries (a rise is a regression).
+// pauses' count and total time are A/B primaries (a rise is a regression);
+// an irregular second not excused is judged against its own regular part's
+// rate snapped to VI/n, else the nominal cadence (ownRateCadence), never a
+// learnt one.
 export const ANALYSIS_VERSION = 8;
 
 export const PHASES = Object.freeze(["boot", "loading", "cinematic", "menu", "game"]);
@@ -349,6 +352,40 @@ export function gamePauseWindow(win, bin, producedT) {
 // most GAME_PAUSE_RESUME_FRAMES frames within GAME_PAUSE_RESUME_FRAMES VI
 // periods after it: frames held by a stall of ours come out at once, a game
 // resumes at its pace). Times in the emulation's host clock.
+// The reference of an irregular second that is not the game's pause (the
+// judge's decision, analysis 8): the rate of ITS OWN regular part, snapped
+// to VI/n; we judge what the game was doing in that second (frames it did
+// not produce at full speed are not ours), our gaps count in full. The
+// regular part: the second's frame intervals (producedT, both frames in the
+// second) that are no gap, the same bound as regularProduction: at most
+// max(REGULAR_GAP_FACTOR x the second's median interval, REGULAR_GAP_VIS VI
+// periods) (a game at 20 a second paces 3 VIs); each rounds to its nearest
+// VI multiple k >= 1 (the host jitter of the produced-frame times: under
+// 0.34 VI for 99 % of the 2P run's intervals). Regular enough: covering at
+// least OWN_RATE_MIN_COVER of the second, OWN_RATE_MIN_SHARE of its
+// intervals on one k; then the nominal cadence / k (60, 30, 20 at 59.94 Hz).
+// Else the nominal cadence: never a learnt one.
+export const OWN_RATE_MIN_COVER = 0.5;
+export const OWN_RATE_MIN_SHARE = 0.8;
+export function ownRateCadence({ producedT, from, to, viMs, nominalCadence }) {
+  const ts = producedT.filter((t) => t >= from && t < to);
+  const ds = ts.slice(1).map((t, i) => t - ts[i]);
+  const bound = Math.max(REGULAR_GAP_FACTOR * (median(ds) ?? 0), REGULAR_GAP_VIS * viMs);
+  const ks = [];
+  let covered = 0;
+  for (const d of ds) {
+    if (d > bound) continue;
+    ks.push(Math.max(1, Math.round(d / viMs)));
+    covered += d;
+  }
+  if (!ks.length || covered < OWN_RATE_MIN_COVER * (to - from)) return { cadence: nominalCadence, from: "nominal" };
+  const counts = new Map();
+  for (const k of ks) counts.set(k, (counts.get(k) ?? 0) + 1);
+  const [k, n] = [...counts].sort((a, b) => b[1] - a[1])[0];
+  if (n < OWN_RATE_MIN_SHARE * ks.length) return { cadence: nominalCadence, from: "nominal" };
+  return { cadence: round(nominalCadence / k, 2), from: "own" };
+}
+
 // The GPU side over a gap, from the drop sampler's 100 ms rows (the probe's
 // gpuRows, GPU_ROW_COLUMNS; never the worker's 500 ms window): a stall of
 // ours on the GPU side (in dual core without SyncOnSkipIdle the guest CPU
@@ -550,10 +587,12 @@ export function deriveSeconds(samples, { tps = null } = {}) {
         // the game's own pause (gamePauseReference), decided after the loop
         const win = !regular && made != null ? gamePauseWindow(counterWindow, x, allProduced) : null;
         const pauseRef = win ? gamePauseReference({ made, xfbCopies: win.copies, producedInWindow: win.produced, vis: vis?.[x.k] ?? null, viRate: nominalVi }) : null;
-        const reference = binContent ? made : sceneCadence;
+        // irregular, not (yet) the game's pause: its own regular part's rate
+        const own = !regular && made != null ? ownRateCadence({ producedT: allProduced, from: x.from, to: x.to, viMs: nominalViMs, nominalCadence: viCadence(nominalVi) }) : null;
+        const reference = binContent ? made : own ? own.cadence : sceneCadence;
         const smoothness = made == null ? null : smoothOf(x.newFrames, reference);
         if (pauseRef != null) pauseBins.set(x.k, { row: rowIndex, i, from: x.from, to: x.to, smoothPause: smoothOf(x.newFrames, pauseRef) });
-        return { t: round((x.to - t0) / 1000, 2), newFrames: x.newFrames, produced: made, regular, content: binContent, gamePause: false, smoothness };
+        return { t: round((x.to - t0) / 1000, 2), newFrames: x.newFrames, produced: made, regular, content: binContent, gamePause: false, reference: own ? own.from : binContent ? "made" : "scene", smoothness };
       }),
       smoothness: null,
       gamePauses: [],
@@ -596,6 +635,7 @@ export function deriveSeconds(samples, { tps = null } = {}) {
     if (!c.ok) continue;
     const bin = rows[c.row].smoothBins[c.i];
     bin.gamePause = true;
+    bin.reference = "gamePause";
     bin.smoothness = c.smoothPause;
     for (const g of c.gaps) {
       if (published.has(g.start)) continue;

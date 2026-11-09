@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 
-import { analyzeRun, classifySecond, filmPhaseLabels, newFrameBins, gamePauseReference, gamePauseSpans, gamePauseGpuSide, nominalViRate, PARCOURS_PRIMARY, viBins, ANALYSIS_VERSION as AV, producedBins, regularProduction, contentSecond, gapDetail, completionOf, currentPhase, deriveSeconds, GAME_DRAWS_PER_FRAME, LOAD_DISC_BPS, markerIndexes, MIN_PHASE_SEC, parcoursVerdict, phaseLabels, phaseMetrics, phaseNoise, renderTimeline, sectionsOf, segmentsOf, summarizeSeconds, windowCadence } from "../harness/lib/parcours.mjs";
+import { analyzeRun, classifySecond, filmPhaseLabels, newFrameBins, gamePauseReference, gamePauseSpans, gamePauseGpuSide, nominalViRate, ownRateCadence, PARCOURS_PRIMARY, viBins, ANALYSIS_VERSION as AV, producedBins, regularProduction, contentSecond, gapDetail, completionOf, currentPhase, deriveSeconds, GAME_DRAWS_PER_FRAME, LOAD_DISC_BPS, markerIndexes, MIN_PHASE_SEC, parcoursVerdict, phaseLabels, phaseMetrics, phaseNoise, renderTimeline, sectionsOf, segmentsOf, summarizeSeconds, windowCadence } from "../harness/lib/parcours.mjs";
 import { filmMarkers, filmPhases, filmWithMarks, keyToPad, padStateOf, recordPorts, runRecordSteps, validateFilm, validateRecordSteps } from "../harness/lib/pad-film.mjs";
 import { analyzeRaw, countersOf, otherCpuOf, presentGaps, samplerTicksOf, viTimesOf, exitCodeOf, gamePausesText, gpuRowsOf, humanSummary, markerStep } from "../harness/probes/parcours.mjs";
 import { decodePng, encodePng } from "../harness/lib/png.mjs";
@@ -1229,3 +1229,55 @@ test("probe: every run keeps the drop sampler's GPU-side rows (gpuRows), in GPU_
   assert.match(worker, /"replayBusyMs"\n\];/);
   assert.match(worker, /out\.replayBusyMs = occupancyBusyMs\(\);/);
 });
+
+// A non-excused irregular second: judged against its own regular part's rate snapped to VI/n, else the nominal cadence.
+// `before`: the first second's rate (the scene cadence a learner would take), else `fps`
+function rateRun(fps, hole, { copies = fps, before = fps } = {}) {
+  const s = rvBase();
+  let shown = 0;
+  for (const r of s.slice(1)) { const n = r === s[1] ? before : fps; r.producedT = presentsIn(r.t, n); r.presents = presentsIn(r.t, n); r.info.producedFps = n; shown += n; r.info.newShown = shown; }
+  const t = s[2].t, cut = (xs) => xs.filter((p) => !(p >= t - hole[0] && p < t - hole[1]));
+  s[2].producedT = cut(s[2].producedT); s[2].presents = cut(s[2].presents);
+  rvCounters(s, () => copies);
+  // the GPU thread busy over the hole: ours, never the game's pause
+  withGpuRows(s, { stall: [t - hole[0] - 20, t - hole[1] + 20] });
+  return deriveSeconds(s, { tps: TPS })[1].smoothBins[0];
+}
+
+test("a non-excused irregular second: 30 frames a second with a 100 ms GPU gap is judged against 30 and loses the gap", () => {
+  const b = rateRun(30, [600, 500]);
+  assert.equal(b.gamePause, false);
+  assert.equal(b.reference, "own");
+  assert.equal(b.produced, 27);
+  assert.equal(b.smoothness, 90, "27 shown against 30");
+  // whatever the scene before ran at (a learner would take 60 there: 45 %)
+  assert.equal(rateRun(30, [600, 500], { before: 60 }).smoothness, 90);
+});
+
+test("a non-excused irregular second: a 60 frames a second scene that stalls 300 ms is judged against 60", () => {
+  const b = rateRun(60, [700, 400]);
+  assert.equal(b.reference, "own");
+  assert.equal(b.smoothness, 70, "42 shown against 60");
+  // after a scene at 30 (a learner would take 30 there: 100 %)
+  assert.equal(rateRun(60, [700, 400], { before: 30 }).smoothness, 70);
+});
+
+test("a non-excused irregular second without enough regular part falls back to the nominal 60, never a learnt cadence", () => {
+  // 30 frames a second, a 600 ms gap: 400 ms regular, under half the second
+  const short = rateRun(30, [800, 200]);
+  assert.equal(short.reference, "nominal");
+  assert.equal(short.smoothness, round1((short.produced / 60) * 100));
+  // the rule alone: 45 a second alternating 1 and 2 VIs (no k on 80 %): nominal; 20 a second: 60 / 3
+  const vi = 1000 / 59.94;
+  const alt = []; for (let t = 0, i = 0; t < 1000; t += (i++ % 2 ? 2 : 1) * vi) alt.push(t);
+  assert.deepEqual(ownRateCadence({ producedT: alt, from: 0, to: 1000, viMs: vi, nominalCadence: 60 }), { cadence: 60, from: "nominal" });
+  const at20 = Array.from({ length: 20 }, (_, i) => i * 3 * vi);
+  assert.deepEqual(ownRateCadence({ producedT: at20, from: 0, to: 1000, viMs: vi, nominalCadence: 60 }), { cadence: 20, from: "own" });
+  // host jitter of a third of a VI still rounds to the same multiple
+  const jit = Array.from({ length: 30 }, (_, i) => i * 2 * vi + (i % 2 ? 2.5 : -2.5)); // intervals 2 VIs ± 5 ms
+  assert.deepEqual(ownRateCadence({ producedT: jit, from: -10, to: 990, viMs: vi, nominalCadence: 60 }), { cadence: 30, from: "own" });
+  // PAL: the nominal 50 and 50 / k
+  assert.deepEqual(ownRateCadence({ producedT: [], from: 0, to: 1000, viMs: 20, nominalCadence: 50 }), { cadence: 50, from: "nominal" });
+  assert.deepEqual(ownRateCadence({ producedT: Array.from({ length: 25 }, (_, i) => i * 40), from: 0, to: 1000, viMs: 20, nominalCadence: 50 }), { cadence: 25, from: "own" });
+});
+const round1 = (x) => Math.round(x * 10) / 10;
