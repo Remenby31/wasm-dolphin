@@ -41,6 +41,9 @@ async function runOne({ bin, file, core, timeoutSec, platform, configs, logFile,
     "-C", `Dolphin.Core.CPUCore=${core}`, "-C", "Dolphin.Core.EmulationSpeed=0",
     "-C", "Dolphin.Movie.DumpFrames=True", "-C", "GFX.Settings.DumpFramesAsImages=True",
     "-C", "GFX.Hacks.EFBAccessEnable=True", "-C", "GFX.Hacks.EFBToTextureEnable=False",
+    // Our programs draw the XFB with the CPU and never swap it: every VI is a
+    // "duplicate", which Dolphin skips presenting (and dumping) by default.
+    "-C", "GFX.Hacks.SkipDuplicateXFBs=False",
     "-C", "Dolphin.DSP.Backend=No Audio Output", "-C", "Dolphin.Interface.ConfirmStop=False",
     // Dolphin's own log (User/Logs/dolphin.log), kept with --keep-user.
     "-C", "Logger.Options.WriteToFile=True", "-C", "Logger.Options.Verbosity=4",
