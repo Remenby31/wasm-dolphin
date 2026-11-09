@@ -12,10 +12,11 @@
  *            mirror read back through the BAT, and the other way round
  *            (through the uncached 0xC mirror).
  *   2 remap: DBAT3 moved to B; the same EA now reads B, then A again.
- *   3 code:  IBAT3 maps EA 0x50000000 to CODE; a function written there
- *            through the 0x8 mirror is called through the BAT address, then
- *            rewritten (dcbst + icbi on the mirror: the 750's caches are
- *            physically tagged) and called again: it returns the new value.
+ *   3 code:  IBAT3 maps EA 0x50000000 to CODE; a 9-instruction function
+ *            written there through the 0x8 mirror is called 50 times through
+ *            the BAT address, then rewritten (dcbst + icbi on the mirror: the
+ *            750's caches are physically tagged) and called 50 times again:
+ *            every call returns the new value.
  */
 #include <gccore.h>
 #include <malloc.h>
@@ -52,13 +53,24 @@ static u32 diff_words(u32 seed) {
   return bad;
 }
 
-/* li r3, imm; blr */
+/* li r3, 0; 6 x addi r3, r3, 1; addi r3, r3, imm; blr: 9 instructions,
+ * long enough for the JIT's minimum block (4 in production); returns imm + 6. */
 static void write_code(u32 imm) {
   u32 *p = (u32 *)(0x80000000u | PHYS_CODE);
-  p[0] = 0x38600000u | (imm & 0xffff);
-  p[1] = 0x4e800020u;
-  DCFlushRange(p, 32);
-  ICInvalidateRange(p, 32);
+  p[0] = 0x38600000u;
+  for (int i = 1; i <= 6; i++) p[i] = 0x38630001u;
+  p[7] = 0x38630000u | (imm & 0xffff);
+  p[8] = 0x4e800020u;
+  DCFlushRange(p, 64);
+  ICInvalidateRange(p, 64);
+}
+
+/* Calls the BAT-mapped function `calls` times; the number of results that
+ * differ from `want` (0 when every call returned it). */
+static u32 call_many(u32 (*fn)(void), u32 want, int calls) {
+  u32 bad = 0;
+  for (int i = 0; i < calls; i++) bad += fn() != want;
+  return bad;
 }
 
 int main(void) {
@@ -92,10 +104,14 @@ int main(void) {
     rp_start_test();
     set_ibat3(BATU(EA), BATL(PHYS_CODE));
     u32 (*fn)(void) = (u32 (*)(void))EA;
+    /* 50 calls of each version, so the JIT compiles it before the rewrite:
+     * a stale block would keep returning the old value. */
     write_code(0x1234);
-    RP_CHECK(fn() == 0x1234, frame);
+    u32 bad = call_many(fn, 0x1234 + 6, 50);
+    RP_CHECK(bad == 0, bad);
     write_code(0x5678);
-    RP_CHECK(fn() == 0x5678, frame);
+    bad = call_many(fn, 0x5678 + 6, 50);
+    RP_CHECK(bad == 0, bad);
     rp_end_test();
 
     /* Totals accumulate over frames: one "test" per kind per frame. */

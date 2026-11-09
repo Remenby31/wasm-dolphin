@@ -11,7 +11,8 @@
  *   576i PAL                  50.00 Hz (625 lines, two fields)
  *   288p PAL (double strike)  50.08 Hz (312 lines per field)
  *   480p                      59.94 Hz (525 lines, 27 MHz pixel clock)
- * Tolerance 0.2 %. The report goes back to the starting mode. Results:
+ * Tolerance 0.02 % (the time base and the VI both run in emulated time: no
+ * jitter), which separates 240p from 480i and 288p from 576i. The report goes back to the starting mode. Results:
  * compat/homebrew/report.h (detail: the measured rate in mHz).
  */
 #include <gccore.h>
@@ -34,7 +35,7 @@ static u32 measure_mhz(GXRModeObj *mode, void *fb) {
 static void check_mode(GXRModeObj *mode, void *fb, u32 expected_mhz) {
   rp_start_test();
   u32 mhz = measure_mhz(mode, fb);
-  u32 tol = expected_mhz / 500; /* 0.2 % */
+  u32 tol = expected_mhz / 5000; /* 0.02 % */
   RP_CHECK(mhz + tol >= expected_mhz && mhz <= expected_mhz + tol, mhz);
   rp_end_test();
 }
