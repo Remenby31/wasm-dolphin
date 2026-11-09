@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 
-import { analyzeRun, classifySecond, filmPhaseLabels, newFrameBins, ANALYSIS_VERSION as AV, producedBins, regularProduction, contentSecond, gapDetail, completionOf, currentPhase, deriveSeconds, GAME_DRAWS_PER_FRAME, LOAD_DISC_BPS, markerIndexes, MIN_PHASE_SEC, parcoursVerdict, phaseLabels, phaseMetrics, phaseNoise, renderTimeline, sectionsOf, segmentsOf, summarizeSeconds, windowCadence } from "../harness/lib/parcours.mjs";
+import { analyzeRun, classifySecond, filmPhaseLabels, newFrameBins, gamePauseReference, viBins, ANALYSIS_VERSION as AV, producedBins, regularProduction, contentSecond, gapDetail, completionOf, currentPhase, deriveSeconds, GAME_DRAWS_PER_FRAME, LOAD_DISC_BPS, markerIndexes, MIN_PHASE_SEC, parcoursVerdict, phaseLabels, phaseMetrics, phaseNoise, renderTimeline, sectionsOf, segmentsOf, summarizeSeconds, windowCadence } from "../harness/lib/parcours.mjs";
 import { filmMarkers, filmPhases, filmWithMarks, keyToPad, padStateOf, recordPorts, runRecordSteps, validateFilm, validateRecordSteps } from "../harness/lib/pad-film.mjs";
 import { analyzeRaw, countersOf, otherCpuOf, presentGaps, samplerTicksOf, viTimesOf, exitCodeOf, humanSummary, markerStep } from "../harness/probes/parcours.mjs";
 import { decodePng, encodePng } from "../harness/lib/png.mjs";
@@ -947,7 +947,7 @@ test("pauses of production: two 100 ms stalls in a second stay a loss; 50 frames
   assert.equal(regularProduction(53, 39), true);
   assert.equal(regularProduction(53, 45), false);
   assert.equal(regularProduction(20, 70), true, "1.5 x 50 ms");
-  assert.equal(AV, 6);
+  assert.ok(AV >= 6);
 });
 const smoothOfCount = (n) => Math.round((1000 * n) / 60) / 10;
 
@@ -965,4 +965,56 @@ test("the live loop: the newest row owns no complete grid second yet, and is sti
     assert.equal(last.smoothness, null, "no smoothness from the worker's rate");
   }
   assert.equal(currentPhase(deriveSeconds(s, { tps: TPS })), "game");
+});
+
+// Analysis 7: the game's own pause.
+// 3 menu seconds; in the middle one the game makes no frame for 300 ms ((t-700, t-400]): 42 made, 42 shown;
+// `copies`: the core's EFB->XFB copies counted in it; `visIn`: its VI outputs; `speed`: its emulation speed
+function pauseRun({ copies = 42, visIn = 60, speed = 100, learn30 = false } = {}) {
+  const s = withProduced(samplesOf(learn30 ? [["menu", 2], ["menu", 3]] : [["menu", 3]]), 60);
+  if (learn30) for (const x of s.slice(1, 3)) { x.presents = presentsIn(x.t, 30); x.producedT = presentsIn(x.t, 30); x.info.newShown = 0; }
+  const m = s.length - 2;
+  const gap = (t) => presentsIn(t, 60).filter((p) => p < t - 700 || p >= t - 400);
+  s[m].producedT = gap(s[m].t);
+  s[m].presents = gap(s[m].t);
+  s.forEach((x) => { x.viT = presentsIn(x.t, 60); });
+  s[m].viT = presentsIn(s[m].t, 60).slice(0, visIn);
+  // the core's counters: copies in the pause second, its ticks at `speed`
+  let xfb = 0, ticks = 0;
+  s.forEach((x, i) => {
+    if (i > 0) { xfb += i === m ? copies : 60; ticks += TPS * ((i === m ? speed : 100) / 100); }
+    x.counters = { ...x.counters, t: x.t, xfbCopies: xfb, ticks };
+  });
+  const rows = deriveSeconds(s, { tps: TPS });
+  return rows[m - 1];
+}
+test("the game's own pause (no XFB copy left unproduced, VIs on): content, judged at a fixed cadence; copies that went on stay a loss", () => {
+  const pause = pauseRun();
+  assert.equal(pause.smoothBins[0].regular, false);
+  assert.equal(pause.smoothBins[0].gamePause, true);
+  assert.equal(pause.smoothness, 100, "42 made, 42 shown, 60 VIs: the game's pause");
+  // the game copied 60 frames and 42 came out: ours, a loss against the cadence
+  const ours = pauseRun({ copies: 60 });
+  assert.equal(ours.smoothBins[0].gamePause, false);
+  assert.equal(ours.smoothness, 70);
+  // deterministic: a scene cadence learnt as 30 before does not change it
+  assert.equal(pauseRun({ learn30: true }).smoothness, 100);
+  assert.equal(gamePauseReference({ made: 42, xfbCopies: 43, vis: 60, viRate: 59.94 }), 42);
+  assert.equal(gamePauseReference({ made: 42, xfbCopies: 44, vis: 60, viRate: 59.94 }), null);
+  assert.equal(gamePauseReference({ made: 42, xfbCopies: null, vis: 60, viRate: 59.94 }), null, "copies unknown: no pause excused");
+  assert.equal(gamePauseReference({ made: 40, xfbCopies: 40, vis: 50, viRate: 50 }), 40, "PAL: the 50 cadence");
+});
+
+test("an emulation stall on top of the game's pause still shows: the missed VIs cost the second, the speed p5 drops", () => {
+  // 4 VIs missing in the pause second (a ~67 ms emulation stall), the emulation at 93 %
+  const r = pauseRun({ visIn: 56, speed: 93 });
+  assert.equal(r.smoothBins[0].gamePause, true);
+  assert.equal(r.smoothness, 91.3, "42 shown against 42 made + 4 VIs missed");
+  assert.ok(r.speed < 95, `speed ${r.speed}`);
+  // VI counts per grid second: unknown where a reading lost them
+  const s = samplesOf([["menu", 3]]);
+  s.forEach((x) => { x.viT = presentsIn(x.t, 60); });
+  assert.deepEqual(viBins(s), [60, 60, 60]);
+  s[2].viT = null;
+  assert.deepEqual(viBins(s), [60, null, null]);
 });

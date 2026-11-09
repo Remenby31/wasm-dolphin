@@ -520,8 +520,10 @@ saw half the second: one 50 ms hitch read 93.3 %; analysis 5: the content
 reference, the frames produced, on the same grid from the worker's produced
 timeline, `producedBasis: "grid"`, each second judged against what was
 made in it (content only with a regular production: no pause past 1.5
-frame intervals and 2.5 VI periods, analysis 6); `"worker"`, its 500 ms
-rate, for older runs),
+frame intervals and 2.5 VI periods, analysis 6; or the game's own pause:
+a production pause while the core copied no XFB that was not produced, judged
+against what was made plus the VIs the emulation missed, at the VI rate's
+fixed cadence, analysis 7); `"worker"`, its 500 ms rate, for older runs),
 smoothness (new frames against the game's cadence, learnt as the site
 learns it: VI/n snapped, below the VI rate only with occupancy margin, else
 the VI rate; in a content second, where the game itself made fewer frames
@@ -529,6 +531,11 @@ at full speed with margin on every thread, against what it made), present
 hitches over 50 and 100 ms, and summarises each phase
 and each film section: min, p5 and median of speed, new frames and
 smoothness, the 3 worst seconds, hitches, integrity, occupancy, seconds.
+
+A generous choice, owned as such: a second at full speed with every thread
+under 70 % whose new frames fall short of a 60 cadence by 4 or more isolated
+frames is excused as the game's content (lib/drops.mjs contentRule), not
+counted as lost.
 
 A film may declare its phases on its own clock, `"phases": [{ "at": 1240,
 "phase": "cinematic", "label": "intro" }, { "at": 2130, "phase": "menu" }]`

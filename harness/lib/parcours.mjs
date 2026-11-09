@@ -52,7 +52,11 @@ import { median, percentile, round } from "./stats.mjs";
 // 6: a pause of production is a stall only past 2.5 VI periods too (a game
 // below its VI rate pauses 2 VIs); a row without a grid second takes the
 // worker's produced rate for its phase signals (the live phase).
-export const ANALYSIS_VERSION = 6;
+// 7: a second whose production pauses while the game asked no XFB copy
+// that was not produced is the game's pause: content, judged against what
+// it made plus the VIs the emulation missed (gamePauseReference), at the VI
+// rate's fixed cadence (no learnt 30/60 coin flip).
+export const ANALYSIS_VERSION = 7;
 
 export const PHASES = Object.freeze(["boot", "loading", "cinematic", "menu", "game"]);
 // A phase lasts at least this long: a shorter run of seconds goes to the
@@ -264,6 +268,43 @@ export function regularProduction(made, maxGapMs, { viMs = 1000 / 59.94 } = {}) 
   return maxGapMs <= Math.max(REGULAR_GAP_FACTOR * (1000 / made), REGULAR_GAP_VIS * viMs);
 }
 
+// The VI outputs of each grid second (the samples' viT), null where a reading
+// whose span the second touches has no VI times (the ring lost entries or the
+// read failed): the same spans as newFrameBins.
+export function viBins(samples, { binMs = NEW_FRAMES_BIN_MS } = {}) {
+  if (!samples.length || !samples.some((s) => Array.isArray(s.viT))) return null;
+  const origin = samples[0].t, last = samples.at(-1).t;
+  const n = Math.floor((last - origin) / binMs);
+  const counts = Array(n).fill(0), unknown = Array(n).fill(false);
+  samples.forEach((s, j) => {
+    if (j === 0 || Array.isArray(s.viT)) return;
+    const from = samples[j - 1].t, to = samples[j + 1]?.t ?? Infinity;
+    for (let k = Math.max(0, Math.floor((from - origin) / binMs)); k < n && origin + k * binMs < to; k += 1) unknown[k] = true;
+  });
+  for (const s of samples) for (const t of s.viT ?? []) {
+    const k = Math.floor((t - origin) / binMs);
+    if (k >= 0 && k < n) counts[k] += 1;
+  }
+  return counts.map((c, k) => (unknown[k] ? null : c * (1000 / binMs)));
+}
+
+// The game's own pause (analysis 7): a grid second whose production pauses
+// (not regular) while the game copied no frame to an XFB that was not
+// produced: the core's EFB->XFB copies over the row at most the frames
+// produced + 1. On the 2P race load the game asks no copy for ~300 ms, at
+// full speed, its VIs on (12 of 12 runs, 0 copies; no emulator shows a frame
+// the game does not make). Such a second is content, judged against what the
+// game made plus the VIs the emulation itself missed in it: reference =
+// produced + max(0, the VI rate's cadence (60 at 59.94 Hz, 50 at PAL; fixed,
+// never a cadence learnt from the scene) - VIs counted in the second). An
+// emulation stall on top of the pause (VIs missing) still costs it; the speed
+// p5 and the hitches over 50 ms keep showing it too.
+export function gamePauseReference({ made, xfbCopies, vis, viRate }) {
+  if (!(Number.isFinite(made) && Number.isFinite(xfbCopies) && Number.isFinite(vis))) return null;
+  if (xfbCopies > made + 1) return null;
+  return made + Math.max(0, viCadence(viRate) - vis);
+}
+
 // The raw samples -> one row a second (the first sample is the origin).
 export function deriveSeconds(samples, { tps = null } = {}) {
   const rows = [];
@@ -272,6 +313,7 @@ export function deriveSeconds(samples, { tps = null } = {}) {
   let booted = false;
   const { bins } = newFrameBins(samples);
   const { bins: produced, maxGapMs: producedGap } = producedBins(samples);
+  const vis = viBins(samples);
   let nextBin = 0;
   for (let i = 1; i < samples.length; i += 1) {
     const a = samples[i - 1], b = samples[i];
@@ -367,7 +409,11 @@ export function deriveSeconds(samples, { tps = null } = {}) {
         const made = ownProduced[i];
         const regular = made != null && regularProduction(made, producedGap[x.k], { viMs: viRate > 0 ? 1000 / viRate : undefined });
         const binContent = regular && contentSecond({ producedFps: made, speed, cadence: sceneCadence, ...occupancy });
-        return { t: round((x.to - t0) / 1000, 2), newFrames: x.newFrames, produced: made, regular, content: binContent, smoothness: made == null ? null : smoothOf(x.newFrames, binContent ? made : sceneCadence) };
+        // an irregular production with no XFB copy left unproduced: the
+        // game's own pause (gamePauseReference), judged at a fixed cadence
+        const pauseRef = !regular && made != null ? gamePauseReference({ made, xfbCopies: carried?.xfbPerSec != null ? carried.xfbPerSec * dt : null, vis: vis?.[x.k] ?? null, viRate }) : null;
+        const reference = binContent ? made : pauseRef ?? sceneCadence;
+        return { t: round((x.to - t0) / 1000, 2), newFrames: x.newFrames, produced: made, regular, content: binContent, gamePause: pauseRef != null, smoothness: made == null ? null : smoothOf(x.newFrames, reference) };
       }),
       smoothness: null,
       viRate: round(viRate, 1), presents: (b.presents ?? []).length, hitches50, hitches100, maxGapMs: round(maxGapMs, 1),
