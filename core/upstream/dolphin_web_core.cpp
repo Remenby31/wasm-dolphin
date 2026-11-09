@@ -921,10 +921,21 @@ void EnsureRuntime()
   // previously got "characters appear" — if the EFB goes non-black here, the
   // black is uber-specific (alpha-test discard / bpmem-konst UBO not uploaded in
   // uber mode); if still black, it's a deeper scene-pass write issue.
+  // Patch 0223: ?shadermode=hybrid (Module['dolphinShaderHybrid']), WebGPU
+  // only: Dolphin's hybrid ubershaders. A missing specialized pipeline draws
+  // with the ubershader one while 2 async threads translate it (GLSL -> WGSL,
+  // no device access; the GPU thread pushes the result into the ring). Both
+  // thread counts equal, so the threads start once at the shader cache's
+  // initialization and are never restarted. The default is unchanged:
+  // Synchronous, no compiler thread.
+  const bool shader_hybrid =
+      s_video_backend == "WebGPU" &&
+      EM_ASM_INT({ return (typeof Module !== 'undefined' && Module['dolphinShaderHybrid']) ? 1 : 0; }) != 0;
   Config::SetBase(Config::GFX_SHADER_COMPILATION_MODE,
-                  ShaderCompilationMode::Synchronous);
-  Config::SetBase(Config::GFX_SHADER_COMPILER_THREADS, 0);
-  Config::SetBase(Config::GFX_SHADER_PRECOMPILER_THREADS, 0);
+                  shader_hybrid ? ShaderCompilationMode::AsynchronousUberShaders :
+                                  ShaderCompilationMode::Synchronous);
+  Config::SetBase(Config::GFX_SHADER_COMPILER_THREADS, shader_hybrid ? 2 : 0);
+  Config::SetBase(Config::GFX_SHADER_PRECOMPILER_THREADS, shader_hybrid ? 2 : 0);
   VideoBackendBase::ActivateBackend(s_video_backend);
 
   if (!g_controller_interface.IsInit())

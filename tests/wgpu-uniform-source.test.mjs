@@ -18,7 +18,16 @@ const without0207 = (text) => text
   .replace(/AbortRecordedPass\(GfxAbortSite::\w+\)/g, "AbortRecordedPass()")
   .replace(/\n\s+if \(m_cur_pipeline_id == 0\)\n\s+s_draw_skipped_no_pipeline\.fetch_add\(1, std::memory_order_relaxed\);/g, "")
   .replace(/\n\s+s_draw_skipped_no_pipeline\.fetch_add\(1, std::memory_order_relaxed\);/g, "");
-const gfx = without0207(readVendorFileSync(join(nativeRoot, nativeFile)).replace(/\r\n/g, "\n"));
+// 0223's hybrid mode (a pipeline from an async compiler thread pushed when
+// first bound, uber draws counted) is not this test's subject either: back to
+// the plain bind, so the functions compile and 0065's hunks apply.
+const without0223 = (text) => text
+  .replace("  // Patch 0223: a pipeline from an async compiler thread enters the ring here.\n" +
+    "  m_cur_pipeline_id = PushPendingPipeline(pipeline);\n" +
+    "  m_cur_pipeline_uber = pipeline && pipeline->m_config.usage == AbstractPipelineUsage::GXUber;\n",
+    "  m_cur_pipeline_id =\n      pipeline ? static_cast<const WebGPUPipeline*>(pipeline)->GetBridgeId() : 0;\n")
+  .replace(/\n\s+if \(m_cur_pipeline_uber\)\n\s+CountUberDraw\(\);/g, "");
+const gfx = without0223(without0207(readVendorFileSync(join(nativeRoot, nativeFile)).replace(/\r\n/g, "\n")));
 const patch = readFileSync(join(root,
   "patches/dolphin-wasm/snapshot/0065-webgpu-select-uniforms-by-pipeline-usage.patch"), "utf8");
 const compiler = process.platform === "win32"

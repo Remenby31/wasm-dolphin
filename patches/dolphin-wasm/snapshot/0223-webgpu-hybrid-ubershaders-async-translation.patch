@@ -1,0 +1,699 @@
+diff --git a/Source/Core/VideoBackends/WebGPU/VideoBackend.cpp b/Source/Core/VideoBackends/WebGPU/VideoBackend.cpp
+--- a/Source/Core/VideoBackends/WebGPU/VideoBackend.cpp
++++ b/Source/Core/VideoBackends/WebGPU/VideoBackend.cpp
+@@ -22,7 +22,9 @@ extern "C" unsigned int DolphinWeb_GetRendererFeatureMask();
+ static constexpr unsigned int DOLPHIN_WEB_RENDERER_FEATURE_DUAL_SOURCE_BLEND = 1u << 1;
+ 
+ #include "Common/Common.h"
++#include "Common/Config/Config.h"
+ #include "Common/Logging/Log.h"
++#include "Core/Config/GraphicsSettings.h"
+ 
+ #include "VideoBackends/WebGPU/WebGPUGfx.h"
+ #include "VideoBackends/WebGPU/WebGPUShaderTranslator.h"
+@@ -105,7 +107,12 @@ void VideoBackend::InitBackendInfo(const WindowSystemInfo& /* wsi */)
+   g_backend_info.bSupportsDepthReadback = false;
+   g_backend_info.bSupportsPartialDepthCopies = false;
+   g_backend_info.bSupportsFramebufferFetch = false;
+-  g_backend_info.bSupportsBackgroundCompiling = false;
++  // Patch 0223: background compiling only in the hybrid mode the web core sets
++  // from ?shadermode=hybrid (AsynchronousUberShaders); the default stays
++  // Synchronous with no compiler thread.
++  g_backend_info.bSupportsBackgroundCompiling =
++      Config::Get(Config::GFX_SHADER_COMPILATION_MODE) ==
++      ShaderCompilationMode::AsynchronousUberShaders;
+   g_backend_info.bSupportsLogicOp = true;
+   g_backend_info.bSupportsShaderBinaries = false;
+   g_backend_info.bSupportsPipelineCacheData = false;
+diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp b/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp
+--- a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp
++++ b/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp
+@@ -14,6 +14,7 @@
+ 
+ #include "Common/Logging/Log.h"
+ 
++#include "Core/Core.h"
+ #include "Core/System.h"
+ 
+ #include "VideoCommon/AbstractFramebuffer.h"
+@@ -28,6 +29,7 @@
+ 
+ #include "VideoCommon/AbstractPipeline.h"
+ #include "VideoCommon/AbstractShader.h"
++#include "VideoCommon/AsyncShaderCompiler.h"
+ #include "VideoCommon/BPMemory.h"
+ #include "VideoCommon/CPMemory.h"
+ #include "VideoCommon/NativeVertexFormat.h"
+@@ -79,6 +81,7 @@ extern "C" unsigned int DolphinWeb_GetRendererFeatureMask()
+ #include <set>
+ #include <atomic>
+ #include <cstdint>
++#include <cstdio>
+ #include <cstring>
+ #include <iterator>
+ #include <sstream>
+@@ -450,6 +453,24 @@ static std::array<std::atomic<u64>, static_cast<u32>(GfxAbortSite::Count)> s_abo
+ static std::array<std::atomic<u64>, static_cast<u32>(GfxAbortSite::Count)> s_poison_by_site{};
+ static std::atomic<u64> s_draw_skipped_no_pipeline{0};
+ 
++// Patch 0223: draws recorded with an ubershader pipeline, and the VI tags
++// whose window (the draws since the previous tag) held at least one, since
++// boot and since the last state load. Per tag, a ring of the window's uber
++// draws keyed by vi_since_load (DolphinWeb_UberDrawsAtVi). VI tags exist
++// only with the harness on, so the frame counts do too; the draw count not.
++static std::atomic<u64> s_uber_draws{0};
++static std::atomic<u64> s_uber_frames{0};
++static std::atomic<u64> s_uber_frames_since_load{0};
++constexpr u32 UBER_VI_RING = 4096;
++struct UberViSlot
++{
++  std::atomic<u32> vi{0xffffffffu};
++  std::atomic<u32> generation{0};
++  std::atomic<u32> draws{0};
++};
++static std::array<UberViSlot, UBER_VI_RING> s_uber_vi_ring{};
++static std::atomic<u32> s_uber_last_generation{0xffffffffu};
++
+ // 0207: comma-separated counters for the stats line.
+ static std::string AbortCauses()
+ {
+@@ -489,6 +510,15 @@ static std::string UploadFailedRoles()
+   return out;
+ }
+ 
++static std::string CompilerStartToken()
++{
++  const auto st = VideoCommon::AsyncShaderCompiler::GetStartStats();
++  char buf[96];
++  std::snprintf(buf, sizeof(buf), "%u,%.1f,%.1f,%d", st.threads, st.wait_ms_total, st.wait_ms_max,
++                g_backend_info.bSupportsBackgroundCompiling ? 1 : 0);
++  return buf;
++}
++
+ extern "C" EMSCRIPTEN_KEEPALIVE const char* GetWebGpuStateCacheStats()
+ {
+   static std::string stats;
+@@ -512,6 +542,14 @@ extern "C" EMSCRIPTEN_KEEPALIVE const char* GetWebGpuStateCacheStats()
+       << " wggfxpoison:" << PoisonSites()
+       << " wgrangefail:" << RangeFailures()
+       << " wgdrawskip:" << s_draw_skipped_no_pipeline.load(std::memory_order_relaxed)
++      // 0223: uber draws, VI windows with one since boot and since the load;
++      // translation failures (glslang, Naga); async compiler threads started,
++      // their start wait (total, max, ms) and the background-compile mode.
++      << " wguber:" << s_uber_draws.load(std::memory_order_relaxed) << ","
++      << s_uber_frames.load(std::memory_order_relaxed) << ","
++      << s_uber_frames_since_load.load(std::memory_order_relaxed)
++      << " wgxlatfail:" << ShaderTranslateFailures(false) << "," << ShaderTranslateFailures(true)
++      << " wgcomp:" << CompilerStartToken()
+       << " wgupfail:" << GetCommandStream().GetUploadAllocFailedCount() << "," << UploadFailedRoles()
+       << "," << GetCommandStream().GetUploadTextureFailedCount()
+       << " wgubo:" << ((s_ubo_control_mode.load(std::memory_order_relaxed) & 1u) ? 1 : 0)
+@@ -720,9 +758,66 @@ WebGPUGfx::~WebGPUGfx()
+   UpdateActiveConfig();
+ }
+ 
++void WebGPUGfx::CountUberDraw()
++{
++  s_uber_draws.fetch_add(1, std::memory_order_relaxed);
++  ++m_window_uber_draws;
++}
++
++// Patch 0223: the window of draws since the previous VI tag closes here.
++static void CloseUberViWindow(u32 vi_since_load, u32 load_generation, u32 draws)
++{
++  if (s_uber_last_generation.exchange(load_generation, std::memory_order_relaxed) !=
++      load_generation)
++    s_uber_frames_since_load.store(0, std::memory_order_relaxed);
++  if (draws > 0)
++  {
++    s_uber_frames.fetch_add(1, std::memory_order_relaxed);
++    s_uber_frames_since_load.fetch_add(1, std::memory_order_relaxed);
++  }
++  UberViSlot& slot = s_uber_vi_ring[vi_since_load % UBER_VI_RING];
++  slot.draws.store(draws, std::memory_order_relaxed);
++  slot.generation.store(load_generation, std::memory_order_relaxed);
++  slot.vi.store(vi_since_load, std::memory_order_release);
++}
++
++// Patch 0223: the uber draws of the windows that closed at vi_since_load and
++// at the tag before it (the picture shown at a VI was drawn in the window
++// before it or in its own: both are counted, a conservative "the captured
++// picture may hold an uber draw"). out[0] found (1, or 0 when either slot was
++// overwritten or never written in this load), out[1] that window, out[2] the
++// one before, out[3] the load generation.
++extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_UberDrawsAtVi(u32 vi_since_load, u32* out)
++{
++  const u32 gen = s_uber_last_generation.load(std::memory_order_relaxed);
++  u32 found = 1, cur = 0, prev = 0;
++  for (u32 k = 0; k < 2; ++k)
++  {
++    if (vi_since_load < k)
++    {
++      continue;
++    }
++    const u32 vi = vi_since_load - k;
++    const UberViSlot& slot = s_uber_vi_ring[vi % UBER_VI_RING];
++    if (slot.vi.load(std::memory_order_acquire) != vi ||
++        slot.generation.load(std::memory_order_relaxed) != gen)
++    {
++      found = 0;
++      continue;
++    }
++    (k == 0 ? cur : prev) = slot.draws.load(std::memory_order_relaxed);
++  }
++  out[0] = found;
++  out[1] = cur;
++  out[2] = prev;
++  out[3] = gen;
++}
++
+ void WebGPUGfx::TagViOutput(u32 vi_since_boot, u32 vi_since_load, u64 ticks,
+                             u32 load_generation)
+ {
++  CloseUberViWindow(vi_since_load, load_generation, m_window_uber_draws);
++  m_window_uber_draws = 0;
+   if (!m_cmd_stream.ready())
+     return;
+   // Keep the tag out of any pass, so it orders cleanly against the
+@@ -854,8 +949,8 @@ public:
+   // producer-assigned id the consumer keyed its module under; 0 means
+   // translation failed / no module (Software fallback). m_wgsl kept
+   // for the Day-29 pipeline opcode + debugging.
+-  WebGPUShader(ShaderStage stage, u32 bridge_id, std::string wgsl)
+-      : AbstractShader(stage), m_bridge_id(bridge_id), m_wgsl(std::move(wgsl))
++  WebGPUShader(ShaderStage stage, u32 bridge_id, std::string wgsl, bool pending = false)
++      : AbstractShader(stage), m_bridge_id(bridge_id), m_wgsl(std::move(wgsl)), m_pending(pending)
+   {
+   }
+   ~WebGPUShader() override = default;
+@@ -864,9 +959,20 @@ public:
+   const std::string& GetWgsl() const { return m_wgsl; }
+   BinaryData GetBinary() const override { return {}; }
+ 
++  // Patch 0223: translated on an async compiler thread, not in the ring yet.
++  // Read and written by the GPU thread only once the shader cache has handed
++  // the object over (its Retrieve runs on that thread).
++  bool IsPending() const { return m_pending; }
++  void SetPushed(u32 bridge_id) const
++  {
++    m_bridge_id = bridge_id;
++    m_pending = false;
++  }
++
+ private:
+-  u32 m_bridge_id = 0;
++  mutable u32 m_bridge_id = 0;
+   std::string m_wgsl;
++  mutable bool m_pending = false;
+ };
+ 
+ std::unique_ptr<AbstractShader>
+@@ -874,6 +980,25 @@ WebGPUGfx::CreateShaderFromSource(ShaderStage stage, std::string_view source,
+                                   VideoCommon::ShaderIncluder* /* shader_includer */,
+                                   std::string_view /* name */)
+ {
++  // Patch 0223 (hybrid mode): on an async compiler thread, translate only.
++  // The ring has one producer, the GPU thread: it pushes this shader the
++  // first time a pipeline needs it (PushPendingShader). The default mode
++  // (Synchronous, no compiler thread) never takes this path.
++  if (g_backend_info.bSupportsBackgroundCompiling && !Core::IsGPUThread())
++  {
++    const bool xlat_stats_async = DolphinWeb::LoadStats::On();
++    XlatTimes xlat_times_async;
++    auto wgsl_async =
++        GlslToWgsl(stage, source, xlat_stats_async ? &xlat_times_async : nullptr);
++    std::string text = wgsl_async ? std::move(*wgsl_async) : std::string{};
++    DolphinWeb::LoadStats::Xlat(xlat_stats_async, source, static_cast<u32>(text.size()),
++                                xlat_times_async.glslang_ms, xlat_times_async.naga_ms, 0.0);
++    if (text.empty())
++      m_shader_fail.fetch_add(1, std::memory_order_relaxed);
++    const bool pending = !text.empty();
++    return std::make_unique<WebGPUShader>(stage, 0u, std::move(text), pending);
++  }
++
+   DolphinWeb::WebGpuProducerProfile::ScopedSample producer_profile(
+       DolphinWeb::WebGpuProducerProfile::Phase::ShaderTranslateEmit);
+   // Day-28: Dolphin GLSL → glslang → SPIR-V → Naga → WGSL (all C++,
+@@ -907,7 +1032,7 @@ WebGPUGfx::CreateShaderFromSource(ShaderStage stage, std::string_view source,
+ 
+   if (bridge_id != 0)
+   {
+-    ++m_shader_ok;
++    m_shader_ok.fetch_add(1, std::memory_order_relaxed);
+     // Day-29/32: remember the first translatable vertex AND pixel
+     // shader so ShowImage can build a real pipeline from a real
+     // Dolphin VS+FS pair (Day-32 proves shader-interface
+@@ -918,10 +1043,12 @@ WebGPUGfx::CreateShaderFromSource(ShaderStage stage, std::string_view source,
+       m_test_fs_id = bridge_id;
+   }
+   else
+-    ++m_shader_fail;
++    m_shader_fail.fetch_add(1, std::memory_order_relaxed);
+ 
+-  const u32 total = m_shader_ok + m_shader_fail;
+-  if ((DolphinWeb::WgpuDeepDiagnostics::IsEnabled() || m_shader_fail != 0) &&
++  const u32 shader_ok = m_shader_ok.load(std::memory_order_relaxed);
++  const u32 shader_fail = m_shader_fail.load(std::memory_order_relaxed);
++  const u32 total = shader_ok + shader_fail;
++  if ((DolphinWeb::WgpuDeepDiagnostics::IsEnabled() || shader_fail != 0) &&
+       (total <= 64 || (total % 256) == 0))
+   {
+     EM_ASM(
+@@ -931,7 +1058,7 @@ WebGPUGfx::CreateShaderFromSource(ShaderStage stage, std::string_view source,
+                         ' (stage=' + $2 + ' xlat=' + $3 + ' id=' + $4 + ') firstErr=' +
+                         (UTF8ToString($5) || '<none>'));
+         },
+-        m_shader_ok, m_shader_fail, static_cast<int>(stage),
++        shader_ok, shader_fail, static_cast<int>(stage),
+         wgsl_text.empty() ? 0 : 1, static_cast<int>(bridge_id),
+         LastShaderTranslateError().c_str());
+   }
+@@ -964,7 +1091,19 @@ public:
+   u32 GetBridgeId() const { return m_bridge_id; }
+ 
+ private:
+-  u32 m_bridge_id = 0;
++  mutable u32 m_bridge_id = 0;
++  // Patch 0223: made on an async compiler thread, not in the ring yet (see
++  // WebGPUShader::IsPending: the GPU thread only, after the hand-over).
++  mutable bool m_pending = false;
++
++public:
++  void MarkPending() { m_pending = true; }
++  bool IsPending() const { return m_pending; }
++  void SetPushed(u32 bridge_id) const
++  {
++    m_bridge_id = bridge_id;
++    m_pending = false;
++  }
+ };
+ 
+ // ---- Day-33 A2: AbstractPipelineConfig → WebGPU pipeline blob -----
+@@ -1247,6 +1386,16 @@ std::unique_ptr<AbstractPipeline>
+ WebGPUGfx::CreatePipeline(const AbstractPipelineConfig& config,
+                           const void* /* cache_data */, size_t /* cache_data_length */)
+ {
++  // Patch 0223 (hybrid mode): on an async compiler thread, nothing is pushed:
++  // the GPU thread pushes the pipeline (and its pending shaders first) when a
++  // draw binds it (PushPendingPipeline). Never taken in the default mode.
++  if (g_backend_info.bSupportsBackgroundCompiling && !Core::IsGPUThread())
++  {
++    auto pending = std::make_unique<WebGPUPipeline>(config, 0u);
++    pending->MarkPending();
++    return pending;
++  }
++
+   DolphinWeb::WebGpuProducerProfile::ScopedSample producer_profile(
+       DolphinWeb::WebGpuProducerProfile::Phase::PipelineSerializeEmit);
+   // Day-33 A2: serialize the real Dolphin pipeline state and ship it
+@@ -1259,10 +1408,10 @@ WebGPUGfx::CreatePipeline(const AbstractPipelineConfig& config,
+   m_cmd_stream.EnsureRing();
+ 
+   u32 bridge_id = 0;
+-  const auto* vs = static_cast<const WebGPUShader*>(config.vertex_shader);
+-  const auto* fs = static_cast<const WebGPUShader*>(config.pixel_shader);
+-  const u32 vs_id = vs ? vs->GetBridgeId() : 0;
+-  const u32 fs_id = fs ? fs->GetBridgeId() : 0;
++  // Patch 0223: a shader an async thread translated is pushed here first
++  // (a synchronous pipeline built from it on this thread).
++  const u32 vs_id = PushPendingShader(config.vertex_shader);
++  const u32 fs_id = PushPendingShader(config.pixel_shader);
+   if (m_cmd_stream.ready() && vs_id != 0 && fs_id != 0)
+   {
+     const std::vector<u8> blob = SerializePipelineConfig(config, vs_id, fs_id);
+@@ -2494,10 +2643,52 @@ bool WebGPUGfx::PrepareDrawResources()
+   return true;
+ }
+ 
++u32 WebGPUGfx::PushPendingShader(const AbstractShader* shader)
++{
++  const auto* s = static_cast<const WebGPUShader*>(shader);
++  if (!s)
++    return 0;
++  if (s->IsPending() && m_cmd_stream.ready())
++  {
++    const u32 id = m_cmd_stream.PushCreateShader(s->GetWgsl().data(), s->GetWgsl().size(),
++                                                 static_cast<u32>(s->GetStage()));
++    if (id != 0)
++      m_shader_ok.fetch_add(1, std::memory_order_relaxed);
++    else
++      m_shader_fail.fetch_add(1, std::memory_order_relaxed);
++    // A failed push (ring full) stays failed, as in the synchronous path.
++    s->SetPushed(id);
++  }
++  return s->GetBridgeId();
++}
++
++u32 WebGPUGfx::PushPendingPipeline(const AbstractPipeline* pipeline)
++{
++  const auto* p = static_cast<const WebGPUPipeline*>(pipeline);
++  if (!p)
++    return 0;
++  if (p->IsPending() && m_cmd_stream.ready())
++  {
++    // Order in the ring: the shaders' CreateShader, then CreatePipelineCfg,
++    // then (the caller's draw) SetPipeline. The replay worker sees them in it.
++    const u32 vs_id = PushPendingShader(p->m_config.vertex_shader);
++    const u32 fs_id = PushPendingShader(p->m_config.pixel_shader);
++    u32 id = 0;
++    if (vs_id != 0 && fs_id != 0)
++    {
++      const std::vector<u8> blob = SerializePipelineConfig(p->m_config, vs_id, fs_id);
++      id = m_cmd_stream.PushCreatePipelineCfg(blob.data(), blob.size());
++    }
++    p->SetPushed(id);
++  }
++  return p->GetBridgeId();
++}
++
+ void WebGPUGfx::SetPipeline(const AbstractPipeline* pipeline)
+ {
+-  m_cur_pipeline_id =
+-      pipeline ? static_cast<const WebGPUPipeline*>(pipeline)->GetBridgeId() : 0;
++  // Patch 0223: a pipeline from an async compiler thread enters the ring here.
++  m_cur_pipeline_id = PushPendingPipeline(pipeline);
++  m_cur_pipeline_uber = pipeline && pipeline->m_config.usage == AbstractPipelineUsage::GXUber;
+   m_pipeline_uses_utility_uniforms =
+       pipeline && pipeline->m_config.usage == AbstractPipelineUsage::Utility;
+ }
+@@ -2839,6 +3030,8 @@ void WebGPUGfx::Draw(u32 base_vertex, u32 num_vertices)
+     AbortRecordedPass(GfxAbortSite::PushDraw);
+     return;
+   }
++  if (m_cur_pipeline_uber)
++    CountUberDraw();
+ }
+ 
+ void WebGPUGfx::DrawIndexed(u32 base_index, u32 num_indices, u32 base_vertex)
+@@ -2889,6 +3082,8 @@ void WebGPUGfx::DrawIndexed(u32 base_index, u32 num_indices, u32 base_vertex)
+     AbortRecordedPass(GfxAbortSite::PushDraw);
+     return;
+   }
++  if (m_cur_pipeline_uber)
++    CountUberDraw();
+ }
+ 
+ void WebGPUGfx::ScaleTexture(AbstractFramebuffer* dst_framebuffer,
+diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.h b/Source/Core/VideoBackends/WebGPU/WebGPUGfx.h
+--- a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.h
++++ b/Source/Core/VideoBackends/WebGPU/WebGPUGfx.h
+@@ -4,6 +4,7 @@
+ #pragma once
+ 
+ #include <array>
++#include <atomic>
+ #include <unordered_map>
+ #include <vector>
+ 
+@@ -184,8 +185,21 @@ private:
+   // Diagnostics: how many shader modules translated+compiled vs fell
+   // back. Logged once so we can see how much of Dolphin's shader set
+   // Naga handles before the pipeline path exists.
+-  u32 m_shader_ok = 0;
+-  u32 m_shader_fail = 0;
++  // Patch 0223: atomics, the async compiler threads translate too (hybrid).
++  std::atomic<u32> m_shader_ok{0};
++  std::atomic<u32> m_shader_fail{0};
++
++  // Patch 0223 (hybrid mode): a shader or pipeline made on an async compiler
++  // thread is pushed into the ring by this (the GPU) thread, the single
++  // producer, the first time a pipeline needs it: its shaders' CreateShader
++  // records, then its CreatePipelineCfg, then the SetPipeline that names it.
++  u32 PushPendingShader(const AbstractShader* shader);
++  u32 PushPendingPipeline(const AbstractPipeline* pipeline);
++  // Patch 0223: the bound pipeline is an ubershader one, and the uber draws
++  // recorded since the last VI tag (TagViOutput closes the window).
++  bool m_cur_pipeline_uber = false;
++  u32 m_window_uber_draws = 0;
++  void CountUberDraw();
+ 
+   // ---- Day-33 A3/A4/A5: real render-path recording state ----------
+   // Begin a render pass for the bound framebuffer if one isn't open
+diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUShaderTranslator.cpp b/Source/Core/VideoBackends/WebGPU/WebGPUShaderTranslator.cpp
+--- a/Source/Core/VideoBackends/WebGPU/WebGPUShaderTranslator.cpp
++++ b/Source/Core/VideoBackends/WebGPU/WebGPUShaderTranslator.cpp
+@@ -7,6 +7,8 @@
+ #include <spirv-tools/libspirv.hpp>
+ 
+ #include <algorithm>
++#include <atomic>
++#include <mutex>
+ 
+ #include <emscripten/emscripten.h>
+ 
+@@ -31,11 +33,27 @@ namespace WebGPU
+ {
+ // §28cx: first shader-translation failure reason, surfaced in the on-screen
+ // [webgpu-shader] summary (the console one-shot logs get evicted by the flood).
++// Patch 0223: the async shader compiler threads translate too (hybrid mode),
++// so the first failure is kept under a mutex and read as a copy, and the
++// failures are counted (glslang, Naga) for the integrity line.
++static std::mutex s_last_xlat_error_lock;
+ static std::string s_last_xlat_error;
+-const std::string& LastShaderTranslateError()
++static std::atomic<u32> s_xlat_failures[2]{};
++static void KeepFirstXlatError(std::string message)
+ {
++  std::lock_guard guard(s_last_xlat_error_lock);
++  if (s_last_xlat_error.empty())
++    s_last_xlat_error = std::move(message);
++}
++std::string LastShaderTranslateError()
++{
++  std::lock_guard guard(s_last_xlat_error_lock);
+   return s_last_xlat_error;
+ }
++u32 ShaderTranslateFailures(bool naga)
++{
++  return s_xlat_failures[naga ? 1 : 0].load(std::memory_order_relaxed);
++}
+ 
+ namespace
+ {
+@@ -169,10 +187,10 @@ std::optional<std::string> GlslToWgsl(ShaderStage stage, std::string_view glsl,
+     // One-shot dump (first failure only) of the offending GLSL so we
+     // can see exactly what glslang choked on (e.g. #include, an
+     // unsupported builtin). Capped + truncated to keep the log sane.
+-    static bool dumped = false;
+-    if (!dumped)
++    s_xlat_failures[0].fetch_add(1, std::memory_order_relaxed);
++    static std::atomic<bool> dumped{false};
++    if (!dumped.exchange(true, std::memory_order_relaxed))
+     {
+-      dumped = true;
+       const std::string body(glsl.substr(0, std::min<size_t>(glsl.size(), 700)));
+       EM_ASM(
+           {
+@@ -183,8 +201,7 @@ std::optional<std::string> GlslToWgsl(ShaderStage stage, std::string_view glsl,
+           },
+           static_cast<int>(stage), body.c_str());
+     }
+-    if (s_last_xlat_error.empty())
+-      s_last_xlat_error = "glslang-fail stage=" + std::to_string(static_cast<int>(stage));
++    KeepFirstXlatError("glslang-fail stage=" + std::to_string(static_cast<int>(stage)));
+     return std::nullopt;
+   }
+ 
+@@ -195,16 +212,16 @@ std::optional<std::string> GlslToWgsl(ShaderStage stage, std::string_view glsl,
+   {
+     // §28cx: capture the Naga error FIRST (valid until the next naga call) for
+     // the on-screen summary, before the disasm/spvtools calls below.
+-    if (s_last_xlat_error.empty())
++    s_xlat_failures[1].fetch_add(1, std::memory_order_relaxed);
+     {
++      // naga_last_error is per thread (thread_local in tools/naga-spirv-wgsl).
+       const char* ne = naga_last_error();
+-      s_last_xlat_error = std::string("naga[s") + std::to_string(static_cast<int>(stage)) +
+-                          "]: " + (ne && *ne ? ne : "<null>");
++      KeepFirstXlatError(std::string("naga[s") + std::to_string(static_cast<int>(stage)) +
++                         "]: " + (ne && *ne ? ne : "<null>"));
+     }
+-    static int naga_dumps = 0;
+-    if (naga_dumps < 5)
++    static std::atomic<int> naga_dumps{0};
++    if (naga_dumps.fetch_add(1, std::memory_order_relaxed) < 5)
+     {
+-      ++naga_dumps;
+       const char* nerr = naga_last_error();
+       EM_ASM(
+           {
+@@ -221,10 +238,9 @@ std::optional<std::string> GlslToWgsl(ShaderStage stage, std::string_view glsl,
+     // %14" (same id across many shaders ⇒ one common glslang
+     // construct Naga's spv frontend can't parse). One-shot, early
+     // section only — that's where the offending id lives.
+-    static bool disasm_done = false;
+-    if (!disasm_done)
++    static std::atomic<bool> disasm_done{false};
++    if (!disasm_done.exchange(true, std::memory_order_relaxed))
+     {
+-      disasm_done = true;
+       spvtools::SpirvTools tools(SPV_ENV_VULKAN_1_0);
+       std::string text;
+       if (tools.Disassemble(spirv->code, &text,
+diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUShaderTranslator.h b/Source/Core/VideoBackends/WebGPU/WebGPUShaderTranslator.h
+--- a/Source/Core/VideoBackends/WebGPU/WebGPUShaderTranslator.h
++++ b/Source/Core/VideoBackends/WebGPU/WebGPUShaderTranslator.h
+@@ -63,6 +63,9 @@ std::optional<std::string> GlslToWgsl(ShaderStage stage, std::string_view glsl,
+ 
+ // §28cx: the FIRST shader-translation failure reason (glslang or Naga),
+ // captured for the on-screen [webgpu-shader] summary so the error survives the
+-// console flood. Empty if no failure yet.
+-const std::string& LastShaderTranslateError();
++// console flood. Empty if no failure yet. Patch 0223: a copy (any thread may
++// translate in the hybrid mode).
++std::string LastShaderTranslateError();
++// Patch 0223: translation failures since boot, glslang (false) or Naga (true).
++u32 ShaderTranslateFailures(bool naga);
+ }  // namespace WebGPU
+diff --git a/Source/Core/VideoCommon/AsyncShaderCompiler.cpp b/Source/Core/VideoCommon/AsyncShaderCompiler.cpp
+--- a/Source/Core/VideoCommon/AsyncShaderCompiler.cpp
++++ b/Source/Core/VideoCommon/AsyncShaderCompiler.cpp
+@@ -3,14 +3,20 @@
+ 
+ #include "VideoCommon/AsyncShaderCompiler.h"
+ 
++#include <algorithm>
+ #include <thread>
+ 
++#ifdef __EMSCRIPTEN__
++#include <emscripten/emscripten.h>
++#endif
++
+ #include "Common/Assert.h"
+ #include "Common/Logging/Log.h"
+ #include "Common/Thread.h"
+ 
+ #include "Core/Core.h"
+ #include "Core/System.h"
++#include "VideoCommon/VideoConfig.h"
+ 
+ namespace VideoCommon
+ {
+@@ -131,7 +137,12 @@ bool AsyncShaderCompiler::StartWorkerThreads(u32 num_worker_threads)
+ 
+ #ifdef __EMSCRIPTEN__
+   // WebGL does not expose shared GL contexts, so shader work must compile synchronously.
+-  return true;
++  // Patch 0223: except the WebGPU backend (the Vulkan dialect here) in its
++  // hybrid mode (?shadermode=hybrid), the only case where it says it supports
++  // background compiling: its threads translate GLSL to WGSL and never touch a
++  // device (the GPU thread pushes their results into the command ring).
++  if (!(g_backend_info.api_type == APIType::Vulkan && g_backend_info.bSupportsBackgroundCompiling))
++    return true;
+ #endif
+ 
+   for (u32 i = 0; i < num_worker_threads; i++)
+@@ -145,8 +156,14 @@ bool AsyncShaderCompiler::StartWorkerThreads(u32 num_worker_threads)
+ 
+     m_worker_thread_start_result.store(false);
+ 
++#ifdef __EMSCRIPTEN__
++    const double wait_start = emscripten_get_now();
++#endif
+     std::thread thr(&AsyncShaderCompiler::WorkerThreadEntryPoint, this, thread_param);
+     m_init_event.Wait();
++#ifdef __EMSCRIPTEN__
++    RecordThreadStart(emscripten_get_now() - wait_start);
++#endif
+ 
+     if (!m_worker_thread_start_result.load())
+     {
+@@ -161,6 +178,28 @@ bool AsyncShaderCompiler::StartWorkerThreads(u32 num_worker_threads)
+   return HasWorkerThreads();
+ }
+ 
++#ifdef __EMSCRIPTEN__
++namespace
++{
++std::mutex s_start_stats_lock;
++AsyncShaderCompiler::StartStats s_start_stats{};
++}  // namespace
++
++void AsyncShaderCompiler::RecordThreadStart(double wait_ms)
++{
++  std::lock_guard guard(s_start_stats_lock);
++  s_start_stats.threads += 1;
++  s_start_stats.wait_ms_total += wait_ms;
++  s_start_stats.wait_ms_max = std::max(s_start_stats.wait_ms_max, wait_ms);
++}
++
++AsyncShaderCompiler::StartStats AsyncShaderCompiler::GetStartStats()
++{
++  std::lock_guard guard(s_start_stats_lock);
++  return s_start_stats;
++}
++#endif
++
+ bool AsyncShaderCompiler::ResizeWorkerThreads(u32 num_worker_threads)
+ {
+   if (m_worker_threads.size() == num_worker_threads)
+diff --git a/Source/Core/VideoCommon/AsyncShaderCompiler.h b/Source/Core/VideoCommon/AsyncShaderCompiler.h
+--- a/Source/Core/VideoCommon/AsyncShaderCompiler.h
++++ b/Source/Core/VideoCommon/AsyncShaderCompiler.h
+@@ -33,6 +33,19 @@ public:
+ 
+   using WorkItemPtr = std::unique_ptr<WorkItem>;
+ 
++#ifdef __EMSCRIPTEN__
++  // Patch 0223: worker threads started since boot, and the time the starting
++  // thread waited for each to come up (Emscripten starts a pthread created
++  // off its main thread only once that main thread handles the request).
++  struct StartStats
++  {
++    u32 threads;
++    double wait_ms_total;
++    double wait_ms_max;
++  };
++  static StartStats GetStartStats();
++#endif
++
+   AsyncShaderCompiler();
+   virtual ~AsyncShaderCompiler();
+ 
+@@ -68,6 +81,9 @@ protected:
+   virtual void WorkerThreadExit(void* param);
+ 
+ private:
++#ifdef __EMSCRIPTEN__
++  static void RecordThreadStart(double wait_ms);
++#endif
+   void WorkerThreadEntryPoint(void* param);
+   void WorkerThreadRun();
+ 
+diff --git a/Source/Core/VideoCommon/Spirv.cpp b/Source/Core/VideoCommon/Spirv.cpp
+--- a/Source/Core/VideoCommon/Spirv.cpp
++++ b/Source/Core/VideoCommon/Spirv.cpp
+@@ -19,20 +19,20 @@ namespace
+ {
+ bool InitializeGlslang()
+ {
+-  static bool glslang_initialized = false;
+-  if (glslang_initialized)
++  // Patch 0223: a function-local static is initialized once even when several
++  // threads call this at the same time (the WebGPU backend translates on the
++  // async shader compiler threads in its hybrid mode). The plain bool it
++  // replaces was safe only with one translating thread.
++  static const bool glslang_initialized = [] {
++    if (!glslang::InitializeProcess())
++    {
++      PanicAlertFmt("Failed to initialize glslang shader compiler");
++      return false;
++    }
++    std::atexit([] { glslang::FinalizeProcess(); });
+     return true;
+-
+-  if (!glslang::InitializeProcess())
+-  {
+-    PanicAlertFmt("Failed to initialize glslang shader compiler");
+-    return false;
+-  }
+-
+-  std::atexit([] { glslang::FinalizeProcess(); });
+-
+-  glslang_initialized = true;
+-  return true;
++  }();
++  return glslang_initialized;
+ }
+ 
+ const TBuiltInResource* GetCompilerResourceLimits()
