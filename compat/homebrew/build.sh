@@ -26,7 +26,7 @@ CPU="cr fctiwz fprf frsp load mtspr nan ni pairedmove rlw srawix"
 # which Dolphin's software renderer ignores (SWEFBInterface::PokeColor is
 # empty), and with tev and lighting they run for hours on it.
 GX="bitfield clipping rasterization"
-OWN="efbpoke"
+OWN="efbpoke battest cardtest vitest"
 
 docker run --rm --platform linux/amd64 -v "$root:/w" -v "$hw:/hw:ro" -v "$out:/out" -w /w "$IMAGE" sh -c '
   set -eu

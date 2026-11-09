@@ -70,6 +70,18 @@
   "gxtest_rasterization": {
    "interp": {"tests":1,"testsPassed":0,"subtests":519,"subtestsPassed":5,"failures":[[1,70,"e5f4fb3e"],[1,119,"01573f48"],[1,119,"35666d77"],[1,119,"4926c273"],[1,119,"2ed07cd3"],[1,119,"0bfb107a"],[1,119,"bc2fe56e"],[1,119,"3f8a8bbc"],[1,119,"d908a60f"],[1,119,"d65db5b6"]]},
    "jit": {"tests":1,"testsPassed":0,"subtests":519,"subtestsPassed":5,"failures":[[1,70,"e5f4fb3e"],[1,119,"01573f48"],[1,119,"35666d77"],[1,119,"4926c273"],[1,119,"2ed07cd3"],[1,119,"0bfb107a"],[1,119,"bc2fe56e"],[1,119,"3f8a8bbc"],[1,119,"d908a60f"],[1,119,"d65db5b6"]]}
+  },
+  "battest": {
+   "interp": {"tests":1800,"testsPassed":1800,"subtests":3600,"subtestsPassed":3600,"failures":[]},
+   "jit": {"tests":1800,"testsPassed":1800,"subtests":3600,"subtestsPassed":3600,"failures":[]}
+  },
+  "cardtest": {
+   "interp": {"tests":2,"testsPassed":2,"subtests":26,"subtestsPassed":26,"failures":[]},
+   "jit": {"tests":2,"testsPassed":2,"subtests":26,"subtestsPassed":26,"failures":[]}
+  },
+  "vitest": {
+   "interp": {"tests":7,"testsPassed":7,"subtests":7,"subtestsPassed":7,"failures":[]},
+   "jit": {"tests":7,"testsPassed":7,"subtests":7,"subtestsPassed":7,"failures":[]}
   }
  }
 }
