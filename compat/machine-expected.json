@@ -1,5 +1,5 @@
 {
- "comment": "A snapshot of what each hwtests program reports on the current emulator (compat/browser.mjs), per config: test and subtest counts and the first failures as [test, source line, FNV-1a of the hwtest failure message]. Every field must match: a regression gate on the known failures. The pass/fail verdict of each subtest comes from the hardware values compiled into the hwtests binaries. jitBlocks: JIT blocks compiled by each program's JIT run when recorded (2026-11-09); a JIT run must compile at least 80 % of it. For the small programs most of these blocks are libogc's start-up, so the floor proves the JIT ran, not that every test loop compiled.",
+ "comment": "A snapshot of what each hwtests program reports on the current emulator (compat/browser.mjs), per config: test and subtest counts and the first failures as [test, source line, FNV-1a of the hwtest failure message]. Every field must match: a regression gate on the known failures. The pass/fail verdict of each subtest comes from the hardware values compiled into the hwtests binaries. jitBlocks: the smallest count of JIT blocks compiled by each program's JIT run seen so far (2026-11-09); a JIT run must compile at least 60 % of it (counts vary between runs with cpu=dual timing: 93 to 129 for gxtest_clipping). For the small programs most of these blocks are libogc's start-up, so the floor proves the JIT ran, not that every test loop compiled.",
  "notes": {
   "gxtest_clipping": "7 of 16 steps fail, decoded from the message hashes: steps 1, 2, 3, 4 and 6 draw outside the viewport inside the guard band (the hardware draws those pixels; the software renderer clips to the viewport), step 11 is z very slightly behind w with depth clipping on (the hardware's non-IEEE sum is zero).",
   "gxtest_rasterization": "514 of 519 fail: the hardware samples a pixel near x = 7/12 (0.5833); the software renderer's sample point differs, so the hwtest's sub-pixel viewport sweep sees covered pixels as empty and the reverse at the edges.",
@@ -9,7 +9,7 @@
   "cputest_ni": "NI: the hardware flushes a result that is tiny before rounding.",
   "cputest_pairedmove": "Paired-single moves after lfd: the hardware rounds ps0's mantissa to single and truncates ps1's; ps_res/ps_rsqrte estimate edge cases."
  },
- "jitBlocks": {"cputest_cr": 53, "cputest_fctiwz": 46, "cputest_fprf": 44, "cputest_frsp": 44, "cputest_load": 46, "cputest_mtspr": 46, "cputest_nan": 185, "cputest_ni": 45, "cputest_pairedmove": 487, "cputest_rlw": 45, "cputest_srawix": 69, "efbpoke": 69, "gxtest_bitfield": 59, "gxtest_clipping": 129, "gxtest_rasterization": 333},
+ "jitBlocks": {"cputest_cr": 53, "cputest_fctiwz": 46, "cputest_fprf": 44, "cputest_frsp": 44, "cputest_load": 46, "cputest_mtspr": 46, "cputest_nan": 185, "cputest_ni": 45, "cputest_pairedmove": 487, "cputest_rlw": 45, "cputest_srawix": 69, "efbpoke": 64, "gxtest_bitfield": 59, "gxtest_clipping": 93, "gxtest_rasterization": 333},
  "programs": {
   "cputest_cr": {
    "interp": {"tests":1,"testsPassed":1,"subtests":54,"subtestsPassed":54,"failures":[]},

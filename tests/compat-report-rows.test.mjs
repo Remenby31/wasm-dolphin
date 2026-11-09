@@ -42,8 +42,8 @@ test("machine: every field, the JIT's activity and every expected run are checke
   const expected = { p: { interp: want, jit: want } };
   const blocks = { p: 10 };
   assert.deepEqual(judgeMachine([run("interp"), run("jit")], expected, blocks), []);
-  // The run compiled 9 blocks: enough for 10 recorded (floor 8), not for 13 (floor 10).
-  assert.match(judgeMachine([run("interp"), run("jit")], expected, { p: 13 })[0], /compiled 9 .*at least 10/);
+  // The run compiled 9 blocks: enough for 10 recorded (floor 6), not for 20 (floor 12).
+  assert.match(judgeMachine([run("interp"), run("jit")], expected, { p: 20 })[0], /compiled 9 .*at least 12/);
   assert.match(judgeMachine([run("interp"), run("jit")], expected, {}).join("\n"), /no jitBlocks count/);
   const off = { p: { interp: want, jit: { ...want, subtestsPassed: want.subtestsPassed + 1 } } };
   assert.match(judgeMachine([run("interp"), run("jit")], off, blocks)[0], /^p jit: got /);
