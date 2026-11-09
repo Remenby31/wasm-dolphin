@@ -149,15 +149,76 @@ test("the worker reads the disc ahead by default, ?discreadahead=0 turns it off,
   assert.match(a, /discReadahead: this\.discReadahead,/);
 });
 
-test("the worker prefetches with Blob.arrayBuffer only with ?discprefetch=1 (off by default)", async () => {
+test("the worker prefetches with Blob.arrayBuffer when the host asks (?discprefetch=1, =0, else on for Chromium with the WebGPU video)", async () => {
   const read = (p) => readFile(new URL(p, import.meta.url), "utf8");
   const w = await read("../src/upstream-discio-worker.js");
   assert.match(w, /readBlobAsync: discPrefetchEnabled \? \(blob\) => blob\.arrayBuffer\(\) : null,/);
   assert.match(w, /discPrefetchEnabled = discPrefetch === true;/);
   assert.match(w, /^let discPrefetchEnabled = false;$/m);
   assert.match(w, /discPrefetch: payload\.discPrefetch,/);
-  assert.match(await read("../src/core-host.js"), /get\("discprefetch"\) === "1"/);
+  assert.match(await read("../src/core-host.js"), /this\.discPrefetch = discPrefetchSetting\(new URLSearchParams\(window\.location\.search\)\.get\("discprefetch"\),\n\s+\{ chromium: isChromium\(\), webgpuVideo: this\.videoBackend === "WebGPU-Real" \}\);/);
   const a = await read("../src/upstream-worker-adapter.js");
   assert.match(a, /this\.discPrefetch = discPrefetch === true;/);
   assert.match(a, /discPrefetch: this\.discPrefetch,/);
+});
+
+test("prefetch default: on only for Chromium with the WebGPU video; ?discprefetch=1 / =0 win; the brands decide Chromium", async () => {
+  const { discPrefetchSetting, isChromium } = await import("../src/disc-prefetch-setting.js");
+  assert.equal(discPrefetchSetting(null, { chromium: true, webgpuVideo: true }), true);
+  assert.equal(discPrefetchSetting(null, { chromium: true, webgpuVideo: false }), false, "software video: not measured");
+  assert.equal(discPrefetchSetting(null, { chromium: false, webgpuVideo: true }), false, "Firefox, Safari: not measured");
+  assert.equal(discPrefetchSetting("0", { chromium: true, webgpuVideo: true }), false);
+  assert.equal(discPrefetchSetting("1", { chromium: false, webgpuVideo: false }), true);
+  assert.equal(isChromium({ userAgentData: { brands: [{ brand: "Google Chrome" }, { brand: "Chromium" }] } }), true);
+  assert.equal(isChromium({ userAgentData: { brands: [{ brand: "Microsoft Edge" }, { brand: "Chromium" }] } }), true);
+  assert.equal(isChromium({}), false, "Firefox, Safari: no userAgentData");
+});
+
+test("prefetch plumbing: the adapter carries discPrefetch (false unless given true) to the worker's init", async () => {
+  const { UpstreamWorkerAdapter } = await import("../src/upstream-worker-adapter.js");
+  assert.equal(new UpstreamWorkerAdapter({}).discPrefetch, false);
+  assert.equal(new UpstreamWorkerAdapter({ discPrefetch: false }).discPrefetch, false);
+  assert.equal(new UpstreamWorkerAdapter({ discPrefetch: true }).discPrefetch, true);
+  const host = await readFile(new URL("../src/core-host.js", import.meta.url), "utf8");
+  assert.match(host, /\n\s+discPrefetch: this\.discPrefetch,\n/);
+});
+
+test("prefetch never delays a demand read and caps its reads in flight: a slow disc piles nothing up", async () => {
+  const { createDiscReadahead } = await import("../src/disc-readahead.js");
+  // two files on a slow disc: the background read never settles
+  const pending = [];
+  let syncReads = 0;
+  const ra = createDiscReadahead({
+    readBlob: (blob) => { syncReads += 1; return blob.bytes; },
+    readBlobAsync: (blob) => new Promise((resolve) => pending.push(() => resolve(blob.bytes))),
+    minBytes: 4, maxBytes: 16, heldBytes: 64
+  });
+  const file = (n) => {
+    const data = Uint8Array.from({ length: 256 }, (_, i) => (i + n) & 255);
+    const blob = { size: 256, slice: (a, b) => ({ bytes: data.slice(a, b) }) };
+    return { node: { contents: blob, size: 256 }, data };
+  };
+  const A = file(0), B = file(100);
+  const buf = new Uint8Array(8);
+  // a stream on A: its follow-on read issues one background read
+  ra.read(A, buf, 0, 4, 0); ra.read(A, buf, 0, 4, 4);
+  assert.equal(ra.stats.prefetchIssued, 1);
+  // a stream on B meanwhile: its demand reads come back at once (synchronous), no second background read
+  const before = syncReads;
+  assert.equal(ra.read(B, buf, 0, 4, 0), 4);
+  assert.deepEqual([...buf.subarray(0, 4)], [...B.data.subarray(0, 4)]);
+  assert.equal(ra.read(B, buf, 0, 4, 4), 4);
+  assert.ok(syncReads > before, "B read synchronously while A's background read hangs");
+  assert.equal(ra.stats.prefetchIssued, 1, "capped: one background read in flight at most");
+  assert.ok(ra.stats.prefetchCapped >= 1);
+  // A's next demand read inside the read still in flight: synchronous, not waiting for it
+  // (the follow-on read held [4, 12); the background one asked [12, 28))
+  assert.equal(ra.read(A, buf, 0, 4, 12), 4);
+  assert.deepEqual([...buf.subarray(0, 4)], [...A.data.subarray(12, 16)]);
+  assert.ok(ra.stats.syncMissInflight >= 1);
+  // once it settles, the cap frees
+  pending.shift()();
+  await new Promise((r) => setTimeout(r, 0));
+  ra.read(B, buf, 0, 4, 12); ra.read(B, buf, 0, 4, 16);
+  assert.ok(ra.stats.prefetchIssued >= 2);
 });

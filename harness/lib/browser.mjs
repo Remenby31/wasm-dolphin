@@ -79,8 +79,26 @@ export async function ensureServer({ port, root = REPO_ROOT, patches = [], coreC
 // at 120.01 fps on the NVIDIA adapter, chrome://gpu refresh 120.0032 Hz.
 // Refused on macOS whatever the environment: headless stays the only mode
 // on the user's Mac. Chosen by HARNESS_DISPLAY=x11 (spark-run --headed).
-export const DISPLAYS = Object.freeze(["headless", "x11"]);
+//
+// windows, Windows only: the browser shown full screen on the PC's own
+// screen (the PC kit, harness/remote/pc-run.mjs, research/pc-windows-kit.md),
+// launched in the logged-on user's session by a scheduled task: a hidden or
+// occluded window is EcoQoS and IDLE priority under Windows
+// (research/deep-windows-blockers.md §2.1), and only a real screen gives the
+// player's vsync and D3D12 present path. Never on the Mac.
+export const DISPLAYS = Object.freeze(["headless", "x11", "windows"]);
 export const X11_ARGS = Object.freeze(["--enable-features=Vulkan", "--use-angle=vulkan", "--disable-features=ThrottleRepeatedNoDamageFrames", "--window-position=0,0", "--window-size=1920,1080"]);
+export const WINDOWS_ARGS = Object.freeze(["--start-fullscreen", "--window-position=0,0"]);
+
+// HARNESS_BROWSER_CHANNEL: the installed browser Playwright starts when
+// HARNESS_CHROME_PATH is unset: chrome (Chrome stable, the default) or
+// msedge (Edge stable).
+export const BROWSER_CHANNELS = Object.freeze(["chrome", "msedge"]);
+export function browserChannel(env = process.env) {
+  const c = env.HARNESS_BROWSER_CHANNEL || "chrome";
+  if (!BROWSER_CHANNELS.includes(c)) throw new Error(`HARNESS_BROWSER_CHANNEL=${c}: one of ${BROWSER_CHANNELS.join(", ")}`);
+  return c;
+}
 
 // Chrome keeps only the last --enable-features and the last
 // --disable-features: every one of each becomes a single flag carrying all
@@ -172,6 +190,10 @@ export function chromeLaunchOptions(display = defaultDisplay(), { unsafeWebgpu =
     if (!env.DISPLAY) throw new Error("--display x11: DISPLAY is not set (the Spark's bare Xorg is :2, spark-run --headed)");
     return { headless: false, viewport: null, args: [...args, ...X11_ARGS] };
   }
+  if (display === "windows") {
+    if (platform !== "win32") throw new Error(`--display windows: Windows only (the PC kit); on ${platform} the harness only runs headless`);
+    return { headless: false, viewport: null, args: [...args, ...WINDOWS_ARGS] };
+  }
   return { headless: true, viewport: { width: 1280, height: 800 }, args };
 }
 
@@ -195,7 +217,7 @@ export async function launchChrome({ profileDir, display = defaultDisplay(), arg
   if (own.some((a) => FEATURE_FLAG.test(a)) && !defaults) console.warn("[harness] Playwright's own feature flags could not be read: ours replace them");
   const flags = withPlaywrightFeatures(own, defaults);
   const context = await chromium.launchPersistentContext(profileDir, {
-    ...(executablePath ? { executablePath } : { channel: "chrome" }),
+    ...(executablePath ? { executablePath } : { channel: browserChannel() }),
     headless: opts.headless,
     // x11: the window's own size (no viewport emulation on a real screen).
     // Headless: HARNESS_VIEWPORT=WxH for a larger page, e.g. a display box

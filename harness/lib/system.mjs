@@ -25,13 +25,29 @@ export function powerDrained(start, end, minPercent = MIN_BATTERY_PERCENT) {
   if (!Number.isFinite(b)) return false;
   return (Number.isFinite(a) && b < a) || b < minPercent;
 }
-export function powerSnapshot() {
-  if (os.platform() !== "darwin") return null;
+// Windows (the PC kit): Win32_Battery as JSON ("[]" or empty: no battery,
+// a desktop on mains). BatteryStatus 2 = on AC; 1 = discharging.
+export function parseWin32Battery(text) {
+  let list;
   try {
-    return parsePmsetBatt(execFileSync("pmset", ["-g", "batt"], { encoding: "utf8" }));
+    list = JSON.parse(String(text ?? "").trim() || "[]");
   } catch {
     return null;
   }
+  list = [list].flat().filter(Boolean);
+  if (!list.length) return { source: "ac", percent: null, battery: false };
+  const b = list[0];
+  return { source: b.BatteryStatus === 1 ? "battery" : "ac", percent: Number.isFinite(b.EstimatedChargeRemaining) ? b.EstimatedChargeRemaining : null, battery: true };
+}
+export function powerSnapshot(platform = os.platform()) {
+  try {
+    if (platform === "darwin") return parsePmsetBatt(execFileSync("pmset", ["-g", "batt"], { encoding: "utf8" }));
+    if (platform === "win32") {
+      return parseWin32Battery(execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
+        "@(Get-CimInstance Win32_Battery | Select-Object BatteryStatus,EstimatedChargeRemaining) | ConvertTo-Json -Compress"], { encoding: "utf8", timeout: 15000, windowsHide: true }));
+    }
+  } catch {}
+  return null;
 }
 
 export function machineSnapshot() {
