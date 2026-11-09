@@ -37,10 +37,14 @@ export const SETTINGS = Object.freeze({
   PROCTHROTTLEMAX: "bc5038f7-23e0-4960-96da-33abaf5935ec", PROCTHROTTLEMAX1: "bc5038f7-23e0-4960-96da-33abaf5935ed",
   PERFBOOSTMODE: "be337238-0d82-4146-a960-4f3749d470c7"
 });
-// The boot task (SYSTEM, at startup): puts the snapshot's scheme back,
-// deletes the kit's, deletes itself. One clamp at a time: a fixed short name
-// (schtasks /tr is limited to 261 characters).
+// The boot task (SYSTEM, at startup): puts the snapshot's scheme back and
+// deletes itself. The kit's scheme stays (inactive) until pc-run restore;
+// the preflight blocks a new run while it exists. One clamp at a time, a
+// fixed name. schtasks silently TRUNCATES a long /tr (CI windows-2025: a
+// 260-character line was cut before its last command, documented limit
+// 261): the line is kept under BOOT_TR_MAX.
 export const BOOT_TASK = "SalonKitRestore";
+export const BOOT_TR_MAX = 240;
 const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const guid = (g) => { if (!GUID.test(String(g))) throw new Error(`not a GUID: ${g}`); return g; };
 const uint = (n) => { if (!Number.isInteger(n) || n < 0 || n > 100000) throw new Error(`not an integer 0-100000: ${n}`); return String(n); };
@@ -56,7 +60,7 @@ export const ADMIN = Object.freeze({
   activateKit: () => `${POWERCFG} /setactive ${KIT_SCHEME}`,
   activate: (orig) => `${POWERCFG} /setactive ${guid(orig)}`,
   deleteKit: () => `${POWERCFG} /delete ${KIT_SCHEME}`,
-  bootTask: (orig) => `${SCHTASKS} /create /tn ${BOOT_TASK} /sc onstart /ru SYSTEM /rl highest /f /tr "${CMD} /d /c ${POWERCFG} /setactive ${guid(orig)} & ${POWERCFG} /delete ${KIT_SCHEME} & ${SCHTASKS} /delete /tn ${BOOT_TASK} /f"`,
+  bootTask: (orig) => `${SCHTASKS} /create /tn ${BOOT_TASK} /sc onstart /ru SYSTEM /rl highest /f /tr "${CMD} /d /c ${POWERCFG} /setactive ${guid(orig)} & ${SCHTASKS} /delete /tn ${BOOT_TASK} /f"`,
   queryBootTask: () => `${SCHTASKS} /query /tn ${BOOT_TASK}`,
   deleteBootTask: () => `${SCHTASKS} /delete /tn ${BOOT_TASK} /f`
 });
@@ -72,13 +76,13 @@ export const ADMIN_PATTERNS = Object.freeze([
   new RegExp(`^${P} /set(ac|dc)valueindex ${K} ${esc(SUB_PROCESSOR)} (${SETTING_ALT}) \\d{1,6}$`),
   new RegExp(`^${P} /setactive (${K}|${G})$`),
   new RegExp(`^${P} /delete ${K}$`),
-  new RegExp(`^${S} /create /tn ${BOOT_TASK} /sc onstart /ru SYSTEM /rl highest /f /tr "${C} /d /c ${P} /setactive ${G} & ${P} /delete ${K} & ${S} /delete /tn ${BOOT_TASK} /f"$`),
+  new RegExp(`^${S} /create /tn ${BOOT_TASK} /sc onstart /ru SYSTEM /rl highest /f /tr "${C} /d /c ${P} /setactive ${G} & ${S} /delete /tn ${BOOT_TASK} /f"$`),
   new RegExp(`^${S} /query /tn ${BOOT_TASK}$`),
   new RegExp(`^${S} /delete /tn ${BOOT_TASK} /f$`)
 ]);
 export function assertAdmin(line) {
   if (typeof line !== "string" || !ADMIN_PATTERNS.some((re) => re.test(line))) throw new Error(`refused: not one of the kit's administrator commands: ${String(line).slice(0, 160)}`);
-  if (line.includes("/tr ") && line.slice(line.indexOf('"')).length > 263) throw new Error("schtasks /tr over 261 characters");
+  if (line.includes("/tr ") && line.slice(line.indexOf('"') + 1, -1).length > BOOT_TR_MAX) throw new Error(`schtasks /tr over ${BOOT_TR_MAX} characters (schtasks truncates silently)`);
   return line;
 }
 

@@ -116,7 +116,8 @@ test("pc-kit: the administrator's commands are a closed list of fixed lines", ()
     assert.doesNotMatch(l.replace(/\/tr ".*"$/, ""), /[&|<>^%"']/, "no shell metacharacter outside the boot task's /tr");
   }
   const tr = /\/tr "(.*)"$/.exec(ADMIN.bootTask(o))[1];
-  assert.ok(tr.length <= 261, `schtasks /tr ${tr.length} <= 261`);
+  assert.ok(tr.length <= 240, `schtasks /tr ${tr.length} <= 240 (schtasks truncates silently: a 260-character one lost its last command on CI)`);
+  assert.match(tr, /\/setactive 8c5e7fda\S+ & C:\\Windows\\System32\\schtasks\.exe \/delete \/tn SalonKitRestore \/f$/, "the scheme back, then the task deletes itself");
   assert.match(tr, /^C:\\Windows\\System32\\cmd\.exe \/d \/c /, "the boot task's cmd without AutoRun");
   assert.match(ADMIN.bootTask(o), / \/sc onstart \/ru SYSTEM /, "at startup, as SYSTEM: no user file, no user profile");
   // refused: anything not of the list, whatever the reason

@@ -27,9 +27,9 @@
 //
 // What it changes on the PC: the kit's power scheme (a copy of the active
 // one, carrying the clamp) and the boot task SalonKitRestore (SYSTEM, at
-// startup: puts the snapshot's scheme back), both by the admin list and
-// both undone by restore (at the end of every job, on Ctrl-C/SIGTERM, or by
-// the boot task after a reboot); in the kit account: one scheduled task per
+// startup: puts the snapshot's scheme back and deletes itself; the kit's
+// scheme then stays, inactive, until restore), both by the admin list and
+// both undone by restore (at the end of every job, on Ctrl-C/SIGTERM); in the kit account: one scheduled task per
 // job and files under its %USERPROFILE%\\salon-kit. It never installs a
 // browser or a driver, never edits a user scheme, never copies a disc (the
 // PC reads its own, --iso is a path ON the PC).

@@ -104,26 +104,21 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = "Continue"
-          $before = (powercfg /list) -join "`n"; $active = (powercfg /getactivescheme) -join ""
+          $active = (powercfg /getactivescheme) -join ""
           foreach ($l in (Get-Content "$env:RUNNER_TEMP\admin-boot.txt")) { if ($l) { cmd.exe /d /c $l | Out-Null } }
           "clamped: $((powercfg /getactivescheme) -join '')"
-          $t = (schtasks /query /tn SalonKitRestore /v /fo LIST) -join "`n"; ($t -split "`n" | Select-String 'Task To Run|Run As User') -join "`n"
+          $x = (schtasks /query /tn SalonKitRestore /xml) -join "`n"; if ($x -match '<Arguments>(.*)</Arguments>') { "stored args: $($Matches[1])" }
+          if ($x -notmatch 'SalonKitRestore /f</Arguments>') { "the boot task's line was truncated"; exit 1 }
           schtasks /run /tn SalonKitRestore | Out-Null
           for ($i = 0; $i -lt 30; $i++) { Start-Sleep 1; schtasks /query /tn SalonKitRestore 2>$null | Out-Null; if ($LASTEXITCODE -ne 0) { break } }
           "after the boot task: $((powercfg /getactivescheme) -join '')"
-          (schtasks /query /tn SalonKitRestore /v /fo LIST 2>$null) | Select-String 'Last Result|Status|Task To Run' | ForEach-Object { "  $_" }
-          $full = (schtasks /query /tn SalonKitRestore /xml 2>$null) -join "`n"; if ($full -match '<Arguments>(.*)</Arguments>') { "  args: $($Matches[1])" }
-          # diagnostic: can a SYSTEM task delete itself at all?
-          schtasks /create /tn SelfDelTest /sc onstart /ru SYSTEM /rl highest /f /tr "C:\Windows\System32\cmd.exe /d /c C:\Windows\System32\schtasks.exe /delete /tn SelfDelTest /f" | Out-Null
-          schtasks /run /tn SelfDelTest | Out-Null; Start-Sleep 5
-          schtasks /query /tn SelfDelTest 2>$null | Out-Null; "  SYSTEM self-delete test: $(if ($LASTEXITCODE -eq 0) { 'still there' } else { 'deleted' })"
-          (schtasks /query /tn SelfDelTest /v /fo LIST 2>$null) | Select-String 'Last Result' | ForEach-Object { "  $_" }
-          schtasks /delete /tn SelfDelTest /f 2>$null | Out-Null
           if (((powercfg /getactivescheme) -join "") -ne $active) { "the boot task did not restore the scheme"; exit 1 }
-          if (((powercfg /list) -join "`n") -ne $before) { "the kit's scheme survived the boot task"; exit 1 }
           schtasks /query /tn SalonKitRestore 2>$null | Out-Null; if ($LASTEXITCODE -eq 0) { "the boot task did not delete itself"; exit 1 }
-          "boot task: restored and gone"
-          exit 0  # the last native exit code (an expected failure) would be the step's
+          # the kit's scheme stays, inactive, until pc-run restore: its line of the list
+          cmd.exe /d /c "C:\Windows\System32\powercfg.exe /delete 5a10c0de-0b1d-4c1a-9e2f-12400c1a0001" | Out-Null
+          if (((powercfg /list) -join "") -match "5a10c0de") { "the kit's scheme could not be deleted"; exit 1 }
+          "boot task: scheme back, task gone; kit scheme deleted by restore"
+          exit 0
       - name: Playwright (driver only; the runner's Chrome and Edge are used)
         shell: bash
         run: npm i -g playwright@1.56.1

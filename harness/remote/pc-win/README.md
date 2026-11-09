@@ -25,7 +25,7 @@ C:\Windows\System32\powercfg.exe /changename 5a10c0de-0b1d-4c1a-9e2f-12400c1a000
 C:\Windows\System32\powercfg.exe /set{ac|dc}valueindex 5a10c0de-… 54533251-… <one of 5 processor-setting GUIDs> <integer>
 C:\Windows\System32\powercfg.exe /setactive {5a10c0de-…|<GUID>}
 C:\Windows\System32\powercfg.exe /delete 5a10c0de-0b1d-4c1a-9e2f-12400c1a0001
-C:\Windows\System32\schtasks.exe /create /tn SalonKitRestore /sc onstart /ru SYSTEM /rl highest /f /tr "C:\Windows\System32\cmd.exe /d /c C:\Windows\System32\powercfg.exe /setactive <GUID> & C:\Windows\System32\powercfg.exe /delete 5a10c0de-… & C:\Windows\System32\schtasks.exe /delete /tn SalonKitRestore /f"
+C:\Windows\System32\schtasks.exe /create /tn SalonKitRestore /sc onstart /ru SYSTEM /rl highest /f /tr "C:\Windows\System32\cmd.exe /d /c C:\Windows\System32\powercfg.exe /setactive <GUID> & C:\Windows\System32\schtasks.exe /delete /tn SalonKitRestore /f"
 C:\Windows\System32\schtasks.exe /query /tn SalonKitRestore
 C:\Windows\System32\schtasks.exe /delete /tn SalonKitRestore /f
 ```
@@ -58,6 +58,6 @@ node harness/remote/pc-run.mjs calibrate --host salonkit@pc --admin-host admin@p
 node harness/remote/pc-run.mjs run       --host salonkit@pc --admin-host admin@pc --iso '…' --film 1p=… --film 2p=… --runs 3 --calibration <job>/calibration.json
 ```
 
-Every command takes `--dry-run`, which prints each line against a simulated PC without connecting. After a lost Mac, use `restore --job ID`; after a reboot, the boot task has already put the scheme back.
+Every command takes `--dry-run`, which prints each line against a simulated PC without connecting. After a lost Mac, use `restore --job ID`. After a reboot, the boot task has already put the scheme back and deleted itself; the kit's scheme stays, inactive, until `restore --job ID`, and the preflight blocks any new run until then.
 
 Results go to `$CLAUDE_JOB_DIR/pc-kit/<job>/` (otherwise `../measures/pc-kit/`), as `report.md` and the raw files.
