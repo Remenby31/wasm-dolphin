@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "1c16182c3400d7b4993539b5824c4ddffb3da5643c7055063be4f9ba38079f25",
+  "patchSeriesSha256": "c51b573ef36d5b98f73379ca37ca4a9b2edff29dd33695d317ce8c51e8ac2388",
   "patches": [
     {
       "order": 1,
@@ -1229,6 +1229,14 @@
     },
     {
       "order": 151,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0222-webgpu-ubershaders-posmtx-dual-source.patch",
+      "size": 2926,
+      "sha256": "a65202c22645f36487ac177b1b94a8242f1f2305e436905c01ca4e9c89932422"
+    },
+    {
+      "order": 152,
       "cwd": "Externals/SFML/SFML",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0001-sfml-emscripten-config.patch",
@@ -1236,7 +1244,7 @@
       "sha256": "f82197a21fe982ad83f6ee7bbf5a03839b1cebd4d64da3eab11263842bf61d89"
     },
     {
-      "order": 152,
+      "order": 153,
       "cwd": "Externals/xxhash/xxHash",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0002-xxhash-wasm-simd-scalar.patch",
