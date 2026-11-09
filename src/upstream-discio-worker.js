@@ -2557,7 +2557,11 @@ async function handleMessage(type, payload) {
       try {
         stats(ptr);
         const v = new Uint32Array(moduleInstance.HEAPU8.buffer, ptr, 3);
-        return { flushes: v[0], extraDraws: v[1], enabled: v[2] === 1 };
+        // 0223: hybrid flushes drawn in one uber pass while their two pass
+        // pipelines compiled (null: a core without 0223)
+        const uberWaits = typeof moduleInstance._DolphinWeb_DstAlphaUberWaits === "function"
+          ? moduleInstance._DolphinWeb_DstAlphaUberWaits() >>> 0 : null;
+        return { flushes: v[0], extraDraws: v[1], enabled: v[2] === 1, uberWaits };
       } finally {
         moduleInstance._free(ptr);
       }

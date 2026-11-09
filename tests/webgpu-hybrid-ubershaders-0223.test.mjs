@@ -78,6 +78,21 @@ test("0223: off the GPU thread only translation; the GPU thread pushes shaders, 
   assert.match(spirv, /static const bool glslang_initialized = \[\] \{/);
 });
 
+test("0223: dst-alpha two passes in hybrid by the bound pipeline (specialized), one uber pass until both are ready", () => {
+  const vm = added("Source/Core/VideoCommon/VertexManagerBase.cpp");
+  // the hybrid branch: by mode AND the pipeline the draw would use (GX = specialized)
+  assert.match(vm, /else if \(s_dst_alpha_two_pass\.load\(std::memory_order_relaxed\) &&\n\s+g_ActiveConfig\.iShaderCompilationMode ==\n\s+ShaderCompilationMode::AsynchronousUberShaders &&\n\s+m_current_pipeline_object->m_config\.usage == AbstractPipelineUsage::GX &&\n\s+NeedsDstAlphaPass\(m_current_pipeline_config\)\)/);
+  // both pass pipelines asked without waiting; both ready, else one uber pass
+  assert.match(vm, /const auto color_pass = g_shader_cache->GetPipelineForUidAsync\(passes\.color\);/);
+  assert.match(vm, /g_shader_cache->GetPipelineForUidAsync\(passes\.alpha\)/);
+  assert.match(vm, /if \(color_pass && \*color_pass && alpha_pass && \(\*alpha_pass \|\| !passes\.alpha_drawn\)\)/);
+  assert.match(vm, /pipeline_object =\n\s+g_shader_cache->GetUberPipelineForUid\(m_current_uber_pipeline_config\);\n\s+s_dst_alpha_uber_waits\.fetch_add/);
+  // the synchronous branch (0136/0149) is untouched: no removed line in the file
+  const part = patch.split(/^diff --git /m).find((p) => p.startsWith("a/Source/Core/VideoCommon/VertexManagerBase.cpp "));
+  assert.equal(part.split("\n").filter((l) => l.startsWith("-") && !l.startsWith("---")).length, 0);
+  assert.match(read("src/upstream-discio-worker.js"), /moduleInstance\._DolphinWeb_DstAlphaUberWaits\(\) >>> 0 : null;/);
+});
+
 test("0223 integrity: uber counters, translation failures, compiler start, pthreads past the pool", () => {
   const c = coreIntegrityOf("wgdrawskip:0 wguber:120,7,3 wgxlatfail:0,1 wgcomp:2,3.5,2.0,1 wgupfail:0,0,0,0,0,0,0,0,0");
   assert.equal(c.uberDraws, 120);
