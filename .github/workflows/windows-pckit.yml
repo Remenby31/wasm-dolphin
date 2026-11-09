@@ -185,11 +185,13 @@ jobs:
           "exit $($p.ExitCode)"
           Get-Content "$k\out.txt" -ErrorAction SilentlyContinue
           Remove-LocalUser -Name kitstd
+      - name: The securing script, as pc-run sends it
+        shell: bash
+        run: node --input-type=module -e 'import { secureKitScript } from "./harness/lib/pc-kit.mjs"; process.stdout.write(secureKitScript());' > "$RUNNER_TEMP/secure.ps1"
       - name: "Security: C:\\salon-kit secured; a standard account cannot rewrite the script; an elevated cleanup does not follow a junction; the logon restore runs no file"
         timeout-minutes: 6
         shell: powershell
         run: |
-          node --input-type=module -e 'import { secureKitScript } from "./harness/lib/pc-kit.mjs"; process.stdout.write(secureKitScript());' | Set-Content -Encoding UTF8 "$env:RUNNER_TEMP\secure.ps1"
           powershell -NoProfile -ExecutionPolicy Bypass -File "$env:RUNNER_TEMP\secure.ps1"
           Copy-Item harness\remote\pc-win\salon-pc.ps1 C:\salon-kit\salon-pc.ps1
           $a = Get-Acl C:\salon-kit; "protected: $($a.AreAccessRulesProtected), owner: $($a.Owner)"; $a.Access | Format-Table IdentityReference, FileSystemRights, IsInherited | Out-String
