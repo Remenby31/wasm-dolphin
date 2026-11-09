@@ -34,13 +34,13 @@ function latestFrames(dir) {
   return files.map((f) => [f, statSync(f).mtimeMs]).sort((a, b) => a[1] - b[1]).map(([f]) => f);
 }
 
-async function runOne({ bin, file, core, timeoutSec, platform, configs, logFile, keepUser }) {
+async function runOne({ bin, file, core, timeoutSec, platform, configs, logFile, keepUser, video }) {
   const user = keepUser ?? mkdtempSync(path.join(os.tmpdir(), "native-dolphin-"));
   mkdirSync(path.join(user, "Config"), { recursive: true });
   // The logger reads its own file at start-up (a -C value comes too late).
   writeFileSync(path.join(user, "Config", "Logger.ini"), "[Options]\nWriteToFile = True\nWriteToConsole = True\nVerbosity = 4\n[Logs]\n" +
-    ["BOOT", "CORE", "VIDEO", "COMMON", "FRAMEDUMP", "OSREPORT", "VIDEOINTERFACE", "HOST_GPU", "MASTER"].map((t) => `${t} = True\n`).join(""));
-  const args = ["-u", user, "-p", platform, "-v", "Software Renderer", "-e", file,
+    ["BOOT", "CORE", "VIDEO", "COMMON", "OSREPORT", "VI", "HOST_GPU", "MASTER"].map((t) => `${t} = True\n`).join(""));
+  const args = ["-u", user, "-p", platform, "-v", video, "-e", file,
     "-C", `Dolphin.Core.CPUCore=${core}`, "-C", "Dolphin.Core.EmulationSpeed=0",
     "-C", "Dolphin.Movie.DumpFrames=True", "-C", "GFX.Settings.DumpFramesAsImages=True",
     "-C", "GFX.Hacks.EFBAccessEnable=True", "-C", "GFX.Hacks.EFBToTextureEnable=False",
@@ -94,7 +94,8 @@ async function main() {
       cores: { type: "string", default: "interp,jit" }, timeout: { type: "string", default: "120" },
       platform: { type: "string", default: "x11" }, config: { type: "string", multiple: true, default: [] },
       json: { type: "string" }, md: { type: "string" }, logs: { type: "string", default: "native-logs" },
-      "keep-user": { type: "string" }, ext: { type: "string", default: "dol" }
+      "keep-user": { type: "string" }, ext: { type: "string", default: "dol" },
+      video: { type: "string", default: "Software Renderer" }
     }
   });
   if (!values.bin || !values.dir) throw new Error("usage: compat/native.mjs --bin <dolphin-emu-nogui> --dir <files>");
@@ -109,7 +110,7 @@ async function main() {
     for (const core of values.cores.split(",")) {
       const logFile = path.join(values.logs, `${program}-${core}.log`);
       const r = await runOne({ bin: values.bin, file: path.resolve(values.dir, f), core: CORES[core], timeoutSec: Number(values.timeout),
-        platform: values.platform, configs: values.config, logFile,
+        platform: values.platform, configs: values.config, logFile, video: values.video,
         keepUser: values["keep-user"] ? path.resolve(values["keep-user"], `${program}-${core}`) : undefined });
       results.push({ program, core, ...r });
       const rep = r.report;

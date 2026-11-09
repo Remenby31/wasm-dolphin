@@ -124,6 +124,15 @@ jobs:
       - name: Build the test programs (pinned devkitPPC image)
         run: sh compat/homebrew/build.sh "$RUNNER_TEMP/hwtests" "$RUNNER_TEMP/hwtests-out"
 
+      - name: Diagnostic, OpenGL backend (llvmpipe)
+        continue-on-error: true
+        shell: bash
+        run: |
+          xvfb-run -a -s "-screen 0 1280x1024x24" node compat/native.mjs --bin "$NATIVE/Binaries/dolphin-emu-nogui" \
+            --dir "$RUNNER_TEMP/hwtests-out" --only cputest_cr --cores interp --timeout 40 --video OGL \
+            --logs native-logs/diag-ogl --keep-user native-logs/diag-ogl-user || true
+          find native-logs/diag-ogl-user -maxdepth 4 | grep -v Wii | head -30; tail -30 native-logs/diag-ogl/*.log
+
       - name: Smoke run (one program, frames must be dumped)
         shell: bash
         run: |
