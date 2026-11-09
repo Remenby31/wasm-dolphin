@@ -362,7 +362,7 @@ function Unclamp {
 # processes written down (pid AND start time: Windows reuses pids at once)
 # and every kit image whose command line holds the job's folder, the job's
 # TEMP removed without following any reparse point.
-function Stop-Job([string]$jd) {
+function Stop-KitJob([string]$jd) {
   $killed = @(); $warn = @()
   if (Test-Path -LiteralPath $jd) { "stop $((Get-Date).ToString('o'))" | Set-Content -LiteralPath (Join-Path $jd "stop") }
   if (Get-ScheduledTask -TaskPath $TaskPath -TaskName $Job -ErrorAction SilentlyContinue) { Stop-ScheduledTask -TaskPath $TaskPath -TaskName $Job -ErrorAction SilentlyContinue }
@@ -386,7 +386,7 @@ function Stop-Job([string]$jd) {
 
 function Cleanup {
   Need-Job
-  $r = Stop-Job (Job-Dir)
+  $r = Stop-KitJob (Job-Dir)
   Out-Result ([ordered]@{ action = "cleanup"; job = $Job; killed = $r.killed; jobProcesses = $r.still; jobTmp = $r.tmpLeft; warnings = $r.warnings })
 }
 
@@ -394,7 +394,7 @@ function Restore {
   Need-Job
   $state = $null; $warn = @()
   try { $state = Read-State } catch { $warn += "no snapshot: the Balanced scheme is activated if the kit's was active" }
-  $r = Stop-Job (Job-Dir)
+  $r = Stop-KitJob (Job-Dir)
   $warn += $r.warnings
   if (Get-ScheduledTask -TaskPath $TaskPath -TaskName "restore-$Job" -ErrorAction SilentlyContinue) { Unregister-ScheduledTask -TaskPath $TaskPath -TaskName "restore-$Job" -Confirm:$false }
   if ($state -or (Active-Scheme) -eq $KitScheme -or (All-Schemes | Where-Object { $_ -eq $KitScheme })) { $active = Restore-Power $state } else { $active = Active-Scheme }
