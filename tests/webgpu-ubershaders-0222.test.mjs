@@ -33,6 +33,25 @@ test("0222: an uber pixel shader that writes depth falls back to single-source b
   assert.match(pipelineUtils, /api_type == APIType::Vulkan && ps->per_pixel_depth/);
 });
 
+test("0222: the dual-source rule sits in ClearUnusedPixelShaderUidBits, after the line that turns dual-source back on", () => {
+  const ps = added("Source/Core/VideoCommon/UberShaderPixel.cpp");
+  assert.match(ps, /if \(api_type == APIType::Vulkan && uid_data->per_pixel_depth\)\n\s+uid_data->no_dual_src = 1;/);
+  // placed after the else-if of the driver bug (context of the hunk)
+  const hunk = patch.slice(patch.indexOf("+++ b/Source/Core/VideoCommon/UberShaderPixel.cpp"));
+  assert.ok(hunk.indexOf("uid_data->no_dual_src = 0;") >= 0 && hunk.indexOf("uid_data->no_dual_src = 0;") < hunk.indexOf("uid_data->no_dual_src = 1;"));
+});
+
+test("0222: uber pipelines feed every input the uber vertex shader declares, with filler attributes at offset 0", () => {
+  const gfx = added("Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp");
+  assert.match(gfx, /if \(decl && cfg\.usage == AbstractPipelineUsage::GXUber && stride >= 2\)/);
+  assert.match(gfx, /FILLER/);
+  assert.match(gfx, /VarToWgpuVertexFormat\(ComponentFormat::UByte, 2, true\)/, "posmtx: uint8x2 (the shader's uint4)");
+  assert.match(gfx, /VarToWgpuVertexFormat\(ComponentFormat::UByte, 2, false\)/, "the others: unorm8x2 (float, never a NaN)");
+  assert.match(gfx, /PutU32\(attrs, 0\);/, "offset 0, inside every stride");
+  // the WebGPU rule that allows the overlap is cited
+  assert.match(gfx, /validating GPUVertexBufferLayout/);
+});
+
 test("0222 changes no default: the web core keeps ShaderCompilationMode::Synchronous", () => {
   const core = read("core/upstream/dolphin_web_core.cpp");
   assert.match(core, /Config::SetBase\(Config::GFX_SHADER_COMPILATION_MODE,\n\s+ShaderCompilationMode::Synchronous\);/);
