@@ -17,6 +17,7 @@ import {
   requestedXfbFastPaths
 } from "./upstream-worker-protocol.js";
 import { requestedUpstreamCoreBuild } from "./default-core.js";
+import { discPrefetchSetting, isChromium } from "./disc-prefetch-setting.js";
 import {
   requestedWgpuAtomicPassReplay,
   requestedWgpuDeepReplayDiagnostics,
@@ -172,9 +173,11 @@ export class EmulatorHost {
     this.dstAlphaTwoPass = new URLSearchParams(window.location.search).get("dstalpha2pass") !== "0";
     // ?discreadahead=0: the disc read exactly as asked (no read-ahead).
     this.discReadahead = new URLSearchParams(window.location.search).get("discreadahead") !== "0";
-    // ?discprefetch=1: the background prefetch of the next segment (0155),
-    // off by default (within noise on Chromium; to be measured on WebKit).
-    this.discPrefetch = new URLSearchParams(window.location.search).get("discprefetch") === "1";
+    // ?discprefetch=1 / =0: the background prefetch of the next segment
+    // (0155); by default on where measured: Chromium with the WebGPU video
+    // backend (src/disc-prefetch-setting.js), off elsewhere.
+    this.discPrefetch = discPrefetchSetting(new URLSearchParams(window.location.search).get("discprefetch"),
+      { chromium: isChromium(), webgpuVideo: this.videoBackend === "WebGPU-Real" });
     // Harness: keep a software WebGL presenter (SwiftShader), which the app
     // refuses for the 2D canvas (cheaper on a CPU).
     this.webglSoftware = new URLSearchParams(window.location.search).get("webglsw") === "1";
