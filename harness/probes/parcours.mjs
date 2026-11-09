@@ -61,7 +61,7 @@ import { calmLock, defaultMaxLoad, loadGaveUp, loadLimit } from "../lib/env.mjs"
 import { readIntegrity, treeHasIntegrity } from "../lib/integrity.mjs";
 import { claim } from "../lib/ownership.mjs";
 import { filmMarkers, filmPhases, filmWithMarks, padFilmStatus, recordPorts, releaseMarker, runRecordSteps, signalStuck, startPadFilm, stopPadFilm, validateFilm, validateRecordSteps } from "../lib/pad-film.mjs";
-import { ANALYSIS_VERSION, analyzeRun, currentPhase, deriveSeconds, frameDiff, gapDetail, markerIndexes, STILL_DIFF, phaseNoise, parcoursVerdict, renderTimeline, usable } from "../lib/parcours.mjs";
+import { ANALYSIS_VERSION, GPU_ROW_COLUMNS, analyzeRun, currentPhase, deriveSeconds, frameDiff, gapDetail, markerIndexes, STILL_DIFF, phaseNoise, parcoursVerdict, renderTimeline, usable } from "../lib/parcours.mjs";
 import { acquirePerfLock } from "../lib/perf-lock.mjs";
 import { descendantsOf } from "../lib/lock-run.mjs";
 import { chromeInfo, isLocalOnly, probeOutDir } from "../lib/probe-out.mjs";
@@ -76,7 +76,7 @@ import { num, sideOrder } from "./race-perf.mjs";
 
 // What this probe runs in the page and the worker: an A/A's noise holds only
 // for the same version. Raised with each such change.
-export const PROBE_VERSION = 2; // 2: the drop sampler every SAMPLER_MS (100 ms, was 1 s), its stalls and the VI times kept per second (present gap detail)
+export const PROBE_VERSION = 3; // 2: the drop sampler every SAMPLER_MS (100 ms, was 1 s), its stalls and the VI times kept per second (present gap detail); 3: its GPU-side subset kept every run (gpuRows: analysis 8's game pauses)
 
 // The drop sampler's period: its counters are drained once a second, its
 // rows' lateness says when the presenting worker was blocked.
@@ -175,6 +175,17 @@ export function otherCpuOf(psOutput, { profileDir, ownPids = [], selfPid = proce
 }
 function otherCpu(profileDir, ownPids = []) {
   return new Promise((resolve) => execFile("ps", ["-A", "-o", "pid=,ppid=,pcpu=,command="], { maxBuffer: 32 << 20, timeout: 5000 }, (error, out) => resolve(error ? null : otherCpuOf(out, { profileDir, ownPids }))));
+}
+
+// The drop sampler's GPU side, every 100 ms row of a drain, kept in every
+// run (lib/parcours.mjs gamePauseGpuSide: a game pause is excused only with
+// the GPU thread and the replay worker idle over it): the copies, the GPU
+// thread's work and waits, the CPU thread's waits for the GPU, this worker's
+// busy time. ~8 numbers a row; null when the drain failed.
+export function gpuRowsOf(drained) {
+  if (!drained || drained.error || !Array.isArray(drained.rows) || !Array.isArray(drained.columns)) return null;
+  const ix = GPU_ROW_COLUMNS.map((k) => drained.columns.indexOf(k));
+  return drained.rows.map((r) => ix.map((i) => (i < 0 || !Number.isFinite(r[i]) ? null : Math.round(r[i] * 10) / 10)));
 }
 
 // The drop sampler's last row of a drain, as named counters (null: no row).
@@ -276,7 +287,7 @@ async function playRun(o, server, { side, run, outDir }) {
       // (lib/drops.mjs parcoursWindowsForAttribution reads gapVis, gapWorkerLagMs)
       const per = presentGaps(raw.samples.at(-1), { presents, viT, samplerTicks });
       if (o.samplerRows && drained?.rows) (raw.samplerRows ??= []).push(drained);
-      raw.samples.push({ t, info, counters: countersOf(drained), presents, presentTag, presentTagEpoch, presentsKnown, producedT, producedKnown, vi: tl?.vi?.t?.length ?? null, viT, samplerTicks, gapVis: per.vis, gapWorkerLagMs: per.workerLagMs, audioQ: audioQ?.unavailable ? null : audioQ, integrity: integrity?.unread || integrity?.unavailable ? null : integrity, film: status ? { pos: status.pos, hold: status.hold, polls: status.polls } : null });
+      raw.samples.push({ t, info, counters: countersOf(drained), gpuRows: gpuRowsOf(drained), presents, presentTag, presentTagEpoch, presentsKnown, producedT, producedKnown, vi: tl?.vi?.t?.length ?? null, viT, samplerTicks, gapVis: per.vis, gapWorkerLagMs: per.workerLagMs, audioQ: audioQ?.unavailable ? null : audioQ, integrity: integrity?.unread || integrity?.unavailable ? null : integrity, film: status ? { pos: status.pos, hold: status.hold, polls: status.polls } : null });
       raw.loads.push([Date.now(), os.loadavg()[0]]);
       const sec = Math.round((Date.now() - t0) / 1000);
       // the other processes' CPU every OTHER_CPU_EVERY_SEC, off the loop
@@ -372,6 +383,13 @@ export function analyzeRaw(raw, { maxLoad, outDir = null, tag = null, filmPhases
   return a;
 }
 
+// The game's own pauses a phase's smoothness p5 did not count as losses
+// (lib/parcours.mjs gamePauseSpans): printed next to it, every one.
+export function gamePausesText(g) {
+  if (!g) return "game pauses unknown";
+  return `game pauses ${g.count} in ${g.seconds} s${g.count ? ` (${g.list.map((p) => `${p.durationMs} ms at ${p.t} s, film ${p.filmPos ?? "?"}`).join("; ")})` : ""}`;
+}
+
 // The lines a person reads (pure).
 export function humanSummary(summary) {
   const lines = [];
@@ -379,10 +397,14 @@ export function humanSummary(summary) {
     if (r.error) { lines.push(`${r.side} ${r.run}: FAILED ${r.error}`); continue; }
     const c = r.completion;
     lines.push(`${r.side} ${r.run}: ${c.completed ? "COMPLETE" : `INCOMPLETE (${c.reached}/${c.markers} markers${c.missing.length ? `, missed ${c.missing.join(", ")}` : ""}${c.phasesInOrder ? "" : ", phases out of order"})`}, ${r.seconds} s, ${r.segments.map((s) => `${s.phase} ${s.to - s.from}`).join(" > ")}${r.integrityFailed ? " INTEGRITY" : ""}${r.overloaded ? " OVERLOADED" : ""}, new frames by ${r.newFramesBasis ?? "?"}${r.powerDrained ? " POWER" : ""}`);
-    for (const [k, p] of Object.entries(r.phases)) lines.push(`   ${k.padEnd(9)} ${String(p.seconds).padStart(4)} s  speed ${p.speed.median} (p5 ${p.speed.p5}, min ${p.speed.min}) %  new ${p.newFps.median} (p5 ${p.newFps.p5})/s  smooth ${p.smoothness.median} (p5 ${p.smoothness.p5}${p.smoothness.unknown ? `, ${p.smoothness.unknown}/${p.smoothness.seconds} s unknown${p.smoothness.reliable ? "" : ": p5 UNRELIABLE"}` : ""}) %  hitches >50 ${p.hitches50} >100 ${p.hitches100}  busy ${p.occupancy.cpuBusy}/${p.occupancy.gpuBusy}/${p.occupancy.replayBusy}`);
+    for (const [k, p] of Object.entries(r.phases)) lines.push(`   ${k.padEnd(9)} ${String(p.seconds).padStart(4)} s  speed ${p.speed.median} (p5 ${p.speed.p5}, min ${p.speed.min}) %  new ${p.newFps.median} (p5 ${p.newFps.p5})/s  smooth ${p.smoothness.median} (p5 ${p.smoothness.p5}${p.smoothness.unknown ? `, ${p.smoothness.unknown}/${p.smoothness.seconds} s unknown${p.smoothness.reliable ? "" : ": p5 UNRELIABLE"}` : ""}) %  hitches >50 ${p.hitches50} >100 ${p.hitches100}  busy ${p.occupancy.cpuBusy}/${p.occupancy.gpuBusy}/${p.occupancy.replayBusy}  gaps ${p.productionGaps?.totalMs ?? "?"} ms (${p.productionGaps?.count ?? "?"}${p.productionGaps?.unknown ? `, ${p.productionGaps.unknown} unknown` : ""})  ${gamePausesText(p.gamePauses)}`);
   }
   if (summary.verdict) {
     const v = summary.verdict;
+    for (const [k, ph] of Object.entries(v.phases)) if (ph.gamePauses) {
+      const side = (xs) => xs.map((x) => (x.count == null ? "?" : `${x.count} in ${x.seconds} s${x.count ? ` [${x.list.map((p) => `${p.durationMs} ms at ${p.t} s film ${p.filmPos ?? "?"}`).join("; ")}]` : ""}`)).join(", ") || "none";
+      lines.push(`   ${k.padEnd(16)} game's own pauses (not counted in its smooth p5), by run: baseline ${side(ph.gamePauses.baseline)}; candidate ${side(ph.gamePauses.candidate)}`);
+    }
     lines.push(`verdict (${v.usable.baseline} baseline, ${v.usable.candidate} candidate usable runs): ${v.regression ? `REGRESSION ${v.regressions.map((r) => `${r.where} ${r.metric} ${r.baseline} → ${r.candidate} (> ${r.threshold})`).join(", ")}` : v.inconclusive ? "NO VERDICT (a phase without enough runs)" : "no regression beyond the noise"}${v.improvement ? " (some improvement)" : ""}`);
   }
   if (summary.browserMixed) lines.push(`WARNING: ${summary.browserMixed}`);
@@ -441,7 +463,7 @@ function writeSummary(outDir, meta, analyses, noise) {
     if (summary.producedBasis === "mixed") reasons.push("produced frames on different bases (grid / worker) across runs");
     for (const side of ["baseline", "candidate"]) if (of(side).filter(usable).length < 3) reasons.push(`${of(side).filter(usable).length} usable ${side} run(s) (complete, clean, calm), 3 needed`);
     const unreliable = Object.entries(summary.verdict.phases).filter(([, v]) => v.rows.some((r) => r.unreliable)).map(([k]) => k);
-    if (unreliable.length) reasons.push(`smoothness p5 unreliable (unknown seconds) in ${unreliable.join(", ")}`);
+    if (unreliable.length) reasons.push(`smoothness p5 or production gaps unreliable (unknown seconds) in ${unreliable.join(", ")}`);
     if (summary.verdict.inconclusive) reasons.push("a phase or section has no verdict");
     summary.noVerdict = reasons.length ? reasons : null;
   } else {

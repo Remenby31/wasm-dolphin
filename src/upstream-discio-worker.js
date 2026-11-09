@@ -3925,7 +3925,10 @@ const DROP_COLUMNS = [
   // synchronous time of those calls; prewarm misses (created at draw time)
   "pipelines", "pipelineMs", "shaders", "shaderMs", "prewarmMisses",
   // block bytes the CPU threads sent to this worker (new compiles)
-  "jitNewCompiles"
+  "jitNewCompiles",
+  // this worker's busy time, cumulative ms (replayBusy's clock: the WebGPU
+  // replay; null without a replay)
+  "replayBusyMs"
 ];
 const dropWgpu = { pipelines: 0, pipelineMs: 0, shaders: 0, shaderMs: 0 };
 let dropSampler = null;
@@ -3994,6 +3997,7 @@ function readDropCounters() {
   Object.assign(out, dropWgpu);
   out.prewarmMisses = pipelinePrewarm?.stats?.misses ?? null;
   out.jitNewCompiles = dolphinJitNewCompileCount;
+  out.replayBusyMs = occupancyBusyMs();
   return DROP_COLUMNS.map((c) => out[c]);
 }
 // payload.action: "start" (everyMs), "drain", "stop".
@@ -6849,12 +6853,13 @@ function readOccupancyCounters() {
       occupancyHeadroomModule = m;
     }
   }
-  // The worker's busy time: its timed entry points (workerBusy) and the
-  // pool's remap callbacks (promise callbacks: never inside a timed entry).
-  const busyMs = webGpuCmdRing && renderGpu && !wgpuReplayFatal
-    ? workerBusy.totalMs() + occupancyRemapMs()
-    : null;
-  return { headroom, busyMs };
+  return { headroom, busyMs: occupancyBusyMs() };
+}
+
+// The worker's busy time: its timed entry points (workerBusy) and the
+// pool's remap callbacks (promise callbacks: never inside a timed entry).
+function occupancyBusyMs() {
+  return webGpuCmdRing && renderGpu && !wgpuReplayFatal ? workerBusy.totalMs() + occupancyRemapMs() : null;
 }
 
 function checkBootStallWatchdog() {
