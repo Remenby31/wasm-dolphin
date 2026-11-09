@@ -743,9 +743,23 @@ const HARNESS_PRESENT_STRIDE = 5;
 let harnessPresentRing = null;
 function harnessPresentRingOn() {
   harnessPresentRing ??= new Float64Array(HARNESS_PRESENT_RING * HARNESS_PRESENT_STRIDE);
+  harnessProducedRing ??= new Float64Array(HARNESS_PRESENT_RING);
 }
 export const harnessPresentRingForTest = () => harnessPresentRing;
 let harnessPresentHead = 0;
+// per frame produced (a new frame tag entering the present queue,
+// wgpuNewFrames.queued): its host time. The harness's produced frames a
+// second on the same grid as the presents; with the presents ring, null for
+// every player (and no call on their path: the ring is checked inline).
+let harnessProducedRing = null;
+let harnessProducedHead = 0;
+let harnessProducedRead = 0;
+export const harnessProducedRingForTest = () => harnessProducedRing;
+function recordProducedFrame() {
+  if (!harnessEnabled || !harnessProducedRing) return;
+  harnessProducedRing[harnessProducedHead % HARNESS_PRESENT_RING] = harnessNow();
+  harnessProducedHead += 1;
+}
 // Harness only, when it asks (validationEnableHarness { displayed: true }):
 // what each BeginFrame put on screen (src/wgpu-display-counter.js).
 const harnessDisplay = createDisplayCounter();
@@ -1573,6 +1587,11 @@ function readHarnessTimeline() {
   }
   const presentsLost = firstPresent - harnessPresentRead;
   harnessPresentRead = harnessPresentHead;
+  const produced = { t: [], lost: 0 };
+  const firstProduced = Math.max(harnessProducedRead, harnessProducedHead - HARNESS_PRESENT_RING);
+  for (let n = firstProduced; n < harnessProducedHead; n += 1) produced.t.push(harnessProducedRing[n % HARNESS_PRESENT_RING]);
+  produced.lost = firstProduced - harnessProducedRead;
+  harnessProducedRead = harnessProducedHead;
 
   const m = moduleInstance;
   // The VI ring only exists when the core has the hooks, the harness enabled
@@ -1617,7 +1636,7 @@ function readHarnessTimeline() {
     harnessSwapRead = head;
   }
   return {
-    presents: { ...presents, lost: presentsLost }, vi, now: harnessNow(),
+    presents: { ...presents, lost: presentsLost }, produced, vi, now: harnessNow(),
     swaps, swapsWhy, pipeline: harnessPipeline ? harnessPipelineLog.drain() : null,
     displayedEnabled: Boolean(harnessDisplayStop),
     displayedWhy: harnessDisplayStop ? null : typeof requestAnimationFrame !== "function" ? "no requestAnimationFrame in this worker" : "not requested (validationEnableHarness { displayed: true })",
@@ -13464,7 +13483,7 @@ function queueWgpuVsyncFrame(coreFrame, shownVi, stream, tag = 0, tagEpoch = 0) 
   wgpuVsyncCountDrops(before);
   if (!frame) return false;
   if (stream && streamCapture.active) streamWgpuVsyncFrame(frame.tex, coreFrame);
-  wgpuNewFrames.queued(tag, tagEpoch);
+  if (wgpuNewFrames.queued(tag, tagEpoch) && harnessProducedRing) recordProducedFrame();
   if (harnessPipeline) harnessPipelineLog.queued(shownVi, performance.timeOrigin + at);
   if (wgpuVsyncTracking()) wgpuGamePacer.stamp(at);
   if (wgpuViLock) {
@@ -16487,7 +16506,7 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
           } else {
             if (streamCapture.active && !hardwareInputMarkerApplied) streamCapture.offerCanvas(renderCanvas, api?.getFrame?.() ?? 0);
             // Shown at the submit: queued and shown at once.
-            wgpuNewFrames.queued(presentFrameTag, presentFrameTagEpoch);
+            if (wgpuNewFrames.queued(presentFrameTag, presentFrameTagEpoch) && harnessProducedRing) recordProducedFrame();
             wgpuNewFrames.shown(presentFrameTag, presentFrameTagEpoch);
             recordPresentedFrame(api?.getFrame?.() ?? 0, wgpuExactCapture.currentBoot(), presentFrameTag, presentFrameTagEpoch);
             if (harnessPipeline) harnessPipelineLog.queued(wgpuExactCapture.currentBoot(), harnessNow());
