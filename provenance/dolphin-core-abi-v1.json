@@ -1,19 +1,19 @@
 {
   "schemaVersion": 1,
   "abiVersion": 1,
-  "coreId": "sha256:d23ff1e53a24c916004699738d4782f7c11da23c2930595e09c0d6a54ec72da7",
+  "coreId": "sha256:415cf618cb12018beb0d123e3a667f43f24ccccec34ef3f5a6d6c9c5494c2766",
   "upstreamCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
   "artifacts": [
     {
       "path": "cores/dolphin/dolphin-core-upstream.js",
       "hashMode": "lf-normalized",
-      "size": 291463,
-      "sha256": "3b07a61d6c781078f3aaa2a5e96d36cddca59745c92f8166897e5b276f46a91d"
+      "size": 291841,
+      "sha256": "a1d570438e9aa2a5dc97403834b8e6693b98f80dc2f0f701e516406eb5e4cbce"
     },
     {
       "path": "cores/dolphin/dolphin-core-upstream.wasm",
-      "size": 13252214,
-      "sha256": "d23ff1e53a24c916004699738d4782f7c11da23c2930595e09c0d6a54ec72da7"
+      "size": 13253849,
+      "sha256": "415cf618cb12018beb0d123e3a667f43f24ccccec34ef3f5a6d6c9c5494c2766"
     }
   ],
   "contractSources": [
@@ -445,6 +445,9 @@
     "_DolphinWeb_HarnessFifoRecordCancel",
     "_DolphinWeb_HarnessFifoRecordState",
     "_DolphinWeb_HarnessLoadGeneration",
+    "_DolphinWeb_HarnessLoadStats",
+    "_DolphinWeb_HarnessLoadStatsEnable",
+    "_DolphinWeb_HarnessLoadStatsWords",
     "_DolphinWeb_HarnessPcAddress",
     "_DolphinWeb_HarnessRecordSwap",
     "_DolphinWeb_HarnessSwapRing",
