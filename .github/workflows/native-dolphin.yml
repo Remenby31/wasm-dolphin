@@ -1,0 +1,153 @@
+name: native Dolphin (unpatched upstream, software renderer, manual)
+
+# An unpatched upstream Dolphin, built from source at a commit (default: the
+# one our core is patched from, provenance/dolphin-source.lock.json), runs
+# our test programs on Linux under xvfb with the software renderer and dumps
+# every frame as PNG; compat/native.mjs reads the report rows
+# (compat/homebrew/report.h). It answers "would Dolphin itself do this?" for
+# a difference our core shows. Generic: any .dol/.elf built here, extra
+# config keys, and the dumped frames on request. Never a commercial game:
+# the programs are built in this workflow from source.
+#
+# Manual only (and a push to a native/** branch, to try the workflow
+# itself). The Dolphin build is cached per commit (actions/cache): only the
+# first run of a commit pays it.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dolphin_ref:
+        description: Upstream Dolphin commit (unpatched)
+        type: string
+        default: e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1
+      programs:
+        description: 'Programs to run, comma-separated (empty: every program compat/homebrew/build.sh builds)'
+        type: string
+        default: ''
+      cores:
+        description: CPU cores to run (interp, jit)
+        type: string
+        default: interp,jit
+      timeout:
+        description: Seconds per run
+        type: number
+        default: 120
+      config:
+        description: 'Extra Dolphin config keys, space-separated System.Section.Key=Value'
+        type: string
+        default: ''
+  push:
+    branches: ["native/**"]
+
+permissions: {}
+
+concurrency:
+  group: native-dolphin-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  native:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    permissions:
+      contents: read
+    env:
+      # Inputs through the environment (a push has none: the defaults).
+      DOLPHIN_REF: ${{ inputs.dolphin_ref || 'e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1' }}
+      PROGRAMS: ${{ inputs.programs }}
+      CORES: ${{ inputs.cores || 'interp,jit' }}
+      TIMEOUT: ${{ inputs.timeout || 120 }}
+      CONFIG: ${{ inputs.config }}
+      NATIVE: ${{ github.workspace }}/../native-dolphin
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.12.0
+
+      - name: Check the commit
+        run: '[[ "$DOLPHIN_REF" =~ ^[0-9a-f]{40}$ ]] || { echo "dolphin_ref: a full commit SHA"; exit 1; }'
+        shell: bash
+
+      - name: Build and run dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends build-essential cmake ninja-build pkg-config \
+            libx11-dev libxi-dev libxrandr-dev libxxf86vm-dev libegl-dev libgl-dev libudev-dev libevdev-dev \
+            libpulse-dev libasound2-dev libbluetooth-dev libsystemd-dev libusb-1.0-0-dev \
+            xvfb xauth libgl1-mesa-dri libglx-mesa0 mesa-utils
+
+      - name: Cached Dolphin build
+        id: cache
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4
+        with:
+          path: ${{ env.NATIVE }}/Binaries
+          key: native-dolphin-${{ env.DOLPHIN_REF }}-ubuntu-24.04-v1
+
+      - name: Build upstream Dolphin (no patch)
+        if: steps.cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          src=$RUNNER_TEMP/dolphin-src
+          git init -q "$src"
+          git -C "$src" remote add origin https://github.com/dolphin-emu/dolphin.git
+          git -C "$src" fetch -q --depth 1 origin "$DOLPHIN_REF"
+          git -C "$src" checkout -q FETCH_HEAD
+          test "$(git -C "$src" rev-parse HEAD)" = "$DOLPHIN_REF"
+          # Windows, Android and test-only submodules are left out.
+          subs=$(git -C "$src" config -f .gitmodules --get-regexp '\.path$' | awk '{print $2}' \
+            | grep -v -E '^Externals/(Qt|FFmpeg-bin|libadrenotools|wil|gtest|mGBA/mgba)$')
+          git -C "$src" submodule update --init --depth 1 --jobs 8 -- $subs
+          git -C "$src" status --short | head -5
+          cmake -S "$src" -B "$RUNNER_TEMP/dolphin-build" -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DENABLE_QT=OFF -DENABLE_NOGUI=ON -DENABLE_TESTS=OFF -DENABLE_ANALYTICS=OFF -DENABLE_AUTOUPDATE=OFF \
+            -DUSE_DISCORD_PRESENCE=OFF -DUSE_MGBA=OFF -DUSE_RETRO_ACHIEVEMENTS=OFF -DENCODE_FRAMEDUMPS=OFF \
+            -DENABLE_LLVM=OFF -DENABLE_VULKAN=OFF -DUSE_UPNP=OFF -DENABLE_CUBEB=OFF
+          ninja -C "$RUNNER_TEMP/dolphin-build" dolphin-nogui
+          mkdir -p "$NATIVE"
+          cp -a "$RUNNER_TEMP/dolphin-build/Binaries" "$NATIVE/"
+          ls -la "$NATIVE/Binaries"
+
+      - name: hwtests sources (pinned commit)
+        run: |
+          git init -q "$RUNNER_TEMP/hwtests"
+          git -C "$RUNNER_TEMP/hwtests" fetch -q --depth 1 https://github.com/dolphin-emu/hwtests f28077b139eec18967f60db6ce1e15b182dfeac0
+          git -C "$RUNNER_TEMP/hwtests" checkout -q FETCH_HEAD
+
+      - name: Build the test programs (pinned devkitPPC image)
+        run: sh compat/homebrew/build.sh "$RUNNER_TEMP/hwtests" "$RUNNER_TEMP/hwtests-out"
+
+      - name: Smoke run (one program, frames must be dumped)
+        shell: bash
+        run: |
+          set -o pipefail
+          extra=(); for c in $CONFIG; do extra+=(--config "$c"); done
+          xvfb-run -a -s "-screen 0 1280x1024x24" node compat/native.mjs --bin "$NATIVE/Binaries/dolphin-emu-nogui" \
+            --dir "$RUNNER_TEMP/hwtests-out" --only cputest_cr --cores interp --timeout 60 --logs native-logs/smoke "${extra[@]}" \
+            || { tail -50 native-logs/smoke/*.log; exit 1; }
+
+      - name: Run
+        shell: bash
+        run: |
+          extra=(); for c in $CONFIG; do extra+=(--config "$c"); done
+          only=(); [ -n "$PROGRAMS" ] && only=(--only "$PROGRAMS")
+          xvfb-run -a -s "-screen 0 1280x1024x24" node compat/native.mjs --bin "$NATIVE/Binaries/dolphin-emu-nogui" \
+            --dir "$RUNNER_TEMP/hwtests-out" "${only[@]}" --cores "$CORES" --timeout "$TIMEOUT" \
+            --json native.json --md native.md --logs native-logs/run "${extra[@]}"
+
+      - name: Table
+        if: always()
+        run: test -f native.md && cat native.md >> "$GITHUB_STEP_SUMMARY" || true
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: native-dolphin
+          path: |
+            native.*
+            native-logs/
+          if-no-files-found: ignore
