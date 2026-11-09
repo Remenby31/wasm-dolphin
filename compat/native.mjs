@@ -41,8 +41,8 @@ async function runOne({ bin, file, core, timeoutSec, platform, configs, logFile,
   for (const d of ["Config", "Logs", "Dump/Frames", "Dump/Screenshots", "Cache/Shaders", "GC", "Wii", "Load", "ScreenShots"])
     mkdirSync(path.join(user, d), { recursive: true });
   // The logger reads its own file at start-up (a -C value comes too late).
-  writeFileSync(path.join(user, "Config", "Logger.ini"), "[Options]\nWriteToFile = True\nWriteToConsole = True\nVerbosity = 4\n[Logs]\n" +
-    ["BOOT", "CORE", "VIDEO", "COMMON", "OSREPORT", "VI", "HOST_GPU", "MASTER"].map((t) => `${t} = True\n`).join(""));
+  writeFileSync(path.join(user, "Config", "Logger.ini"), "[Options]\nWriteToFile = True\nWriteToConsole = True\nVerbosity = 5\n[Logs]\n" +
+    ["BOOT", "CORE", "VIDEO", "OSREPORT", "VI", "HOST_GPU", "MASTER", "PI", "EXI"].map((t) => `${t} = True\n`).join(""));
   const args = ["-u", user, "-p", platform, "-v", video, "-e", file,
     "-C", `Dolphin.Core.CPUCore=${core}`, "-C", "Dolphin.Core.EmulationSpeed=0",
     "-C", "Dolphin.Movie.DumpFrames=True", "-C", "GFX.Settings.DumpFramesAsImages=True",
