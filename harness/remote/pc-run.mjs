@@ -3,26 +3,36 @@
 // SPDX-License-Identifier: MIT
 //
 // The PC kit, Mac side (research/pc-windows-kit.md): drives a Windows PC
-// over ssh (OpenSSH Server, Tailscale) with harness/remote/pc-win/salon-pc.ps1.
+// over ssh (OpenSSH Server, Tailscale) with two identities:
+//   --host        the kit's STANDARD account (e.g. salonkit@pc): everything
+//                 (files, node, Playwright, the jobs in that account's own
+//                 desktop session, cleanup, reading the power state), via
+//                 harness/remote/pc-win/salon-pc.ps1; never elevated;
+//   --admin-host  an administrator (e.g. baptiste@pc): ONLY the closed list
+//                 of lib/pc-kit.mjs ADMIN (powercfg.exe / schtasks.exe by
+//                 absolute path, constant or regex-checked GUID arguments),
+//                 every line checked by assertAdmin before it is sent.
 //
-//   node harness/remote/pc-run.mjs check --host pc [--iso C:\\discs\\game.iso]
-//   node harness/remote/pc-run.mjs setup --host pc [--engine REF]
-//   node harness/remote/pc-run.mjs smoke --host pc [--homebrew harness/homebrew/out/gxscene.iso]
-//   node harness/remote/pc-run.mjs calibrate --host pc [--browser chrome] [--host-gb6 N]
-//   node harness/remote/pc-run.mjs bench --host pc [--browser msedge] [--calibration FILE | --clamp-mhz N | --no-clamp]
-//   node harness/remote/pc-run.mjs run --host pc --iso C:\\discs\\game.iso --film 1p=route1.json --film 2p=route2.json
+//   node harness/remote/pc-run.mjs check --host salonkit@pc [--admin-host baptiste@pc] [--iso C:\\discs\\game.iso]
+//   node harness/remote/pc-run.mjs setup --host salonkit@pc [--engine REF]
+//   node harness/remote/pc-run.mjs smoke --host salonkit@pc [--homebrew harness/homebrew/out/gxscene.iso]
+//   node harness/remote/pc-run.mjs calibrate --host salonkit@pc --admin-host baptiste@pc [--browser chrome] [--host-gb6 N]
+//   node harness/remote/pc-run.mjs bench --host ... [--admin-host ...] [--browser msedge] [--calibration FILE | --clamp-mhz N | --no-clamp]
+//   node harness/remote/pc-run.mjs run --host ... --admin-host ... --iso C:\\discs\\game.iso --film 1p=route1.json --film 2p=route2.json
 //       [--browser chrome,msedge] [--runs 3] [--calibration FILE | --clamp-mhz N | --no-clamp] [--query Q]
-//   node harness/remote/pc-run.mjs all --host pc --iso ... --film ... (check, setup, calibrate, run)
-//   node harness/remote/pc-run.mjs status|fetch|restore --host pc --job ID
+//   node harness/remote/pc-run.mjs all ... (check, setup, calibrate, run)
+//   node harness/remote/pc-run.mjs status|fetch|restore|uninstall --host ... [--admin-host ...] [--job ID]
 //   any command with --dry-run: no connection; every ssh/scp printed, a
 //   simulated PC answers (the commands' shape and the flow, checked offline)
 //
-// What it changes on the PC, all undone by restore (run at the end of every
-// job, and by the job's own task if the Mac is gone): the kit's power scheme
-// (a copy of the active one, carrying the clamp), one scheduled task
-// \SalonKit\<job>; files under C:\salon-kit. It never installs a browser or a
-// driver, never edits a user scheme, never copies a disc (the PC reads its
-// own, --iso is a path ON the PC).
+// What it changes on the PC: the kit's power scheme (a copy of the active
+// one, carrying the clamp) and the boot task SalonKitRestore (SYSTEM, at
+// startup: puts the snapshot's scheme back), both by the admin list and
+// both undone by restore (at the end of every job, on Ctrl-C/SIGTERM, or by
+// the boot task after a reboot); in the kit account: one scheduled task per
+// job and files under its %USERPROFILE%\\salon-kit. It never installs a
+// browser or a driver, never edits a user scheme, never copies a disc (the
+// PC reads its own, --iso is a path ON the PC).
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -33,7 +43,7 @@ import { parseArgs } from "node:util";
 
 import { classifyJit, LIFTOFF_FLAGS, LIFTOFF_GAP } from "../probes/pc-bench.mjs";
 import { calibrate } from "./pc-win/pc-calibrate.mjs";
-import { assertSendable, benchHold, jobDirScript, MAX_TURBO_MHZ, ownScript, secureKitScript, CLASS_CORES, encodePs, gb6Of, j1bMarkdown, j1bTable, JOB_ID, KIT_DIR, KIT_SCHEME, kitCommand, newJobId, parseKitJson, preflight, preflightMarkdown, psQuote, restoreDiff, rowsIn, samplerVerdict, stepWindows, versionOutliers } from "../lib/pc-kit.mjs";
+import { ADMIN, assertAdmin, assertSendable, BALANCED, benchHold, MAX_TURBO_MHZ, CLASS_CORES, encodePs, gb6Of, j1bMarkdown, j1bTable, JOB_ID, KIT_DIR, KIT_SCHEME, kitCommand, newJobId, parseKitJson, POWERCFG, POWERSHELL, preflight, preflightMarkdown, psQuote, restoreDiff, rowsIn, samplerVerdict, SCHTASKS, SETTINGS, setKitDir, stepWindows, versionOutliers } from "../lib/pc-kit.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, "..", "..");
@@ -71,10 +81,11 @@ export function sshTransport(host, { log = console.error } = {}) {
   };
 }
 
-// A simulated PC for --dry-run and the tests: salon-pc.ps1's answers, its
-// power scheme and task state, jobs finishing at once.
+// A simulated PC for --dry-run and the tests: salon-pc.ps1's answers (the
+// standard account), the admin list's effects on the power state, jobs
+// finishing at once. One object serves as both transports.
 export function simulatedPc({ cpu = "13th Gen Intel(R) Core(TM) i9-13900K", log = console.error, overrides = {} } = {}) {
-  const st = { active: "381b4222-f694-41f0-9685-ff5bb260df2e", schemes: ["381b4222-f694-41f0-9685-ff5bb260df2e", "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c", "a1841308-3541-4fab-bc81-f71556f20b4a"], tasks: [], snapshots: {}, files: new Set() };
+  const st = { active: BALANCED, schemes: [BALANCED, "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c", "a1841308-3541-4fab-bc81-f71556f20b4a"], tasks: [], snapshots: {}, files: new Set(), bootTask: false, maxMhz: 0, statePct: 0, admin: [] };
   const proc = { PROCFREQMAX: { ac: 0, dc: 0 }, PROCFREQMAX1: { ac: 0, dc: 0 }, PROCTHROTTLEMAX: { ac: 100, dc: 100 }, PROCTHROTTLEMAX1: { ac: 100, dc: 100 }, PERFBOOSTMODE: { ac: 2, dc: 2 } };
   const calls = [];
   const decode = (command) => {
@@ -83,9 +94,35 @@ export function simulatedPc({ cpu = "13th Gen Intel(R) Core(TM) i9-13900K", log 
   };
   const arg = (s, k) => (new RegExp(`-${k} '([^']*)'`).exec(s) ?? new RegExp(`-${k} (-?\\d+)`).exec(s))?.[1] ?? null;
   const reply = (o) => ({ status: 0, out: `SALONKIT-JSON ${JSON.stringify(o)}\n`, err: "" });
+  const power = () => ({ activeScheme: st.active, schemes: [...st.schemes], processor: structuredClone(proc), kitScheme: st.schemes.includes(KIT_SCHEME) ? { PROCFREQMAX: { ac: st.maxMhz, dc: st.maxMhz } } : null });
+  const adminLine = (line) => {
+    st.admin.push(line);
+    let m;
+    // schtasks first: the boot task's /tr itself holds powercfg lines
+    if (line.startsWith(SCHTASKS)) {
+      if (/^\S+ \/create /.test(line)) st.bootTask = true;
+      else if (/^\S+ \/query /.test(line)) return { status: st.bootTask ? 0 : 1, out: "", err: "" };
+      else if (/^\S+ \/delete /.test(line)) { if (!st.bootTask) return { status: 1, out: "", err: "no task" }; st.bootTask = false; }
+      return { status: 0, out: "", err: "" };
+    }
+    if ((m = /\/duplicatescheme \S+ (\S+)$/.exec(line))) { if (!st.schemes.includes(m[1])) st.schemes.push(m[1]); }
+    else if ((m = /\/set(ac|dc)valueindex \S+ \S+ (\S+) (\d+)$/.exec(line))) {
+      if (m[2] === SETTINGS.PROCFREQMAX) st.maxMhz = Number(m[3]);
+      if (m[2] === SETTINGS.PROCTHROTTLEMAX) st.statePct = Number(m[3]) === 100 ? 0 : Number(m[3]);
+    } else if ((m = /\/setactive (\S+)$/.exec(line))) st.active = m[1];
+    else if (/powercfg\.exe \/delete /.test(line)) { st.schemes = st.schemes.filter((x) => x !== KIT_SCHEME); st.maxMhz = 0; st.statePct = 0; }
+    else if (/\/getactivescheme$/.test(line)) return { status: 0, out: `Power Scheme GUID: ${st.active}  (x)`, err: "" };
+    return { status: 0, out: "", err: "" };
+  };
   return {
     dry: true, calls, state: st, log,
     ssh(command) {
+      if (command.startsWith(POWERCFG) || command.startsWith(SCHTASKS)) {
+        calls.push({ kind: "admin", command, script: command });
+        log(`[dry-run] admin: ${command}`);
+        return adminLine(command);
+      }
+      if (command === "echo %USERPROFILE%") return { status: 0, out: "C:\\Users\\salonkit\r\n", err: "" };
       const script = decode(command);
       calls.push({ kind: "ssh", command, script });
       log(`[dry-run] ssh: ${script}`);
@@ -98,32 +135,18 @@ export function simulatedPc({ cpu = "13th Gen Intel(R) Core(TM) i9-13900K", log 
           memory: { totalGiB: 64, freeGiB: 50 }, gpus: [{ name: "NVIDIA GeForce RTX 4080", driver: "32.0.15.6614", driverDate: "2026-10-01", refreshHz: 60 }],
           browsers: { chrome: { version: "157.0.8103.39", path: "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" }, edge: { version: "157.0.3200.12", path: "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe" } },
           policies: {}, power: { battery: [], activeScheme: st.active, schemes: [...st.schemes], kitSchemeActive: st.active === KIT_SCHEME, overlayAc: null },
-          session: { sessions: ["baptiste|console|1|Active|none|08/11/2026 20:00"], lockScreenUp: false, elevated: true }, disk: { drive: "C", freeGiB: 200 },
+          session: { sessions: ["salonkit|console|1|Active|none|08/11/2026 20:00"], lockScreenUp: false, elevated: false, user: "salonkit" }, disk: { drive: "C", freeGiB: 200 },
+          sshd: { defaultShell: "C:\\Windows\\System32\\cmd.exe", defaultShellCommandOption: "/d /c" },
           kit: { tasks: [...st.tasks] }, cpuBusy: { otherPctOfOneCore: 3, top: [] }, ...overrides
         });
         case "stat": return reply({ action, path: arg(script, "Path"), exists: true, bytes: 1459978240 });
         case "snapshot":
-          if (!st.snapshots[job]) st.snapshots[job] = { activeScheme: st.active, schemes: [...st.schemes], processor: structuredClone(proc), tasks: [...st.tasks] };
+          if (!st.snapshots[job]) st.snapshots[job] = { activeScheme: st.active, schemes: [...st.schemes], processor: structuredClone(proc), tasks: [...st.tasks], kitProcesses: [] };
           return reply({ action, job, state: st.snapshots[job] });
-        case "clamp":
-          if (!st.snapshots[job]) return { status: 1, out: "", err: "no snapshot" };
-          if (!st.schemes.includes(KIT_SCHEME)) st.schemes.push(KIT_SCHEME);
-          st.active = KIT_SCHEME;
-          st.maxMhz = Number(arg(script, "MaxMhz") ?? 0);
-          st.statePct = Number(arg(script, "StatePct") ?? 0);
-          if (!st.tasks.includes(`restore-${job}`)) st.tasks.push(`restore-${job}`);
-          return reply({ action, job, maxMhz: st.maxMhz });
-        case "cleanup": st.tasks = st.tasks.filter((x) => x !== job); return reply({ action, job, killed: [], jobProcesses: [], jobTmp: false, warnings: [] });
+        case "power": return reply({ action, power: power(), tasks: [...st.tasks] });
+        case "cleanup": st.tasks = st.tasks.filter((x) => x !== job); return reply({ action, job, killed: [], jobProcesses: [], jobTmp: false, warnings: [], power: power(), tasks: [...st.tasks], kitProcesses: [] });
         case "start": st.tasks.push(job); return reply({ action, job, state: "running" });
         case "status": return reply({ action, job, state: "done", exit: 0, logTail: ["[dry-run] step done"] });
-        case "restore": {
-          const before = st.snapshots[job] ?? null;
-          if (before) st.active = before.activeScheme;
-          st.schemes = st.schemes.filter((s) => s !== KIT_SCHEME);
-          st.tasks = st.tasks.filter((x) => x !== job && x !== `restore-${job}`);
-          st.maxMhz = 0; st.statePct = 0;
-          return reply({ action, job, before, after: { activeScheme: st.active, schemes: [...st.schemes], processor: structuredClone(proc), tasks: [...st.tasks], kitProcesses: [], jobProcesses: [], jobTmp: false }, killed: [], warnings: [] });
-        }
         case "uninstall": return st.tasks.length || st.schemes.includes(KIT_SCHEME) ? { status: 1, out: "", err: "restore first" } : reply({ action, kitDir: KIT_DIR, removed: true });
         default: return { status: 0, out: "", err: "" }; // mkdir, expand, npm: nothing to answer
       }
@@ -147,33 +170,84 @@ export function simulatedPc({ cpu = "13th Gen Intel(R) Core(TM) i9-13900K", log 
 // ---- PC operations
 // The Mac's copy of salon-pc.ps1: every call checks the PC's against it.
 export const KIT_SHA256 = createHash("sha256").update(readFileSync(path.join(HERE, "pc-win", "salon-pc.ps1"))).digest("hex");
+// One salon-pc.ps1 action, as the kit's standard account.
 const kit = (t, action, params = {}) => {
   const r = t.ssh(kitCommand(action, params, { sha256: KIT_SHA256 }), { timeoutSec: action === "check" ? 180 : 120 });
   const j = parseKitJson(r.out);
   if (!j) throw new Error(`salon-pc.ps1 -Action ${action}: no result: ${(r.err || r.out).trim().slice(-600)}`);
   return j;
 };
-const ps = (t, script, opts) => t.ssh(`powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${encodePs(script)}`, opts);
+// One line of the closed admin list, as the administrator. Anything else is
+// refused here, before it leaves the Mac.
+export function admin(a, line, { quiet = false } = {}) {
+  if (!a) throw new Error("this needs --admin-host (an administrator): the clamp is the kit's only elevated operation");
+  return a.ssh(assertAdmin(line), { quiet, timeoutSec: 60 });
+}
+const ps = (t, script, opts) => t.ssh(`${POWERSHELL} -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${encodePs(script)}`, opts);
 
-// The kit folder secured (ACL, no reparse point) BEFORE anything is copied
-// into it, then the script; every later call checks its sha256.
+// The kit's folder: the standard account's %USERPROFILE%\salon-kit.
+export function initKitDir(t) {
+  const home = t.ssh("echo %USERPROFILE%", { timeoutSec: 30 }).out.trim();
+  setKitDir(`${home}\\salon-kit`);
+  return KIT_DIR;
+}
 export function pushKitScript(t) {
-  // throws (ssh exit != 0) on a folder that is not the kit's own: nothing
-  // is copied, nothing runs elevated from it
-  const r = ps(t, secureKitScript());
-  const v = parseKitJson(r.out);
-  if (!t.dry && v?.action !== "secure") throw new Error(`securing ${KIT_DIR}: no verification came back (${(r.err || r.out).trim().slice(-300)})`);
+  ps(t, `New-Item -ItemType Directory -Force -Path ${[KIT_DIR, W(KIT_DIR, "jobs"), W(KIT_DIR, "state"), W(KIT_DIR, "films"), W(KIT_DIR, "trees")].map(psQuote).join(", ")} | Out-Null`);
   t.put(path.join(HERE, "pc-win", "salon-pc.ps1"), W(KIT_DIR, "salon-pc.ps1"));
-  ps(t, ownScript([W(KIT_DIR, "salon-pc.ps1")]));
-  return v;
 }
 
-export function check(t, { iso = null, browsers = ["chrome", "msedge"], cores = CLASS_CORES } = {}) {
-  const verified = pushKitScript(t);
+// ---- the clamp, by the admin list only
+// The kit's scheme (created from the snapshot's), its processor caps, the
+// boot task (the way back, before anything is activated), then activated;
+// read back as the standard account.
+export function applyClamp(t, a, { orig, maxMhz = 0, statePct = 0, boostMode = -1 }) {
+  const p = kit(t, "power").power;
+  if (!p.schemes.includes(KIT_SCHEME)) { admin(a, ADMIN.duplicate(orig)); admin(a, ADMIN.rename()); }
+  const set = (name, v) => { for (const acdc of ["ac", "dc"]) admin(a, ADMIN.setIndex(acdc, name, v), { quiet: /1$/.test(name) }); };
+  set("PROCFREQMAX", maxMhz); set("PROCFREQMAX1", maxMhz);
+  set("PROCTHROTTLEMAX", statePct || 100); set("PROCTHROTTLEMAX1", statePct || 100);
+  if (boostMode >= 0) set("PERFBOOSTMODE", boostMode);
+  admin(a, ADMIN.bootTask(orig));
+  admin(a, ADMIN.activateKit());
+  const after = kit(t, "power").power;
+  if (after.activeScheme !== KIT_SCHEME) throw new Error(`the kit's scheme did not become active (active ${after.activeScheme})`);
+  return after.kitScheme;
+}
+// Back: the snapshot's scheme (Balanced if it is gone), the kit's scheme
+// deleted, the boot task deleted. Idempotent. Returns whether the boot task
+// still exists.
+export function restorePower(t, a, before) {
+  const p = kit(t, "power").power;
+  const target = before?.activeScheme && p.schemes.includes(before.activeScheme) && before.activeScheme !== KIT_SCHEME ? before.activeScheme : BALANCED;
+  if (p.activeScheme !== target || p.activeScheme === KIT_SCHEME) admin(a, ADMIN.activate(target));
+  if (p.schemes.includes(KIT_SCHEME)) admin(a, ADMIN.deleteKit());
+  if (admin(a, ADMIN.queryBootTask(), { quiet: true }).status === 0) admin(a, ADMIN.deleteBootTask());
+  return { bootTask: admin(a, ADMIN.queryBootTask(), { quiet: true }).status === 0 };
+}
+// A job stopped (standard account) and the power put back (admin list):
+// the after-state restoreDiff compares with the snapshot.
+export function restoreJob(t, a, job, before) {
+  const c = kit(t, "cleanup", { Job: job });
+  const r = a ? restorePower(t, a, before) : { bootTask: null };
+  const p = kit(t, "power");
+  return { after: { power: p.power, tasks: p.tasks, kitProcesses: c.kitProcesses, jobProcesses: c.jobProcesses, jobTmp: c.jobTmp, bootTask: r.bootTask }, warnings: c.warnings ?? [], killed: c.killed ?? [] };
+}
+
+export function check(t, { a = null, iso = null, browsers = ["chrome", "msedge"], cores = CLASS_CORES } = {}) {
+  initKitDir(t);
+  pushKitScript(t);
   const c = kit(t, "check", { Cores: cores });
-  c.kitVerify = verified ?? null;
   if (iso) c.iso = kit(t, "stat", { Path: iso });
-  return { check: c, preflight: preflight(c, { browsers, needIso: iso }) };
+  const p = preflight(c, { browsers, needIso: iso });
+  // the admin channel, only once its shell is known safe (cmd /d): one
+  // read-only line of the list
+  if (a && !p.blocked.some((b) => b.id === "sshd-shell")) {
+    const r = admin(a, ADMIN.getActive(), { quiet: true });
+    c.adminChannel = { ok: r.status === 0 && /[0-9a-f]{8}-/.test(r.out), out: r.out.trim().slice(0, 120) };
+    p.items.push({ id: "admin-channel", level: c.adminChannel.ok ? "ok" : "block", seen: c.adminChannel.out || r.err.trim().slice(0, 120), ...(c.adminChannel.ok ? {} : { fix: "--admin-host must reach an administrator by key (C:\\ProgramData\\ssh\\administrators_authorized_keys)" }) });
+    p.blocked = p.items.filter((i) => i.level === "block");
+  }
+  return { check: c, preflight: p };
 }
 
 function sha256(file) {
@@ -188,7 +262,6 @@ function fetchTo(url, file) {
 // Playwright (driver only: it starts the installed Chrome or Edge), the
 // harness tree (this checkout's HEAD) and the engine tree (--engine).
 export function setup(t, { tmp, engine, dry }) {
-  pushKitScript(t);
   const zip = `node-${NODE_VERSION}-win-x64.zip`;
   const nodeZip = path.join(tmp, zip);
   if (!dry) {
@@ -200,8 +273,8 @@ export function setup(t, { tmp, engine, dry }) {
       if (!want || want !== sha256(nodeZip)) throw new Error(`${zip}: sha256 does not match SHASUMS256.txt`);
     }
   }
-  // node.exe is never run elevated unless its hash is the official zip's
-  // (read here from the verified zip): present = same hash, else replaced
+  // node.exe runs only if its hash is the official zip's (read here from
+  // the verified zip): present = same hash, else replaced
   const nodeSha = dry ? "0".repeat(64) : createHash("sha256").update(execFileSync("unzip", ["-p", nodeZip, `node-${NODE_VERSION}-win-x64/node.exe`], { maxBuffer: 1 << 28 })).digest("hex");
   const nodeExe = W(KIT_DIR, "node", "node.exe");
   const nodeCheck = `if ((Get-FileHash -LiteralPath ${psQuote(nodeExe)} -Algorithm SHA256).Hash -ne ${psQuote(nodeSha.toUpperCase())}) { throw 'node.exe differs from the official zip: refused' }`;
@@ -214,7 +287,6 @@ export function setup(t, { tmp, engine, dry }) {
       `if (Test-Path -LiteralPath ${psQuote(W(KIT_DIR, "node"))}) { Remove-Item -LiteralPath ${psQuote(W(KIT_DIR, "node"))} -Recurse -Force }`,
       `Move-Item -LiteralPath (Join-Path $d ${psQuote(`node-${NODE_VERSION}-win-x64`)}) -Destination ${psQuote(W(KIT_DIR, "node"))}`,
       `Remove-Item -LiteralPath $d -Recurse -Force; Remove-Item -LiteralPath $z -Force`].join("; "));
-    ps(t, ownScript([W(KIT_DIR, "node")]));
     if (!dry) ps(t, nodeCheck);
   }
   const pwHave = ps(t, `$p = ${psQuote(W(KIT_DIR, "pw", "node_modules", "playwright", "package.json"))}; if (Test-Path -LiteralPath $p) { (Get-Content -Raw $p | ConvertFrom-Json).version }`, { quiet: true }).out.trim();
@@ -228,7 +300,6 @@ export function setup(t, { tmp, engine, dry }) {
       `New-Item -ItemType Directory -Force -Path ${psQuote(W(KIT_DIR, "pw"))} | Out-Null`,
       `& ${psQuote(W(KIT_DIR, "node", "npm.cmd"))} install --prefix ${psQuote(W(KIT_DIR, "pw"))} --no-audit --no-fund --offline --ignore-scripts ${tgz.map((f) => psQuote(W(KIT_DIR, f))).join(" ")}`,
       `if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }`].join("; "));
-    ps(t, ownScript([W(KIT_DIR, "pw"), W(KIT_DIR, "npm-cache"), W(KIT_DIR, "npm-tmp")]));
   }
   const trees = {};
   for (const [name, ref] of [["harness", "HEAD"], ["engine", engine]]) {
@@ -244,7 +315,6 @@ export function setup(t, { tmp, engine, dry }) {
     ps(t, [`$d = ${psQuote(dest)}; New-Item -ItemType Directory -Force -Path $d | Out-Null`,
       `tar.exe -xf ${psQuote(W(KIT_DIR, `tree-${sha.slice(0, 12)}.tar`))} -C $d; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }`,
       `Remove-Item -LiteralPath ${psQuote(W(KIT_DIR, `tree-${sha.slice(0, 12)}.tar`))} -Force`].join("; "));
-    ps(t, ownScript([dest]));
   }
   return { node: NODE_VERSION, playwright: PLAYWRIGHT_VERSION, trees };
 }
@@ -256,10 +326,10 @@ export function defaultEngineRef(repo = REPO) {
 }
 
 // A job's spec (salon-pc.ps1 inner reads it): steps of node runs, the env,
-// the class affinity, restoreAtEnd.
+// the class affinity.
 export function jobSpec({ harnessDir, steps, affinity, env = {} }) {
   return {
-    cwd: harnessDir, affinity: affinity ?? null, restoreAtEnd: true,
+    cwd: harnessDir, affinity: affinity ?? null,
     env: { HARNESS_DISPLAY: "windows", PLAYWRIGHT_MODULE: W(KIT_DIR, "pw", "node_modules", "playwright", "index.mjs"), ...env },
     steps: steps.map((s) => ({ name: s.name, args: s.args, env: s.env ?? {}, continueOnError: Boolean(s.continueOnError) }))
   };
@@ -341,42 +411,45 @@ export function parcoursSteps({ jobDir, iso, films, browsers, runs, query, engin
 // Status polls that may fail in a row (a network blip) before the job is
 // given up, and restored (which stops it first).
 export const POLL_FAILURES_MAX = 10;
-// The job whose restore a Ctrl-C or a SIGTERM must run.
-let liveJob = null;
-export function installSignalRestore(t, log = console.error) {
+// The job whose restore a Ctrl-C or a SIGTERM must run, and its snapshot.
+let live = null;
+export function installSignalRestore(t, a, log = console.error) {
   for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) {
     process.once(sig, () => {
-      if (liveJob) {
-        log(`[pc-run] ${sig}: stopping and restoring job ${liveJob}`);
-        try { const r = kit(t, "restore", { Job: liveJob }); const d = restoreDiff(r.before, r.after, liveJob); log(d.length ? `[pc-run] RESTORE DIFFERS: ${d.join("; ")}` : "[pc-run] machine restored"); } catch (e) { log(`[pc-run] restore failed (${e.message}): run pc-run.mjs restore --job ${liveJob}; the PC also restores at its next logon`); }
+      if (live) {
+        log(`[pc-run] ${sig}: stopping job ${live.job} and putting the power back`);
+        try { const r = restoreJob(t, a, live.job, live.before); const d = restoreDiff(live.before, r.after, live.job); log(d.length ? `[pc-run] RESTORE DIFFERS: ${d.join("; ")}` : "[pc-run] machine restored"); } catch (e) { log(`[pc-run] restore failed (${e.message}): run pc-run.mjs restore --job ${live.job}; the boot task restores the scheme at the next startup`); }
       }
       process.exit(130);
     });
   }
 }
-export async function runJob(t, { job, steps, affinity, clamp, outDir, env = {}, harnessDir, poll = POLL_SEC, sleep = (s) => new Promise((r) => setTimeout(r, s * 1000)), log = console.error }) {
-  const jobDir = W(KIT_DIR, "jobs", job);
+// A job's life: snapshot (standard account), clamp (admin list), the steps,
+// then the job stopped and the power put back, compared with the snapshot.
+// Always restores.
+export async function runJob(t, { a = null, job, steps, affinity, clamp, outDir, env = {}, harnessDir, poll = POLL_SEC, sleep = (s) => new Promise((r) => setTimeout(r, s * 1000)), log = console.error }) {
   const local = path.join(outDir, job);
   mkdirSync(local, { recursive: true });
   const record = { job, started: new Date().toISOString(), clamp: clamp ?? null, affinity, ceilingSec: assertFitsTask(steps) };
-  let restore = null;
-  liveJob = job;
+  if (clamp && !a) throw new Error("a clamp needs --admin-host");
+  record.snapshot = kit(t, "snapshot", { Job: job }).state;
+  live = { job, before: record.snapshot };
   try {
-    record.snapshot = kit(t, "snapshot", { Job: job }).state;
-    if (clamp) record.clamped = kit(t, "clamp", { Job: job, MaxMhz: clamp.maxMhz ?? 0, StatePct: clamp.statePct ?? 0, BoostMode: clamp.boostMode ?? -1 });
+    if (clamp) record.clamped = applyClamp(t, a, { orig: record.snapshot.activeScheme, ...clamp });
     record.exit = await runSteps(t, { job, steps, affinity, outDir, env, harnessDir, poll, sleep, log, ceilingSec: record.ceilingSec });
   } finally {
-    liveJob = null;
+    live = null;
+    let r;
     try {
-      restore = kit(t, "restore", { Job: job });
+      r = restoreJob(t, a, job, record.snapshot);
     } catch (e) {
-      log(`[pc-run] RESTORE FAILED (${e.message}): run pc-run.mjs restore --job ${job} as soon as the PC answers; the PC restores this job itself at its next logon`);
+      log(`[pc-run] RESTORE FAILED (${e.message}): run pc-run.mjs restore --job ${job} as soon as the PC answers; the boot task restores the scheme at the next startup`);
       throw e;
     }
-    record.restore = { after: restore.after, warnings: restore.warnings, killed: restore.killed, diff: restoreDiff(restore.before, restore.after, job) };
+    record.restore = { after: r.after, warnings: r.warnings, killed: r.killed, diff: a || !clamp ? restoreDiff(record.snapshot, r.after, job) : ["power not restored (no --admin-host)"] };
     writeFileSync(path.join(local, "kit-record.json"), JSON.stringify(record, null, 1) + "\n");
     if (record.restore.diff.length) log(`[pc-run] RESTORE DIFFERS: ${record.restore.diff.join("; ")}`);
-    else log("[pc-run] machine restored (power scheme, schemes, processor settings, tasks as before)");
+    else log("[pc-run] machine restored (power scheme, schemes, processor settings, tasks, boot task as before)");
   }
   return record;
 }
@@ -393,7 +466,7 @@ export async function runSteps(t, { job, steps, affinity, outDir, env = {}, harn
   try {
     const spec = jobSpec({ harnessDir, steps, affinity, env });
     writeFileSync(path.join(local, "spec.json"), JSON.stringify(spec, null, 1) + "\n");
-    ps(t, jobDirScript(jobDir));
+    ps(t, `$j = ${psQuote(jobDir)}; if (Test-Path -LiteralPath $j) { throw "$j exists already: a job id is used once" }; New-Item -ItemType Directory -Path $j | Out-Null`);
     t.put(path.join(local, "spec.json"), W(jobDir, "spec.json"));
     kit(t, "start", { Job: job });
     const shown = new Set();
@@ -425,17 +498,17 @@ export async function runSteps(t, { job, steps, affinity, outDir, env = {}, harn
   return exit;
 }
 
-// The calibration, driven from here (the clamp needs the elevated ssh
-// session; the job's own task is not elevated): one snapshot and clamp
-// state (job), each probe a bench sub-job <job>-bN on the game's origin
-// under the clamp just set. Restored in the end, whatever happened.
-export async function calibrateFromMac(t, { job, browser, engineDir, hostGb6, turboMhz, affinity, outDir, harnessDir, runs = 3, poll = POLL_SEC, sleep, log = console.error }) {
+// The calibration, driven from here: one snapshot, the clamp by the admin
+// list between probes, each probe a bench sub-job <job>-bN (the standard
+// account) on the game's origin under the clamp just set. Restored in the
+// end, whatever happened.
+export async function calibrateFromMac(t, { a, job, browser, engineDir, hostGb6, turboMhz, affinity, outDir, harnessDir, runs = 3, poll = POLL_SEC, sleep, log = console.error }) {
   const local = path.join(outDir, job);
   mkdirSync(local, { recursive: true });
-  liveJob = job;
-  let n = 0, restore = null, result = null;
+  let n = 0, result = null;
+  const before = kit(t, "snapshot", { Job: job }).state;
+  live = { job, before };
   try {
-    kit(t, "snapshot", { Job: job });
     const bench = async () => {
       n += 1;
       const sub = `${job}-b${n}`;
@@ -449,12 +522,12 @@ export async function calibrateFromMac(t, { job, browser, engineDir, hostGb6, tu
       if (st && (st.visibility !== "visible" || (st.rafMs?.p50 ?? 0) >= 25)) throw new Error(`${sub}: page ${st.visibility}, rAF ${st.rafMs?.p50} ms: see the preflight`);
       return b.score;
     };
-    const clamp = (o) => kit(t, "clamp", { Job: job, MaxMhz: o.maxMhz ?? 0, StatePct: o.statePct ?? 0, BoostMode: o.boostMode ?? -1 });
+    const clamp = (o) => applyClamp(t, a, { orig: before.activeScheme, ...o });
     result = await calibrate({ bench, clamp, hostGb6, turboMhz, log: (m) => log(`[calibrate] ${m}`) });
   } finally {
-    liveJob = null;
-    restore = kit(t, "restore", { Job: job });
-    const diff = restoreDiff(restore.before, restore.after, job);
+    live = null;
+    const r = restoreJob(t, a, job, before);
+    const diff = restoreDiff(before, r.after, job);
     log(diff.length ? `[pc-run] RESTORE DIFFERS: ${diff.join("; ")}` : "[pc-run] machine restored after the calibration");
   }
   const report = { probe: "pc-calibrate", at: new Date().toISOString(), browser, probes: n, ...result };
@@ -536,7 +609,7 @@ async function main() {
   const { values, positionals } = parseArgs({
     allowPositionals: true,
     options: {
-      host: { type: "string" }, job: { type: "string" }, out: { type: "string" }, "dry-run": { type: "boolean", default: false },
+      host: { type: "string" }, "admin-host": { type: "string" }, job: { type: "string" }, out: { type: "string" }, "dry-run": { type: "boolean", default: false },
       iso: { type: "string" }, film: { type: "string", multiple: true }, browser: { type: "string", default: "chrome,msedge" }, runs: { type: "string", default: "3" },
       query: { type: "string", default: J1_QUERY }, engine: { type: "string" }, calibration: { type: "string" }, "clamp-mhz": { type: "string" }, "no-clamp": { type: "boolean", default: false },
       "host-gb6": { type: "string" }, homebrew: { type: "string" }, "js-flags": { type: "string" }, cores: { type: "string", default: String(CLASS_CORES) }
@@ -544,11 +617,12 @@ async function main() {
   });
   const cmd = positionals[0];
   const cmds = ["check", "setup", "smoke", "calibrate", "bench", "run", "all", "status", "fetch", "restore", "uninstall"];
-  if (!cmds.includes(cmd) || !values.host) throw new Error(`usage: pc-run.mjs <${cmds.join("|")}> --host <ssh host> [options] (header of this file)`);
+  if (!cmds.includes(cmd) || !values.host) throw new Error(`usage: pc-run.mjs <${cmds.join("|")}> --host <kit account@pc> [--admin-host <admin@pc>] [options] (header of this file)`);
   const log = (m) => console.error(m);
   const dry = values["dry-run"];
   const t = dry ? simulatedPc({ log }) : sshTransport(values.host, { log });
-  installSignalRestore(t, log);
+  const a = values["admin-host"] ? (dry ? t : sshTransport(values["admin-host"], { log })) : null;
+  installSignalRestore(t, a, log);
   const jobBase = process.env.CLAUDE_JOB_DIR ? path.join(process.env.CLAUDE_JOB_DIR, "pc-kit") : path.join(REPO, "..", "measures", "pc-kit");
   const outDir = path.resolve(values.out ?? jobBase);
   const tmp = path.join(outDir, "cache");
@@ -560,12 +634,22 @@ async function main() {
   if (values.iso && !/^[A-Za-z]:\\/.test(values.iso)) throw new Error(`--iso ${values.iso}: a Windows path on the PC (the kit never sends a disc)`);
   if ((cmd === "run" || cmd === "all") && (!values.iso || !values.film?.length)) throw new Error("run: --iso <path ON the PC> and --film scene=film.json (one per scene)");
 
+  const needsAdmin = cmd === "calibrate" || cmd === "all" || cmd === "restore" || ((cmd === "run" || cmd === "bench") && !values["no-clamp"]);
+  if (needsAdmin && !a) throw new Error(`${cmd} needs --admin-host <admin@pc> (the clamp's closed command list), or --no-clamp`);
+  if (["status", "restore", "uninstall", "fetch"].includes(cmd)) initKitDir(t);
   if (cmd === "status") return console.log(JSON.stringify(kit(t, "status", { Job: job }), null, 1));
-  if (cmd === "restore") { const r = kit(t, "restore", { Job: job }); const d = restoreDiff(r.before, r.after, job); console.log(d.length ? `restore differs: ${d.join("; ")}` : "restored"); return void (process.exitCode = d.length ? 1 : 0); }
+  if (cmd === "restore") {
+    // the job's own snapshot (the first one taken; a new one if none)
+    const before = kit(t, "snapshot", { Job: job }).state;
+    const r = restoreJob(t, a, job, before);
+    const d = restoreDiff(before, r.after, job);
+    console.log(d.length ? `restore differs: ${d.join("; ")}` : "restored");
+    return void (process.exitCode = d.length ? 1 : 0);
+  }
   if (cmd === "uninstall") { console.log(JSON.stringify(kit(t, "uninstall"))); return; }
   if (cmd === "fetch") { t.getDir(W(KIT_DIR, "jobs", job), outDir); console.log(jobReport(path.join(outDir, job))); return; }
 
-  const pre = check(t, { iso: values.iso ?? null, browsers: browsers.map(channelOf), cores: Number(values.cores) });
+  const pre = check(t, { a, iso: values.iso ?? null, browsers: browsers.map(channelOf), cores: Number(values.cores) });
   mkdirSync(outDir, { recursive: true });
   writeFileSync(path.join(outDir, `check-${job}.json`), JSON.stringify(pre.check, null, 1) + "\n");
   log(preflightMarkdown(pre.preflight));
@@ -582,7 +666,7 @@ async function main() {
   const affinity = pre.check.classAffinity?.mask ?? null;
   const env = values["js-flags"] ? { HARNESS_CHROME_ARGS: `--js-flags=${values["js-flags"]}` } : {};
   const jobDir = (j) => W(KIT_DIR, "jobs", j);
-  const go = (j, steps, clamp) => runJob(t, { job: j, steps, affinity, clamp, outDir, env, harnessDir, poll: dry ? 0 : POLL_SEC, log }).then((r) => { log(jobReport(path.join(outDir, j), { check: pre })); return r; });
+  const go = (j, steps, clamp) => runJob(t, { a, job: j, steps, affinity, clamp, outDir, env, harnessDir, poll: dry ? 0 : POLL_SEC, log }).then((r) => { log(jobReport(path.join(outDir, j), { check: pre })); return r; });
 
   if (cmd === "smoke") {
     const steps = [
@@ -592,7 +676,6 @@ async function main() {
     if (values.homebrew) {
       assertSendable(path.resolve(values.homebrew), { homebrewDirs: [path.join(REPO, "harness", "homebrew", "out")] });
       t.put(path.resolve(values.homebrew), W(KIT_DIR, "films", path.basename(values.homebrew)));
-      ps(t, ownScript([W(KIT_DIR, "films", path.basename(values.homebrew))]));
       steps.push({ name: "presenter-homebrew", continueOnError: true, args: ["harness/probes/presenter-check.mjs", "--iso", W(KIT_DIR, "films", path.basename(values.homebrew)), "--port", String(JOB_PORT), "--query", "core=upstream&video=wgpu&presenter=webgpu&cpu=dual&speed=1", "--out", W(jobDir(job), "presenter-homebrew.json")] });
     }
     await go(job, steps, null);
@@ -604,7 +687,7 @@ async function main() {
     const known = gb6Of(pre.check.cpu?.name ?? "");
     const hostGb6 = values["host-gb6"] ? Number(values["host-gb6"]) : known?.gb6;
     if (!(hostGb6 > 0)) throw new Error(`${pre.check.cpu?.name}: not in the public table, pass --host-gb6 N (with its source)`);
-    const f = await calibrateFromMac(t, { job: j, browser: browsers[0], engineDir: st.trees.engine.dest, hostGb6, turboMhz: known ? MAX_TURBO_MHZ[known.name] ?? null : null, affinity, outDir, harnessDir, poll: dry ? 0 : POLL_SEC, log });
+    const f = await calibrateFromMac(t, { a, job: j, browser: browsers[0], engineDir: st.trees.engine.dest, hostGb6, turboMhz: known ? MAX_TURBO_MHZ[known.name] ?? null : null, affinity, outDir, harnessDir, poll: dry ? 0 : POLL_SEC, log });
     const c = JSON.parse(readFileSync(f, "utf8"));
     log(`[pc-run] calibration: chosen ${JSON.stringify(c.chosen)} (${c.why}${c.errPct != null ? `, ${c.errPct} % off` : ""}): ${f}`);
     return f;
@@ -619,7 +702,6 @@ async function main() {
     const sum = createHash("sha256").update(readFileSync(file)).digest("hex").slice(0, 12);
     const remote = W(KIT_DIR, "films", `${path.basename(file, ".json")}-${sum}.json`);
     t.put(path.resolve(file), remote);
-    ps(t, ownScript([remote]));
     films[scene] = remote;
   }
   const clamp = cmd === "all" && !values.calibration && !values["clamp-mhz"] && !values["no-clamp"]

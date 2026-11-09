@@ -6,10 +6,81 @@
 // seen), the CPU clamp's calibration search, a run's validity and the J1b
 // verdict. harness/remote/pc-run.mjs does the I/O.
 
-export const KIT_DIR = "C:\\salon-kit";
+// The kit's folder: %USERPROFILE%\salon-kit of the kit's standard account,
+// read once at the start of a session (pc-run.mjs setKitDir).
+export let KIT_DIR = "C:\\Users\\salonkit\\salon-kit";
+export const KIT_PATH = /^[A-Za-z]:\\(?:[A-Za-z0-9 ._-]+\\)*salon-kit$/;
+export function setKitDir(dir) {
+  if (!KIT_PATH.test(dir)) throw new Error(`kit folder ${dir}: expected <drive>:\\...\\salon-kit (letters, digits, space . _ -)`);
+  KIT_DIR = dir;
+}
+export const kitScript = () => `${KIT_DIR}\\salon-pc.ps1`;
 export const KIT_SCHEME = "5a10c0de-0b1d-4c1a-9e2f-12400c1a0001";
-export const KIT_SCRIPT = `${KIT_DIR}\\salon-pc.ps1`;
 export const JSON_MARK = "SALONKIT-JSON ";
+export const POWERSHELL = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
+
+// ---- the administrator's commands: a closed list (research/pc-windows-kit.md §1)
+// The ONLY operations of the kit run as an administrator: these command
+// lines, executable by absolute path, arguments constants, GUIDs matched
+// by regex, the known processor-setting GUIDs, integers. No kit script, no
+// node, no PowerShell module, no Add-Type. sshd runs them through
+// "cmd.exe /d /c" (DefaultShell + DefaultShellCommandOption, checked by
+// the preflight from the standard account: /d = no AutoRun).
+const SYS = "C:\\Windows\\System32";
+export const POWERCFG = `${SYS}\\powercfg.exe`;
+export const SCHTASKS = `${SYS}\\schtasks.exe`;
+const CMD = `${SYS}\\cmd.exe`;
+export const BALANCED = "381b4222-f694-41f0-9685-ff5bb260df2e";
+export const SUB_PROCESSOR = "54533251-82be-4824-96c1-47b60b740d00";
+export const SETTINGS = Object.freeze({
+  PROCFREQMAX: "75b0ae3f-bce0-45a7-8c89-c9611c25e100", PROCFREQMAX1: "75b0ae3f-bce0-45a7-8c89-c9611c25e101",
+  PROCTHROTTLEMAX: "bc5038f7-23e0-4960-96da-33abaf5935ec", PROCTHROTTLEMAX1: "bc5038f7-23e0-4960-96da-33abaf5935ed",
+  PERFBOOSTMODE: "be337238-0d82-4146-a960-4f3749d470c7"
+});
+// The boot task (SYSTEM, at startup): puts the snapshot's scheme back,
+// deletes the kit's, deletes itself. One clamp at a time: a fixed short name
+// (schtasks /tr is limited to 261 characters).
+export const BOOT_TASK = "SalonKitRestore";
+const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const guid = (g) => { if (!GUID.test(String(g))) throw new Error(`not a GUID: ${g}`); return g; };
+const uint = (n) => { if (!Number.isInteger(n) || n < 0 || n > 100000) throw new Error(`not an integer 0-100000: ${n}`); return String(n); };
+export const ADMIN = Object.freeze({
+  getActive: () => `${POWERCFG} /getactivescheme`,
+  duplicate: (orig) => `${POWERCFG} /duplicatescheme ${guid(orig)} ${KIT_SCHEME}`,
+  rename: () => `${POWERCFG} /changename ${KIT_SCHEME} SalonKitClamp`,
+  setIndex: (acdc, name, value) => {
+    if (acdc !== "ac" && acdc !== "dc") throw new Error(`setIndex: ac or dc, not ${acdc}`);
+    if (!SETTINGS[name]) throw new Error(`setIndex: unknown setting ${name}`);
+    return `${POWERCFG} /set${acdc}valueindex ${KIT_SCHEME} ${SUB_PROCESSOR} ${SETTINGS[name]} ${uint(value)}`;
+  },
+  activateKit: () => `${POWERCFG} /setactive ${KIT_SCHEME}`,
+  activate: (orig) => `${POWERCFG} /setactive ${guid(orig)}`,
+  deleteKit: () => `${POWERCFG} /delete ${KIT_SCHEME}`,
+  bootTask: (orig) => `${SCHTASKS} /create /tn ${BOOT_TASK} /sc onstart /ru SYSTEM /rl highest /f /tr "${CMD} /d /c ${POWERCFG} /setactive ${guid(orig)} & ${POWERCFG} /delete ${KIT_SCHEME} & ${SCHTASKS} /delete /tn ${BOOT_TASK} /f"`,
+  queryBootTask: () => `${SCHTASKS} /query /tn ${BOOT_TASK}`,
+  deleteBootTask: () => `${SCHTASKS} /delete /tn ${BOOT_TASK} /f`
+});
+// The closed list as exact patterns: assertAdmin refuses any other line.
+const G = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
+const esc = (x) => x.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
+const P = esc(POWERCFG), S = esc(SCHTASKS), C = esc(CMD), K = esc(KIT_SCHEME);
+const SETTING_ALT = Object.values(SETTINGS).map(esc).join("|");
+export const ADMIN_PATTERNS = Object.freeze([
+  new RegExp(`^${P} /getactivescheme$`),
+  new RegExp(`^${P} /duplicatescheme ${G} ${K}$`),
+  new RegExp(`^${P} /changename ${K} SalonKitClamp$`),
+  new RegExp(`^${P} /set(ac|dc)valueindex ${K} ${esc(SUB_PROCESSOR)} (${SETTING_ALT}) \\d{1,6}$`),
+  new RegExp(`^${P} /setactive (${K}|${G})$`),
+  new RegExp(`^${P} /delete ${K}$`),
+  new RegExp(`^${S} /create /tn ${BOOT_TASK} /sc onstart /ru SYSTEM /rl highest /f /tr "${C} /d /c ${P} /setactive ${G} & ${P} /delete ${K} & ${S} /delete /tn ${BOOT_TASK} /f"$`),
+  new RegExp(`^${S} /query /tn ${BOOT_TASK}$`),
+  new RegExp(`^${S} /delete /tn ${BOOT_TASK} /f$`)
+]);
+export function assertAdmin(line) {
+  if (typeof line !== "string" || !ADMIN_PATTERNS.some((re) => re.test(line))) throw new Error(`refused: not one of the kit's administrator commands: ${String(line).slice(0, 160)}`);
+  if (line.includes("/tr ") && line.slice(line.indexOf('"')).length > 263) throw new Error("schtasks /tr over 261 characters");
+  return line;
+}
 
 // ---- remote PowerShell
 // A literal for PowerShell (single quotes: nothing expands).
@@ -18,92 +89,20 @@ export const psQuote = (s) => `'${String(s).replace(/'/g, "''")}'`;
 // through ssh and cmd.exe, Windows OpenSSH's default shell.
 export const encodePs = (script) => Buffer.from(script, "utf16le").toString("base64");
 const PARAM = /^[A-Z][A-Za-z]+$/;
-// The remote command line of one salon-pc.ps1 action. With sha256 (the
-// Mac's copy), the script on the PC is checked first and refused if it
-// differs: an elevated session never runs a file it did not send.
+// The remote command line of one salon-pc.ps1 action, run by the kit's
+// standard account (never elevated). With sha256 (the Mac's copy), the
+// script on the PC is checked first: the measurement runs the code sent.
 export function kitCommand(action, params = {}, { sha256 = null } = {}) {
   if (sha256 != null && !/^[0-9a-f]{64}$/.test(sha256)) throw new Error("kitCommand: bad sha256");
-  const guard = sha256 ? `$f = ${psQuote(KIT_SCRIPT)}; if ((Get-FileHash -LiteralPath $f -Algorithm SHA256).Hash -ne ${psQuote(sha256.toUpperCase())}) { throw 'salon-pc.ps1 on the PC differs from the copy pc-run sent: refused' }; ` : "";
-  const parts = [`${guard}& ${psQuote(KIT_SCRIPT)} -Action ${psQuote(action)}`];
+  const guard = sha256 ? `$f = ${psQuote(kitScript())}; if ((Get-FileHash -LiteralPath $f -Algorithm SHA256).Hash -ne ${psQuote(sha256.toUpperCase())}) { throw 'salon-pc.ps1 on the PC differs from the copy pc-run sent: refused' }; ` : "";
+  const parts = [`${guard}& ${psQuote(kitScript())} -Action ${psQuote(action)}`];
   for (const [k, v] of Object.entries(params)) {
     if (v == null) continue;
     if (!PARAM.test(k)) throw new Error(`bad parameter name ${k}`);
     parts.push(`-${k} ${typeof v === "number" ? String(Math.trunc(v)) : psQuote(v)}`);
   }
-  return `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${encodePs(parts.join(" "))}`;
+  return `${POWERSHELL} -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${encodePs(parts.join(" "))}`;
 }
-// The kit folder, from the elevated ssh session, BEFORE anything is
-// copied into it or run from it. All under 'Stop': any failure throws and
-// the ssh call fails (pc-run stops there).
-// - Absent: created atomically with its own ACL (inheritance cut, owner
-//   Administrators, full control for Administrators and SYSTEM, read and
-//   execute for the user; children inherit it).
-// - Present: verified, never repaired. A folder the kit did not make (a
-//   planted node.exe would run elevated at the next setup) is refused.
-// - Then re-read in the same session: the top's ACL protected, owner
-//   Administrators, no writer but Administrators and SYSTEM; every entry
-//   outside jobs\<job>\ owned by Administrators or SYSTEM, writable by
-//   nobody else, no junction or link anywhere outside jobs\<job>\ (walked
-//   without following any). jobs\<job> itself (made by jobDirScript) may
-//   grant the user write; its content is the user's and never walked.
-// Prints one SALONKIT-JSON line: the verification. (PowerShell names are
-// case-insensitive: $msg, never $w beside $W; CI caught that once.)
-export function secureKitScript() {
-  return [
-    `$ErrorActionPreference = 'Stop'`,
-    `$d = ${psQuote(KIT_DIR)}`,
-    `$adm = New-Object Security.Principal.SecurityIdentifier 'S-1-5-32-544'; $sys = New-Object Security.Principal.SecurityIdentifier 'S-1-5-18'`,
-    `$me = [Security.Principal.WindowsIdentity]::GetCurrent().User`,
-    `$ok = @($adm.Value, $sys.Value)`,
-    `$created = $false`,
-    `if (-not (Test-Path -LiteralPath $d)) { $acl = New-Object Security.AccessControl.DirectorySecurity; $acl.SetAccessRuleProtection($true, $false); $acl.SetOwner($adm); $inh = [Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'; foreach ($r in @(@($adm, 'FullControl'), @($sys, 'FullControl'), @($me, 'ReadAndExecute'))) { $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($r[0], $r[1], $inh, 'None', 'Allow'))) }; [void][IO.Directory]::CreateDirectory($d, $acl); $created = $true }`,
-    `$WriteMask = [Security.AccessControl.FileSystemRights]'WriteData, AppendData, WriteExtendedAttributes, WriteAttributes, Delete, DeleteSubdirectoriesAndFiles, ChangePermissions, TakeOwnership'`,
-    `function Sid($i) { try { $i.Translate([Security.Principal.SecurityIdentifier]).Value } catch { "$i" } }`,
-    `function Bad($path, $isJobDir) { $a = Get-Acl -LiteralPath $path; $o = Sid ([Security.Principal.NTAccount]$a.Owner); $why = @(); if ($ok -notcontains $o) { $why += "owner $($a.Owner)" }; foreach ($e in $a.Access) { if ($e.AccessControlType -ne 'Allow' -or -not ($e.FileSystemRights -band $WriteMask)) { continue }; $s = Sid $e.IdentityReference; if ($ok -contains $s) { continue }; if ($isJobDir -and $s -eq $me.Value) { continue }; $why += "$($e.IdentityReference) may write" }; $why }`,
-    `$problems = @()`,
-    `$top = Get-Acl -LiteralPath $d; if (-not $top.AreAccessRulesProtected) { $problems += "$d inherits its ACL" }`,
-    `if ((Get-Item -LiteralPath $d -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "$d is a junction or a link: refused" }`,
-    `foreach ($msg in (Bad $d $false)) { $problems += "$d $msg" }`,
-    `$jobs = Join-Path $d 'jobs'`,
-    `$stack = New-Object System.Collections.Stack; $stack.Push($d)`,
-    `while ($stack.Count) { $dir = $stack.Pop(); foreach ($e in [IO.Directory]::GetFileSystemEntries($dir)) { $attr = [IO.File]::GetAttributes($e); $isJob = ([IO.Path]::GetDirectoryName($e) -eq $jobs); if ($attr -band [IO.FileAttributes]::ReparsePoint) { $problems += "$e is a junction or a link"; continue }; foreach ($msg in (Bad $e $isJob)) { $problems += "$e $msg" }; if (($attr -band [IO.FileAttributes]::Directory) -and -not $isJob) { $stack.Push($e) } } }`,
-    `if ($problems.Count) { throw "C:\\salon-kit is not the kit's own (made or changed by someone else?); check it, remove it by hand, then retry: $(($problems | Select-Object -First 8) -join '; ')" }`,
-    `foreach ($sub in @('jobs', 'state', 'films', 'trees')) { $p = Join-Path $d $sub; if (-not (Test-Path -LiteralPath $p)) { [void](New-Item -ItemType Directory -Path $p); & icacls.exe $p /setowner '*S-1-5-32-544' /C /Q | Out-Null; if ($LASTEXITCODE -ne 0) { throw "icacls /setowner $p failed" } } }`,
-    `'SALONKIT-JSON ' + (@{ action = 'secure'; created = $created; owner = (Get-Acl -LiteralPath $d).Owner; protected = $true; checked = 'top, every entry outside jobs\\<job>\\' } | ConvertTo-Json -Compress)`
-  ].join("; ");
-}
-// After the kit's own elevated writes: the paths it just wrote owned by
-// Administrators (by default Windows may make the creating account the
-// owner, and an owner can always rewrite the ACL). Never on jobs\ (the
-// user's), never before secureKitScript's check (it would hide a planted
-// file).
-export function ownScript(paths) {
-  for (const p of paths) if (!p.startsWith(`${KIT_DIR}\\`) || /\\jobs(\\|$)/i.test(p.slice(KIT_DIR.length))) throw new Error(`ownScript: ${p} is not an admin-only kit path`);
-  return [
-    `$ErrorActionPreference = 'Stop'`,
-    `foreach ($p in @(${paths.map(psQuote).join(", ")})) { if (Test-Path -LiteralPath $p) { if ((Get-Item -LiteralPath $p -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "$p is a junction or a link" }; & icacls.exe $p /setowner '*S-1-5-32-544' /T /C /Q | Out-Null; if ($LASTEXITCODE -ne 0) { throw "icacls /setowner $p failed" } } }`
-  ].join("; ");
-}
-// A job's folder, the only place the user's non-elevated task may write.
-export function jobDirScript(jobDir) {
-  return [
-    `$ErrorActionPreference = 'Stop'`,
-    `$j = ${psQuote(jobDir)}`,
-    `if (Test-Path -LiteralPath $j) { throw "$j exists already: a job id is used once" }`,
-    `New-Item -ItemType Directory -Path $j | Out-Null`,
-    `& icacls.exe $j /setowner '*S-1-5-32-544' /C /Q | Out-Null; if ($LASTEXITCODE -ne 0) { throw "icacls /setowner $j failed" }`,
-    `$me = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value`,
-    `& icacls.exe $j /grant "*$($me):(OI)(CI)M" /C /Q | Out-Null; if ($LASTEXITCODE -ne 0) { throw "icacls $j failed" }`
-  ].join("; ");
-}
-// The ACL check reads: protected, and nobody but Administrators and SYSTEM
-// may write (the user's own SID may appear only as read and execute).
-export const KIT_WRITERS = Object.freeze(["S-1-5-32-544", "S-1-5-18"]);
-export function aclSafe(acl) {
-  if (!acl || acl.error) return false;
-  return acl.protected === true && KIT_WRITERS.includes(acl.ownerSid) && (acl.writers ?? []).every((w) => KIT_WRITERS.includes(w));
-}
-
 // The action's result: the last "SALONKIT-JSON {...}" line.
 export function parseKitJson(stdout) {
   const line = String(stdout ?? "").split(/\r?\n/).filter((l) => l.startsWith(JSON_MARK)).at(-1);
@@ -222,9 +221,11 @@ export function preflight(check, { browsers = ["chrome", "msedge"], bench = {}, 
   add("windows-11", "warn", Number(os.build) >= 22000, `${os.caption ?? "?"} build ${os.build ?? "?"}`, "J1b's target is Windows 11");
   const bat = check.power?.battery ?? [];
   add("mains", "block", !bat.length || bat.every((b) => b.BatteryStatus !== 1), bat.length ? `battery ${bat.map((b) => `${b.EstimatedChargeRemaining}% status ${b.BatteryStatus}`).join(", ")}` : "no battery (desktop)", "plug the PC in: on battery Windows lowers the QoS and the frequency");
-  add("elevated", "block", check.session?.elevated !== false, `ssh session ${check.session?.elevated ? "elevated (administrator)" : check.session?.elevated === false ? "NOT elevated" : "?"}`, "the clamp needs an administrator: ssh with an admin account (key in C:\\ProgramData\\ssh\\administrators_authorized_keys)");
-  if (check.kit?.acl) add("kit-acl", "block", aclSafe(check.kit.acl), `C:\\salon-kit ${check.kit.acl.error ?? `protected ${check.kit.acl.protected}, writers ${JSON.stringify(check.kit.acl.writers)}`}`, "the kit folder is writable by non-administrators: pc-run re-secures it on the next call; never run elevated from it until this passes");
-  add("kit-scheme-not-left", "block", !check.power?.kitSchemeActive, `active scheme ${check.power?.activeScheme}`, "a previous job left the clamp on: pc-run.mjs restore --job <that job>");
+  add("kit-not-elevated", "block", check.session?.elevated === false, `kit account ${check.session?.user ?? "?"}: ${check.session?.elevated ? "ELEVATED" : check.session?.elevated === false ? "standard" : "?"}`, "the kit's ssh must be a standard (non-administrator) account (salonkit): everything but the closed admin list runs there");
+  const sh = check.sshd ?? {};
+  const shellOk = /^C:\\Windows\\System32\\cmd\.exe$/i.test(sh.defaultShell ?? "") && /(^|\s)\/d(\s|$)/i.test(sh.defaultShellCommandOption ?? "") && /(^|\s)\/c(\s|$)/i.test(sh.defaultShellCommandOption ?? "");
+  add("sshd-shell", "block", shellOk, `OpenSSH DefaultShell ${sh.defaultShell ?? "unset"}, DefaultShellCommandOption ${sh.defaultShellCommandOption ?? "unset"}`, "as admin, once: HKLM\\SOFTWARE\\OpenSSH DefaultShell = C:\\Windows\\System32\\cmd.exe and DefaultShellCommandOption = /d /c (no AutoRun before the admin commands)");
+  add("kit-scheme-not-left", "block", !check.power?.kitSchemeActive && !(check.power?.schemes ?? []).includes(KIT_SCHEME), `active scheme ${check.power?.activeScheme}`, "a previous job left the kit's scheme: pc-run.mjs restore --job <that job>");
   const ovl = String(check.power?.overlayAc ?? "").toLowerCase();
   add("power-mode", "warn", !ovl || ovl === "00000000-0000-0000-0000-000000000000" || ovl === "ded574b5-45a0-4f42-8737-46345c09c238", `power mode overlay (AC) ${ovl || "none"}`, "Settings > System > Power: 'Balanced' or 'Best performance' on mains (best power efficiency throttles)");
   add("unlocked-session", "block", !check.session?.lockScreenUp && (check.session?.sessions ?? []).some((s) => /\|Active\||\|Actif\||\bActive\b|\bActif\b/i.test(s)), `sessions ${JSON.stringify(check.session?.sessions ?? [])}, lock screen ${check.session?.lockScreenUp ? "up" : "down"}`,
@@ -356,21 +357,25 @@ export function versionOutliers(runs) {
 }
 
 // What a restore must give back: the snapshot's scheme active, the kit's
-// scheme and task gone, the scheme list and the processor settings as before.
+// scheme gone, the scheme list and the processor settings as before, the
+// job's task and processes gone, its TEMP gone, the boot task gone.
+// before: the snapshot; after: cleanup's reading (+ bootTask from the
+// admin's query: true while it exists).
 export function restoreDiff(before, after, job) {
   const d = [];
   if (!before) return ["no snapshot to compare with"];
-  if (after.activeScheme !== before.activeScheme) d.push(`active scheme ${after.activeScheme}, was ${before.activeScheme}`);
-  if ((after.schemes ?? []).includes(KIT_SCHEME)) d.push("the kit's power scheme still exists");
+  const p = after.power ?? after;
+  if (p.activeScheme !== before.activeScheme) d.push(`active scheme ${p.activeScheme}, was ${before.activeScheme}`);
+  if ((p.schemes ?? []).includes(KIT_SCHEME)) d.push("the kit's power scheme still exists");
   const set = (x) => JSON.stringify([...(x ?? [])].sort());
-  if (set(after.schemes) !== set(before.schemes)) d.push(`schemes ${set(after.schemes)}, were ${set(before.schemes)}`);
-  if (JSON.stringify(after.processor) !== JSON.stringify(before.processor)) d.push(`processor settings ${JSON.stringify(after.processor)}, were ${JSON.stringify(before.processor)}`);
+  if (set(p.schemes) !== set(before.schemes)) d.push(`schemes ${set(p.schemes)}, were ${set(before.schemes)}`);
+  if (JSON.stringify(p.processor) !== JSON.stringify(before.processor)) d.push(`processor settings ${JSON.stringify(p.processor)}, were ${JSON.stringify(before.processor)}`);
   if ((after.tasks ?? []).includes(job)) d.push(`scheduled task \\SalonKit\\${job} still registered`);
-  if ((after.tasks ?? []).includes(`restore-${job}`)) d.push(`scheduled task \\SalonKit\\restore-${job} still registered`);
-  if ((after.jobProcesses ?? []).length) d.push(`job processes still running: ${after.jobProcesses.map((p) => `${p.name} ${p.pid}`).join(", ")}`);
-  const was = new Set((before.kitProcesses ?? []).map((p) => p.pid));
-  const extra = (after.kitProcesses ?? []).filter((p) => !was.has(p.pid));
-  if (extra.length) d.push(`kit processes left: ${extra.map((p) => `${p.name} ${p.pid}`).join(", ")}`);
+  if (after.bootTask) d.push(`the boot task ${BOOT_TASK} still exists`);
+  if ((after.jobProcesses ?? []).length) d.push(`job processes still running: ${after.jobProcesses.map((x) => `${x.name} ${x.pid}`).join(", ")}`);
+  const was = new Set((before.kitProcesses ?? []).map((x) => x.pid));
+  const extra = (after.kitProcesses ?? []).filter((x) => !was.has(x.pid));
+  if (extra.length) d.push(`kit processes left: ${extra.map((x) => `${x.name} ${x.pid}`).join(", ")}`);
   if (after.jobTmp) d.push("the job's TEMP folder is still there");
   return d;
 }

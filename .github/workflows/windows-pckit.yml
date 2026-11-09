@@ -1,13 +1,20 @@
 name: windows PC kit (salon-pc.ps1 on a real Windows)
 
 # The PC kit's Windows side (harness/remote/pc-win, research/pc-windows-kit.md)
-# on a GitHub Windows runner, before it meets the real PC: the script parses
-# and lints clean under Windows PowerShell 5.1, its check reads this machine,
-# the clamp's power scheme is created and fully undone (the scheme list and
-# the processor settings as before), the bench page runs in Chrome and in
-# Edge and tells Chrome from Chrome without optimizer (headless: no GPU, the
-# timings mean nothing), and a scheduled task runs a job in the logged-on
-# session. No disc, no game.
+# on a GitHub Windows runner, before it meets the real PC:
+# - salon-pc.ps1 (the standard account's script) parses and lints clean
+#   under Windows PowerShell 5.1, reads this machine, runs a job through a
+#   scheduled task in the logged-on session, stops one mid-way, never
+#   follows a junction, never kills another account's process; it also
+#   runs as a real standard account (and powercfg refuses that account the
+#   clamp: why the admin list exists);
+# - the administrator's closed list (lib/pc-kit.mjs ADMIN), exactly as
+#   pc-run sends it, through cmd.exe /d /c as sshd will: the clamp and its
+#   undoing leave the power schemes as they were; the boot task, started
+#   by hand, puts the scheme back and deletes itself;
+# - the bench page in Chrome and Edge tells Chrome from Chrome without
+#   optimizer (headless: no GPU, the timings mean nothing).
+# No disc, no game.
 # Runs only when the kit changes.
 
 on:
@@ -61,38 +68,52 @@ jobs:
             const c = parseKitJson(readFileSync(process.env.RUNNER_TEMP + "/check.txt", "utf8").replace(/^\uFEFF/, ""));
             if (!c?.cpu?.name || !c.power?.activeScheme) throw new Error("check gave no CPU or scheme");
             console.log(preflightMarkdown(preflight(c, { browsers: ["chrome", "msedge"] })));'
-      - name: Snapshot, clamp, restore with the real powercfg; the machine as before
-        shell: powershell
-        run: |
-          $k = "$env:RUNNER_TEMP\salon-kit"; $s = "harness\remote\pc-win\salon-pc.ps1"
-          $before = (powercfg /list) -join "`n"; $active = (powercfg /getactivescheme) -join ""
-          $o = @()
-          # the runner has 2 cores: the class affinity is asked for 2
-          $a = powershell -NoProfile -ExecutionPolicy Bypass -File $s -Action affinity -Cores 2 -KitDir $k | Select-Object -Last 1
-          $a
-          if ($a -notmatch '"mask":"0x[0-9a-f]+"') { "no class affinity"; exit 1 }
-          $o += powershell -NoProfile -ExecutionPolicy Bypass -File $s -Action snapshot -Job ci1 -KitDir $k | Select-Object -Last 1
-          $o += powershell -NoProfile -ExecutionPolicy Bypass -File $s -Action clamp -Job ci1 -MaxMhz 2000 -StatePct 90 -KitDir $k | Select-Object -Last 1
-          $mid = (powercfg /getactivescheme) -join ""
-          $o += powershell -NoProfile -ExecutionPolicy Bypass -File $s -Action restore -Job ci1 -KitDir $k | Select-Object -Last 1
-          $o | Set-Content -Encoding UTF8 "$env:RUNNER_TEMP\roundtrip.txt"
-          $o
-          if ($mid -notmatch "5a10c0de-0b1d-4c1a-9e2f-12400c1a0001") { "the kit's scheme was not active while clamped: $mid"; exit 1 }
-          if (((powercfg /list) -join "`n") -ne $before) { "scheme list changed"; exit 1 }
-          if (((powercfg /getactivescheme) -join "") -ne $active) { "active scheme changed"; exit 1 }
-      - name: The round trip's own diff is empty
+      - name: The admin list, as pc-run sends it (the clamp, its undoing, the boot task)
         shell: bash
         run: |
           node --input-type=module -e '
-            import { readFileSync } from "node:fs";
-            import { parseKitJson, restoreDiff } from "./harness/lib/pc-kit.mjs";
-            const lines = readFileSync(process.env.RUNNER_TEMP + "/roundtrip.txt", "utf8").replace(/^\uFEFF/, "").split(/\r?\n/).filter(Boolean);
-            const [snap, clamp, restore] = lines.map((l) => parseKitJson(l));
-            console.log(JSON.stringify(clamp.processor));
-            if (clamp.processor.PROCFREQMAX?.ac !== 2000) throw new Error("PROCFREQMAX not set in the kit scheme");
-            const d = restoreDiff(restore.before, restore.after, "ci1");
-            if (d.length) throw new Error(d.join("; "));
-            console.log("restored:", JSON.stringify(restore.after.activeScheme));'
+            import { execFileSync } from "node:child_process";
+            import { writeFileSync } from "node:fs";
+            import { ADMIN, assertAdmin } from "./harness/lib/pc-kit.mjs";
+            const orig = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/.exec(execFileSync("powercfg", ["/getactivescheme"], { encoding: "utf8" }))[1];
+            const clamp = [ADMIN.duplicate(orig), ADMIN.rename(), ADMIN.setIndex("ac", "PROCFREQMAX", 2000), ADMIN.setIndex("dc", "PROCFREQMAX", 2000), ADMIN.setIndex("ac", "PROCTHROTTLEMAX", 90), ADMIN.setIndex("dc", "PROCTHROTTLEMAX", 90), ADMIN.bootTask(orig), ADMIN.activateKit()];
+            const back = [ADMIN.activate(orig), ADMIN.deleteKit(), ADMIN.deleteBootTask()];
+            for (const l of [...clamp, ...back]) assertAdmin(l);
+            writeFileSync(process.env.RUNNER_TEMP + "/admin-clamp.txt", clamp.join("\n") + "\n");
+            writeFileSync(process.env.RUNNER_TEMP + "/admin-back.txt", back.join("\n") + "\n");
+            writeFileSync(process.env.RUNNER_TEMP + "/admin-boot.txt", [ADMIN.duplicate(orig), ADMIN.bootTask(orig), ADMIN.activateKit()].join("\n") + "\n");
+            console.log(orig);'
+      - name: "Admin list: clamp then undo through cmd /d /c; the schemes as before"
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Continue"
+          $before = (powercfg /list) -join "`n"; $active = (powercfg /getactivescheme) -join ""
+          function RunList($file) { foreach ($l in (Get-Content $file)) { if (-not $l) { continue }; "> $l"; cmd.exe /d /c $l; if ($LASTEXITCODE -ne 0) { "exit $LASTEXITCODE"; exit 1 } } }
+          RunList "$env:RUNNER_TEMP\admin-clamp.txt"
+          $mid = (powercfg /getactivescheme) -join ""; "while clamped: $mid"
+          $q = (powercfg /qh 5a10c0de-0b1d-4c1a-9e2f-12400c1a0001 54533251-82be-4824-96c1-47b60b740d00 75b0ae3f-bce0-45a7-8c89-c9611c25e100) -join "`n"
+          if ($mid -notmatch "5a10c0de" -or $q -notmatch "0x000007d0") { "the clamp did not take: $q"; exit 1 }
+          schtasks /query /tn SalonKitRestore | Out-Null; if ($LASTEXITCODE -ne 0) { "no boot task"; exit 1 }
+          RunList "$env:RUNNER_TEMP\admin-back.txt"
+          if (((powercfg /list) -join "`n") -ne $before) { "scheme list changed"; exit 1 }
+          if (((powercfg /getactivescheme) -join "") -ne $active) { "active scheme changed"; exit 1 }
+          schtasks /query /tn SalonKitRestore 2>$null | Out-Null; if ($LASTEXITCODE -eq 0) { "boot task left"; exit 1 }
+          "clamp and undo: the machine as before"
+      - name: "Admin list: the boot task alone puts the scheme back and deletes itself"
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Continue"
+          $before = (powercfg /list) -join "`n"; $active = (powercfg /getactivescheme) -join ""
+          foreach ($l in (Get-Content "$env:RUNNER_TEMP\admin-boot.txt")) { if ($l) { cmd.exe /d /c $l | Out-Null } }
+          "clamped: $((powercfg /getactivescheme) -join '')"
+          $t = (schtasks /query /tn SalonKitRestore /v /fo LIST) -join "`n"; ($t -split "`n" | Select-String 'Task To Run|Run As User') -join "`n"
+          schtasks /run /tn SalonKitRestore | Out-Null
+          for ($i = 0; $i -lt 30; $i++) { Start-Sleep 1; schtasks /query /tn SalonKitRestore 2>$null | Out-Null; if ($LASTEXITCODE -ne 0) { break } }
+          "after the boot task: $((powercfg /getactivescheme) -join '')"
+          if (((powercfg /getactivescheme) -join "") -ne $active) { "the boot task did not restore the scheme"; exit 1 }
+          if (((powercfg /list) -join "`n") -ne $before) { "the kit's scheme survived the boot task"; exit 1 }
+          schtasks /query /tn SalonKitRestore 2>$null | Out-Null; if ($LASTEXITCODE -eq 0) { "the boot task did not delete itself"; exit 1 }
+          "boot task: restored and gone"
       - name: Playwright (driver only; the runner's Chrome and Edge are used)
         shell: bash
         run: npm i -g playwright@1.56.1
@@ -139,11 +160,11 @@ jobs:
           Get-ChildItem "$k\jobs\ci2" | Format-Table Name, Length | Out-String
           Get-Content "$k\jobs\ci2\log" -ErrorAction SilentlyContinue
           Get-Content "$k\jobs\ci2\hello.out" -ErrorAction SilentlyContinue
-          Kit @("-Action", "restore", "-Job", "ci2", "-KitDir", $k)
+          Kit @("-Action", "cleanup", "-Job", "ci2", "-KitDir", $k)
           if ($st -notmatch '"exit":0') { "the job did not exit 0"; exit 1 }
           if ((Get-Content "$k\jobs\ci2\hello.out") -ne "1") { "the spec's env did not reach the step"; exit 1 }
           if ((Get-Content "$k\jobs\ci2\log" -Raw) -notmatch 'session [1-9]') { "the task did not run in a user session"; exit 1 }
-      - name: Restore in the middle of a running job stops it (the step killed, no further step, task gone)
+      - name: Cleanup in the middle of a running job stops it (the step killed, no further step, task gone)
         timeout-minutes: 4
         shell: powershell
         run: |
@@ -153,116 +174,65 @@ jobs:
             @{ name = "long"; args = @("-e", "setTimeout(() => {}, 600000)"); env = @{}; continueOnError = $true },
             @{ name = "after"; args = @("-e", "console.log(2)"); env = @{}; continueOnError = $false }) } | ConvertTo-Json -Depth 5 | Set-Content -Encoding UTF8 "$k\jobs\ci3\spec.json"
           powershell -NoProfile -ExecutionPolicy Bypass -File $s -Action snapshot -Job ci3 -KitDir $k | Select-Object -Last 1
-          powershell -NoProfile -ExecutionPolicy Bypass -File $s -Action clamp -Job ci3 -MaxMhz 2000 -KitDir $k | Select-Object -Last 1
           powershell -NoProfile -ExecutionPolicy Bypass -File $s -Action start -Job ci3 -KitDir $k | Select-Object -Last 1
           for ($i = 0; $i -lt 20 -and -not (Test-Path "$k\jobs\ci3\node.pid"); $i++) { Start-Sleep 1 }
           Start-Sleep 2
           $nodePid = [int]("$(Get-Content -Raw "$k\jobs\ci3\node.pid")".Trim() -split '\s+')[0]
           "node of the job: $nodePid"
-          $r = powershell -NoProfile -ExecutionPolicy Bypass -File $s -Action restore -Job ci3 -KitDir $k | Select-Object -Last 1
+          $r = powershell -NoProfile -ExecutionPolicy Bypass -File $s -Action cleanup -Job ci3 -KitDir $k | Select-Object -Last 1
           $r
           Start-Sleep 5
           Get-Content "$k\jobs\ci3\log" -ErrorAction SilentlyContinue
           if (Get-Process -Id $nodePid -ErrorAction SilentlyContinue) { "the job's node still runs"; exit 1 }
           if (Test-Path "$k\jobs\ci3\after.out") { "a step ran after the stop"; exit 1 }
           if (Get-ScheduledTask -TaskPath "\SalonKit\" -ErrorAction SilentlyContinue | Where-Object { $_.TaskName -match 'ci3' }) { "a ci3 task is still registered"; exit 1 }
-          if (((powercfg /getactivescheme) -join "") -match "5a10c0de") { "the clamp is still active"; exit 1 }
           if ($r -notmatch '"jobTmp":false') { "the job TEMP was not removed"; exit 1 }
-      - name: The power round trip under a standard (non-admin) account (report only)
-        continue-on-error: true
-        timeout-minutes: 4
-        shell: powershell
-        run: |
-          $pw = "Kit-" + [guid]::NewGuid().ToString("N").Substring(0, 16) + "!a1"
-          $sec = ConvertTo-SecureString $pw -AsPlainText -Force
-          New-LocalUser -Name kitstd -Password $sec -AccountNeverExpires | Out-Null
-          $cred = New-Object System.Management.Automation.PSCredential("$env:COMPUTERNAME\kitstd", $sec)
-          $k = "C:\kitstd-kit"; New-Item -ItemType Directory -Force -Path $k | Out-Null
-          Copy-Item harness\remote\pc-win\salon-pc.ps1 "$k\salon-pc.ps1"
-          icacls $k /grant "kitstd:(OI)(CI)F" | Out-Null
-          $cmd = "& '$k\salon-pc.ps1' -Action snapshot -Job std1 -KitDir '$k' | Select-Object -Last 1; & '$k\salon-pc.ps1' -Action clamp -Job std1 -MaxMhz 2000 -KitDir '$k' 2>&1 | Select-Object -Last 1; & '$k\salon-pc.ps1' -Action restore -Job std1 -KitDir '$k' | Select-Object -Last 1"
-          $p = Start-Process powershell.exe -Credential $cred -LoadUserProfile -ArgumentList "-NoProfile -ExecutionPolicy Bypass -Command `"$cmd *> $k\out.txt`"" -WorkingDirectory $k -Wait -PassThru
-          "exit $($p.ExitCode)"
-          Get-Content "$k\out.txt" -ErrorAction SilentlyContinue
-          Remove-LocalUser -Name kitstd
-      - name: The securing script, as pc-run sends it
-        shell: bash
-        run: node --input-type=module -e 'import { secureKitScript } from "./harness/lib/pc-kit.mjs"; process.stdout.write(secureKitScript());' > "$RUNNER_TEMP/secure.ps1"
-      - name: "Security: a planted C:\\salon-kit refused; atomic ACL; a standard account cannot rewrite the script; pid files and junctions; the logon restore runs no file"
-        timeout-minutes: 8
+      - name: "The kit side as a real standard account: it works, it is not elevated, and powercfg refuses it the clamp"
+        timeout-minutes: 6
         shell: powershell
         run: |
           $ErrorActionPreference = "Continue"
           $pw = "Kit-" + [guid]::NewGuid().ToString("N").Substring(0, 16) + "!a1"; $sec = ConvertTo-SecureString $pw -AsPlainText -Force
-          New-LocalUser -Name kitstd2 -Password $sec -AccountNeverExpires | Out-Null
-          $cred = New-Object System.Management.Automation.PSCredential("$env:COMPUTERNAME\kitstd2", $sec)
-          New-Item -ItemType Directory -Force -Path C:\kitstd2-out | Out-Null; icacls C:\kitstd2-out /grant "kitstd2:(OI)(CI)F" | Out-Null
-          function AsStd([string]$cmd) { $p = Start-Process powershell.exe -Credential $cred -LoadUserProfile -WorkingDirectory C:\kitstd2-out -ArgumentList "-NoProfile -Command `"$cmd`"" -Wait -PassThru; $p.ExitCode }
-          $fail = @()
-          # 1. a C:\salon-kit made before the kit, a node.exe planted by a standard account: refused
-          New-Item -ItemType Directory -Force -Path C:\salon-kit | Out-Null
-          AsStd "New-Item -ItemType Directory -Force -Path C:\salon-kit\node | Out-Null; Set-Content C:\salon-kit\node\node.exe planted" | Out-Null
-          "planted node.exe owner: $((Get-Acl C:\salon-kit\node\node.exe).Owner)"
-          $r = powershell -NoProfile -ExecutionPolicy Bypass -File "$env:RUNNER_TEMP\secure.ps1" 2>&1 | Out-String
-          "secure on a planted folder: exit $LASTEXITCODE"
-          if ($LASTEXITCODE -eq 0 -or $r -notmatch "not the kit's own") { $fail += "a planted C:\salon-kit was accepted: $r" }
-          Remove-Item -LiteralPath C:\salon-kit -Recurse -Force
-          # 2. created atomically with its ACL
-          $r = powershell -NoProfile -ExecutionPolicy Bypass -File "$env:RUNNER_TEMP\secure.ps1" 2>&1 | Out-String
-          "secure, fresh: exit $LASTEXITCODE $($r.Trim())"
-          if ($LASTEXITCODE -ne 0 -or $r -notmatch '"created":true') { $fail += "secure on a fresh folder failed: $r" }
-          Copy-Item harness\remote\pc-win\salon-pc.ps1 C:\salon-kit\salon-pc.ps1
-          icacls C:\salon-kit\salon-pc.ps1 /setowner "*S-1-5-32-544" /C /Q | Out-Null
-          $a = Get-Acl C:\salon-kit; "protected: $($a.AreAccessRulesProtected), owner: $($a.Owner)"; $a.Access | Format-Table IdentityReference, FileSystemRights, IsInherited | Out-String
-          if (-not $a.AreAccessRulesProtected -or $a.Owner -notmatch 'Administrators') { $fail += "top ACL or owner wrong" }
-          $r = powershell -NoProfile -ExecutionPolicy Bypass -File "$env:RUNNER_TEMP\secure.ps1" 2>&1 | Out-String
-          if ($LASTEXITCODE -ne 0) { $fail += "the kit's own folder failed its re-check: $r" }
-          # 3. a standard account cannot rewrite the script
-          AsStd "`$(try { Add-Content -LiteralPath C:\salon-kit\salon-pc.ps1 -Value pwned -ErrorAction Stop; 'WROTE' } catch { 'DENIED' }) | Out-File C:\kitstd2-out\w.txt" | Out-Null
-          $w = "$(Get-Content C:\kitstd2-out\w.txt -Raw)".Trim(); "standard account writing the script: $w"
-          if ($w -ne "DENIED") { $fail += "a standard account could write the kit script ($w)" }
-          # 4. a pid file naming another account's node: restore must not kill it
-          $std = Start-Process node.exe -Credential $cred -ArgumentList "-e", "setTimeout(()=>{},120000)" -WorkingDirectory C:\kitstd2-out -PassThru
-          Start-Sleep 2
-          New-Item -ItemType Directory -Force -Path C:\salon-kit\jobs\ci8 | Out-Null
-          "$($std.Id) $((Get-Process -Id $std.Id).StartTime.ToUniversalTime().Ticks)" | Set-Content C:\salon-kit\jobs\ci8\node.pid
-          powershell -NoProfile -ExecutionPolicy Bypass -File C:\salon-kit\salon-pc.ps1 -Action cleanup -Job ci8 | Select-Object -Last 1
-          if (-not (Get-Process -Id $std.Id -ErrorAction SilentlyContinue)) { $fail += "restore killed another account's process named in a pid file" } else { "another account's node survived the cleanup: ok" }
-          Stop-Process -Id $std.Id -Force -ErrorAction SilentlyContinue
-          # 5. a junction planted in a job's TEMP: the cleanup (as the user) removes the link only
-          New-Item -ItemType Directory -Force -Path C:\sentinel | Out-Null; Set-Content C:\sentinel\keep.txt keep
-          New-Item -ItemType Directory -Force -Path C:\salon-kit\jobs\ci6 | Out-Null
-          $mysid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-          icacls C:\salon-kit\jobs\ci6 /grant "*$($mysid):(OI)(CI)M" | Out-Null   # as jobDirScript does
-          New-Item -ItemType Directory -Force -Path C:\salon-kit\jobs\ci6\tmp | Out-Null
-          cmd /c mklink /J C:\salon-kit\jobs\ci6\tmp\evil C:\sentinel | Out-Null
-          powershell -NoProfile -ExecutionPolicy Bypass -File C:\salon-kit\salon-pc.ps1 -Action cleanup -Job ci6 | Select-Object -Last 1
+          New-LocalUser -Name salonkit -Password $sec -AccountNeverExpires | Out-Null
+          $cred = New-Object System.Management.Automation.PSCredential("$env:COMPUTERNAME\salonkit", $sec)
+          $k = "C:\salonkit-ci\salon-kit"; New-Item -ItemType Directory -Force -Path $k | Out-Null
+          icacls C:\salonkit-ci /grant "salonkit:(OI)(CI)F" | Out-Null
+          Copy-Item harness\remote\pc-win\salon-pc.ps1 "$k\salon-pc.ps1"
+          $o = "C:\salonkit-ci\out.txt"
+          $cmd = "& '$k\salon-pc.ps1' -Action check -KitDir '$k' | Select-Object -Last 1 | Out-File $o; & '$k\salon-pc.ps1' -Action snapshot -Job s1 -KitDir '$k' | Select-Object -Last 1 | Out-File $o -Append; & '$k\salon-pc.ps1' -Action power -KitDir '$k' | Select-Object -Last 1 | Out-File $o -Append; C:\Windows\System32\powercfg.exe /duplicatescheme 381b4222-f694-41f0-9685-ff5bb260df2e 5a10c0de-0b1d-4c1a-9e2f-12400c1a00ff 2>&1 | Out-File $o -Append"
+          $p = Start-Process powershell.exe -Credential $cred -LoadUserProfile -WorkingDirectory C:\salonkit-ci -ArgumentList "-NoProfile -ExecutionPolicy Bypass -Command `"$cmd`"" -Wait -PassThru
+          $out = Get-Content $o -Raw; $out
+          Remove-LocalUser -Name salonkit
+          if ($out -notmatch '"elevated":false') { "the kit account read as elevated"; exit 1 }
+          if ($out -notmatch '"action":"snapshot"' -or $out -notmatch '"action":"power"') { "the kit side did not run as a standard account"; exit 1 }
+          if ($out -notmatch 'permission') { "a standard account could duplicate a scheme (then the admin list is not needed?)"; exit 1 }
+          if (((powercfg /list) -join "") -match "5a10c0de-0b1d-4c1a-9e2f-12400c1a00ff") { cmd /d /c "powercfg /delete 5a10c0de-0b1d-4c1a-9e2f-12400c1a00ff"; "a standard account created a scheme"; exit 1 }
+          "standard account: kit side ok, clamp refused by powercfg"
+      - name: "Kit side: cleanup does not follow a planted junction, and never kills another account's process named in a pid file"
+        timeout-minutes: 4
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Continue"
+          $k = "$env:RUNNER_TEMP\salon-kit"; $s = "$PWD\harness\remote\pc-win\salon-pc.ps1"; $fail = @()
+          New-Item -ItemType Directory -Force -Path C:\sentinel, "$k\jobs\ci6\tmp" | Out-Null; Set-Content C:\sentinel\keep.txt keep
+          cmd /c mklink /J "$k\jobs\ci6\tmp\evil" C:\sentinel | Out-Null
+          powershell -NoProfile -ExecutionPolicy Bypass -File $s -Action cleanup -Job ci6 -KitDir $k | Select-Object -Last 1
           if (-not (Test-Path C:\sentinel\keep.txt)) { $fail += "the cleanup followed the junction" }
-          if (Test-Path C:\salon-kit\jobs\ci6\tmp) { $fail += "the job tmp is still there" }
-          # 6. securing refuses a reparse point inside the kit
-          cmd /c mklink /J C:\salon-kit\planted C:\sentinel | Out-Null
-          $r = powershell -NoProfile -ExecutionPolicy Bypass -File "$env:RUNNER_TEMP\secure.ps1" 2>&1 | Out-String
-          if ($LASTEXITCODE -eq 0 -or $r -notmatch "junction or a link") { $fail += "a planted junction was not refused: $r" }
-          [IO.Directory]::Delete("C:\salon-kit\planted", $false)
-          # 7. the logon restore task: a self-contained command, and it restores
-          $orig = ((powercfg /getactivescheme) -join "") -replace '.*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}).*', '$1'
-          powershell -NoProfile -ExecutionPolicy Bypass -File C:\salon-kit\salon-pc.ps1 -Action snapshot -Job ci7 | Select-Object -Last 1
-          powershell -NoProfile -ExecutionPolicy Bypass -File C:\salon-kit\salon-pc.ps1 -Action clamp -Job ci7 -MaxMhz 2000 | Select-Object -Last 1
-          $t = Get-ScheduledTask -TaskPath "\SalonKit\" -TaskName restore-ci7
-          $argLine = $t.Actions[0].Arguments
-          "logon task: $($t.Actions[0].Execute) $($argLine.Substring(0, [Math]::Min(80, $argLine.Length)))..."
-          if ($argLine -match '\.ps1|-File') { $fail += "the elevated logon task runs a file" }
-          if ("$($t.Principal.RunLevel)" -ne "Highest") { $fail += "logon task not elevated: $($t.Principal.RunLevel)" }
-          Start-ScheduledTask -TaskPath "\SalonKit\" -TaskName restore-ci7
-          for ($i = 0; $i -lt 30 -and (Get-ScheduledTask -TaskPath "\SalonKit\" -TaskName restore-ci7 -ErrorAction SilentlyContinue); $i++) { Start-Sleep 1 }
-          $now = (powercfg /getactivescheme) -join ""; "after the logon task: $now"
-          if ($now -notmatch $orig) { $fail += "the logon task did not restore the scheme" }
-          if (((powercfg /list) -join "") -match "5a10c0de") { $fail += "the kit's scheme survived the logon task" }
-          if (Get-ScheduledTask -TaskPath "\SalonKit\" -TaskName restore-ci7 -ErrorAction SilentlyContinue) { $fail += "the logon task did not unregister itself" }
-          powershell -NoProfile -ExecutionPolicy Bypass -File C:\salon-kit\salon-pc.ps1 -Action restore -Job ci7 | Select-Object -Last 1
-          Remove-LocalUser -Name kitstd2
-          if ($fail.Count) { "FAILED:"; $fail; exit 1 }
-          "all security checks passed"
+          if (Test-Path "$k\jobs\ci6\tmp") { $fail += "the job tmp is still there" }
+          $pw = "Kit-" + [guid]::NewGuid().ToString("N").Substring(0, 16) + "!a1"; $sec = ConvertTo-SecureString $pw -AsPlainText -Force
+          New-LocalUser -Name kitother -Password $sec -AccountNeverExpires | Out-Null
+          $cred = New-Object System.Management.Automation.PSCredential("$env:COMPUTERNAME\kitother", $sec)
+          New-Item -ItemType Directory -Force -Path C:\kitother | Out-Null; icacls C:\kitother /grant "kitother:(OI)(CI)F" | Out-Null
+          $other = Start-Process node.exe -Credential $cred -ArgumentList "-e", "setTimeout(()=>{},120000)" -WorkingDirectory C:\kitother -PassThru
+          Start-Sleep 2
+          New-Item -ItemType Directory -Force -Path "$k\jobs\ci8" | Out-Null
+          "$($other.Id) $((Get-Process -Id $other.Id).StartTime.ToUniversalTime().Ticks)" | Set-Content "$k\jobs\ci8\node.pid"
+          powershell -NoProfile -ExecutionPolicy Bypass -File $s -Action cleanup -Job ci8 -KitDir $k | Select-Object -Last 1
+          if (-not (Get-Process -Id $other.Id -ErrorAction SilentlyContinue)) { $fail += "cleanup killed another account's process named in a pid file" }
+          Stop-Process -Id $other.Id -Force -ErrorAction SilentlyContinue
+          Remove-LocalUser -Name kitother
+          if ($fail.Count) { $fail; exit 1 }
+          "junction not followed, another account's process left alone"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
@@ -272,4 +242,5 @@ jobs:
             ${{ runner.temp }}/roundtrip.txt
             ${{ runner.temp }}/bench-*.json
             ${{ runner.temp }}/salon-kit/jobs/ci2
+            ${{ runner.temp }}/admin-*.txt
           retention-days: 7

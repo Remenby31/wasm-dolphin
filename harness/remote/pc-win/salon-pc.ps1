@@ -3,58 +3,41 @@
 #
 # The Windows side of the PC kit (harness/remote/pc-run.mjs drives it over
 # ssh; research/pc-windows-kit.md). Windows PowerShell 5.1, no module, no
-# install. Everything it creates is the kit's own and is listed in the
-# snapshot it takes first, so `restore` puts the machine back:
-#   - a power scheme with the fixed GUID $KitScheme, a copy of the scheme
-#     that was active, carrying the CPU clamp; the original is re-activated
-#     and the copy deleted on restore (the user's schemes are never edited);
-#   - scheduled tasks under \SalonKit\: the job's own, and while a clamp is
-#     on, restore-<job> (at logon: a reboot or a lost Mac never leaves the
-#     clamp on past the next session; elevated, so it runs a self-contained
-#     encoded command, never a file); both removed on restore;
-# $KitDir carries its own ACL (pc-run.mjs secures it before copying this
-# script): Administrators and SYSTEM full control, the user read and
-# execute; only jobs\<job> is writable by the user (the job's own,
-# non-elevated task writes there). Every elevated call checks this file's
-# sha256 against the Mac's copy first (lib/pc-kit.mjs kitCommand).
-# Nothing elevated ever deletes inside jobs\<job> (user-writable: a junction
-# could replace a folder between a check and a delete): the job's TEMP, and
-# the job folders at uninstall, are deleted by a non-elevated task
-# (\SalonKit\purge-<job>, -Action purge), as the user. Elevated code kills
-# only a process that is one of the kit's 4 images AND owned by the user.
-#   - files under $KitDir only: the job's TEMP/TMP (browser profiles,
-#     Playwright's files) is $KitDir\jobs\<job>\tmp, deleted on restore.
-# restore stops the job first (stop file, task stopped, the job's processes
-# killed: those it wrote down by pid and start time, and every process whose
-# command line holds the job's folder, i.e. its browsers), then puts the
-# power scheme back. Rights: the clamp needs an elevated session (a standard
-# account gets "You do not have the permissions" from powercfg
-# /duplicatescheme: CI windows-2025, 2026-11-09), i.e. ssh as an
-# administrator (Windows OpenSSH gives an admin key a full token). The job's
-# own task stays non-elevated (the browser never runs as admin); the logon
-# restore task runs at the highest level, to delete the kit's scheme.
+# install. It runs ONLY as the kit's standard (non-administrator) account,
+# never elevated: check refuses to go on in an elevated session.
+# Everything it creates belongs to that account:
+#   - files under $KitDir (default %USERPROFILE%\salon-kit): node,
+#     Playwright, the trees, the films, the jobs (each job's TEMP/TMP, i.e.
+#     its browser profiles, in jobs\<job>\tmp, deleted at the job's end and
+#     by cleanup);
+#   - scheduled tasks under \SalonKit\: one per job, in the account's own
+#     desktop session (a browser started from ssh would have no screen).
+# The CPU clamp's power scheme is NOT this script's: the only elevated
+# operations of the kit are a closed list of powercfg.exe / schtasks.exe
+# command lines sent by pc-run.mjs over the administrator's ssh
+# (lib/pc-kit.mjs ADMIN). This script only reads the power state.
+# cleanup stops a job: stop file (inner runs no further step), the task
+# stopped, the job's processes killed (written down by pid AND start time,
+# or holding the job's folder on their command line; only node, chrome,
+# msedge, powershell, only the account's own), its TEMP deleted without
+# following any reparse point.
 # The core-count clamp is a process affinity of the job's own process tree
 # (inherited by node and the browser it starts): nothing to undo.
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File salon-pc.ps1 -Action check
-#   ... -Action snapshot -Job ID | clamp -Job ID -MaxMhz 4400 [-StatePct 100] [-BoostMode N]
-#   ... -Action unclamp -Job ID | restore -Job ID | start -Job ID | status -Job ID
-#   ... -Action inner -Job ID   (the scheduled task itself, in the user's session)
+#   ... -Action snapshot -Job ID | power | start -Job ID | status -Job ID | cleanup -Job ID
+#   ... -Action inner -Job ID   (the scheduled task itself, in the account's session)
 #   ... -Action sampler -Job ID (started by inner: other processes' CPU every 5 s)
-#   ... -Action stat -Path FILE (does the disc exist on the PC; never read)
+#   ... -Action stat -Path FILE (does the disc exist; never read) | affinity | uninstall
 # Every action prints one line "SALONKIT-JSON {...}" (its result) last.
 # -ExecutionPolicy Bypass on the command line holds for this process only.
 
 param(
-  [Parameter(Mandatory = $true)][ValidateSet("check", "snapshot", "clamp", "unclamp", "restore", "start", "status", "inner", "sampler", "affinity", "stat", "uninstall", "cleanup", "purge")][string]$Action,
+  [Parameter(Mandatory = $true)][ValidateSet("check", "snapshot", "power", "start", "status", "inner", "sampler", "affinity", "stat", "uninstall", "cleanup")][string]$Action,
   [string]$Job = "",
-  [int]$MaxMhz = 0,
-  [int]$StatePct = 0,
-  [int]$BoostMode = -1,
   [int]$Cores = 6,
   [string]$Path = "",
-  [ValidateSet("tmp", "all")][string]$Scope = "tmp",
-  [string]$KitDir = "C:\salon-kit"
+  [string]$KitDir = (Join-Path $env:USERPROFILE "salon-kit")
 )
 
 $ErrorActionPreference = "Stop"
@@ -228,13 +211,10 @@ function Check {
   $defender = $null
   try { $mp = Get-MpComputerStatus; $defender = [ordered]@{ realTime = $mp.RealTimeProtectionEnabled } } catch {}
   $node = File-Version @((Join-Path $KitDir "node\node.exe"))
-  $acl = $null
-  try {
-    $a = Get-Acl -LiteralPath $KitDir
-    $writers = @($a.Access | Where-Object { $_.AccessControlType -eq 'Allow' -and ($_.FileSystemRights -band [Security.AccessControl.FileSystemRights]'Write, Modify, FullControl, Delete, ChangePermissions, TakeOwnership') } | ForEach-Object { try { $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value } catch { "$($_.IdentityReference)" } })
-    $ownerSid = try { ([Security.Principal.NTAccount]$a.Owner).Translate([Security.Principal.SecurityIdentifier]).Value } catch { "$($a.Owner)" }
-    $acl = [ordered]@{ protected = $a.AreAccessRulesProtected; owner = $a.Owner; ownerSid = $ownerSid; writers = @($writers | Select-Object -Unique) }
-  } catch { $acl = [ordered]@{ error = "$_" } }
+  # OpenSSH's shell for the administrator's commands: cmd.exe must get /d
+  # (AutoRun off: HKCU\...\Command Processor\AutoRun would otherwise run
+  # elevated before the kit's fixed command)
+  $sshd = [ordered]@{ defaultShell = Reg-Value "HKLM:\SOFTWARE\OpenSSH" "DefaultShell"; defaultShellCommandOption = Reg-Value "HKLM:\SOFTWARE\OpenSSH" "DefaultShellCommandOption" }
   $affinity = $null
   try { $affinity = Class-Affinity $Cores } catch { $affinity = [ordered]@{ error = "$_" } }
   Out-Result ([ordered]@{
@@ -258,10 +238,11 @@ function Check {
       overlayAc = Reg-Value "HKLM:\SYSTEM\CurrentControlSet\Control\Power\User\PowerSchemes" "ActiveOverlayAcPowerScheme"
       processor = Processor-Settings $active
     }
-    session = [ordered]@{ sessions = $sessions; lockScreenUp = $locked; sshSession = [bool]$env:SSH_CLIENT; elevated = (Is-Elevated) }
+    session = [ordered]@{ sessions = $sessions; lockScreenUp = $locked; sshSession = [bool]$env:SSH_CLIENT; elevated = (Is-Elevated); user = $env:USERNAME }
     security = [ordered]@{ memoryIntegrity = $hvci; defender = $defender }
     disk = [ordered]@{ drive = $kitDrive; freeGiB = [math]::Round((Get-PSDrive -Name $kitDrive).Free / 1GB, 1) }
-    kit = [ordered]@{ dir = $KitDir; node = $node; acl = $acl; tasks = @(Get-ScheduledTask -TaskPath $TaskPath -ErrorAction SilentlyContinue | ForEach-Object { $_.TaskName }) }
+    kit = [ordered]@{ dir = $KitDir; node = $node; tasks = @(Kit-Tasks) }
+    sshd = $sshd
     cpuBusy = Cpu-Busy 3
   })
 }
@@ -276,17 +257,14 @@ function Snapshot {
     return
   }
   $active = Active-Scheme
-  if ($active -eq $KitScheme) { throw "the kit's scheme is active already: run -Action restore for the job that set it first" }
+  if ($active -eq $KitScheme) { throw "the kit's scheme is active already: pc-run.mjs restore --job <the job that set it> first" }
   $state = [ordered]@{
     job = $Job; at = (Get-Date).ToString("o"); activeScheme = $active; schemes = @(All-Schemes)
     processor = Processor-Settings $active
-    tasks = @(Get-ScheduledTask -TaskPath $TaskPath -ErrorAction SilentlyContinue | ForEach-Object { $_.TaskName })
+    tasks = @(Kit-Tasks)
     kitProcesses = @(Kit-Processes)
-    kitFiles = @(Get-ChildItem -LiteralPath $KitDir -Force -ErrorAction SilentlyContinue | ForEach-Object { [string]$_.Name } | Sort-Object)
   }
   ($state | ConvertTo-Json -Depth 8) | Set-Content -LiteralPath $sf -Encoding UTF8
-  # owned by Administrators (state\ is admin-only; secureKitScript checks owners)
-  & icacls.exe $sf /setowner '*S-1-5-32-544' /C /Q 2>$null | Out-Null
   Out-Result ([ordered]@{ action = "snapshot"; job = $Job; existing = $false; state = $state })
 }
 
@@ -296,73 +274,11 @@ function Read-State {
   return Get-Content -Raw -LiteralPath $sf | ConvertFrom-Json
 }
 
-function Set-Index($scheme, $name, [int64]$value) {
-  & powercfg /setacvalueindex $scheme $SubProcessor $Settings[$name] $value 2>$null | Out-Null
-  $ac = $LASTEXITCODE
-  & powercfg /setdcvalueindex $scheme $SubProcessor $Settings[$name] $value 2>$null | Out-Null
-  return ($ac -eq 0 -and $LASTEXITCODE -eq 0)
-}
-
+# check refuses to go on elevated: this script is the standard account's.
 function Is-Elevated {
   # tests only (pwsh on macOS has no WindowsPrincipal): SALONKIT_TEST_ELEVATED=1|0
   if ($env:SALONKIT_TEST_ELEVATED) { return $env:SALONKIT_TEST_ELEVATED -eq "1" }
   ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-}
-
-function Clamp {
-  Need-Job
-  if (-not (Is-Elevated)) { throw "the clamp needs an elevated session (powercfg /duplicatescheme): ssh as an administrator" }
-  $state = Read-State
-  if ($MaxMhz -lt 0 -or ($MaxMhz -gt 0 -and $MaxMhz -lt 800)) { throw "-MaxMhz: 0 (no cap) or at least 800" }
-  if ($StatePct -ne 0 -and ($StatePct -lt 30 -or $StatePct -gt 100)) { throw "-StatePct: 30-100" }
-  if (-not (All-Schemes | Where-Object { $_ -eq $KitScheme })) {
-    & powercfg /duplicatescheme $state.activeScheme $KitScheme | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "powercfg /duplicatescheme failed ($LASTEXITCODE)" }
-    & powercfg /changename $KitScheme $KitSchemeName | Out-Null
-  }
-  $applied = [ordered]@{}
-  $applied.PROCFREQMAX = Set-Index $KitScheme "PROCFREQMAX" $MaxMhz
-  $applied.PROCFREQMAX1 = Set-Index $KitScheme "PROCFREQMAX1" $MaxMhz
-  if ($StatePct -gt 0) {
-    $applied.PROCTHROTTLEMAX = Set-Index $KitScheme "PROCTHROTTLEMAX" $StatePct
-    $applied.PROCTHROTTLEMAX1 = Set-Index $KitScheme "PROCTHROTTLEMAX1" $StatePct
-  }
-  if ($BoostMode -ge 0) { $applied.PERFBOOSTMODE = Set-Index $KitScheme "PERFBOOSTMODE" $BoostMode }
-  # first the way back: at the next logon, restore this job (a reboot, a
-  # crash or a lost Mac never leaves the clamp on past it)
-  # elevated at logon: a self-contained command, no file (a file the user
-  # can write, run as admin, is an elevation of privilege). Only GUIDs and
-  # the job id (checked by Need-Job) go into it.
-  if ($state.activeScheme -notmatch '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$') { throw "snapshot scheme is not a GUID: $($state.activeScheme)" }
-  $back = "powercfg /setactive $($state.activeScheme); if (`$LASTEXITCODE -ne 0) { powercfg /setactive $Balanced }; powercfg /delete $KitScheme; Unregister-ScheduledTask -TaskPath '$TaskPath' -TaskName 'restore-$Job' -Confirm:`$false"
-  $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($back))
-  $act = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand $enc"
-  $trg = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
-  $prin = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Highest
-  Register-ScheduledTask -TaskPath $TaskPath -TaskName "restore-$Job" -Action $act -Trigger $trg -Principal $prin -Force | Out-Null
-  & powercfg /setactive $KitScheme | Out-Null
-  $now = Active-Scheme
-  if ($now -ne $KitScheme) { throw "the kit's scheme did not become active (active: $now)" }
-  Out-Result ([ordered]@{ action = "clamp"; job = $Job; scheme = $KitScheme; maxMhz = $MaxMhz; statePct = $StatePct; boostMode = $BoostMode; applied = $applied; processor = Processor-Settings $KitScheme })
-}
-
-# Back to the snapshot's scheme, the kit's scheme deleted. Idempotent.
-function Restore-Power($state) {
-  $target = $Balanced
-  if ($state) { $target = $state.activeScheme }
-  # the snapshot's scheme gone (deleted meanwhile): Balanced, which always exists
-  if (-not (All-Schemes | Where-Object { $_ -eq $target })) { $target = $Balanced }
-  if ((Active-Scheme) -ne $target) { & powercfg /setactive $target | Out-Null }
-  # deleting may need elevation the job's own task lacks: then the scheme
-  # stays, inactive, until restore (elevated) or the logon task removes it
-  if (All-Schemes | Where-Object { $_ -eq $KitScheme }) { try { & powercfg /delete $KitScheme 2>$null | Out-Null } catch {} }
-  return Active-Scheme
-}
-
-function Unclamp {
-  Need-Job
-  $active = Restore-Power (Read-State)
-  Out-Result ([ordered]@{ action = "unclamp"; job = $Job; activeScheme = $active })
 }
 
 # Stop a job and remove what it left, power untouched: the stop file
@@ -387,40 +303,28 @@ function Stop-KitJob([string]$jd) {
   $still = @(Job-Processes $jd | ForEach-Object { [ordered]@{ pid = $_.ProcessId; name = $_.Name } })
   if ($still.Count) { $warn += "processes of the job still running: $(($still | ForEach-Object { "$($_.name) $($_.pid)" }) -join ', ')" }
   if (Get-ScheduledTask -TaskPath $TaskPath -TaskName $Job -ErrorAction SilentlyContinue) { Unregister-ScheduledTask -TaskPath $TaskPath -TaskName $Job -Confirm:$false }
-  # the job's TEMP: deleted as the user, never by this elevated session
+  # the job's TEMP (this account's own files; never elevated)
   $tmp = Join-Path $jd "tmp"
-  if (Test-Path -LiteralPath $tmp) {
-    try { if (-not (Purge-AsUser $Job "tmp")) { $warn += "job tmp left (the purge task could not run: nobody logged on?); user data under jobs\$Job, harmless" } } catch { $warn += "purge task failed: $_" }
-  }
+  try { Remove-Tree $tmp } catch { $warn += "job tmp not fully removed: $_" }
   return [ordered]@{ killed = @($killed | Select-Object -Unique); still = $still; tmpLeft = (Test-Path -LiteralPath $tmp); warnings = $warn }
 }
 
 function Cleanup {
   Need-Job
   $r = Stop-KitJob (Job-Dir)
-  Out-Result ([ordered]@{ action = "cleanup"; job = $Job; killed = $r.killed; jobProcesses = $r.still; jobTmp = $r.tmpLeft; warnings = $r.warnings })
+  Out-Result ([ordered]@{ action = "cleanup"; job = $Job; killed = $r.killed; jobProcesses = $r.still; jobTmp = $r.tmpLeft; warnings = $r.warnings; power = (Power-State); tasks = @(Kit-Tasks); kitProcesses = @(Kit-Processes) })
 }
 
-function Restore {
-  Need-Job
-  $state = $null; $warn = @()
-  try { $state = Read-State } catch { $warn += "no snapshot: the Balanced scheme is activated if the kit's was active" }
-  $r = Stop-KitJob (Job-Dir)
-  $warn += $r.warnings
-  if (Get-ScheduledTask -TaskPath $TaskPath -TaskName "restore-$Job" -ErrorAction SilentlyContinue) { Unregister-ScheduledTask -TaskPath $TaskPath -TaskName "restore-$Job" -Confirm:$false }
-  if ($state -or (Active-Scheme) -eq $KitScheme -or (All-Schemes | Where-Object { $_ -eq $KitScheme })) { $active = Restore-Power $state } else { $active = Active-Scheme }
-  $after = [ordered]@{
-    activeScheme = $active; schemes = @(All-Schemes); processor = Processor-Settings $active
-    tasks = @(Get-ScheduledTask -TaskPath $TaskPath -ErrorAction SilentlyContinue | ForEach-Object { $_.TaskName })
-    kitProcesses = @(Kit-Processes); jobProcesses = $r.still; jobTmp = $r.tmpLeft
-  }
-  Out-Result ([ordered]@{ action = "restore"; job = $Job; before = $state; after = $after; killed = $r.killed; warnings = $warn })
+# The power state as this account reads it (the admin commands change it).
+function Power-State {
+  $active = Active-Scheme
+  [ordered]@{ activeScheme = $active; schemes = @(All-Schemes); processor = Processor-Settings $active; kitScheme = $(if (All-Schemes | Where-Object { $_ -eq $KitScheme }) { Processor-Settings $KitScheme } else { $null }) }
 }
+function Kit-Tasks { @(Get-ScheduledTask -TaskPath $TaskPath -ErrorAction SilentlyContinue | ForEach-Object { [string]$_.TaskName }) }
 
 # A folder deleted without ever following a reparse point (junction,
 # symlink): such an entry is removed itself, never what it points to.
-# Remove-Item -Recurse in 5.1 can follow a junction planted in a writable
-# folder and, run elevated, delete elsewhere.
+# Remove-Item -Recurse in 5.1 can follow a junction.
 function Remove-Tree([string]$dir) {
   $item = Get-Item -LiteralPath $dir -Force -ErrorAction SilentlyContinue
   if (-not $item) { return }
@@ -498,32 +402,6 @@ function Is-UsersKitProcess($cim) {
   try { $o = Invoke-CimMethod -InputObject $cim -MethodName GetOwner -ErrorAction Stop } catch { return $false }
   return ($o.ReturnValue -eq 0 -and $o.User -eq $env:USERNAME -and $o.Domain -eq $env:USERDOMAIN)
 }
-# The job's TEMP (or its whole folder), deleted as the user by a
-# non-elevated task; waited for (60 s), then the task removed. False when it
-# could not run (nobody logged on): the folder stays, user data, harmless.
-function Purge-AsUser([string]$jobName, [string]$scope) {
-  $name = "purge-$jobName"
-  $arg = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$PSCommandPath`" -Action purge -Job $jobName -Scope $scope -KitDir `"$KitDir`""
-  $act = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $arg
-  $prin = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
-  Register-ScheduledTask -TaskPath $TaskPath -TaskName $name -Action $act -Principal $prin -Force | Out-Null
-  $target = Join-Path (Join-Path $KitDir "jobs") $jobName
-  if ($scope -eq "tmp") { $target = Join-Path $target "tmp" }
-  try {
-    Start-ScheduledTask -TaskPath $TaskPath -TaskName $name
-    for ($i = 0; $i -lt 60 -and (Test-Path -LiteralPath $target); $i++) { Start-Sleep 1 }
-  } finally {
-    if (Get-ScheduledTask -TaskPath $TaskPath -TaskName $name -ErrorAction SilentlyContinue) { Unregister-ScheduledTask -TaskPath $TaskPath -TaskName $name -Confirm:$false }
-  }
-  return -not (Test-Path -LiteralPath $target)
-}
-# -Action purge: run by Purge-AsUser's task, as the user (not elevated).
-function Purge {
-  Need-Job
-  $jd = Job-Dir
-  if ($Scope -eq "tmp") { Remove-Tree (Join-Path $jd "tmp") } else { Remove-Tree $jd }
-}
-
 function Start-Job-Task {
   Need-Job
   $jd = Job-Dir
@@ -631,11 +509,8 @@ function Inner {
     "[$((Get-Date).ToString('o'))] inner failed: $_" | Out-File -LiteralPath $log -Append -Encoding UTF8
     $code = 99
   } finally {
-    # this task runs as the user: it deletes its own TEMP (never an elevated session)
+    # its own TEMP, deleted by the job itself
     try { Remove-Tree (Join-Path $jd "tmp") } catch { "tmp not removed: $_" | Out-File -LiteralPath $log -Append -Encoding UTF8 }
-    if ($spec -and $spec.restoreAtEnd) {
-      try { $a = Restore-Power (Read-State); "[$((Get-Date).ToString('o'))] power restored: $a" | Out-File -LiteralPath $log -Append -Encoding UTF8 } catch { "power restore failed: $_" | Out-File -LiteralPath $log -Append -Encoding UTF8 }
-    }
     "$code" | Set-Content -LiteralPath (Join-Path $jd "exit")
   }
 }
@@ -666,23 +541,15 @@ function Sampler {
   }
 }
 
-# C:\salon-kit and the \SalonKit\ task folder gone; refused while a job or a
-# clamp is on.
+# $KitDir and the \SalonKit\ task folder gone; refused while a job runs or
+# the kit's power scheme exists (pc-run restore first).
 function Uninstall {
-  $tasks = @(Get-ScheduledTask -TaskPath $TaskPath -ErrorAction SilentlyContinue | ForEach-Object { $_.TaskName })
+  $tasks = @(Kit-Tasks)
   if ($tasks.Count) { throw "kit tasks still registered ($($tasks -join ', ')): restore their jobs first" }
-  if ((Active-Scheme) -eq $KitScheme -or (All-Schemes | Where-Object { $_ -eq $KitScheme })) { throw "the kit's power scheme exists: restore first" }
+  if ((Active-Scheme) -eq $KitScheme -or (All-Schemes | Where-Object { $_ -eq $KitScheme })) { throw "the kit's power scheme exists: pc-run.mjs restore first" }
   $procs = @(Kit-Processes)
   if ($procs.Count) { throw "kit processes running: $(($procs | ForEach-Object { "$($_.name) $($_.pid)" }) -join ', ')" }
-  if ($KitDir -notmatch '^[A-Za-z]:\\salon-kit$') { throw "refused: -KitDir $KitDir is not <drive>:\salon-kit" }
-  # the job folders (user-writable) by the user's own purge task; this
-  # elevated session then deletes only what only administrators could write
-  $jobs = Join-Path $KitDir "jobs"
-  foreach ($j in @(Get-ChildItem -LiteralPath $jobs -Force -ErrorAction SilentlyContinue)) {
-    if ($j.Name -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$') { throw "unexpected entry in jobs: $($j.Name)" }
-    if (-not (Purge-AsUser $j.Name "all")) { throw "jobs\$($j.Name) could not be removed as the user (log on at the PC and retry)" }
-  }
-  if (Test-Path -LiteralPath $jobs) { [IO.Directory]::Delete($jobs, $false) }
+  if ((Split-Path -Leaf $KitDir) -ne "salon-kit") { throw "refused: -KitDir $KitDir is not a salon-kit folder" }
   try { $svc = New-Object -ComObject Schedule.Service; $svc.Connect(); $svc.GetFolder("\").DeleteFolder("SalonKit", 0) } catch {}
   Remove-Tree $KitDir
   Out-Result ([ordered]@{ action = "uninstall"; kitDir = $KitDir; removed = -not (Test-Path -LiteralPath $KitDir) })
@@ -691,16 +558,13 @@ function Uninstall {
 switch ($Action) {
   "check" { Check }
   "snapshot" { Snapshot }
-  "clamp" { Clamp }
-  "unclamp" { Unclamp }
-  "restore" { Restore }
+  "power" { Out-Result ([ordered]@{ action = "power"; power = (Power-State); tasks = @(Kit-Tasks) }) }
   "start" { Start-Job-Task }
   "status" { Status }
   "inner" { Inner }
   "sampler" { Sampler }
   "uninstall" { Uninstall }
   "cleanup" { Cleanup }
-  "purge" { Purge }
   "stat" { $i = Get-Item -LiteralPath $Path -ErrorAction SilentlyContinue; Out-Result ([ordered]@{ action = "stat"; path = $Path; exists = [bool]$i; bytes = $(if ($i) { $i.Length } else { $null }) }) }
   "affinity" { Out-Result ([ordered]@{ action = "affinity"; coreMap = @(Core-Map); classAffinity = (Class-Affinity $Cores) }) }
 }

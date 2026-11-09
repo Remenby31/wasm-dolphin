@@ -22,7 +22,7 @@ import { parseWin32Battery } from "../harness/lib/system.mjs";
 import { buildKernel, reference, SHAPES } from "../harness/lib/wasm-kernel.mjs";
 import { benchScore, classifyJit, summarizeCalls, summarizeRuns } from "../harness/probes/pc-bench.mjs";
 import {
-  aclSafe, assertSendable, benchHold, calibrationTarget, jobDirScript, ownScript, secureKitScript, stepWindows, versionOutliers, encodePs, gb6Of, j1bTable, KIT_SCHEME, kitCommand, knobIneffective, nextProbe, parseKitJson, preflight, restoreDiff, samplerVerdict
+  ADMIN, ADMIN_PATTERNS, assertAdmin, assertSendable, benchHold, calibrationTarget, setKitDir, stepWindows, versionOutliers, encodePs, gb6Of, j1bTable, KIT_SCHEME, kitCommand, knobIneffective, nextProbe, parseKitJson, preflight, restoreDiff, samplerVerdict
 } from "../harness/lib/pc-kit.mjs";
 import { calibrate } from "../harness/remote/pc-win/pc-calibrate.mjs";
 import { assertFitsTask, benchFindings, benchSteps, calibrateFromMac, clampOf, jobReport, jobSpec, parcoursSteps, runJob, simulatedPc } from "../harness/remote/pc-run.mjs";
@@ -89,32 +89,50 @@ test("pc-kit: Windows power source from Win32_Battery", () => {
 });
 
 test("pc-kit: remote commands are encoded PowerShell, results read back", () => {
-  const c = kitCommand("clamp", { Job: "j1", MaxMhz: 4300.7, Path: "C:\\it's here" });
+  setKitDir("C:\\Users\\salonkit\\salon-kit");
+  const c = kitCommand("status", { Job: "j1", Cores: 6.7, Path: "C:\\it's here" });
+  assert.match(c, /^C:\\Windows\\System32\\WindowsPowerShell\\v1\.0\\powershell\.exe -NoProfile /, "PowerShell by its absolute path");
   const b64 = /-EncodedCommand (\S+)$/.exec(c)[1];
   assert.match(b64, /^[A-Za-z0-9+/=]+$/, "nothing for cmd.exe or ssh to reinterpret");
-  assert.equal(Buffer.from(b64, "base64").toString("utf16le"), "& 'C:\\salon-kit\\salon-pc.ps1' -Action 'clamp' -Job 'j1' -MaxMhz 4300 -Path 'C:\\it''s here'");
+  assert.equal(Buffer.from(b64, "base64").toString("utf16le"), "& 'C:\\Users\\salonkit\\salon-kit\\salon-pc.ps1' -Action 'status' -Job 'j1' -Cores 6 -Path 'C:\\it''s here'");
   assert.equal(Buffer.from(encodePs("é"), "base64").toString("utf16le"), "é");
   assert.throws(() => kitCommand("check", { "Bad;Name": 1 }), /bad parameter/);
-  const g = Buffer.from(/-EncodedCommand (\S+)$/.exec(kitCommand("restore", { Job: "j" }, { sha256: "ab".repeat(32) }))[1], "base64").toString("utf16le");
-  assert.match(g, /^\$f = 'C:\\salon-kit\\salon-pc\.ps1'; if \(\(Get-FileHash -LiteralPath \$f -Algorithm SHA256\)\.Hash -ne 'ABAB/, "the PC's script is checked before an elevated run");
+  const g = Buffer.from(/-EncodedCommand (\S+)$/.exec(kitCommand("cleanup", { Job: "j" }, { sha256: "ab".repeat(32) }))[1], "base64").toString("utf16le");
+  assert.match(g, /^\$f = 'C:\\Users\\salonkit\\salon-kit\\salon-pc\.ps1'; if \(\(Get-FileHash -LiteralPath \$f -Algorithm SHA256\)\.Hash -ne 'ABAB/, "the PC's script is the one sent");
   assert.throws(() => kitCommand("check", {}, { sha256: "x" }), /bad sha256/);
-  const sec = secureKitScript();
-  assert.match(sec, /^\$ErrorActionPreference = 'Stop'/, "a failure throws: the ssh call fails, nothing is copied");
-  assert.match(sec, /CreateDirectory\(\$d, \$acl\)/, "created atomically with its ACL");
-  assert.match(sec, /SetAccessRuleProtection\(\$true, \$false\).*SetOwner\(\$adm\).*ReadAndExecute/s);
-  assert.match(sec, /is not the kit's own.*remove it by hand/s, "a pre-existing folder that fails the check is refused, never repaired");
-  assert.doesNotMatch(sec, /\/reset|\/T /, "no recursive icacls over a tree that may hold the user's junctions");
-  assert.match(ownScript(["C:\\salon-kit\\node"]), /setowner '\*S-1-5-32-544' \/T/);
-  assert.throws(() => ownScript(["C:\\salon-kit\\jobs\\j1"]), /not an admin-only kit path/, "never on the user's jobs");
-  assert.throws(() => ownScript(["C:\\Windows"]), /not an admin-only kit path/);
-  assert.match(jobDirScript("C:\\salon-kit\\jobs\\j1"), /a job id is used once.*\(OI\)\(CI\)M/s);
-  assert.equal(aclSafe({ protected: true, ownerSid: "S-1-5-32-544", writers: ["S-1-5-32-544", "S-1-5-18"] }), true);
-  assert.equal(aclSafe({ protected: true, ownerSid: "S-1-5-21-1-2-3-1001", writers: ["S-1-5-32-544"] }), false, "owned by a user account: it could rewrite the ACL");
-  assert.equal(aclSafe({ protected: false, ownerSid: "S-1-5-32-544", writers: ["S-1-5-32-544"] }), false, "inherited from C:\\: Authenticated Users may write");
-  assert.equal(aclSafe({ protected: true, ownerSid: "S-1-5-32-544", writers: ["S-1-5-32-544", "S-1-5-11"] }), false);
-  assert.equal(aclSafe(null), false);
+  assert.throws(() => setKitDir("C:\\Users\\x\\other"), /expected/);
+  assert.throws(() => setKitDir("C:\\Users\\a&b\\salon-kit"), /expected/);
   assert.deepEqual(parseKitJson('noise\r\nSALONKIT-JSON {"a":1}\r\nSALONKIT-JSON {"a":2}\r\n'), { a: 2 });
   assert.equal(parseKitJson("nothing"), null);
+});
+
+test("pc-kit: the administrator's commands are a closed list of fixed lines", () => {
+  const o = "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c";
+  const all = [ADMIN.getActive(), ADMIN.duplicate(o), ADMIN.rename(), ADMIN.setIndex("ac", "PROCFREQMAX", 4300), ADMIN.setIndex("dc", "PERFBOOSTMODE", 0),
+    ADMIN.activateKit(), ADMIN.activate(o), ADMIN.deleteKit(), ADMIN.bootTask(o), ADMIN.queryBootTask(), ADMIN.deleteBootTask()];
+  for (const l of all) {
+    assert.equal(assertAdmin(l), l);
+    assert.match(l, /^C:\\Windows\\System32\\(powercfg|schtasks)\.exe /, "absolute path, one of two executables");
+    assert.doesNotMatch(l.replace(/\/tr ".*"$/, ""), /[&|<>^%"']/, "no shell metacharacter outside the boot task's /tr");
+  }
+  const tr = /\/tr "(.*)"$/.exec(ADMIN.bootTask(o))[1];
+  assert.ok(tr.length <= 261, `schtasks /tr ${tr.length} <= 261`);
+  assert.match(tr, /^C:\\Windows\\System32\\cmd\.exe \/d \/c /, "the boot task's cmd without AutoRun");
+  assert.match(ADMIN.bootTask(o), / \/sc onstart \/ru SYSTEM /, "at startup, as SYSTEM: no user file, no user profile");
+  // refused: anything not of the list, whatever the reason
+  for (const bad of [
+    "powercfg /setactive " + o,                                         // not by absolute path
+    ADMIN.activate(o) + " & calc",                                       // a second command
+    "C:\\Windows\\System32\\powercfg.exe /delete " + o,                  // delete a user's scheme
+    "C:\\Windows\\System32\\powercfg.exe /setactive 8C5E7FDA-E8BF-4A96-9A85-A6E23A8C635C x",
+    "C:\\Windows\\System32\\cmd.exe /c whoami",
+    "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -c x",
+    ADMIN.bootTask(o).replace("/sc onstart", "/sc onlogon")
+  ]) assert.throws(() => assertAdmin(bad), /refused/, bad);
+  for (const bad of ["x & calc", "8c5e7fda", "../../x"]) assert.throws(() => ADMIN.activate(bad), /not a GUID/);
+  assert.throws(() => ADMIN.setIndex("ac", "SOMETHING", 1), /unknown setting/);
+  assert.throws(() => ADMIN.setIndex("ac", "PROCFREQMAX", -1), /not an integer/);
+  assert.equal(ADMIN_PATTERNS.length, 9, "nine line shapes; adding one is a review");
 });
 
 test("pc-kit: no disc image is ever sent, homebrews are", () => {
@@ -198,8 +216,9 @@ test("pc-kit: the preflight blocks on each Windows trap it can see", () => {
   assert.deepEqual(blocked((c) => { c.browsers.edge = null; }), ["browser-msedge"]);
   assert.deepEqual(blocked((c) => { c.browsers.edge = null; }, { browsers: ["chrome"] }), [], "Edge not asked");
   assert.deepEqual(blocked((c) => { c.power.kitSchemeActive = true; }), ["kit-scheme-not-left"]);
-  assert.deepEqual(blocked((c) => { c.session.elevated = false; }), ["elevated"], "a standard account cannot clamp");
-  assert.deepEqual(blocked((c) => { c.kit.acl = { protected: false, writers: ["S-1-5-11"] }; }), ["kit-acl"], "a kit folder others may write is never run elevated");
+  assert.deepEqual(blocked((c) => { c.session.elevated = true; }), ["kit-not-elevated"], "the kit's account must be a standard one");
+  assert.deepEqual(blocked((c) => { c.sshd.defaultShellCommandOption = "/c"; }), ["sshd-shell"], "cmd without /d runs HKCU AutoRun before an admin command");
+  assert.deepEqual(blocked((c) => { c.sshd = {}; }), ["sshd-shell"]);
   assert.deepEqual(blocked((c) => { c.policies.chromeMachine = { DefaultJavaScriptOptimizerSetting: 2 }; }), ["chrome-jit-policy"]);
   assert.deepEqual(blocked((c) => { c.classAffinity = { error: "only 4 cores of the fastest class (asked 6)" }; }), ["class-affinity"]);
   const warns = (mut) => { const c = structuredClone(base); mut(c); return preflight(c).warnings.map((b) => b.id); };
@@ -235,10 +254,10 @@ test("pc-kit: sampler contamination and the J1b table", () => {
 
 test("pc-kit: restore diff", () => {
   const before = { activeScheme: "a", schemes: ["a", "b"], processor: { X: { ac: 0 } }, tasks: [] };
-  assert.deepEqual(restoreDiff(before, structuredClone(before), "j"), []);
-  const d = restoreDiff(before, { activeScheme: KIT_SCHEME, schemes: ["a", "b", KIT_SCHEME], processor: { X: { ac: 1 } }, tasks: ["j", "restore-j"], jobProcesses: [{ name: "msedge.exe", pid: 9 }], kitProcesses: [{ name: "node.exe", pid: 8 }], jobTmp: true }, "j");
+  assert.deepEqual(restoreDiff(before, { power: structuredClone(before), tasks: [], bootTask: false }, "j"), []);
+  const d = restoreDiff(before, { power: { activeScheme: KIT_SCHEME, schemes: ["a", "b", KIT_SCHEME], processor: { X: { ac: 1 } } }, tasks: ["j"], bootTask: true, jobProcesses: [{ name: "msedge.exe", pid: 9 }], kitProcesses: [{ name: "node.exe", pid: 8 }], jobTmp: true }, "j");
   assert.equal(d.length, 9);
-  assert.match(d.join(), /restore-j still registered.*msedge\.exe 9.*node\.exe 8.*TEMP/);
+  assert.match(d.join(), /SalonKit.j still registered.*boot task.*msedge\.exe 9.*node\.exe 8.*TEMP/);
 });
 
 test("pc-run: steps interleave runs, browsers and scenes; clamps are explicit", () => {
@@ -252,7 +271,6 @@ test("pc-run: steps interleave runs, browsers and scenes; clamps are explicit", 
   assert.throws(() => assertFitsTask(parcoursSteps({ jobDir: "j", iso: "i", films: { a: "a", b: "b" }, browsers: ["chrome", "msedge"], runs: 6, query: "q", engineDir: "e" })), /split the series/);
   const spec = jobSpec({ harnessDir: "C:\\k\\trees\\h", steps: s, affinity: "0xfff" });
   assert.equal(spec.env.HARNESS_DISPLAY, "windows");
-  assert.equal(spec.restoreAtEnd, true);
   assert.ok(spec.steps.every((x) => typeof x.continueOnError === "boolean" && x.env), "every field present (salon-pc.ps1 runs under StrictMode)");
   assert.throws(() => clampOf({}), /say which clamp/);
   assert.equal(clampOf({ "no-clamp": true }), null);
@@ -264,20 +282,24 @@ test("pc-run: a job against a simulated PC restores the machine, even when it fa
   try {
     const pc = simulatedPc({ log: quiet });
     const before = structuredClone(pc.state);
-    const rec = await runJob(pc, { job: "t1", steps: [{ name: "x", args: ["a.mjs"] }], affinity: "0xfff", clamp: { maxMhz: 4300 }, outDir: dir, harnessDir: "C:\\k", poll: 0, log: quiet });
+    const rec = await runJob(pc, { a: pc, job: "t1", steps: [{ name: "x", args: ["a.mjs"] }], affinity: "0xfff", clamp: { maxMhz: 4300 }, outDir: dir, harnessDir: "C:\\k", poll: 0, log: quiet });
     assert.deepEqual(rec.restore.diff, []);
     assert.equal(pc.state.active, before.active);
     assert.deepEqual(pc.state.schemes, before.schemes);
     assert.deepEqual(pc.state.tasks, []);
+    assert.equal(pc.state.bootTask, false);
+    assert.ok(pc.calls.filter((x) => x.kind === "ssh").every((x) => !/powercfg \/(set|dup|delete)|Register-ScheduledTask.*Highest/i.test(x.script)), "the standard account never writes power settings");
     const spec = JSON.parse(readFileSync(path.join(dir, "t1", "spec.json"), "utf8"));
     assert.equal(spec.affinity, "0xfff");
     // the task cannot start: the clamp is undone all the same
     const broken = simulatedPc({ log: quiet });
     const ssh = broken.ssh.bind(broken);
     broken.ssh = (c) => (/-Action 'start'/.test(Buffer.from(/-EncodedCommand (\S+)/.exec(c)?.[1] ?? "", "base64").toString("utf16le")) ? (() => { throw new Error("start refused"); })() : ssh(c));
-    await assert.rejects(runJob(broken, { job: "t2", steps: [], affinity: null, clamp: { maxMhz: 4000 }, outDir: dir, harnessDir: "C:\\k", poll: 0, log: quiet }), /start refused/);
+    await assert.rejects(runJob(broken, { a: broken, job: "t2", steps: [], affinity: null, clamp: { maxMhz: 4000 }, outDir: dir, harnessDir: "C:\\k", poll: 0, log: quiet }), /start refused/);
     assert.equal(broken.state.active, before.active);
     assert.ok(!broken.state.schemes.includes(KIT_SCHEME));
+    assert.equal(broken.state.bootTask, false, "the boot task removed too");
+    assert.ok(broken.state.admin.every((l) => assertAdmin(l)), "every admin line of the list");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -290,7 +312,7 @@ test("pc-run: a dead task, or polls failing in a row, end the job and restore it
     const dead = simulatedPc({ log: quiet });
     const ssh = dead.ssh.bind(dead);
     dead.ssh = (c) => (/-Action 'status'/.test(script(c)) ? { status: 0, out: 'SALONKIT-JSON {"state":"dead","exit":null,"logTail":[]}', err: "" } : ssh(c));
-    await assert.rejects(runJob(dead, { job: "d1", steps: [{ name: "x", args: [] }], affinity: null, clamp: { maxMhz: 4000 }, outDir: dir, harnessDir: "C:\\k", poll: 0, log: quiet }), /stopped without an exit/);
+    await assert.rejects(runJob(dead, { a: dead, job: "d1", steps: [{ name: "x", args: [] }], affinity: null, clamp: { maxMhz: 4000 }, outDir: dir, harnessDir: "C:\\k", poll: 0, log: quiet }), /stopped without an exit/);
     assert.ok(!dead.state.schemes.includes(KIT_SCHEME), "restored");
     const flaky = simulatedPc({ log: quiet });
     const ssh2 = flaky.ssh.bind(flaky);
@@ -307,19 +329,21 @@ test("pc-run: a dead task, or polls failing in a row, end the job and restore it
   }
 });
 
-test("pc-run: the calibration runs from the Mac (elevated clamp), each probe a bench job, and restores", async () => {
+test("pc-run: the calibration runs from the Mac (clamp by the admin list), each probe a bench job, and restores", async () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "pc-kit-cal-"));
   try {
     const pc = simulatedPc({ log: quiet });
     const before = structuredClone(pc.state);
-    const f = await calibrateFromMac(pc, { job: "cal1", browser: "chrome", engineDir: "C:\\salon-kit\\trees\\e", hostGb6: 2983, turboMhz: 5800, affinity: "0xfff", outDir: dir, harnessDir: "C:\\k", poll: 0, log: quiet });
+    const f = await calibrateFromMac(pc, { a: pc, job: "cal1", browser: "chrome", engineDir: "C:\\salon-kit\\trees\\e", hostGb6: 2983, turboMhz: 5800, affinity: "0xfff", outDir: dir, harnessDir: "C:\\k", poll: 0, log: quiet });
     const c = JSON.parse(readFileSync(f, "utf8"));
     assert.ok(c.chosen.maxMhz > 4100 && c.chosen.maxMhz < 4450, `chose ${c.chosen.maxMhz}`);
     assert.ok(c.errPct <= 2);
     const scripts = pc.calls.filter((x) => x.kind === "ssh").map((x) => x.script);
-    assert.ok(scripts.filter((x) => /-Action 'clamp' -Job 'cal1'/.test(x)).length >= 2, "the clamp goes through the elevated ssh session");
+    const adminLines = pc.calls.filter((x) => x.kind === "admin").map((x) => x.command);
+    assert.ok(adminLines.filter((x) => /\/setactive 5a10c0de/.test(x)).length >= 2, "the clamp goes through the admin list");
+    assert.ok(adminLines.every((x) => assertAdmin(x)));
     assert.ok(scripts.some((x) => /-Action 'start' -Job 'cal1-b1'/.test(x)) && scripts.some((x) => /-Action 'cleanup' -Job 'cal1-b1'/.test(x)), "each probe a job of its own, cleaned up");
-    assert.ok(scripts.filter((x) => /-Action/.test(x)).every((x) => /Get-FileHash/.test(x)), "every call checks the script's hash");
+    assert.ok(scripts.filter((x) => /-Action/.test(x)).every((x) => /Get-FileHash/.test(x)), "every kit call checks the script's hash");
     assert.equal(pc.state.active, before.active);
     assert.deepEqual(pc.state.tasks, []);
   } finally {
@@ -332,13 +356,13 @@ test("pc-run: the whole flow in --dry-run (no connection)", () => {
   try {
     const film = path.join(dir, "f.json");
     writeFileSync(film, "{}");
-    const r = spawnSync(process.execPath, ["harness/remote/pc-run.mjs", "run", "--host", "pc", "--dry-run", "--out", path.join(dir, "out"), "--iso", "C:\\d\\g.iso", "--film", `1p=${film}`, "--clamp-mhz", "4300", "--runs", "1", "--job", "dry", "--engine", "HEAD"], { cwd: ROOT, encoding: "utf8", env: { ...process.env, CLAUDE_JOB_DIR: "" } });
+    const r = spawnSync(process.execPath, ["harness/remote/pc-run.mjs", "run", "--host", "salonkit@pc", "--admin-host", "admin@pc", "--dry-run", "--out", path.join(dir, "out"), "--iso", "C:\\d\\g.iso", "--film", `1p=${film}`, "--clamp-mhz", "4300", "--runs", "1", "--job", "dry", "--engine", "HEAD"], { cwd: ROOT, encoding: "utf8", env: { ...process.env, CLAUDE_JOB_DIR: "" } });
     assert.equal(r.status, 0, r.stderr);
-    assert.match(r.stderr, /-Action 'clamp' -Job 'dry' -MaxMhz 4300/);
-    assert.match(r.stderr, /-Action 'restore' -Job 'dry'/);
+    assert.match(r.stderr, /admin: C:\\Windows\\System32\\powercfg\.exe \/setacvalueindex 5a10c0de\S+ \S+ 75b0ae3f-bce0-45a7-8c89-c9611c25e100 4300/);
+    assert.match(r.stderr, /admin: C:\\Windows\\System32\\schtasks\.exe \/delete \/tn SalonKitRestore \/f/);
     assert.match(r.stderr, /machine restored/);
     assert.doesNotMatch(r.stderr, /scp \S+\.iso/i, "no disc sent");
-    const bad = spawnSync(process.execPath, ["harness/remote/pc-run.mjs", "run", "--host", "pc", "--dry-run", "--out", path.join(dir, "out"), "--iso", "/Users/x/g.iso", "--film", film, "--no-clamp"], { cwd: ROOT, encoding: "utf8" });
+    const bad = spawnSync(process.execPath, ["harness/remote/pc-run.mjs", "run", "--host", "salonkit@pc", "--admin-host", "admin@pc", "--dry-run", "--out", path.join(dir, "out"), "--iso", "/Users/x/g.iso", "--film", film, "--no-clamp"], { cwd: ROOT, encoding: "utf8" });
     assert.notEqual(bad.status, 0);
     assert.match(bad.stderr, /a Windows path on the PC/);
   } finally {
@@ -347,60 +371,40 @@ test("pc-run: the whole flow in --dry-run (no connection)", () => {
 });
 
 // salon-pc.ps1 under pwsh, powercfg and the task cmdlets mocked: the
-// snapshot / clamp / restore round trip and the scheme it creates.
+// standard account's side. It reads the power state and never writes it.
 const PWSH = process.env.PWSH || "pwsh";
 const hasPwsh = spawnSync(PWSH, ["-NoProfile", "-Command", "1"], { encoding: "utf8" }).status === 0;
-test("pc-kit: salon-pc.ps1 snapshot, clamp, restore with powercfg mocked", { skip: hasPwsh ? false : "no pwsh" }, () => {
+test("pc-kit: salon-pc.ps1 (standard account) snapshot, power, cleanup, status with powercfg mocked", { skip: hasPwsh ? false : "no pwsh" }, () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "pc-kit-ps-"));
   try {
     const harness = `
 $ErrorActionPreference = 'Stop'
-$global:pc = @{ active = '381b4222-f694-41f0-9685-ff5bb260df2e'; schemes = [System.Collections.ArrayList]@('381b4222-f694-41f0-9685-ff5bb260df2e', '8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c'); v = @{}; log = [System.Collections.ArrayList]@() }
-$global:defaults = @{ 'bc5038f7-23e0-4960-96da-33abaf5935ec' = 100; 'be337238-0d82-4146-a960-4f3749d470c7' = 2; '75b0ae3f-bce0-45a7-8c89-c9611c25e100' = 0 }
+$global:pc = @{ active = '381b4222-f694-41f0-9685-ff5bb260df2e'; schemes = [System.Collections.ArrayList]@('381b4222-f694-41f0-9685-ff5bb260df2e', '8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c'); log = [System.Collections.ArrayList]@() }
 function global:powercfg {
   $a = @($args); [void]$global:pc.log.Add(($a -join ' ')); $global:LASTEXITCODE = 0
   switch ($a[0]) {
     '/getactivescheme' { "Power Scheme GUID: $($global:pc.active)  (Mock)" }
     '/list' { 'Existing Power Schemes'; foreach ($s in $global:pc.schemes) { "Power Scheme GUID: $s  (Mock)" } }
-    '/duplicatescheme' { [void]$global:pc.schemes.Add($a[2]); foreach ($k in @($global:pc.v.Keys)) { if ($k.StartsWith($a[1])) { $global:pc.v[$k.Replace($a[1], $a[2])] = $global:pc.v[$k].Clone() } } }
-    '/changename' { }
-    '/setactive' { $global:pc.active = $a[1] }
-    '/delete' { $global:pc.schemes.Remove($a[1]) }
     { $_ -in '/qh', '/query' } {
       if ($a[3] -notmatch '^(bc5038f7|be337238|75b0ae3f)' -or $a[3] -match 'e101$|5ed$') { $global:LASTEXITCODE = 1; return }
-      $k = "$($a[1])|$($a[3])"; $d = $global:defaults[$a[3]]; $cur = $global:pc.v[$k]; if (-not $cur) { $cur = @{ ac = $d; dc = $d } }
       "    Power Setting GUID: $($a[3])"; '      Minimum Possible Setting: 0x00000000'; '      Maximum Possible Setting: 0x00000064'
-      ('    Current AC Power Setting Index: 0x{0:x8}' -f $cur.ac); ('    Current DC Power Setting Index: 0x{0:x8}' -f $cur.dc)
+      '    Current AC Power Setting Index: 0x00000064'; '    Current DC Power Setting Index: 0x00000064'
     }
-    { $_ -in '/setacvalueindex', '/setdcvalueindex' } {
-      if ($a[3] -match 'e101$|5ed$') { $global:LASTEXITCODE = 1; return }
-      $k = "$($a[1])|$($a[3])"; if (-not $global:pc.v[$k]) { $d = $global:defaults[$a[3]]; $global:pc.v[$k] = @{ ac = $d; dc = $d } }
-      if ($a[0] -eq '/setacvalueindex') { $global:pc.v[$k].ac = [int]$a[4] } else { $global:pc.v[$k].dc = [int]$a[4] }
-    }
+    default { $global:LASTEXITCODE = 1 }
   }
 }
 $global:tasks = [System.Collections.ArrayList]@()
 function global:Get-ScheduledTask { param($TaskPath, $TaskName, $ErrorAction) @($global:tasks | Where-Object { -not $TaskName -or $_ -eq $TaskName } | ForEach-Object { [pscustomobject]@{ TaskName = $_; State = 'Ready' } }) }
 function global:Unregister-ScheduledTask { param($TaskPath, $TaskName, $Confirm) $global:tasks.Remove($TaskName) }
-function global:Register-ScheduledTask { param($TaskPath, $TaskName, $Action, $Trigger, $Principal, $Settings, [switch]$Force) if (-not $global:tasks.Contains($TaskName)) { [void]$global:tasks.Add($TaskName) } }
 function global:Stop-ScheduledTask { param($TaskPath, $TaskName, $ErrorAction) }
-function global:Start-ScheduledTask { param($TaskPath, $TaskName) if ($TaskName -like 'purge-*') { & $global:kitScript -Action purge -Job ($TaskName -replace '^purge-', '') -Scope tmp -KitDir $global:kitDir } }
-function global:New-ScheduledTaskAction { param($Execute, $Argument, $WorkingDirectory) 'action' }
-function global:New-ScheduledTaskTrigger { param([switch]$AtLogOn, $User) 'trigger' }
-function global:New-ScheduledTaskPrincipal { param($UserId, $LogonType, $RunLevel) 'principal' }
 function global:Get-CimInstance { param($ClassName, $Filter, $ErrorAction) @() }
-function global:icacls.exe { $global:LASTEXITCODE = 0 }
-$env:SALONKIT_TEST_ELEVATED = '1'
 $s = '${path.join(ROOT, "harness", "remote", "pc-win", "salon-pc.ps1")}'
 $k = '${dir}'
-$global:kitScript = $s; $global:kitDir = $k
 & $s -Action snapshot -Job t1 -KitDir $k
-& $s -Action clamp -Job t1 -MaxMhz 4300 -KitDir $k
-"SALONKIT-JSON " + (@{ tasksWhileClamped = @($global:tasks) } | ConvertTo-Json -Compress)
+& $s -Action power -KitDir $k
 & $s -Action snapshot -Job t1 -KitDir $k
-& $s -Action restore -Job t1 -KitDir $k
-try { & $s -Action clamp -Job 't1;rm' -MaxMhz 4300 -KitDir $k } catch { "SALONKIT-JSON " + (@{ refused = "$_" } | ConvertTo-Json -Compress) }
-try { & $s -Action clamp -Job t9 -MaxMhz 4300 -KitDir $k } catch { "SALONKIT-JSON " + (@{ refused = "$_" } | ConvertTo-Json -Compress) }
+try { & $s -Action snapshot -Job 't1;rm' -KitDir $k } catch { "SALONKIT-JSON " + (@{ refused = "$_" } | ConvertTo-Json -Compress) }
+try { & $s -Action clamp -Job t1 -KitDir $k } catch { "SALONKIT-JSON " + (@{ refused = "$_" } | ConvertTo-Json -Compress) }
 # a link planted in a job's TEMP: cleanup removes the link, never its target
 $sentinel = Join-Path $k "sentinel"; New-Item -ItemType Directory -Force -Path $sentinel | Out-Null; Set-Content -LiteralPath (Join-Path $sentinel "keep.txt") -Value "keep"
 $t5 = Join-Path (Join-Path (Join-Path $k "jobs") "t5") "tmp"; New-Item -ItemType Directory -Force -Path $t5 | Out-Null
@@ -413,34 +417,27 @@ Set-Content -LiteralPath (Join-Path (Join-Path (Join-Path $k "jobs") "t3") "exit
 Set-Content -LiteralPath (Join-Path (Join-Path (Join-Path $k "jobs") "t4") "exit") -Value "0"
 & $s -Action status -Job t3 -KitDir $k
 & $s -Action status -Job t4 -KitDir $k
-"SALONKIT-JSON " + (@{ final = $global:pc.active; schemes = @($global:pc.schemes) } | ConvertTo-Json -Compress)
+"SALONKIT-JSON " + (@{ writes = @($global:pc.log | Where-Object { $_ -notmatch '^/(getactivescheme|list|qh|query)' }) } | ConvertTo-Json -Compress)
 `;
     const f = path.join(dir, "h.ps1");
     writeFileSync(f, harness);
     const r = spawnSync(PWSH, ["-NoProfile", "-File", f], { encoding: "utf8" });
     assert.equal(r.status, 0, r.stderr + r.stdout);
     const out = r.stdout.split(/\r?\n/).filter((l) => l.startsWith("SALONKIT-JSON ")).map((l) => JSON.parse(l.slice(14)));
-    const [snap, clamp, whileClamped, snap2, restore, badJob, noSnap, cleanup5, link, st3, st4, final] = out;
+    const [snap, power, snap2, badJob, noClamp, cleanup5, link, st3, st4, writes] = out;
+    assert.equal(snap.state.activeScheme, "381b4222-f694-41f0-9685-ff5bb260df2e");
+    assert.equal(snap.state.processor.PROCFREQMAX.ac, 100);
+    assert.equal(snap.state.processor.PROCFREQMAX1, null, "a setting this CPU lacks is null, not an error");
+    assert.equal(power.power.activeScheme, "381b4222-f694-41f0-9685-ff5bb260df2e");
+    assert.equal(power.power.kitScheme, null);
+    assert.equal(snap2.existing, true, "a second snapshot never replaces the first");
+    assert.match(badJob.refused, /-Job/);
+    assert.match(noClamp.refused, /clamp|ValidateSet|does not belong/i, "the script has no clamp action: the admin list does it");
     assert.equal(cleanup5.action, "cleanup");
     assert.deepEqual(link, { sentinelKept: true, tmpGone: true }, "a link in the job's TEMP is removed, its target untouched");
-    assert.deepEqual(whileClamped.tasksWhileClamped, ["restore-t1"], "the way back is registered with the clamp");
-    assert.deepEqual(restore.after.tasks, [], "and removed by restore");
     assert.deepEqual([st3.state, st3.exit], ["done", -1], "an empty exit file is done, exit unknown (-1), not a crash");
     assert.deepEqual([st4.state, st4.exit], ["done", 0]);
-    assert.equal(snap.state.activeScheme, "381b4222-f694-41f0-9685-ff5bb260df2e");
-    assert.equal(snap.state.processor.PROCFREQMAX.ac, 0);
-    assert.equal(snap.state.processor.PROCFREQMAX1, null, "a setting this CPU lacks is null, not an error");
-    assert.equal(clamp.scheme, KIT_SCHEME);
-    assert.equal(clamp.processor.PROCFREQMAX.ac, 4300);
-    assert.equal(clamp.processor.PROCFREQMAX.dc, 4300);
-    assert.equal(clamp.applied.PROCFREQMAX1, false);
-    assert.equal(snap2.existing, true, "a second snapshot never replaces the first");
-    assert.equal(snap2.state.activeScheme, "381b4222-f694-41f0-9685-ff5bb260df2e");
-    assert.deepEqual(restoreDiff(restore.before, restore.after, "t1"), []);
-    assert.match(badJob.refused, /-Job/);
-    assert.match(noSnap.refused, /no snapshot/);
-    assert.equal(final.final, "381b4222-f694-41f0-9685-ff5bb260df2e");
-    assert.deepEqual(final.schemes, ["381b4222-f694-41f0-9685-ff5bb260df2e", "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c"]);
+    assert.deepEqual(writes.writes, [], "the standard account's script never writes a power setting");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
