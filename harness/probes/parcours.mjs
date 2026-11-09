@@ -376,7 +376,7 @@ export function analyzeRaw(raw, { maxLoad, outDir = null, tag = null, filmPhases
 // (lib/parcours.mjs gamePauseSpans): printed next to it, every one.
 export function gamePausesText(g) {
   if (!g) return "game pauses unknown";
-  return `game pauses ${g.count}${g.count ? ` (${g.list.map((p) => `${p.durationMs} ms at ${p.t} s, film ${p.filmPos ?? "?"}`).join("; ")})` : ""}`;
+  return `game pauses ${g.count} in ${g.seconds} s${g.count ? ` (${g.list.map((p) => `${p.durationMs} ms at ${p.t} s, film ${p.filmPos ?? "?"}`).join("; ")})` : ""}`;
 }
 
 // The lines a person reads (pure).
@@ -390,9 +390,9 @@ export function humanSummary(summary) {
   }
   if (summary.verdict) {
     const v = summary.verdict;
-    for (const [k, ph] of Object.entries(v.phases)) if (k.startsWith("kind:") && ph.gamePauses) {
-      const side = (xs) => xs.map((x) => `${x.count ?? "?"} (${x.totalMs ?? "?"} ms)`).join(", ") || "none";
-      lines.push(`   ${k.slice(5).padEnd(9)} smooth p5 excludes the game's own pauses, by run: baseline ${side(ph.gamePauses.baseline)}; candidate ${side(ph.gamePauses.candidate)}`);
+    for (const [k, ph] of Object.entries(v.phases)) if (ph.gamePauses) {
+      const side = (xs) => xs.map((x) => (x.count == null ? "?" : `${x.count} in ${x.seconds} s${x.count ? ` [${x.list.map((p) => `${p.durationMs} ms at ${p.t} s film ${p.filmPos ?? "?"}`).join("; ")}]` : ""}`)).join(", ") || "none";
+      lines.push(`   ${k.padEnd(16)} game's own pauses (not counted in its smooth p5), by run: baseline ${side(ph.gamePauses.baseline)}; candidate ${side(ph.gamePauses.candidate)}`);
     }
     lines.push(`verdict (${v.usable.baseline} baseline, ${v.usable.candidate} candidate usable runs): ${v.regression ? `REGRESSION ${v.regressions.map((r) => `${r.where} ${r.metric} ${r.baseline} → ${r.candidate} (> ${r.threshold})`).join(", ")}` : v.inconclusive ? "NO VERDICT (a phase without enough runs)" : "no regression beyond the noise"}${v.improvement ? " (some improvement)" : ""}`);
   }

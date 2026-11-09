@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 
-import { analyzeRun, classifySecond, filmPhaseLabels, newFrameBins, gamePauseReference, gamePauseSpans, viBins, ANALYSIS_VERSION as AV, producedBins, regularProduction, contentSecond, gapDetail, completionOf, currentPhase, deriveSeconds, GAME_DRAWS_PER_FRAME, LOAD_DISC_BPS, markerIndexes, MIN_PHASE_SEC, parcoursVerdict, phaseLabels, phaseMetrics, phaseNoise, renderTimeline, sectionsOf, segmentsOf, summarizeSeconds, windowCadence } from "../harness/lib/parcours.mjs";
+import { analyzeRun, classifySecond, filmPhaseLabels, newFrameBins, gamePauseReference, gamePauseSpans, nominalViRate, viBins, ANALYSIS_VERSION as AV, producedBins, regularProduction, contentSecond, gapDetail, completionOf, currentPhase, deriveSeconds, GAME_DRAWS_PER_FRAME, LOAD_DISC_BPS, markerIndexes, MIN_PHASE_SEC, parcoursVerdict, phaseLabels, phaseMetrics, phaseNoise, renderTimeline, sectionsOf, segmentsOf, summarizeSeconds, windowCadence } from "../harness/lib/parcours.mjs";
 import { filmMarkers, filmPhases, filmWithMarks, keyToPad, padStateOf, recordPorts, runRecordSteps, validateFilm, validateRecordSteps } from "../harness/lib/pad-film.mjs";
 import { analyzeRaw, countersOf, otherCpuOf, presentGaps, samplerTicksOf, viTimesOf, exitCodeOf, gamePausesText, humanSummary, markerStep } from "../harness/probes/parcours.mjs";
 import { decodePng, encodePng } from "../harness/lib/png.mjs";
@@ -947,7 +947,7 @@ test("pauses of production: two 100 ms stalls in a second stay a loss; 50 frames
   assert.equal(regularProduction(53, 39), true);
   assert.equal(regularProduction(53, 45), false);
   assert.equal(regularProduction(20, 70), true, "1.5 x 50 ms");
-  assert.ok(AV >= 6);
+  assert.equal(AV, 7);
 });
 const smoothOfCount = (n) => Math.round((1000 * n) / 60) / 10;
 
@@ -1021,36 +1021,127 @@ test("the game's pauses are published one by one next to the p5: start, duration
   assert.equal(sum.metrics.gamePauseMs, pauses[0].durationMs);
   // copies that went on: no game pause, none published
   assert.equal(summarizeSeconds(pauseRun({ copies: 60, rows: true })).gamePauses.count, 0);
-  // the VIs stopped inside the gap (an emulation stall, not the game's pause at full speed): the
-  // second keeps the pause reference (its missed VIs cost it) but no pause is published
-  const stalled = pauseRun({ gapVis: false, rows: true });
-  assert.equal(stalled.some((r) => r.smoothBins.some((x) => x.gamePause)), true);
-  assert.equal(summarizeSeconds(stalled).gamePauses.count, 0);
-  // below full speed: none published either
-  assert.equal(summarizeSeconds(pauseRun({ speed: 93, rows: true })).gamePauses.count, 0);
-  // the spans alone: VIs counted, not interval by interval (host jitter: a VI 2.5 periods late, then caught up)
+  // the spans alone: VIs counted, a VI 2.5 periods late (host jitter, then caught up) still continuous
   const vi = 1000 / 59.94, vis = Array.from({ length: 40 }, (_, i) => i * vi);
   const late = vis.map((t, i) => (i === 10 ? t + 25 : t)).sort((a, b) => a - b);
-  const spans = (viT, speed = 100) => gamePauseSpans({ producedT: [0, vi, 2 * vi, 2 * vi + 300, 2 * vi + 300 + vi], viT, from: 0, to: 1000, viMs: vi, speed });
-  assert.deepEqual(spans(late).map((p) => [p.durationMs, p.continuousVis, p.fullSpeed]), [[300, true, true]]);
+  const spans = (viT, speed = 100) => gamePauseSpans({ producedT: [0, vi, 2 * vi, 2 * vi + 300, 2 * vi + 300 + vi], viT, from: 0, to: 1000, viMs: vi, speedAt: () => [speed] });
+  assert.deepEqual(spans(late).map((p) => [p.durationMs, p.continuousVis, p.fullSpeed, p.noBurst, p.ok]), [[300, true, true, true, true]]);
   assert.equal(spans(vis.filter((_, i) => i < 6 || i > 12))[0].continuousVis, false, "7 VIs missing");
   assert.equal(spans(vis, 97)[0].fullSpeed, false);
-  // the run's report and the A/B tables carry them
-  assert.match(gamePausesText(sum.gamePauses), /^game pauses 1 \(\d+(\.\d)? ms at [\d.]+ s, film /);
-  assert.equal(gamePausesText(summarizeSeconds(pauseRun({ copies: 60, rows: true })).gamePauses), "game pauses 0");
-  const run = (gp) => ({ completion: { completed: true }, phases: { menu: { metrics: { speedMedian: 100, speedP5: 99, newFpsMedian: 60, smoothP5: 100, hitches100: 0, smoothReliable: true, gamePauses: gp, gamePauseMs: gp * 100 } } }, sections: {} });
+  // the run's report and the A/B lines carry them, every one, kinds and sections
+  assert.match(gamePausesText(sum.gamePauses), /^game pauses 1 in 1 s \(\d+(\.\d)? ms at [\d.]+ s, film /);
+  assert.equal(gamePausesText(summarizeSeconds(pauseRun({ copies: 60, rows: true })).gamePauses), "game pauses 0 in 0 s");
+  const gp = (n) => ({ count: n, seconds: n, totalMs: n * 100, durationsMs: Array(n).fill(100), list: Array.from({ length: n }, (_, i) => ({ t: 10 + i, durationMs: 100, filmPos: 500 + i })) });
+  const metrics = (n) => ({ speedMedian: 100, speedP5: 99, newFpsMedian: 60, smoothP5: 100, hitches100: 0, smoothReliable: true, gamePauses: n, gamePauseMs: n * 100 });
+  const run = (n) => ({ completion: { completed: true }, phases: { menu: { metrics: metrics(n), gamePauses: gp(n) } }, sections: { race: { metrics: metrics(n), gamePauses: gp(n) } } });
   const v = parcoursVerdict([run(1), run(2)], [run(0)]);
-  assert.deepEqual(v.phases["kind:menu"].gamePauses, { baseline: [{ count: 1, totalMs: 100 }, { count: 2, totalMs: 200 }], candidate: [{ count: 0, totalMs: 0 }] });
+  assert.deepEqual(v.phases["kind:menu"].gamePauses.baseline.map((x) => [x.count, x.totalMs, x.list.length]), [[1, 100, 1], [2, 200, 2]]);
+  assert.deepEqual(v.phases["section:race"].gamePauses.candidate.map((x) => x.count), [0]);
   const lines = humanSummary({ runs: [], verdict: v });
-  assert.ok(lines.some((l) => /menu .*game's own pauses, by run: baseline 1 \(100 ms\), 2 \(200 ms\); candidate 0 \(0 ms\)/.test(l)), lines.join("\n"));
+  assert.ok(lines.some((l) => /kind:menu .*by run: baseline 1 in 1 s \[100 ms at 10 s film 500\], 2 in 2 s \[100 ms at 10 s film 500; 100 ms at 11 s film 501\]; candidate 0 in 0 s/.test(l)), lines.join("\n"));
+  assert.ok(lines.some((l) => /section:race .*game's own pauses/.test(l)));
 });
 
-test("an emulation stall on top of the game's pause still shows: the missed VIs cost the second, the speed p5 drops", () => {
-  // 4 VIs missing in the pause second (a ~67 ms emulation stall), the emulation at 93 %
+// The review's cases (PR #469): each an emulation fault the game-pause rule must not excuse.
+// rvBase: n seconds of 60 frames made, shown and VIs, readings on the grid; rvCounters: one fresh
+// sampler counter row per reading, copiesPerSec(i) copies in reading i.
+function rvBase(n = 3) {
+  const out = [{ t: 1000, info: { newShown: 0, draws: 0, producedFps: 0 }, counters: { t: 1000, ticks: 0, discBytes: 0, xfbCopies: 0 }, presents: [], producedT: [], producedKnown: true, viT: [], vi: 0 }];
+  for (let k = 1; k <= n; k += 1) {
+    const t = 1000 + 1000 * k;
+    out.push({ t, info: { speed: 100, newShown: 60 * k, producedFps: 60, draws: 120 * 60 * k, cpuBusy: 0.3, gpuBusy: 0.3, replayBusy: 0.3, outOfOrder: 0 }, counters: null, presents: presentsIn(t, 60), producedT: presentsIn(t, 60), producedKnown: true, viT: presentsIn(t, 60), vi: 60 });
+  }
+  return out;
+}
+function rvCounters(s, copiesPerSec) {
+  let x = 0, ticks = 0;
+  s.forEach((r, i) => { if (i) { const dt = (r.t - s[i - 1].t) / 1000; x += copiesPerSec(i) * dt; ticks += TPS * dt; } r.counters = { t: r.t, ticks, discBytes: 0, xfbCopies: x }; });
+}
+const rvPause = (t, from = 700, to = 400) => (xs) => xs.filter((p) => p < t - from || p >= t - to);
+const rvBins = (s) => deriveSeconds(s, { tps: TPS }).flatMap((r) => r.smoothBins.map((x) => [x.gamePause, x.smoothness]));
+const rvPauses = (s) => summarizeSeconds(deriveSeconds(s, { tps: TPS })).gamePauses;
+
+test("game pause: a reading without a fresh counter row (a stalled sampler) excuses nothing", () => {
+  const s = rvBase();
+  for (const k of [2, 3]) { const g = rvPause(s[k].t); s[k].producedT = g(s[k].producedT); s[k].presents = g(s[k].presents); }
+  rvCounters(s, (i) => (i === 2 ? 42 : 60));
+  assert.deepEqual(rvBins(s), [[false, 100], [true, 100], [false, 70]], "fresh: second 3 copied 60, a loss");
+  s[3].counters = { ...s[2].counters };
+  assert.deepEqual(rvBins(s), [[false, 100], [true, 100], [false, 70]], "stale: second 3 still a loss");
+  assert.equal(rvPauses(s).count, 1);
+});
+
+test("game pause: copies compared with the frames made in the SAME counter window; a late reading excuses no loss", () => {
+  const s = rvBase(4);
+  s[3].t += 300;
+  const lost = (xs) => xs.filter((p) => !(p >= 4000 && p < 4300));
+  for (const r of [s[3], s[4]]) { r.producedT = lost(r.producedT); r.presents = lost(r.presents); }
+  rvCounters(s, () => 60);
+  s[3].vi = 78; s[4].vi = 42;
+  assert.deepEqual(rvBins(s).at(-1), [false, 70], "18 frames lost at 60 copies a second");
+  assert.equal(rvPauses(s).count, 0);
+});
+
+test("game pause: the cadence and VI period are the run's nominal ones, never one second's measured VI rate", () => {
+  const s = rvBase();
+  const g = rvPause(s[2].t);
+  s[2].producedT = g(s[2].producedT); s[2].presents = g(s[2].presents);
+  s[2].viT = s[2].viT.filter((p) => !(p >= s[2].t - 1000 && p < s[2].t - 750)); // 15 VIs gone, outside the gap
+  rvCounters(s, (i) => (i === 2 ? 42 : 60));
+  const fine = rvBins(s);
+  s[2].vi = 45;
+  assert.deepEqual(rvBins(s), fine, "the row's VI rate changes nothing");
+  assert.deepEqual(fine[1], [true, 73.7], "42 shown against 42 made + 15 VIs missed");
+  assert.equal(nominalViRate(s), 59.94);
+  // 5 VIs missing INSIDE the gap: not the game's pause, judged against the scene cadence
+  const e = rvBase();
+  const t = e[2].t, ge = rvPause(t);
+  e[2].producedT = ge(e[2].producedT); e[2].presents = ge(e[2].presents);
+  let drop = 5;
+  e[2].viT = e[2].viT.filter((p) => !(p >= t - 700 && p < t - 400 && drop-- > 0)).filter((p) => !(p >= t - 1000 && p < t - 833));
+  e[2].vi = e[2].viT.length;
+  rvCounters(e, (i) => (i === 2 ? 42 : 60));
+  assert.deepEqual(rvBins(e)[1], [false, 70]);
+  assert.equal(rvPauses(e).count, 0);
+});
+
+test("game pause: a stall caught up in a VI burst, or frames held then burst out, are ours: losses, nothing excused unpublished", () => {
+  // the last 80 ms of the pause an emulation stall, its VIs then caught up within 5 ms
+  const s = rvBase();
+  const t = s[2].t, g = rvPause(t);
+  s[2].producedT = g(s[2].producedT); s[2].presents = g(s[2].presents);
+  const v = s[2].viT.filter((p) => !(p >= t - 480 && p < t - 400));
+  s[2].viT = [...v, ...Array.from({ length: 60 - v.length }, (_, i) => t - 400 + i)].sort((a, b) => a - b);
+  rvCounters(s, (i) => (i === 2 ? 42 : 60));
+  assert.deepEqual(rvBins(s)[1], [false, 70]);
+  const p = rvPauses(s);
+  assert.equal(p.count, 0);
+  assert.equal(p.seconds, 0, "no second excused without its pause published");
+  // a 45 fps scene: the replay held 150 ms of frames, then let them out at once (copies = made)
+  const f = rvBase();
+  for (const r of f.slice(1)) { r.producedT = presentsIn(r.t, 45); r.presents = presentsIn(r.t, 45); r.info.producedFps = 45; }
+  const tf = f[2].t, held = (x) => x >= tf - 700 && x < tf - 550;
+  const shift = (xs) => [...xs.filter((x) => !held(x)), ...xs.filter(held).map((x, i) => tf - 550 + i)].sort((a, b) => a - b);
+  f[2].producedT = shift(f[2].producedT); f[2].presents = shift(f[2].presents);
+  rvCounters(f, () => 45);
+  assert.equal(rvBins(f)[1][0], false);
+  assert.equal(rvPauses(f).count, 0);
+});
+
+test("an emulation stall on top of the game's pause still shows: below full speed, the second is a loss against the scene cadence", () => {
+  // the emulation at 93 % in the pause second, 4 VIs missing
   const r = pauseRun({ visIn: 56, speed: 93 });
-  assert.equal(r.smoothBins[0].gamePause, true);
-  assert.equal(r.smoothness, 91.3, "42 shown against 42 made + 4 VIs missed");
+  assert.equal(r.smoothBins[0].gamePause, false);
+  assert.equal(r.smoothness, 70, "42 shown against the 60 cadence");
   assert.ok(r.speed < 95, `speed ${r.speed}`);
+  // the VIs stopped inside the gap: no game pause, a loss
+  const stalled = pauseRun({ gapVis: false, rows: true });
+  assert.equal(stalled.some((x) => x.smoothBins.some((y) => y.gamePause)), false);
+  assert.equal(summarizeSeconds(stalled).gamePauses.count, 0);
+  // at full speed, VIs missing outside the gap: excused, the missed VIs cost it
+  const missed = pauseRun({ visIn: 56 });
+  assert.equal(missed.smoothBins[0].gamePause, true);
+  assert.equal(missed.smoothness, 91.3, "42 shown against 42 made + 4 VIs missed");
   // VI counts per grid second: unknown where a reading lost them
   const s = samplesOf([["menu", 3]]);
   s.forEach((x) => { x.viT = presentsIn(x.t, 60); });

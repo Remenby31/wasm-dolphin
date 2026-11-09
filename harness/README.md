@@ -522,8 +522,8 @@ timeline, `producedBasis: "grid"`, each second judged against what was
 made in it (content only with a regular production: no pause past 1.5
 frame intervals and 2.5 VI periods, analysis 6; or the game's own pause:
 a production pause while the core copied no XFB that was not produced, judged
-against what was made plus the VIs the emulation missed, at the VI rate's
-fixed cadence, analysis 7); `"worker"`, its 500 ms rate, for older runs),
+against what was made plus the VIs the emulation missed, at the run's
+nominal VI cadence, analysis 7); `"worker"`, its 500 ms rate, for older runs),
 smoothness (new frames against the game's cadence, learnt as the site
 learns it: VI/n snapped, below the VI rate only with occupancy margin, else
 the VI rate; in a content second, where the game itself made fewer frames
@@ -538,17 +538,25 @@ frames is excused as the game's content (lib/drops.mjs contentRule), not
 counted as lost.
 
 The game's own pauses are published next to every smoothness p5, never
-hidden in it: each phase's `gamePauses` (summary.json, the run's report, the
-A/B lines) holds their count, durations and each one's start, duration and
-film position. A pause is a production gap over 2.5 VI periods in a second
-the game-pause rule accepts, at full speed (98 % or more) with the VIs
-continuous over it (at most 1 missing); a gap failing either is not counted
-as the game's pause, and its second's missed VIs still cost it. Its "0 XFB
-copies" is read from the sampler's counters (at most one copy over the row
-left unproduced: their resolution, there are no copy timestamps). Caveat:
+hidden in it: each phase's and section's `gamePauses` (summary.json, the
+run's report, the A/B lines run by run) holds their count, the seconds they
+excused, their durations and each one's start, duration and film position.
+A pause is a production gap over 2.5 VI periods at full speed (98 % or more
+in every reading it covers), with the VIs continuous over it (at most 1
+missing, none late by 3 periods or more: a stall caught up in a burst is
+ours) and no burst of frames after it (frames held by a stall of ours come
+out at once). A second is the game's pause only when its counter window is
+a fresh sampler row covering 95 % of it, the copies in that window at most
+the frames produced in the same window + 1, and every gap it holds is such
+a pause, excused in every second it covers; it is then judged against what
+was made plus the VIs missed, at the run's nominal VI cadence (60 at
+59.94 Hz, 50 at PAL, never one second's measured rate). Anything else is
+judged against the scene's cadence, a loss. "0 XFB copies" is read at the
+counters' resolution (about 1 s: there are no copy timestamps). Caveat:
 "coming from the guest" means in EMULATED time. A pause that waits on a disc
-transfer lasts what our emulated DVD timing (Dolphin's FastDiscSpeed setting) makes it, not
-necessarily what a console takes; that is not measurable without a console.
+transfer lasts what our emulated DVD timing (Dolphin's FastDiscSpeed
+setting) makes it, not necessarily what a console takes; that is not
+measurable without a console.
 
 A film may declare its phases on its own clock, `"phases": [{ "at": 1240,
 "phase": "cinematic", "label": "intro" }, { "at": 2130, "phase": "menu" }]`
