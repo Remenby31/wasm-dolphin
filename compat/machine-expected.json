@@ -1,0 +1,75 @@
+{
+ "comment": "A snapshot of what each hwtests program reports on the current emulator (compat/browser.mjs), per config: test and subtest counts and the first failures as [test, source line, FNV-1a of the hwtest failure message]. Every field must match: a regression gate on the known failures. The pass/fail verdict of each subtest comes from the hardware values compiled into the hwtests binaries. jitBlocks: the smallest count of JIT blocks compiled by each program's JIT run seen so far (2026-11-09); a JIT run must compile at least 60 % of it (counts vary between runs with cpu=dual timing; over 5 runs: gxtest_clipping 72 to 130, cputest_srawix 69 to 171, cputest_nan 185 to 240). For the small programs most of these blocks are libogc's start-up, so the floor proves the JIT ran, not that every test loop compiled.",
+ "notes": {
+  "gxtest_clipping": "7 of 16 steps fail (compat/decode-failures.mjs decodes the messages): steps 1, 2, 3, 4 and 6 draw outside the viewport inside the guard band, where the hardware draws pixels and our software renderer clips to the viewport; steps 11 and 12 put z very slightly behind w, which the hardware's non-IEEE z+w treats as on the plane (drawn). Whether unpatched Dolphin's software renderer behaves the same is NOT verified: ours carries patches (0004, 0009, 0012, 0016, 0017, 0020, 0021, 0196).",
+  "gxtest_rasterization": "514 of 519 fail (first 10 decoded by compat/decode-failures.mjs, all pinned by the fingerprint): the hardware samples a pixel near x = 7/12 (0.5833) of the sub-pixel sweep; our software renderer's sample point is elsewhere. NOT verified on unpatched Dolphin.",
+  "efbpoke": "Our own probe (expected values deduced from the GX documentation and libogc, not measured on a console). Checks 2 and 3 fail: CPU pokes of the EFB have no effect on our software renderer; upstream Dolphin's SWEFBInterface::PokeColor is an empty function (Source/Core/VideoBackends/Software/SWEfbInterface.cpp), not verified by running unpatched Dolphin. Peeks and drawing match the hardware rules (RGBA6 expanded by repeating the top bits).",
+  "cputest_fprf": "FPRF off by default (Config::MAIN_FPRF).",
+  "cputest_nan": "ps_sum0/ps_sum1 quiet the signalling NaN they pass through.",
+  "cputest_ni": "NI: the hardware flushes a result that is tiny before rounding.",
+  "cputest_pairedmove": "Paired-single moves after lfd: the hardware rounds ps0's mantissa to single and truncates ps1's; ps_res/ps_rsqrte estimate edge cases."
+ },
+ "jitBlocks": {"cputest_cr": 45, "cputest_fctiwz": 44, "cputest_fprf": 44, "cputest_frsp": 44, "cputest_load": 46, "cputest_mtspr": 46, "cputest_nan": 185, "cputest_ni": 45, "cputest_pairedmove": 487, "cputest_rlw": 45, "cputest_srawix": 69, "efbpoke": 52, "gxtest_bitfield": 59, "gxtest_clipping": 72, "gxtest_rasterization": 312},
+ "programs": {
+  "cputest_cr": {
+   "interp": {"tests":1,"testsPassed":1,"subtests":54,"subtestsPassed":54,"fingerprint":"811c9dc5","failures":[]},
+   "jit": {"tests":1,"testsPassed":1,"subtests":54,"subtestsPassed":54,"fingerprint":"811c9dc5","failures":[]}
+  },
+  "cputest_fctiwz": {
+   "interp": {"tests":1,"testsPassed":1,"subtests":12,"subtestsPassed":12,"fingerprint":"811c9dc5","failures":[]},
+   "jit": {"tests":1,"testsPassed":1,"subtests":12,"subtestsPassed":12,"fingerprint":"811c9dc5","failures":[]}
+  },
+  "cputest_fprf": {
+   "interp": {"tests":2,"testsPassed":0,"subtests":90,"subtestsPassed":60,"fingerprint":"2b2c2ba1","failures":[[1,26,"b0dc94b4"],[1,75,"6385a256"],[1,26,"50d5383f"],[1,75,"7fb81cdb"],[1,75,"02711397"],[1,26,"e1efe5e3"],[1,75,"17775ede"],[1,26,"83426af6"],[1,75,"f3781aa1"],[1,75,"14a74c79"]]},
+   "jit": {"tests":2,"testsPassed":0,"subtests":90,"subtestsPassed":60,"fingerprint":"2b2c2ba1","failures":[[1,26,"b0dc94b4"],[1,75,"6385a256"],[1,26,"50d5383f"],[1,75,"7fb81cdb"],[1,75,"02711397"],[1,26,"e1efe5e3"],[1,75,"17775ede"],[1,26,"83426af6"],[1,75,"f3781aa1"],[1,75,"14a74c79"]]}
+  },
+  "cputest_frsp": {
+   "interp": {"tests":1,"testsPassed":1,"subtests":18,"subtestsPassed":18,"fingerprint":"811c9dc5","failures":[]},
+   "jit": {"tests":1,"testsPassed":1,"subtests":18,"subtestsPassed":18,"fingerprint":"811c9dc5","failures":[]}
+  },
+  "cputest_load": {
+   "interp": {"tests":16,"testsPassed":16,"subtests":1632,"subtestsPassed":1632,"fingerprint":"811c9dc5","failures":[]},
+   "jit": {"tests":16,"testsPassed":16,"subtests":1632,"subtestsPassed":1632,"fingerprint":"811c9dc5","failures":[]}
+  },
+  "cputest_mtspr": {
+   "interp": {"tests":2,"testsPassed":2,"subtests":2,"subtestsPassed":2,"fingerprint":"811c9dc5","failures":[]},
+   "jit": {"tests":2,"testsPassed":2,"subtests":2,"subtestsPassed":2,"fingerprint":"811c9dc5","failures":[]}
+  },
+  "cputest_nan": {
+   "interp": {"tests":55,"testsPassed":53,"subtests":626,"subtestsPassed":612,"fingerprint":"3ab8e098","failures":[[46,824,"5c655909"],[46,824,"5e1265fe"],[46,824,"856847c5"],[46,824,"93f4c626"],[46,824,"2d449c3e"],[46,824,"16ce706e"],[46,824,"00ec8636"],[47,848,"69fa58a2"],[47,848,"b08b7361"],[47,848,"9e088176"]]},
+   "jit": {"tests":55,"testsPassed":53,"subtests":626,"subtestsPassed":612,"fingerprint":"3ab8e098","failures":[[46,824,"5c655909"],[46,824,"5e1265fe"],[46,824,"856847c5"],[46,824,"93f4c626"],[46,824,"2d449c3e"],[46,824,"16ce706e"],[46,824,"00ec8636"],[47,848,"69fa58a2"],[47,848,"b08b7361"],[47,848,"9e088176"]]}
+  },
+  "cputest_ni": {
+   "interp": {"tests":1,"testsPassed":0,"subtests":10,"subtestsPassed":9,"fingerprint":"241b8ea3","failures":[[1,61,"90bb44a5"]]},
+   "jit": {"tests":1,"testsPassed":0,"subtests":10,"subtestsPassed":9,"fingerprint":"241b8ea3","failures":[[1,61,"90bb44a5"]]}
+  },
+  "cputest_pairedmove": {
+   "interp": {"tests":1,"testsPassed":0,"subtests":8800,"subtestsPassed":4852,"fingerprint":"8ed64d85","failures":[[1,30,"f8681909"],[1,59,"6edfa472"],[1,90,"7083c97d"],[1,125,"1d16815d"],[1,160,"669dcc67"],[1,214,"c579e9e4"],[1,253,"790d7088"],[1,30,"96d13645"],[1,59,"fd95ee4f"],[1,90,"da914de7"]]},
+   "jit": {"tests":1,"testsPassed":0,"subtests":8800,"subtestsPassed":4852,"fingerprint":"8ed64d85","failures":[[1,30,"f8681909"],[1,59,"6edfa472"],[1,90,"7083c97d"],[1,125,"1d16815d"],[1,160,"669dcc67"],[1,214,"c579e9e4"],[1,253,"790d7088"],[1,30,"96d13645"],[1,59,"fd95ee4f"],[1,90,"da914de7"]]}
+  },
+  "cputest_rlw": {
+   "interp": {"tests":3,"testsPassed":3,"subtests":4200,"subtestsPassed":4200,"fingerprint":"811c9dc5","failures":[]},
+   "jit": {"tests":3,"testsPassed":3,"subtests":4200,"subtestsPassed":4200,"fingerprint":"811c9dc5","failures":[]}
+  },
+  "cputest_srawix": {
+   "interp": {"tests":1,"testsPassed":1,"subtests":262144,"subtestsPassed":262144,"fingerprint":"811c9dc5","failures":[]},
+   "jit": {"tests":1,"testsPassed":1,"subtests":262144,"subtestsPassed":262144,"fingerprint":"811c9dc5","failures":[]}
+  },
+  "efbpoke": {
+   "interp": {"tests":4,"testsPassed":2,"subtests":4,"subtestsPassed":2,"fingerprint":"cd37be96","failures":[[2,60,"4182c3ff"],[3,72,"4182c3ff"]]},
+   "jit": {"tests":4,"testsPassed":2,"subtests":4,"subtestsPassed":2,"fingerprint":"cd37be96","failures":[[2,60,"4182c3ff"],[3,72,"4182c3ff"]]}
+  },
+  "gxtest_bitfield": {
+   "interp": {"tests":1,"testsPassed":1,"subtests":10,"subtestsPassed":10,"fingerprint":"811c9dc5","failures":[]},
+   "jit": {"tests":1,"testsPassed":1,"subtests":10,"subtestsPassed":10,"fingerprint":"811c9dc5","failures":[]}
+  },
+  "gxtest_clipping": {
+   "interp": {"tests":1,"testsPassed":0,"subtests":16,"subtestsPassed":9,"fingerprint":"aebbaecc","failures":[[1,221,"2dd59eea"],[1,221,"1bc5e33d"],[1,221,"a5cc2420"],[1,221,"095cf247"],[1,221,"2b52d5cf"],[1,221,"c92e59cb"],[1,221,"c6668e08"]]},
+   "jit": {"tests":1,"testsPassed":0,"subtests":16,"subtestsPassed":9,"fingerprint":"aebbaecc","failures":[[1,221,"2dd59eea"],[1,221,"1bc5e33d"],[1,221,"a5cc2420"],[1,221,"095cf247"],[1,221,"2b52d5cf"],[1,221,"c92e59cb"],[1,221,"c6668e08"]]}
+  },
+  "gxtest_rasterization": {
+   "interp": {"tests":1,"testsPassed":0,"subtests":519,"subtestsPassed":5,"fingerprint":"8132ae8c","failures":[[1,70,"e5f4fb3e"],[1,119,"01573f48"],[1,119,"35666d77"],[1,119,"4926c273"],[1,119,"2ed07cd3"],[1,119,"0bfb107a"],[1,119,"bc2fe56e"],[1,119,"3f8a8bbc"],[1,119,"d908a60f"],[1,119,"d65db5b6"]]},
+   "jit": {"tests":1,"testsPassed":0,"subtests":519,"subtestsPassed":5,"fingerprint":"8132ae8c","failures":[[1,70,"e5f4fb3e"],[1,119,"01573f48"],[1,119,"35666d77"],[1,119,"4926c273"],[1,119,"2ed07cd3"],[1,119,"0bfb107a"],[1,119,"bc2fe56e"],[1,119,"3f8a8bbc"],[1,119,"d908a60f"],[1,119,"d65db5b6"]]}
+  }
+ }
+}

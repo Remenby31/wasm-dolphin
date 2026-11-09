@@ -49,7 +49,10 @@ import { median, percentile, round } from "./stats.mjs";
 // the film's declared phases (film.phases) before the detector's.
 // 5: the produced frames (the content reference) on the same grid, by tag
 // (producedBasis "grid"; "worker": the worker's 500 ms rate, older runs).
-export const ANALYSIS_VERSION = 5;
+// 6: a pause of production is a stall only past 2.5 VI periods too (a game
+// below its VI rate pauses 2 VIs); a row without a grid second takes the
+// worker's produced rate for its phase signals (the live phase).
+export const ANALYSIS_VERSION = 6;
 
 export const PHASES = Object.freeze(["boot", "loading", "cinematic", "menu", "game"]);
 // A phase lasts at least this long: a shorter run of seconds goes to the
@@ -246,11 +249,20 @@ export function producedBins(samples, { binMs = NEW_FRAMES_BIN_MS } = {}) {
 }
 
 // A second's production is regular (its frames spread over it, no burst then
-// a stop): its longest pause at most REGULAR_GAP_FACTOR frame intervals. A
-// worker stalled 300 ms makes and shows nothing meanwhile: 42 made, 42
-// shown, and only a regular production may be the game's own content.
+// a stop): its longest pause at most REGULAR_GAP_FACTOR frame intervals, and
+// never under REGULAR_GAP_VIS VI periods. A worker stalled 300 ms makes and
+// shows nothing meanwhile: 42 made, 42 shown, and only a regular production
+// may be the game's own content. A game below its VI rate makes a frame
+// every 2 VIs now and then (33 ms at 59.94 Hz): its pauses are its pace, not
+// a stall (a race's results at 50-56 frames a second read 83-93 % as losses
+// with the frame-interval bound alone). Frames not made at full speed stay
+// content here: the speed p5 is the measure of an emulation slowdown.
 export const REGULAR_GAP_FACTOR = 1.5;
-export const regularProduction = (made, maxGapMs) => Number.isFinite(made) && made > 0 && Number.isFinite(maxGapMs) && maxGapMs <= REGULAR_GAP_FACTOR * (1000 / made);
+export const REGULAR_GAP_VIS = 2.5;
+export function regularProduction(made, maxGapMs, { viMs = 1000 / 59.94 } = {}) {
+  if (!(Number.isFinite(made) && made > 0 && Number.isFinite(maxGapMs))) return false;
+  return maxGapMs <= Math.max(REGULAR_GAP_FACTOR * (1000 / made), REGULAR_GAP_VIS * viMs);
+}
 
 // The raw samples -> one row a second (the first sample is the origin).
 export function deriveSeconds(samples, { tps = null } = {}) {
@@ -306,10 +318,13 @@ export function deriveSeconds(samples, { tps = null } = {}) {
     // the mean of this row's known bins; else the worker's rate
     const ownProduced = produced ? own.map((x) => produced[x.k] ?? null) : null;
     const knownProduced = ownProduced ? ownProduced.filter((x) => x != null) : [];
-    const producedFps = produced
-      ? (knownProduced.length ? knownProduced.reduce((n, x) => n + x, 0) / knownProduced.length : null)
-      : num(ib.producedFps) ?? (carried?.xfbPerSec != null ? carried.xfbPerSec : null);
-    const producedFrom = produced ? (producedFps != null ? "grid" : null) : num(ib.producedFps) != null ? "worker" : carried?.xfbPerSec != null ? "xfb" : null;
+    // a row owning no known grid second (the live loop's newest row, before
+    // its second is complete): the worker's rate for the ROW's signals
+    // (draws per frame, cadence, phase), never for a smoothness (the bins
+    // keep their own: unknown when their production is)
+    const workerProduced = num(ib.producedFps) ?? (carried?.xfbPerSec != null ? carried.xfbPerSec : null);
+    const producedFps = produced && knownProduced.length ? knownProduced.reduce((n, x) => n + x, 0) / knownProduced.length : workerProduced;
+    const producedFrom = produced && knownProduced.length ? "grid" : num(ib.producedFps) != null ? "worker" : carried?.xfbPerSec != null ? "xfb" : null;
     const speed = carried?.speed ?? num(ib.speed);
     const draws = delta(ia.draws, ib.draws);
     const made = producedFps != null && producedFps * dt >= 1 ? producedFps * dt : null;
@@ -350,7 +365,7 @@ export function deriveSeconds(samples, { tps = null } = {}) {
         // and showing alike is a loss); speed and occupancy are the row's
         // (the occupancy: the worker's 500 ms window)
         const made = ownProduced[i];
-        const regular = made != null && regularProduction(made, producedGap[x.k]);
+        const regular = made != null && regularProduction(made, producedGap[x.k], { viMs: viRate > 0 ? 1000 / viRate : undefined });
         const binContent = regular && contentSecond({ producedFps: made, speed, cadence: sceneCadence, ...occupancy });
         return { t: round((x.to - t0) / 1000, 2), newFrames: x.newFrames, produced: made, regular, content: binContent, smoothness: made == null ? null : smoothOf(x.newFrames, binContent ? made : sceneCadence) };
       }),

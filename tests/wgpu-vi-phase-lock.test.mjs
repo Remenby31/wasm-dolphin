@@ -523,3 +523,62 @@ test("a sustained drift past reach after the lock (the game 1 % slow for good): 
   assert.ok(later.length && later.every((x) => !x.on && x.ppm === 0), JSON.stringify(later.slice(0, 3)));
   assert.equal(vi.stats.locks, 1);
 });
+
+// After the logo's load the frames' ARRIVALS at the presenter can lag and
+// then drain (the replay catching up), the emulation itself regular: a
+// window over the drain reads the frames faster than they are (2P parcours:
+// 0.9981 against 1.001, a lock started at -1860 ppm the wrong way and walked
+// the phase to the cut at the film's start). The lock starts from the
+// window's drift only when its last second agrees, else from none.
+// `arrivalOffset(t, n)`: ms added to the n-th arrival (a drain, a ripple, a jitter).
+function arrivalsBoot({ offset, arrivalOffset, seconds = 16 }) {
+  const R = 1000 / 60;
+  const vi = createViPhaseLock();
+  let factor = 1, next = offset, n = 0, last = 0, first = null, drift = null, start = null, lockedMs = 0;
+  for (let k = 0; k * R < seconds * 1000; k++) {
+    const t = 0.37 * R + k * R;
+    const at = () => next + arrivalOffset(next, n);
+    while (at() <= t) { vi.arrival(at()); n++; next += NTSC_VI_MS / factor; }
+    vi.tick(t, t);
+    if (t - last >= 500) {
+      last = t;
+      factor = vi.update(t).factor;
+      if (vi.stats.on) lockedMs += 500;
+      if (vi.stats.on && first === null) { first = t; drift = vi.stats.driftPpm; start = vi.stats.startDrift; }
+    }
+  }
+  return { first, drift, start, lockedMs };
+}
+const drainAt = (lagMs, drainMs, load = 3000) => (t, n) => (t < load ? 0 : t < load + 300 ? (lagMs * (t - load)) / 300 : Math.max(0, lagMs * (1 - (t - load - 300) / drainMs))) + (((n * 7919) % 7) - 3) * 0.6;
+
+test("a drain of the arrivals after a load: no lock starts the wrong way (it starts from the window's drift only on a settled window, else from none)", () => {
+  let boots = 0, fromWindow = 0, fromNone = 0;
+  for (const [lagMs, drainMs] of [[8, 600], [8, 1500], [12, 600]]) for (let offset = 0; offset < 16.6; offset += 0.5) {
+    const r = arrivalsBoot({ offset, arrivalOffset: drainAt(lagMs, drainMs) });
+    boots++;
+    assert.ok(r.first !== null, `${lagMs}/${drainMs} ${offset}: locked`);
+    // the drift after the lock's first update: its start plus one step of the
+    // integral (at most PHASE_INTEGRAL_PPM_PER_SEC x 0.5 x 0.5 = 375 ppm)
+    if (r.start === "window") { fromWindow++; assert.ok(Math.abs(r.drift - 1001) <= 700, `${offset}: from the window at ${r.drift}`); }
+    else { fromNone++; assert.ok(Math.abs(r.drift) <= 375, `${offset}: from none at ${r.drift}`); }
+  }
+  console.log(`drain after a load: ${boots} boots, none started the wrong way; from the window ${fromWindow}, from none ${fromNone}`);
+  assert.ok(fromNone >= boots / 2, `the unsettled windows were not trusted (${fromNone})`);
+});
+
+test("a ripple or a jitter of the arrivals never keeps the lock off: it locks as often as without the starting-drift check", () => {
+  const sine = (ampMs, periodMs) => (t) => ampMs * Math.sin((2 * Math.PI * t) / periodMs);
+  const saw = (ampMs, periodMs) => (t) => ampMs * (((t % periodMs) / periodMs) - 0.5);
+  // a Gaussian jitter (Box-Muller on a fixed sequence)
+  const gauss = (sdMs) => (t, n) => { const u = ((n * 7919 + 13) % 1000 + 0.5) / 1000, v = ((n * 104729 + 7) % 997 + 0.5) / 997; return sdMs * Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v); };
+  for (const [name, f] of [["sine 1.5 ms / 1.5 s", sine(1.5, 1500)], ["sine 1.5 ms / 4 s", sine(1.5, 4000)], ["saw 4 ms / 1.5 s", saw(4, 1500)], ["gauss 5 ms", gauss(5)]]) {
+    let locked = 0, boots = 0, never = 0;
+    for (let offset = 0; offset < 16.6; offset += 2) {
+      const r = arrivalsBoot({ offset, arrivalOffset: f, seconds: 60 });
+      boots++; locked += r.lockedMs; if (r.first === null) never++;
+    }
+    console.log(`${name}: locked ${(locked / boots / 1000).toFixed(1)} s of 60 a boot, never locked ${never}/${boots}`);
+    assert.equal(never, 0, `${name}: never locked in ${never} boots`);
+    assert.ok(locked / boots >= (name.startsWith("gauss") ? 15_000 : 40_000), `${name}: locked ${locked / boots} ms of 60 s`);
+  }
+});
