@@ -8,7 +8,9 @@
  *   2 poke then peek of that pixel reads the poked colour
  *   3 an EFB copy to RAM (RGBA8) holds the poked colour at that pixel
  *   4 a quad drawn over it, peeked, reads the quad's colour
- * Detail of a failed check: the colour read, 0xRRGGBBAA.
+ * Detail of a failed check: the colour read, 0xRRGGBBAA. RGBA6: a peek
+ * expands each 6-bit channel to 8 bits by repeating its top bits (0x40 reads
+ * 0x41). Dither off.
  */
 #include <gccore.h>
 #include <malloc.h>
@@ -48,14 +50,14 @@ int main(void) {
   rp_start_test();
   GXColor c;
   GX_PeekARGB(5, 5, &c);
-  RP_CHECK(c.r == 0x40 && c.g == 0x80 && c.b == 0xc0, packed(c));
+  RP_CHECK(c.r == 0x41 && c.g == 0x82 && c.b == 0xc3, packed(c));
   rp_end_test();
 
   rp_start_test();
   GXColor poke = {0xa0, 0x20, 0x60, 0xfc};
   GX_PokeARGB(5, 5, poke);
   GX_PeekARGB(5, 5, &c);
-  RP_CHECK(c.r == 0xa0 && c.g == 0x20 && c.b == 0x60, packed(c));
+  RP_CHECK(c.r == 0xa2 && c.g == 0x20 && c.b == 0x61, packed(c));
   rp_end_test();
 
   rp_start_test();
@@ -67,7 +69,7 @@ int main(void) {
   /* RGBA8 tiles of 4x4: AR block, then GB block. Pixel (5,5) = tile (1,1), index 5. */
   u32 base = (1 * 2 + 1) * 64, off = 5 * 2;
   GXColor m = {buf[base + off + 1], buf[base + 32 + off], buf[base + 32 + off + 1], buf[base + off]};
-  RP_CHECK(m.r == 0xa0 && m.g == 0x20 && m.b == 0x60, packed(m));
+  RP_CHECK(m.r == 0xa2 && m.g == 0x20 && m.b == 0x61, packed(m));
   rp_end_test();
 
   rp_start_test();
@@ -85,6 +87,7 @@ int main(void) {
   GX_SetBlendMode(GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_CLEAR);
   GX_SetZMode(GX_FALSE, GX_ALWAYS, GX_FALSE);
   GX_SetCullMode(GX_CULL_NONE);
+  GX_SetDither(GX_FALSE);
   Mtx44 ortho;
   guOrtho(ortho, 0, 479, 0, 639, 0, 300);
   GX_LoadProjectionMtx(ortho, GX_ORTHOGRAPHIC);
@@ -100,7 +103,7 @@ int main(void) {
   GX_End();
   GX_DrawDone();
   GX_PeekARGB(5, 5, &c);
-  RP_CHECK(c.r == 0x20 && c.g == 0x40 && c.b == 0xe0, packed(c));
+  RP_CHECK(c.r == 0x20 && c.g == 0x41 && c.b == 0xe3, packed(c));
   rp_end_test();
 
   rp_done();

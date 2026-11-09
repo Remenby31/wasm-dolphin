@@ -3,8 +3,8 @@
  *
  * cardtest: the memory card in slot A through libogc's CARD API, as a game
  * saves: mount, create a 2-block file, write it, read it back, check its
- * status, delete it, and the file is gone. Two rounds, the second after an
- * unmount and a new mount. The card must start empty of this file or not:
+ * status, delete it, and the file is gone. Three rounds, each after an
+ * unmount and a new mount; the third writes sector by sector. The card must start empty of this file or not:
  * any leftover is deleted first. Results: compat/homebrew/report.h (the
  * detail of a failed call is its return code).
  */
@@ -27,7 +27,8 @@ static s32 mount(void) {
   return r;
 }
 
-static void round_trip(u32 seed) {
+/* by_sector: one CARD_Write per 8 KiB sector instead of one for the file. */
+static void round_trip(u32 seed, int by_sector) {
   rp_start_test();
   s32 r = mount();
   RP_CHECK(r == CARD_ERROR_READY, r);
@@ -44,8 +45,15 @@ static void round_trip(u32 seed) {
   card_file file;
   r = CARD_Create(CARD_SLOTA, NAME, len, &file);
   RP_CHECK(r == CARD_ERROR_READY, r);
-  r = CARD_Write(&file, out, len, 0);
-  RP_CHECK(r == CARD_ERROR_READY, r);
+  if (by_sector) {
+    for (u32 off = 0; off < len; off += 8192) {
+      r = CARD_Write(&file, (u8 *)out + off, 8192, off);
+      RP_CHECK(r == CARD_ERROR_READY, r);
+    }
+  } else {
+    r = CARD_Write(&file, out, len, 0);
+    RP_CHECK(r == CARD_ERROR_READY, r);
+  }
   CARD_Close(&file);
 
   r = CARD_Open(CARD_SLOTA, NAME, &file);
@@ -80,8 +88,9 @@ int main(void) {
   memcpy(game, (const void *)0x80000000, 4);
   memcpy(maker, (const void *)0x80000004, 2);
   CARD_Init(game, maker);
-  round_trip(0xc0ffee00u);
-  round_trip(0x5eed0001u);
+  round_trip(0xc0ffee00u, 0);
+  round_trip(0x5eed0001u, 0);
+  round_trip(0xb10c0002u, 1);
   rp_done();
   return 0;
 }
