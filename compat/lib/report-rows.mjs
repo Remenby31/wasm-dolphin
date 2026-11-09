@@ -5,7 +5,7 @@
 // y = 16). Read from an exact native-size capture; returned only when the
 // checksum row matches.
 
-export const REPORT_ROWS = 26;
+export const REPORT_ROWS = 27;
 const Y = 16;
 const MAGIC = 0x48575431;
 
@@ -33,7 +33,7 @@ function readRow(frame, row) {
   return value >>> 0;
 }
 
-/** @returns {null | {done, tests, testsPassed, subtests, subtestsPassed, failures: {test, line, msgHash}[]}} */
+/** @returns {null | {done, tests, testsPassed, subtests, subtestsPassed, fingerprint, failures: {test, line, msgHash}[]}} */
 export function decodeReport(frame) {
   if (!frame?.data || frame.width < 32 + 32 * 18 || frame.height < Y + (REPORT_ROWS + 1) * 16) return null;
   const rows = Array.from({ length: REPORT_ROWS }, (_, r) => readRow(frame, r));
@@ -45,6 +45,8 @@ export function decodeReport(frame) {
     testsPassed: rows[2],
     subtests: rows[3],
     subtestsPassed: rows[4],
+    // FNV-1a over (test, line, detail) of every failure, not only the first 10.
+    fingerprint: rows[26].toString(16).padStart(8, "0"),
     failures: Array.from({ length: n }, (_, i) => ({
       test: rows[6 + 2 * i] >>> 24, line: rows[6 + 2 * i] & 0xffffff,
       msgHash: rows[7 + 2 * i].toString(16).padStart(8, "0")

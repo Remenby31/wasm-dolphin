@@ -66,18 +66,29 @@ network reporter: the counts and the first 10 failures (source line and
 FNV-1a of the failure message) are painted into the XFB as checksummed rows
 (`homebrew/report.h`), read back from exact captures by `lib/report-rows.mjs`.
 `shim/` stands in for the Wii-only headers (no Wii remote, no network).
-reciprocal and fctiw are left out (2^32 inputs each: hours).
+reciprocal and fctiw are left out (2^32 inputs each: hours). From gxtest,
+bitfield, clipping and rasterization run; intensity and copyfilter fill the
+EFB with CPU pokes, which our software renderer ignores
+(`homebrew/efbpoke` shows it; upstream `SWEFBInterface::PokeColor` is an
+empty function, not checked by running unpatched Dolphin), and
+tev and lighting run for hours on it: they wait for a GPU runner (wgpu).
+`machine-expected.json` `notes` explains each expected failure.
 
 `browser.mjs` boots each disc in headless Chromium (harness sessions,
 software renderer at full resolution) on the interpreter and on the JIT,
 and compares each report with `machine-expected.json`: every count and
-failure must match, the JIT run must compile at least 80 % of the blocks
-recorded for the program (`jitBlocks`) and run some, the interpreter run
+failure must match, the JIT run must compile at least 60 % of the smallest
+block count recorded for the program (`jitBlocks`) and run some, the interpreter run
 none. The `machine` job of `compat.yml` runs it (about 5 minutes). The
 failures are the same gaps as in the Node port.
 
 `machine-expected.json` is a snapshot of the current emulator: a regression
-gate on the known failures. The verdict of each subtest comes from the
+gate on the known failures. Besides the first 10 failures, each report
+carries a fingerprint (FNV-1a over test, line and message hash of every
+failure), so the same count of different failures is a difference too; the
+Node port's failure families carry the same kind of fingerprint.
+`decode-failures.mjs` recovers the text of the gxtest failure messages from
+their hashes, so the `notes` can be checked. The verdict of each subtest comes from the
 hardware values compiled into the hwtests binaries. For the small programs
 most JIT blocks are libogc's start-up, so the block floor proves the JIT ran,
 not that every test loop compiled (the Node port's `jitCoverage` checks that
@@ -90,5 +101,5 @@ resolution (`fastsw=0`), `efbaccess=1`. Playwright is installed by version
 
 ## Not yet ported
 
-`gxtest/` on the machine job (next), homebrews for MMU/BAT, VI modes and
-memory cards.
+gxtest intensity/copyfilter/tev/lighting (need wgpu), homebrews for
+MMU/BAT, VI modes and memory cards.

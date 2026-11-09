@@ -13,7 +13,9 @@
  *   row 5      failures recorded below (at most RP_FAILURES)
  *   row 6+2i   failure i: test number << 24 | source line
  *   row 7+2i   failure i: a 32-bit detail (hash of the message, or a value)
- *   row 26     FNV-1a of rows 0..25 (big-endian bytes)
+ *   row 26     fingerprint of EVERY failure: FNV-1a over (test number, line,
+ *              detail) of each, in order (0x811c9dc5 when none)
+ *   row 27     FNV-1a of rows 0..26 (big-endian bytes)
  */
 #ifndef COMPAT_REPORT_H
 #define COMPAT_REPORT_H
@@ -21,7 +23,7 @@
 #include <gccore.h>
 #include "marker.h"
 
-#define RP_ROWS 26
+#define RP_ROWS 27
 #define RP_FAILURES 10
 #define RP_Y 16
 
@@ -31,6 +33,7 @@ typedef struct {
   u32 rows[RP_ROWS];
   u32 tests, tests_passed, subtests, subtests_passed, failures;
   u32 test_failures;
+  u32 fingerprint;
 } rp_state;
 
 static rp_state rp;
@@ -43,6 +46,7 @@ static inline void rp_paint(u32 done) {
   rp.rows[3] = rp.subtests;
   rp.rows[4] = rp.subtests_passed;
   rp.rows[5] = rp.failures;
+  rp.rows[26] = rp.fingerprint;
   u32 sum = mk_fnv(MK_FNV_INIT, rp.rows, sizeof rp.rows);
   for (int r = 0; r <= RP_ROWS; r++) {
     u32 v = r < RP_ROWS ? rp.rows[r] : sum;
@@ -54,6 +58,7 @@ static inline void rp_paint(u32 done) {
 
 /* VI on, one XFB, black, the empty report shown. */
 static inline void rp_init(void) {
+  rp.fingerprint = MK_FNV_INIT;
   VIDEO_Init();
   rp.rmode = VIDEO_GetPreferredMode(NULL);
   rp.xfb = MEM_K0_TO_K1(SYS_AllocateFramebuffer(rp.rmode));
@@ -73,6 +78,8 @@ static inline void rp_result(int ok, int line, u32 detail) {
   rp.subtests++;
   if (ok) { rp.subtests_passed++; return; }
   rp.test_failures++;
+  u32 key[3] = {rp.tests, (u32)line, detail};
+  rp.fingerprint = mk_fnv(rp.fingerprint, key, sizeof key);
   if (rp.failures < RP_FAILURES) {
     rp.rows[6 + 2 * rp.failures] = (rp.tests << 24) | ((u32)line & 0xffffff);
     rp.rows[7 + 2 * rp.failures] = detail;

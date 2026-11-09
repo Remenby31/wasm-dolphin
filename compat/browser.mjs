@@ -13,7 +13,7 @@
 //
 // Every program × config must finish and match compat/machine-expected.json
 // exactly (test and subtest counts, the first failures with their detail);
-// the JIT config must have compiled at least 80 % of the JIT blocks
+// the JIT config must have compiled at least 60 % of the JIT blocks
 // recorded there for the program (jitBlocks) and run some, the interpreter
 // config none. Exit 1 on any difference, 2 when nothing could be read.
 // --timeout bounds one run, --budget all of them (later runs are "skipped",
@@ -61,11 +61,14 @@ async function runOne(server, iso, query, timeoutSec) {
 // The part of a report the expectations pin.
 export const summarize = (rep) => ({
   tests: rep.tests, testsPassed: rep.testsPassed, subtests: rep.subtests, subtestsPassed: rep.subtestsPassed,
+  fingerprint: rep.fingerprint,
   failures: rep.failures.map((f) => [f.test, f.line, f.msgHash])
 });
 
-// A JIT run must compile at least this share of the blocks recorded for it.
-export const JIT_BLOCK_FLOOR = 0.8;
+// A JIT run must compile at least this share of the blocks recorded for it
+// (the smallest count seen). Counts vary between runs (cpu=dual timing:
+// gxtest_clipping compiled 129 then 93 blocks), so 80 % failed a clean run.
+export const JIT_BLOCK_FLOOR = 0.6;
 
 /** Differences between the results and the expectations, one line each. */
 export function judgeMachine(results, expected, jitBlocks = {}) {
