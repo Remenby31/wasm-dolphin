@@ -1,0 +1,114 @@
+diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp b/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp
+--- a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp
++++ b/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp
+@@ -1199,6 +1199,43 @@ std::vector<u8> SerializePipelineConfig(const AbstractPipelineConfig& cfg, u32 v
+       add_attr(static_cast<u32>(ShaderAttrib::TexCoord0) + i, decl->texcoords[i]);
+     add_attr(static_cast<u32>(ShaderAttrib::PositionMatrix), decl->posmtx);
+   }
++  // Patch 0222: the uber vertex shader declares every input (UberShaderVertex
++  // GenVertexShader: rawpos, posmtx, normal, tangent, binormal, two colours,
++  // eight texcoords) and reads each only behind its VB_HAS_* bit. WebGPU
++  // refuses a pipeline whose vertex shader reads a location no attribute
++  // feeds. Each location the format lacks gets an attribute aliasing the
++  // first two bytes of the vertex (offset 0, inside every stride): uint8x2
++  // for posmtx (the shader's uint4), unorm8x2 elsewhere (float; never a NaN).
++  // These values are FILLER: the shader never reads an input without its
++  // VB_HAS_* bit set, and the bit is never set for a location filled here.
++  // The WebGPU spec ("validating GPUVertexBufferLayout") only requires
++  // offset + byteSize(format) <= arrayStride and an offset multiple of
++  // min(4, byteSize): attributes of one buffer may overlap. Uber pipelines
++  // only: a specialized shader declares just the inputs its format has.
++  if (decl && cfg.usage == AbstractPipelineUsage::GXUber && stride >= 2)
++  {
++    std::array<bool, 16> fed{};
++    for (size_t k = 0; k < attrs.size(); k += 12)
++      fed[std::min<u32>(15, attrs[k] | (attrs[k + 1] << 8))] = true;
++    constexpr ShaderAttrib declared[] = {
++        ShaderAttrib::Position,  ShaderAttrib::PositionMatrix, ShaderAttrib::Normal,
++        ShaderAttrib::Tangent,   ShaderAttrib::Binormal,       ShaderAttrib::Color0,
++        ShaderAttrib::Color1,    ShaderAttrib::TexCoord0,      ShaderAttrib::TexCoord1,
++        ShaderAttrib::TexCoord2, ShaderAttrib::TexCoord3,      ShaderAttrib::TexCoord4,
++        ShaderAttrib::TexCoord5, ShaderAttrib::TexCoord6,      ShaderAttrib::TexCoord7};
++    for (ShaderAttrib location : declared)
++    {
++      const u32 l = static_cast<u32>(location);
++      if (fed[l])
++        continue;
++      PutU32(attrs, l);
++      PutU32(attrs, location == ShaderAttrib::PositionMatrix ?
++                        VarToWgpuVertexFormat(ComponentFormat::UByte, 2, true) :
++                        VarToWgpuVertexFormat(ComponentFormat::UByte, 2, false));
++      PutU32(attrs, 0);
++      ++attr_count;
++    }
++  }
+   PutU32(b, stride);
+   PutU32(b, attr_count);
+   b.insert(b.end(), attrs.begin(), attrs.end());
+diff --git a/Source/Core/VideoCommon/ShaderCache.cpp b/Source/Core/VideoCommon/ShaderCache.cpp
+--- a/Source/Core/VideoCommon/ShaderCache.cpp
++++ b/Source/Core/VideoCommon/ShaderCache.cpp
+@@ -748,6 +748,24 @@ static GXUberPipelineUid ApplyDriverBugs(const GXUberPipelineUid& in)
+     out.ps_uid.GetUidData()->no_dual_src = true;
+   }
+ 
++  // Patch 0222: the same WebGPU rule the specialized pipelines already follow
++  // (PipelineUtils.cpp ApplyDriverBugs): a pixel shader that writes depth
++  // (per_pixel_depth) does not emit the dual-source output, the draw falls
++  // back to single-source blending. Our SPIR-V -> WGSL translator, Naga 26,
++  // refuses a fragment output struct with @blend_src members plus any other
++  // member, @builtin(frag_depth) included ("If `blend_src` is used, there must
++  // be exactly two outputs ..."). The WGSL spec and Naga >= 30 only forbid
++  // other @location members, so Naga 26 is the stricter one; the narrowest fix
++  // is this rule, which gives the ubershaders exactly the specialized
++  // shaders' blending (no translator upgrade, no change to any specialized
++  // result). Without it every dual-source + per-pixel-depth ubershader failed
++  // to translate.
++  if (g_backend_info.api_type == APIType::Vulkan && out.ps_uid.GetUidData()->per_pixel_depth)
++  {
++    out.blending_state.use_dual_src = false;
++    out.ps_uid.GetUidData()->no_dual_src = true;
++  }
++
+   if (g_ActiveConfig.UseVSForLinePointExpand())
+   {
+     // All primitives are expanded to triangles in the vertex shader
+diff --git a/Source/Core/VideoCommon/UberShaderPixel.cpp b/Source/Core/VideoCommon/UberShaderPixel.cpp
+--- a/Source/Core/VideoCommon/UberShaderPixel.cpp
++++ b/Source/Core/VideoCommon/UberShaderPixel.cpp
+@@ -48,6 +48,14 @@ void ClearUnusedPixelShaderUidBits(APIType api_type, const ShaderHostConfig& hos
+   // Dual source is always enabled in the shader if this bug is not present
+   else if (!DriverDetails::HasBug(DriverDetails::BUG_BROKEN_DUAL_SOURCE_BLENDING))
+     uid_data->no_dual_src = 0;
++  // Patch 0222: WebGPU (api_type Vulkan in the browser build): a shader that
++  // writes depth never emits the dual-source output. Naga 26, our SPIR-V ->
++  // WGSL translator, refuses @blend_src beside @builtin(frag_depth). Here,
++  // after the line above (which turns dual-source back on), so the shader
++  // compiled is the one the pipeline's blend state (ApplyDriverBugs,
++  // use_dual_src off) expects.
++  if (api_type == APIType::Vulkan && uid_data->per_pixel_depth)
++    uid_data->no_dual_src = 1;
+ 
+   // OpenGL and Vulkan convert implicitly normalized color outputs to their uint representation.
+   // Therefore, it is not necessary to use a uint output on these backends. We also disable the
+diff --git a/Source/Core/VideoCommon/UberShaderVertex.cpp b/Source/Core/VideoCommon/UberShaderVertex.cpp
+--- a/Source/Core/VideoCommon/UberShaderVertex.cpp
++++ b/Source/Core/VideoCommon/UberShaderVertex.cpp
+@@ -151,7 +151,16 @@ float3 load_input_float3_rawtex(uint vtx_offset, uint attr_offset) {{
+     out.Write("ATTRIBUTE_LOCATION({:s}) in float4 rawpos;\n", ShaderAttrib::Position);
+ #ifdef __EMSCRIPTEN__
+     // See VertexShaderGen.cpp: WebGL2 path feeds posmtx as float, not uint.
+-    out.Write("ATTRIBUTE_LOCATION({:s}) in float4 posmtx;\n", ShaderAttrib::PositionMatrix);
++    // Patch 0222: the WebGPU backend (api_type == Vulkan) feeds it as uint8x4
++    // (Uint base type), as the specialized vertex shader already declares it:
++    // a float4 here made createRenderPipeline refuse every ubershader geometry
++    // pipeline ("Attribute base type (Uint for VertexFormat::Uint8x2) does not
++    // match the shader's base type (Float) in location (1)"). The body reads
++    // `int(posmtx.r)`, the same value from either type.
++    if (api_type == APIType::Vulkan)
++      out.Write("ATTRIBUTE_LOCATION({:s}) in uint4 posmtx;\n", ShaderAttrib::PositionMatrix);
++    else
++      out.Write("ATTRIBUTE_LOCATION({:s}) in float4 posmtx;\n", ShaderAttrib::PositionMatrix);
+ #else
+     out.Write("ATTRIBUTE_LOCATION({:s}) in uint4 posmtx;\n", ShaderAttrib::PositionMatrix);
+ #endif
