@@ -372,6 +372,13 @@ export function analyzeRaw(raw, { maxLoad, outDir = null, tag = null, filmPhases
   return a;
 }
 
+// The game's own pauses a phase's smoothness p5 did not count as losses
+// (lib/parcours.mjs gamePauseSpans): printed next to it, every one.
+export function gamePausesText(g) {
+  if (!g) return "game pauses unknown";
+  return `game pauses ${g.count}${g.count ? ` (${g.list.map((p) => `${p.durationMs} ms at ${p.t} s, film ${p.filmPos ?? "?"}`).join("; ")})` : ""}`;
+}
+
 // The lines a person reads (pure).
 export function humanSummary(summary) {
   const lines = [];
@@ -379,10 +386,14 @@ export function humanSummary(summary) {
     if (r.error) { lines.push(`${r.side} ${r.run}: FAILED ${r.error}`); continue; }
     const c = r.completion;
     lines.push(`${r.side} ${r.run}: ${c.completed ? "COMPLETE" : `INCOMPLETE (${c.reached}/${c.markers} markers${c.missing.length ? `, missed ${c.missing.join(", ")}` : ""}${c.phasesInOrder ? "" : ", phases out of order"})`}, ${r.seconds} s, ${r.segments.map((s) => `${s.phase} ${s.to - s.from}`).join(" > ")}${r.integrityFailed ? " INTEGRITY" : ""}${r.overloaded ? " OVERLOADED" : ""}, new frames by ${r.newFramesBasis ?? "?"}${r.powerDrained ? " POWER" : ""}`);
-    for (const [k, p] of Object.entries(r.phases)) lines.push(`   ${k.padEnd(9)} ${String(p.seconds).padStart(4)} s  speed ${p.speed.median} (p5 ${p.speed.p5}, min ${p.speed.min}) %  new ${p.newFps.median} (p5 ${p.newFps.p5})/s  smooth ${p.smoothness.median} (p5 ${p.smoothness.p5}${p.smoothness.unknown ? `, ${p.smoothness.unknown}/${p.smoothness.seconds} s unknown${p.smoothness.reliable ? "" : ": p5 UNRELIABLE"}` : ""}) %  hitches >50 ${p.hitches50} >100 ${p.hitches100}  busy ${p.occupancy.cpuBusy}/${p.occupancy.gpuBusy}/${p.occupancy.replayBusy}`);
+    for (const [k, p] of Object.entries(r.phases)) lines.push(`   ${k.padEnd(9)} ${String(p.seconds).padStart(4)} s  speed ${p.speed.median} (p5 ${p.speed.p5}, min ${p.speed.min}) %  new ${p.newFps.median} (p5 ${p.newFps.p5})/s  smooth ${p.smoothness.median} (p5 ${p.smoothness.p5}${p.smoothness.unknown ? `, ${p.smoothness.unknown}/${p.smoothness.seconds} s unknown${p.smoothness.reliable ? "" : ": p5 UNRELIABLE"}` : ""}) %  hitches >50 ${p.hitches50} >100 ${p.hitches100}  busy ${p.occupancy.cpuBusy}/${p.occupancy.gpuBusy}/${p.occupancy.replayBusy}  ${gamePausesText(p.gamePauses)}`);
   }
   if (summary.verdict) {
     const v = summary.verdict;
+    for (const [k, ph] of Object.entries(v.phases)) if (k.startsWith("kind:") && ph.gamePauses) {
+      const side = (xs) => xs.map((x) => `${x.count ?? "?"} (${x.totalMs ?? "?"} ms)`).join(", ") || "none";
+      lines.push(`   ${k.slice(5).padEnd(9)} smooth p5 excludes the game's own pauses, by run: baseline ${side(ph.gamePauses.baseline)}; candidate ${side(ph.gamePauses.candidate)}`);
+    }
     lines.push(`verdict (${v.usable.baseline} baseline, ${v.usable.candidate} candidate usable runs): ${v.regression ? `REGRESSION ${v.regressions.map((r) => `${r.where} ${r.metric} ${r.baseline} → ${r.candidate} (> ${r.threshold})`).join(", ")}` : v.inconclusive ? "NO VERDICT (a phase without enough runs)" : "no regression beyond the noise"}${v.improvement ? " (some improvement)" : ""}`);
   }
   if (summary.browserMixed) lines.push(`WARNING: ${summary.browserMixed}`);

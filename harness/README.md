@@ -537,6 +537,19 @@ under 70 % whose new frames fall short of a 60 cadence by 4 or more isolated
 frames is excused as the game's content (lib/drops.mjs contentRule), not
 counted as lost.
 
+The game's own pauses are published next to every smoothness p5, never
+hidden in it: each phase's `gamePauses` (summary.json, the run's report, the
+A/B lines) holds their count, durations and each one's start, duration and
+film position. A pause is a production gap over 2.5 VI periods in a second
+the game-pause rule accepts, at full speed (98 % or more) with the VIs
+continuous over it (at most 1 missing); a gap failing either is not counted
+as the game's pause, and its second's missed VIs still cost it. Its "0 XFB
+copies" is read from the sampler's counters (at most one copy over the row
+left unproduced: their resolution, there are no copy timestamps). Caveat:
+"coming from the guest" means in EMULATED time. A pause that waits on a disc
+transfer lasts what our emulated DVD timing (Dolphin's FastDiscSpeed setting) makes it, not
+necessarily what a console takes; that is not measurable without a console.
+
 A film may declare its phases on its own clock, `"phases": [{ "at": 1240,
 "phase": "cinematic", "label": "intro" }, { "at": 2130, "phase": "menu" }]`
 (each from its poll to the next one's; null: the detector's from there): each second then takes the declared

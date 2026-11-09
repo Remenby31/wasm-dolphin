@@ -6,9 +6,9 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 
-import { analyzeRun, classifySecond, filmPhaseLabels, newFrameBins, gamePauseReference, viBins, ANALYSIS_VERSION as AV, producedBins, regularProduction, contentSecond, gapDetail, completionOf, currentPhase, deriveSeconds, GAME_DRAWS_PER_FRAME, LOAD_DISC_BPS, markerIndexes, MIN_PHASE_SEC, parcoursVerdict, phaseLabels, phaseMetrics, phaseNoise, renderTimeline, sectionsOf, segmentsOf, summarizeSeconds, windowCadence } from "../harness/lib/parcours.mjs";
+import { analyzeRun, classifySecond, filmPhaseLabels, newFrameBins, gamePauseReference, gamePauseSpans, viBins, ANALYSIS_VERSION as AV, producedBins, regularProduction, contentSecond, gapDetail, completionOf, currentPhase, deriveSeconds, GAME_DRAWS_PER_FRAME, LOAD_DISC_BPS, markerIndexes, MIN_PHASE_SEC, parcoursVerdict, phaseLabels, phaseMetrics, phaseNoise, renderTimeline, sectionsOf, segmentsOf, summarizeSeconds, windowCadence } from "../harness/lib/parcours.mjs";
 import { filmMarkers, filmPhases, filmWithMarks, keyToPad, padStateOf, recordPorts, runRecordSteps, validateFilm, validateRecordSteps } from "../harness/lib/pad-film.mjs";
-import { analyzeRaw, countersOf, otherCpuOf, presentGaps, samplerTicksOf, viTimesOf, exitCodeOf, humanSummary, markerStep } from "../harness/probes/parcours.mjs";
+import { analyzeRaw, countersOf, otherCpuOf, presentGaps, samplerTicksOf, viTimesOf, exitCodeOf, gamePausesText, humanSummary, markerStep } from "../harness/probes/parcours.mjs";
 import { decodePng, encodePng } from "../harness/lib/png.mjs";
 
 const TPS = 486e6;
@@ -970,7 +970,7 @@ test("the live loop: the newest row owns no complete grid second yet, and is sti
 // Analysis 7: the game's own pause.
 // 3 menu seconds; in the middle one the game makes no frame for 300 ms ((t-700, t-400]): 42 made, 42 shown;
 // `copies`: the core's EFB->XFB copies counted in it; `visIn`: its VI outputs; `speed`: its emulation speed
-function pauseRun({ copies = 42, visIn = 60, speed = 100, learn30 = false } = {}) {
+function pauseRun({ copies = 42, visIn = 60, speed = 100, learn30 = false, gapVis = true, rows: wantRows = false } = {}) {
   const s = withProduced(samplesOf(learn30 ? [["menu", 2], ["menu", 3]] : [["menu", 3]]), 60);
   if (learn30) for (const x of s.slice(1, 3)) { x.presents = presentsIn(x.t, 30); x.producedT = presentsIn(x.t, 30); x.info.newShown = 0; }
   const m = s.length - 2;
@@ -979,6 +979,7 @@ function pauseRun({ copies = 42, visIn = 60, speed = 100, learn30 = false } = {}
   s[m].presents = gap(s[m].t);
   s.forEach((x) => { x.viT = presentsIn(x.t, 60); });
   s[m].viT = presentsIn(s[m].t, 60).slice(0, visIn);
+  if (!gapVis) s[m].viT = s[m].viT.filter((p) => p < s[m].t - 650 || p >= s[m].t - 450);
   // the core's counters: copies in the pause second, its ticks at `speed`
   let xfb = 0, ticks = 0;
   s.forEach((x, i) => {
@@ -986,7 +987,7 @@ function pauseRun({ copies = 42, visIn = 60, speed = 100, learn30 = false } = {}
     x.counters = { ...x.counters, t: x.t, xfbCopies: xfb, ticks };
   });
   const rows = deriveSeconds(s, { tps: TPS });
-  return rows[m - 1];
+  return wantRows ? rows : rows[m - 1];
 }
 test("the game's own pause (no XFB copy left unproduced, VIs on): content, judged at a fixed cadence; copies that went on stay a loss", () => {
   const pause = pauseRun();
@@ -1003,6 +1004,45 @@ test("the game's own pause (no XFB copy left unproduced, VIs on): content, judge
   assert.equal(gamePauseReference({ made: 42, xfbCopies: 44, vis: 60, viRate: 59.94 }), null);
   assert.equal(gamePauseReference({ made: 42, xfbCopies: null, vis: 60, viRate: 59.94 }), null, "copies unknown: no pause excused");
   assert.equal(gamePauseReference({ made: 40, xfbCopies: 40, vis: 50, viRate: 50 }), 40, "PAL: the 50 cadence");
+});
+
+test("the game's pauses are published one by one next to the p5: start, duration, film position; per phase, per run, in the A/B", () => {
+  const rows = pauseRun({ rows: true });
+  const pauses = rows.flatMap((r) => r.gamePauses);
+  assert.equal(pauses.length, 1, "one pause, counted once");
+  assert.ok(pauses[0].durationMs > 300 && pauses[0].durationMs < 320, `duration ${pauses[0].durationMs}`);
+  assert.ok(Number.isFinite(pauses[0].t));
+  assert.ok("filmPos" in pauses[0]);
+  const sum = summarizeSeconds(rows);
+  assert.equal(sum.gamePauses.count, 1);
+  assert.equal(sum.gamePauses.seconds, 1);
+  assert.deepEqual(sum.gamePauses.durationsMs, [pauses[0].durationMs]);
+  assert.equal(sum.metrics.gamePauses, 1);
+  assert.equal(sum.metrics.gamePauseMs, pauses[0].durationMs);
+  // copies that went on: no game pause, none published
+  assert.equal(summarizeSeconds(pauseRun({ copies: 60, rows: true })).gamePauses.count, 0);
+  // the VIs stopped inside the gap (an emulation stall, not the game's pause at full speed): the
+  // second keeps the pause reference (its missed VIs cost it) but no pause is published
+  const stalled = pauseRun({ gapVis: false, rows: true });
+  assert.equal(stalled.some((r) => r.smoothBins.some((x) => x.gamePause)), true);
+  assert.equal(summarizeSeconds(stalled).gamePauses.count, 0);
+  // below full speed: none published either
+  assert.equal(summarizeSeconds(pauseRun({ speed: 93, rows: true })).gamePauses.count, 0);
+  // the spans alone: VIs counted, not interval by interval (host jitter: a VI 2.5 periods late, then caught up)
+  const vi = 1000 / 59.94, vis = Array.from({ length: 40 }, (_, i) => i * vi);
+  const late = vis.map((t, i) => (i === 10 ? t + 25 : t)).sort((a, b) => a - b);
+  const spans = (viT, speed = 100) => gamePauseSpans({ producedT: [0, vi, 2 * vi, 2 * vi + 300, 2 * vi + 300 + vi], viT, from: 0, to: 1000, viMs: vi, speed });
+  assert.deepEqual(spans(late).map((p) => [p.durationMs, p.continuousVis, p.fullSpeed]), [[300, true, true]]);
+  assert.equal(spans(vis.filter((_, i) => i < 6 || i > 12))[0].continuousVis, false, "7 VIs missing");
+  assert.equal(spans(vis, 97)[0].fullSpeed, false);
+  // the run's report and the A/B tables carry them
+  assert.match(gamePausesText(sum.gamePauses), /^game pauses 1 \(\d+(\.\d)? ms at [\d.]+ s, film /);
+  assert.equal(gamePausesText(summarizeSeconds(pauseRun({ copies: 60, rows: true })).gamePauses), "game pauses 0");
+  const run = (gp) => ({ completion: { completed: true }, phases: { menu: { metrics: { speedMedian: 100, speedP5: 99, newFpsMedian: 60, smoothP5: 100, hitches100: 0, smoothReliable: true, gamePauses: gp, gamePauseMs: gp * 100 } } }, sections: {} });
+  const v = parcoursVerdict([run(1), run(2)], [run(0)]);
+  assert.deepEqual(v.phases["kind:menu"].gamePauses, { baseline: [{ count: 1, totalMs: 100 }, { count: 2, totalMs: 200 }], candidate: [{ count: 0, totalMs: 0 }] });
+  const lines = humanSummary({ runs: [], verdict: v });
+  assert.ok(lines.some((l) => /menu .*game's own pauses, by run: baseline 1 \(100 ms\), 2 \(200 ms\); candidate 0 \(0 ms\)/.test(l)), lines.join("\n"));
 });
 
 test("an emulation stall on top of the game's pause still shows: the missed VIs cost the second, the speed p5 drops", () => {
