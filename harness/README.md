@@ -558,9 +558,17 @@ the frames produced in them + 1. In dual core without SyncOnSkipIdle a
 stall of ours on the GPU side looks like the game's pause in every other
 signal (the guest CPU spins at full speed waiting for draw-done, the VIs go
 on, no copy is asked, nothing bursts after). Rows missing or a field
-unknown: no excuse (analysis 8). In an A/B the pauses' count and total time
-are primaries: a rise past the noise is a regression, so even a stall the
-rule took for the game's is caught. An irregular second that is not the
+unknown: no excuse (analysis 8). In an A/B the primary is the production gaps' total time
+at full speed, per phase and run (`productionGapMs`): every interval between
+two produced frames past the regularity rule's bound for its second
+(max(1.5 frame intervals, 2.5 VI periods)) with every reading it covers at
+98 % or more, excused as the game's pause or not, so a change that only
+flips an excuse (GPU timing near the bound) does not move it while an
+emulator stall the rule took for the game's raises it. A rise of the medians
+past the noise's threshold (the A/A's sd, else the sides' pooled sd) and
+past 100 ms is a regression; a gap of unknown length (production unknown)
+makes that row judged neither way. The pauses' count and time are
+published, not judged. An irregular second that is not the
 game's pause is judged against the rate of its own regular part (its frame
 intervals that are no gap, each rounded to a VI multiple k, covering half
 the second or more with 80 % on one k: the nominal cadence / k; for k > 1

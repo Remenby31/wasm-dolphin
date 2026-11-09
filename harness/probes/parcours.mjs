@@ -397,7 +397,7 @@ export function humanSummary(summary) {
     if (r.error) { lines.push(`${r.side} ${r.run}: FAILED ${r.error}`); continue; }
     const c = r.completion;
     lines.push(`${r.side} ${r.run}: ${c.completed ? "COMPLETE" : `INCOMPLETE (${c.reached}/${c.markers} markers${c.missing.length ? `, missed ${c.missing.join(", ")}` : ""}${c.phasesInOrder ? "" : ", phases out of order"})`}, ${r.seconds} s, ${r.segments.map((s) => `${s.phase} ${s.to - s.from}`).join(" > ")}${r.integrityFailed ? " INTEGRITY" : ""}${r.overloaded ? " OVERLOADED" : ""}, new frames by ${r.newFramesBasis ?? "?"}${r.powerDrained ? " POWER" : ""}`);
-    for (const [k, p] of Object.entries(r.phases)) lines.push(`   ${k.padEnd(9)} ${String(p.seconds).padStart(4)} s  speed ${p.speed.median} (p5 ${p.speed.p5}, min ${p.speed.min}) %  new ${p.newFps.median} (p5 ${p.newFps.p5})/s  smooth ${p.smoothness.median} (p5 ${p.smoothness.p5}${p.smoothness.unknown ? `, ${p.smoothness.unknown}/${p.smoothness.seconds} s unknown${p.smoothness.reliable ? "" : ": p5 UNRELIABLE"}` : ""}) %  hitches >50 ${p.hitches50} >100 ${p.hitches100}  busy ${p.occupancy.cpuBusy}/${p.occupancy.gpuBusy}/${p.occupancy.replayBusy}  ${gamePausesText(p.gamePauses)}`);
+    for (const [k, p] of Object.entries(r.phases)) lines.push(`   ${k.padEnd(9)} ${String(p.seconds).padStart(4)} s  speed ${p.speed.median} (p5 ${p.speed.p5}, min ${p.speed.min}) %  new ${p.newFps.median} (p5 ${p.newFps.p5})/s  smooth ${p.smoothness.median} (p5 ${p.smoothness.p5}${p.smoothness.unknown ? `, ${p.smoothness.unknown}/${p.smoothness.seconds} s unknown${p.smoothness.reliable ? "" : ": p5 UNRELIABLE"}` : ""}) %  hitches >50 ${p.hitches50} >100 ${p.hitches100}  busy ${p.occupancy.cpuBusy}/${p.occupancy.gpuBusy}/${p.occupancy.replayBusy}  gaps ${p.productionGaps?.totalMs ?? "?"} ms (${p.productionGaps?.count ?? "?"}${p.productionGaps?.unknown ? `, ${p.productionGaps.unknown} unknown` : ""})  ${gamePausesText(p.gamePauses)}`);
   }
   if (summary.verdict) {
     const v = summary.verdict;
@@ -463,7 +463,7 @@ function writeSummary(outDir, meta, analyses, noise) {
     if (summary.producedBasis === "mixed") reasons.push("produced frames on different bases (grid / worker) across runs");
     for (const side of ["baseline", "candidate"]) if (of(side).filter(usable).length < 3) reasons.push(`${of(side).filter(usable).length} usable ${side} run(s) (complete, clean, calm), 3 needed`);
     const unreliable = Object.entries(summary.verdict.phases).filter(([, v]) => v.rows.some((r) => r.unreliable)).map(([k]) => k);
-    if (unreliable.length) reasons.push(`smoothness p5 unreliable (unknown seconds) in ${unreliable.join(", ")}`);
+    if (unreliable.length) reasons.push(`smoothness p5 or production gaps unreliable (unknown seconds) in ${unreliable.join(", ")}`);
     if (summary.verdict.inconclusive) reasons.push("a phase or section has no verdict");
     summary.noVerdict = reasons.length ? reasons : null;
   } else {

@@ -699,7 +699,7 @@ export const PHASE_PRIMARY_DISPLAY = { stallMs: "up", displayExcessMs: "up", dis
 export const REPORTED = { lostMs: "up", dropLostMs: "up", slowRowsMs: "up", pctBelow95: "up", pctBelow90: "up", hitches50: "up", presentP99: "up", loadExcessMs: "up" };
 export const GUARDED = { ...VISIT_PRIMARY, ...REPORTED };
 export const VERDICT_MIN_RUNS = 3;
-export const COUNTS = new Set(["hitches50", "hitches100", "displayRepeats3", "displayGaps100", "gamePauses"]);
+export const COUNTS = new Set(["hitches50", "hitches100", "displayRepeats3", "displayGaps100"]);
 export const Z_COUNTS = 2.576;
 // A median of n runs varies ~1.25x more than a mean.
 export const MEDIAN_SE = 1.25;

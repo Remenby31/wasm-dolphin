@@ -60,7 +60,8 @@ import { median, percentile, round } from "./stats.mjs";
 // count, seconds, durations, start, film position).
 // 8: a gap is the game's pause only with the GPU side idle over it, from the
 // drop sampler's 100 ms rows (gamePauseGpuSide; unknown: no excuse); the
-// pauses' count and total time are A/B primaries (a rise is a regression);
+// production gaps at full speed (total ms, excused or not) are an A/B
+// primary (a rise is a regression), the pauses published only;
 // an irregular second not excused is judged against its own regular part's
 // rate snapped to VI/n, else the nominal cadence (ownRateCadence), never a
 // learnt one.
@@ -399,6 +400,31 @@ export function ownRateCadence({ producedT, from, to, viMs, nominalCadence, spee
   return { cadence: round(nominalCadence / k, 2), from: "own" };
 }
 
+// The production gaps at full speed (the A/B's primary, analysis 8): every
+// interval between two produced frames (producedT) longer than the
+// regularity rule's bound for the second it starts in, max(REGULAR_GAP_FACTOR
+// x 1000 / the frames made in that second, REGULAR_GAP_VIS nominal VI
+// periods), with every reading it covers at GAME_PAUSE_FULL_SPEED % or more
+// (a slower emulation is the speed p5's): its whole length in ms, excused as
+// the game's pause or not, so no change of the excuse moves it; ms null when
+// the second's production is unknown. [{ k (grid second of its start), ms }]
+export function productionGapsOf({ producedT, origin, binMs, produced, viMs, speedAt }) {
+  const out = [];
+  for (let i = 1; i < producedT.length; i += 1) {
+    const a = producedT[i - 1], b = producedT[i];
+    const k = Math.floor((a - origin) / binMs);
+    if (k < 0 || k >= produced.length) continue;
+    const made = produced[k];
+    if (b - a <= REGULAR_GAP_VIS * viMs) continue;
+    if (made == null) { out.push({ k, ms: null }); continue; }
+    if (b - a <= Math.max(made > 0 ? REGULAR_GAP_FACTOR * (1000 / made) : Infinity, REGULAR_GAP_VIS * viMs)) continue;
+    const speeds = speedAt(a, b);
+    if (!(speeds.length && speeds.every((x) => Number.isFinite(x) && x >= GAME_PAUSE_FULL_SPEED))) continue;
+    out.push({ k, ms: round(b - a, 1) });
+  }
+  return out;
+}
+
 // The GPU side over a span, from the drop sampler's 100 ms rows (the probe's
 // gpuRows, GPU_ROW_COLUMNS; never the worker's 500 ms window). The counters
 // are credited when a pass or a wait ENDS (patch 0113: a GPU-loop pass adds
@@ -512,6 +538,7 @@ export function deriveSeconds(samples, { tps = null } = {}) {
   const nominalVi = nominalViRate(samples), nominalViMs = 1000 / nominalVi;
   // the game-pause candidates, decided once every second is read
   const pauseBins = new Map(); // grid second k -> { row, bin index, gaps, smoothPause, smoothScene }
+  const binRow = new Map(); // grid second k -> its row's index
   const rowSpeeds = []; // [from, to, speed] per reading
   let nextBin = 0;
   for (let i = 1; i < samples.length; i += 1) {
@@ -597,6 +624,7 @@ export function deriveSeconds(samples, { tps = null } = {}) {
     booted ||= (num(ib.newShown) ?? 0) > 0;
     rowSpeeds.push([a.t, b.t, speed]);
     const rowIndex = rows.length;
+    for (const x of own) binRow.set(x.k, rowIndex);
     rows.push({
       i: rows.length, t: round((b.t - t0) / 1000, 2), at: b.t, booted,
       speed: round(speed, 1), newFps: round(newFps, 1), newFpsWorker: round(newFpsWorker, 1), producedFps: round(producedFps, 1), producedFrom,
@@ -624,7 +652,7 @@ export function deriveSeconds(samples, { tps = null } = {}) {
         return { t: round((x.to - t0) / 1000, 2), newFrames: x.newFrames, produced: made, regular, content: binContent, gamePause: false, reference: own ? own.from : binContent ? "made" : "scene", smoothness };
       }),
       smoothness: null,
-      gamePauses: [],
+      gamePauses: [], productionGaps: [], productionGapsUnknown: 0,
       viRate: round(viRate, 1), presents: (b.presents ?? []).length, hitches50, hitches100, maxGapMs: round(maxGapMs, 1),
       // the presenting worker's longest stall in the second (sampler rows)
       workerLagMs: Array.isArray(b.samplerTicks) && b.samplerTicks.length ? Math.max(...b.samplerTicks.map((x) => x[1])) : null,
@@ -672,6 +700,14 @@ export function deriveSeconds(samples, { tps = null } = {}) {
       const owner = pauseBins.get(binOf(g.start));
       rows[owner.row].gamePauses.push({ t: round((g.start - t0) / 1000, 2), durationMs: g.durationMs, filmPos: filmAt(g.start) });
     }
+  }
+  // the production gaps at full speed (productionGapsOf), each in the row of
+  // the second it starts in: the A/B's primary, excused or not
+  if (produced) for (const g of productionGapsOf({ producedT: allProduced, origin: t0, binMs: NEW_FRAMES_BIN_MS, produced, viMs: nominalViMs, speedAt })) {
+    const row = rows[binRow.get(g.k)];
+    if (!row) continue;
+    if (g.ms == null) row.productionGapsUnknown += 1;
+    else row.productionGaps.push(g.ms);
   }
   // a row's smoothness: its worst grid second, null unless all are known
   for (const r of rows) r.smoothness = r.smoothBins.length && r.smoothBins.every((x) => x.smoothness != null) ? Math.min(...r.smoothBins.map((x) => x.smoothness)) : null;
@@ -809,8 +845,14 @@ export function summarizeSeconds(rows, { integrityAllow = [] } = {}) {
   const gamePauses = { count: pauses.length, durationsMs: pauses.map((p) => p.durationMs), totalMs: round(pauses.reduce((n, p) => n + p.durationMs, 0), 1), seconds: rows.reduce((n, r) => n + (r.smoothBins ?? []).filter((x) => x.gamePause).length, 0), list: pauses };
   metrics.gamePauses = gamePauses.count;
   metrics.gamePauseMs = gamePauses.totalMs;
+  // the production gaps at full speed, excused or not (productionGapsOf):
+  // the A/B's primary; unknown ones counted apart
+  const gaps = rows.flatMap((r) => r.productionGaps ?? []);
+  metrics.productionGapMs = round(gaps.reduce((n, x) => n + x, 0), 1);
+  metrics.productionGaps = gaps.length;
+  metrics.productionGapsUnknown = rows.reduce((n, r) => n + (r.productionGapsUnknown ?? 0), 0);
   return {
-    seconds: rows.length, contentSeconds, gamePauses, speed, newFps, smoothness: { ...smooth, seconds: grid.length, unknown: smoothUnknown, reliable: smoothReliable }, hitches50: metrics.hitches50, hitches100: metrics.hitches100, worst,
+    seconds: rows.length, contentSeconds, gamePauses, productionGaps: { count: metrics.productionGaps, totalMs: metrics.productionGapMs, unknown: metrics.productionGapsUnknown }, speed, newFps, smoothness: { ...smooth, seconds: grid.length, unknown: smoothUnknown, reliable: smoothReliable }, hitches50: metrics.hitches50, hitches100: metrics.hitches100, worst,
     occupancy: { cpuBusy: round(median(rows.map((r) => r.cpuBusy)), 2), gpuBusy: round(median(rows.map((r) => r.gpuBusy)), 2), replayBusy: round(median(rows.map((r) => r.replayBusy)), 2) },
     discMB: round(rows.reduce((s, r) => s + (r.discBps ?? 0), 0) / (1 << 20), 1),
     integrity: integrity ? { fatal: integrity.fatal ?? [], reported: integrity.reported ?? [] } : null,
@@ -891,11 +933,16 @@ export function analyzeRun(raw, { integrityAllow = [] } = {}) {
 // --- A/B: pairs by phase, never by timestamp ---------------------------------
 // Every phase kind ("kind:game") and every section ("section:race") of the
 // runs is one comparison; its metrics are the runs' flat metrics.
-// The game's pauses are judged too (analysis 8): an emulator stall the rule
-// took for one raises their count and time, a regression past the noise
-// (the count a Poisson count, lib/drops.mjs COUNTS).
-export const PARCOURS_PRIMARY = Object.freeze({ speedMedian: "down", speedP5: "down", newFpsMedian: "down", smoothP5: "down", hitches100: "up", gamePauses: "up", gamePauseMs: "up" });
-export const PARCOURS_FLOOR = Object.freeze({ speedMedian: 1, speedP5: 2, newFpsMedian: 1, smoothP5: 3, hitches100: 1, gamePauses: 1, gamePauseMs: 50 });
+// The production gaps at full speed are judged too (analysis 8): their total
+// ms per run and phase, excused as the game's pauses or not (an emulator
+// stall the rule took for the game's raises it; a GPU speed-up that turns a
+// refused gap into an excused one does not move it); a rise of the medians
+// past the noise's threshold (the A/A's sd, else the two sides' pooled sd,
+// lib/drops.mjs verdictOf) and past PARCOURS_FLOOR's 100 ms (about 2.5
+// gaps of the 2.5-VI bound) is a regression. The game's pauses stay
+// published, not judged (their excuse flips with the GPU side's timing).
+export const PARCOURS_PRIMARY = Object.freeze({ speedMedian: "down", speedP5: "down", newFpsMedian: "down", smoothP5: "down", hitches100: "up", productionGapMs: "up" });
+export const PARCOURS_FLOOR = Object.freeze({ speedMedian: 1, speedP5: 2, newFpsMedian: 1, smoothP5: 3, hitches100: 1, productionGapMs: 100 });
 
 export function phaseMetrics(analysis) {
   const out = {};
@@ -941,8 +988,16 @@ export function parcoursVerdict(baseline, candidate, noise = null) {
       v.improvement = v.rows.some((r) => r.improvement);
       v.inconclusive = true;
     }
+    // a run with production gaps of unknown length in the phase (a second's
+    // production unknown): its gaps' total is a lower bound, judged neither way
+    if ([...of(b), ...of(c)].some((m) => m.productionGapsUnknown > 0)) {
+      v.rows = v.rows.map((r) => (r.metric === "productionGapMs" ? { ...r, regression: false, improvement: false, inconclusive: true, unreliable: true } : r));
+      v.regression = v.rows.some((r) => r.regression);
+      v.improvement = v.rows.some((r) => r.improvement);
+      v.inconclusive = true;
+    }
     // the game's pauses each side's p5 excused, run by run (published next
-    // to the p5; their count and time are also primaries, judged above)
+    // to the p5, not judged: the production gaps are, above)
     const pausesOf = (xs) => xs.map((a) => gamePausesOf(a, k)).filter(Boolean);
     v.gamePauses = { baseline: pausesOf(b), candidate: pausesOf(c) };
     phases[k] = v;

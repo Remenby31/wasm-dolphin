@@ -816,7 +816,7 @@ test("A/B: a smoothness p5 marked unreliable on either side is judged neither wa
   const x = parcoursVerdict([run(40, true), run(41, true), run(40, true)], [run(70, true), run(71, true), run(70, true)]);
   assert.equal(x.phases["kind:menu"].rows.find((r) => r.metric === "smoothP5").improvement, true);
   const probe = readFileSync(new URL("../harness/probes/parcours.mjs", import.meta.url), "utf8");
-  assert.match(probe, /smoothness p5 unreliable \(unknown seconds\) in/);
+  assert.match(probe, /smoothness p5 or production gaps unreliable \(unknown seconds\) in/);
 });
 
 test("worst seconds: a row owning no grid second is left out, never ranked over a bad one", () => {
@@ -1196,15 +1196,33 @@ test("a stall on OUR GPU side (VIs on, full speed, no copy asked, no burst after
   assert.equal(spans(null).known, false);
 });
 
-test("A/B: the game's pauses are primaries: more of them, or longer, beyond the noise is a regression", () => {
-  const run = (n, ms) => ({ completion: { completed: true }, phases: { menu: { metrics: { speedMedian: 100, speedP5: 99, newFpsMedian: 60, smoothP5: 100, hitches100: 0, smoothReliable: true, gamePauses: n, gamePauseMs: ms } } }, sections: {} });
-  const same = parcoursVerdict([run(2, 300), run(2, 310), run(2, 305)], [run(2, 300), run(2, 305), run(2, 310)]);
-  assert.equal(same.regression, false);
-  const more = parcoursVerdict([run(2, 300), run(2, 310), run(2, 305)], [run(9, 1300), run(9, 1310), run(9, 1305)]);
+test("A/B: the primary is the production gaps' total time at full speed, excused or not; the game's pauses are published, not judged", () => {
+  // a gap the rule refuses (the GPU thread busy over it) and the same gap excused: the gaps' time does not move
+  const refused = summarizeSeconds(pauseRun({ gpu: { stall: [2280, 2620] }, rows: true }));
+  const excused = summarizeSeconds(pauseRun({ rows: true }));
+  assert.deepEqual([refused.gamePauses.count, excused.gamePauses.count], [0, 1]);
+  assert.ok(excused.metrics.productionGapMs > 300 && excused.metrics.productionGapMs < 320, `${excused.metrics.productionGapMs}`);
+  assert.equal(refused.metrics.productionGapMs, excused.metrics.productionGapMs);
+  assert.equal(refused.metrics.productionGaps, 1);
+  // below full speed: the speed p5's, not a gap
+  assert.equal(summarizeSeconds(pauseRun({ speed: 93, rows: true })).metrics.productionGapMs, 0);
+  // the verdict
+  const run = (gapMs, pauses = 0) => ({ completion: { completed: true }, phases: { menu: { metrics: { speedMedian: 100, speedP5: 99, newFpsMedian: 60, smoothP5: 100, hitches100: 0, smoothReliable: true, productionGapMs: gapMs, gamePauses: pauses, gamePauseMs: pauses * 100 } } }, sections: {} });
+  const flip = parcoursVerdict([run(400, 0), run(410, 0), run(405, 0)], [run(400, 2), run(405, 2), run(410, 2)]);
+  assert.equal(flip.regression, false, "a refused gap turned excused: no regression");
+  const more = parcoursVerdict([run(400), run(410), run(405)], [run(900), run(910), run(905)]);
   assert.equal(more.regression, true);
-  assert.deepEqual(more.regressions.map((r) => r.metric).sort(), ["gamePauseMs", "gamePauses"]);
-  assert.equal(PARCOURS_PRIMARY.gamePauses, "up");
-  assert.equal(PARCOURS_PRIMARY.gamePauseMs, "up");
+  assert.deepEqual(more.regressions.map((r) => r.metric), ["productionGapMs"]);
+  // the floor: 60 ms more, with no spread, is no regression
+  assert.equal(parcoursVerdict([run(400), run(400), run(400)], [run(460), run(460), run(460)]).regression, false);
+  // a gap of unknown length on either side: that row judged neither way
+  const unk = (gapMs) => { const r = run(gapMs); r.phases.menu.metrics.productionGapsUnknown = 1; return r; };
+  const u = parcoursVerdict([run(400), run(410), run(405)], [unk(900), run(910), run(905)]);
+  assert.equal(u.regression, false);
+  assert.equal(u.phases["kind:menu"].rows.find((r) => r.metric === "productionGapMs").unreliable, true);
+  assert.equal(PARCOURS_PRIMARY.productionGapMs, "up");
+  assert.equal(PARCOURS_PRIMARY.gamePauses, undefined);
+  assert.equal(PARCOURS_PRIMARY.gamePauseMs, undefined);
 });
 
 test("an emulation stall on top of the game's pause still shows: below full speed, the second is a loss against the scene cadence", () => {
