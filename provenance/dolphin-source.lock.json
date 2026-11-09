@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "fb3a422cf9911948d3a6dd68a6d79a16afa4e9d0a789f7ad0f5cab5f8278327b",
+  "patchSeriesSha256": "8464375a1865eea500d2af9bc6b8162101f1696493fed0709fbdc50f6ef757be",
   "patches": [
     {
       "order": 1,
@@ -1240,8 +1240,8 @@
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0223-webgpu-hybrid-ubershaders-async-translation.patch",
-      "size": 28826,
-      "sha256": "65112980ddbe5fa5ef00b98a6fe7dedc5857e7260be70471f6b2270cea1c9280"
+      "size": 29814,
+      "sha256": "394ab6abe57260c920074e8a8be8ab59c2f6b68abf4f32181ab237b1eee01b30"
     },
     {
       "order": 153,

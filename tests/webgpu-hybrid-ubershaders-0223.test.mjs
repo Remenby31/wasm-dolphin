@@ -52,7 +52,12 @@ test("0223: background compiling only in the hybrid mode, the #ifdef lifted for 
   const backend = added("Source/Core/VideoBackends/WebGPU/VideoBackend.cpp");
   assert.match(backend, /g_backend_info\.bSupportsBackgroundCompiling =\n\s+Config::Get\(Config::GFX_SHADER_COMPILATION_MODE\) ==\n\s+ShaderCompilationMode::AsynchronousUberShaders;/);
   const compiler = added("Source/Core/VideoCommon/AsyncShaderCompiler.cpp");
-  assert.match(compiler, /if \(!\(g_backend_info\.api_type == APIType::Vulkan && g_backend_info\.bSupportsBackgroundCompiling\)\)\n\s+return true;/);
+  assert.match(compiler, /if \(!\(m_web_worker_threads && g_backend_info\.api_type == APIType::Vulkan &&\n\s+g_backend_info\.bSupportsBackgroundCompiling\)\)\n\s+return true;/);
+  // only the shader cache's compiler may start threads (the graphics-mod and
+  // custom-resource compilers start theirs unconditionally upstream: 3 more)
+  const cache = added("Source/Core/VideoCommon/ShaderCache.cpp");
+  assert.match(cache, /m_async_shader_compiler->AllowWebWorkerThreads\(\);/);
+  assert.equal(patch.match(/AllowWebWorkerThreads\(\);/g).length, 1);
   // the start wait is measured around the one Wait per thread
   assert.match(patch, / {4}m_init_event\.Wait\(\);\n\+#ifdef __EMSCRIPTEN__\n\+\s+RecordThreadStart\(emscripten_get_now\(\) - wait_start\);/);
 });

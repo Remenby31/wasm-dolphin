@@ -576,21 +576,23 @@ diff --git a/Source/Core/VideoCommon/AsyncShaderCompiler.cpp b/Source/Core/Video
  
  namespace VideoCommon
  {
-@@ -131,7 +137,12 @@ bool AsyncShaderCompiler::StartWorkerThreads(u32 num_worker_threads)
+@@ -131,7 +137,14 @@ bool AsyncShaderCompiler::StartWorkerThreads(u32 num_worker_threads)
  
  #ifdef __EMSCRIPTEN__
    // WebGL does not expose shared GL contexts, so shader work must compile synchronously.
 -  return true;
-+  // Patch 0223: except the WebGPU backend (the Vulkan dialect here) in its
-+  // hybrid mode (?shadermode=hybrid), the only case where it says it supports
-+  // background compiling: its threads translate GLSL to WGSL and never touch a
-+  // device (the GPU thread pushes their results into the command ring).
-+  if (!(g_backend_info.api_type == APIType::Vulkan && g_backend_info.bSupportsBackgroundCompiling))
++  // Patch 0223: except the shader cache's compiler (AllowWebWorkerThreads)
++  // with the WebGPU backend (the Vulkan dialect here) in its hybrid mode
++  // (?shadermode=hybrid), the only case where it says it supports background
++  // compiling: its threads translate GLSL to WGSL and never touch a device
++  // (the GPU thread pushes their results into the command ring).
++  if (!(m_web_worker_threads && g_backend_info.api_type == APIType::Vulkan &&
++        g_backend_info.bSupportsBackgroundCompiling))
 +    return true;
  #endif
  
    for (u32 i = 0; i < num_worker_threads; i++)
-@@ -145,8 +156,14 @@ bool AsyncShaderCompiler::StartWorkerThreads(u32 num_worker_threads)
+@@ -145,8 +158,14 @@ bool AsyncShaderCompiler::StartWorkerThreads(u32 num_worker_threads)
  
      m_worker_thread_start_result.store(false);
  
@@ -605,7 +607,7 @@ diff --git a/Source/Core/VideoCommon/AsyncShaderCompiler.cpp b/Source/Core/Video
  
      if (!m_worker_thread_start_result.load())
      {
-@@ -161,6 +178,28 @@ bool AsyncShaderCompiler::StartWorkerThreads(u32 num_worker_threads)
+@@ -161,6 +180,28 @@ bool AsyncShaderCompiler::StartWorkerThreads(u32 num_worker_threads)
    return HasWorkerThreads();
  }
  
@@ -637,7 +639,7 @@ diff --git a/Source/Core/VideoCommon/AsyncShaderCompiler.cpp b/Source/Core/Video
 diff --git a/Source/Core/VideoCommon/AsyncShaderCompiler.h b/Source/Core/VideoCommon/AsyncShaderCompiler.h
 --- a/Source/Core/VideoCommon/AsyncShaderCompiler.h
 +++ b/Source/Core/VideoCommon/AsyncShaderCompiler.h
-@@ -33,6 +33,19 @@ public:
+@@ -33,6 +33,22 @@ public:
  
    using WorkItemPtr = std::unique_ptr<WorkItem>;
  
@@ -652,21 +654,39 @@ diff --git a/Source/Core/VideoCommon/AsyncShaderCompiler.h b/Source/Core/VideoCo
 +    double wait_ms_max;
 +  };
 +  static StartStats GetStartStats();
++  // Patch 0223: the one compiler allowed threads on the web, the shader
++  // cache's (the graphics-mod and custom-resource ones stay without, as before).
++  void AllowWebWorkerThreads() { m_web_worker_threads = true; }
 +#endif
 +
    AsyncShaderCompiler();
    virtual ~AsyncShaderCompiler();
  
-@@ -68,6 +81,9 @@ protected:
+@@ -68,6 +84,10 @@ protected:
    virtual void WorkerThreadExit(void* param);
  
  private:
 +#ifdef __EMSCRIPTEN__
 +  static void RecordThreadStart(double wait_ms);
++  bool m_web_worker_threads = false;
 +#endif
    void WorkerThreadEntryPoint(void* param);
    void WorkerThreadRun();
  
+diff --git a/Source/Core/VideoCommon/ShaderCache.cpp b/Source/Core/VideoCommon/ShaderCache.cpp
+--- a/Source/Core/VideoCommon/ShaderCache.cpp
++++ b/Source/Core/VideoCommon/ShaderCache.cpp
+@@ -51,6 +51,10 @@ bool ShaderCache::Initialize()
+     return false;
+ 
+   m_async_shader_compiler = g_gfx->CreateAsyncShaderCompiler();
++#ifdef __EMSCRIPTEN__
++  // Patch 0223: threads only in the WebGPU hybrid mode (StartWorkerThreads).
++  m_async_shader_compiler->AllowWebWorkerThreads();
++#endif
+   m_frame_end_handler = GetVideoEvents().after_frame_event.Register(
+       [this](Core::System&) { RetrieveAsyncShaders(); });
+   return true;
 diff --git a/Source/Core/VideoCommon/Spirv.cpp b/Source/Core/VideoCommon/Spirv.cpp
 --- a/Source/Core/VideoCommon/Spirv.cpp
 +++ b/Source/Core/VideoCommon/Spirv.cpp
