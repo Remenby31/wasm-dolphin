@@ -36,7 +36,10 @@ function latestFrames(dir) {
 
 async function runOne({ bin, file, core, timeoutSec, platform, configs, logFile, keepUser, video }) {
   const user = keepUser ?? mkdtempSync(path.join(os.tmpdir(), "native-dolphin-"));
-  mkdirSync(path.join(user, "Config"), { recursive: true });
+  // dolphin-emu-nogui does not create the user tree (the Qt UI does): a
+  // missing Dump/Frames makes every frame dump fail silently.
+  for (const d of ["Config", "Logs", "Dump/Frames", "Dump/Screenshots", "Cache/Shaders", "GC", "Wii", "Load", "ScreenShots"])
+    mkdirSync(path.join(user, d), { recursive: true });
   // The logger reads its own file at start-up (a -C value comes too late).
   writeFileSync(path.join(user, "Config", "Logger.ini"), "[Options]\nWriteToFile = True\nWriteToConsole = True\nVerbosity = 4\n[Logs]\n" +
     ["BOOT", "CORE", "VIDEO", "COMMON", "OSREPORT", "VI", "HOST_GPU", "MASTER"].map((t) => `${t} = True\n`).join(""));
