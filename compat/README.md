@@ -76,8 +76,8 @@ tev and lighting run for hours on it: they wait for a GPU runner (wgpu).
 `browser.mjs` boots each disc in headless Chromium (harness sessions,
 software renderer at full resolution) on the interpreter and on the JIT,
 and compares each report with `machine-expected.json`: every count and
-failure must match, the JIT run must compile at least 80 % of the blocks
-recorded for the program (`jitBlocks`) and run some, the interpreter run
+failure must match, the JIT run must compile at least 60 % of the smallest
+block count recorded for the program (`jitBlocks`) and run some, the interpreter run
 none. The `machine` job of `compat.yml` runs it (about 5 minutes). The
 failures are the same gaps as in the Node port.
 

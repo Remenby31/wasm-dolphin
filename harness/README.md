@@ -516,7 +516,10 @@ older frame not new; else `"all"`, every present one; a second is unknown
 when a reading that may hold its presents was not read whole, counted as
 `smoothUnknown`, the phase's p5 marked unreliable past 5 %; A/Bs and noise
 across bases refused; the worker's own 500 ms rate, kept as `newFpsWorker`,
-saw half the second: one 50 ms hitch read 93.3 %),
+saw half the second: one 50 ms hitch read 93.3 %; analysis 5: the content
+reference, the frames produced, on the same grid from the worker's produced
+timeline, `producedBasis: "grid"`, each second judged against what was
+made in it; `"worker"`, its 500 ms rate, for older runs),
 smoothness (new frames against the game's cadence, learnt as the site
 learns it: VI/n snapped, below the VI rate only with occupancy margin, else
 the VI rate; in a content second, where the game itself made fewer frames
