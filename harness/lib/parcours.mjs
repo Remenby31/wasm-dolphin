@@ -407,7 +407,7 @@ export function ownRateCadence({ producedT, from, to, viMs, nominalCadence, spee
 // periods), with every reading it covers at GAME_PAUSE_FULL_SPEED % or more
 // (a slower emulation is the speed p5's): its whole length in ms, excused as
 // the game's pause or not, so no change of the excuse moves it; ms null when
-// the second's production is unknown. [{ k (grid second of its start), ms }]
+// the second's production or a covered reading's speed is unknown. [{ k (grid second of its start), ms }]
 export function productionGapsOf({ producedT, origin, binMs, produced, viMs, speedAt }) {
   const out = [];
   for (let i = 1; i < producedT.length; i += 1) {
@@ -419,7 +419,11 @@ export function productionGapsOf({ producedT, origin, binMs, produced, viMs, spe
     if (made == null) { out.push({ k, ms: null }); continue; }
     if (b - a <= Math.max(made > 0 ? REGULAR_GAP_FACTOR * (1000 / made) : Infinity, REGULAR_GAP_VIS * viMs)) continue;
     const speeds = speedAt(a, b);
-    if (!(speeds.length && speeds.every((x) => Number.isFinite(x) && x >= GAME_PAUSE_FULL_SPEED))) continue;
+    // a known speed below full: the speed p5's, never a gap (whatever the
+    // other readings); then a reading with no speed known: a gap of unknown
+    // standing, counted unknown (never dropped as if below full speed)
+    if (speeds.some((x) => Number.isFinite(x) && x < GAME_PAUSE_FULL_SPEED)) continue;
+    if (!speeds.length || speeds.some((x) => !Number.isFinite(x))) { out.push({ k, ms: null }); continue; }
     out.push({ k, ms: round(b - a, 1) });
   }
   return out;
@@ -439,7 +443,15 @@ export function productionGapsOf({ producedT, origin, binMs, produced, viMs, spe
 // reads served and JIT messages included); the CPU thread's waits for the
 // GPU (FlushGpu, EFB syncs). Rows missing, a drain lost (rows over
 // GAME_PAUSE_MAX_ROW_MS apart), a counter unknown or going back: unknown.
-export const GPU_ROW_COLUMNS = Object.freeze(["t", "xfbCopies", "gpuWorkUs", "gpuConsumerWaitUs", "presentSleepUs", "flushGpuWaitUs", "efbWaitUs", "replayBusyMs"]);
+// (patch 0219's cache-miss counters after them: what a load's GPU work was,
+// textures or shaders; null on a core without them, never read by the
+// game-pause rule. texCopyPushUs: the copy into the command ring, its waits
+// included; shaderXlatPushUs: GLSL -> SPIR-V -> WGSL + the ring push, the
+// replay worker makes the modules; pipelineUs includes its shaders' time,
+// never add the two; texture object creation, hi-res textures and async
+// pipelines are not counted)
+export const GPU_ROW_COLUMNS = Object.freeze(["t", "xfbCopies", "gpuWorkUs", "gpuConsumerWaitUs", "presentSleepUs", "flushGpuWaitUs", "efbWaitUs", "replayBusyMs",
+  "texLoads", "texBytes", "texDecodeUs", "texCopyPushUs", "shaderCompiles", "shaderGenUs", "shaderXlatPushUs", "pipelineMisses", "pipelineUs"]);
 export const GAME_PAUSE_MAX_GPU_SHARE = 0.5;
 export const GAME_PAUSE_MAX_GPU_WAIT_MS = 1;
 export const GAME_PAUSE_MAX_ROW_MS = 250;
@@ -453,7 +465,8 @@ export function gpuSideBusy(rows, a, b) {
   let gpuMs = 0, replayMs = 0, waitMs = 0;
   for (let i = first + 1; i < rows.length && rows[i - 1][ROW_T] < b + GAME_PAUSE_PASS_SCAN_MS; i += 1) {
     const p = rows[i - 1], c = rows[i];
-    if (c.some((x) => x == null) || p.some((x) => x == null)) return null;
+    // the fields the rule reads (ROW_T..ROW_REPLAY); 0219's after them may be null
+    if (c.slice(0, ROW_REPLAY + 1).some((x) => x == null) || p.slice(0, ROW_REPLAY + 1).some((x) => x == null)) return null;
     const span = c[ROW_T] - p[ROW_T];
     if (!(span > 0) || span > GAME_PAUSE_MAX_ROW_MS) return null;
     const d = (k) => c[k] - p[k];
