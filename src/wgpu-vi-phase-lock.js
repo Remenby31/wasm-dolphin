@@ -90,6 +90,10 @@ export const OUT_OF_REACH_MS = 3000;
 // within RATIO_TOLERANCE (its estimate wobbles: a drift past it was taken now
 // and then, and dropped again)
 export const ENTRY_UPDATES = 4;
+// a lock starts from the window's drift only when every RECENT_MS of the
+// arrivals' window agrees with the whole window on the period within this,
+// else from none (a swing of the arrivals in the window would set it wrong)
+export const ENTRY_RATE_AGREEMENT = 0.0019;
 // after a drift out of reach, the lock is taken again as soon as the drift
 // is back within reach (no base window first), but not with the arrivals
 // within this share of a refresh of the cut
@@ -211,7 +215,7 @@ export function createViPhaseLock({ quickReentry = true, maxPpm = MAX_PPM, slewP
   let saturatedMs = 0;
   // the leaky count of time the locked ratio spent off RATIO_TOLERANCE_LOCKED (ms)
   let ratioOffMs = 0;
-  const stats = { on: false, ppm: 0, locks: 0, lost: 0, why: "starting", driftPpm: null, refreshMs: null, frameMs: null, ratio: null, phase: null };
+  const stats = { on: false, ppm: 0, locks: 0, lost: 0, why: "starting", driftPpm: null, refreshMs: null, frameMs: null, ratio: null, phase: null, startDrift: null };
 
   function tick(frameTime, now = frameTime) {
     if (lastFrameTime === null || frameTime > lastFrameTime) {
@@ -277,6 +281,26 @@ export function createViPhaseLock({ quickReentry = true, maxPpm = MAX_PPM, slewP
     if (m < 1 || m > 2 || (!stats.on && Math.abs(ratio - m) > m * RATIO_TOLERANCE)) return { why: "no integer ratio", refreshMs, frameMs, ratio };
     // the default (auto) stops at 1:1: 2:1 only with ?vilock=1
     if (m > maxRatio) return { why: "2:1 only with ?vilock=1", refreshMs, frameMs, ratio };
+    // unlocked: the window's period is the drift a lock starts from (its
+    // integral). A window holding a swing of the arrivals (after a load, the
+    // replay's backlog draining) reads a drift the game does not have: on the
+    // 2P parcours a lock taken 2 s after the logo's load read 0.9981 against
+    // 1.001, started at -1860 ppm the wrong way and walked the phase to the
+    // cut at the film's start (18 frames). The lock is never refused for it
+    // (a ripple or a jitter of the arrivals would keep it off): it starts
+    // from the window's drift only when every RECENT_MS of the window reads
+    // the same period, else from none (0: the integral learns it).
+    let settled = true;
+    if (!stats.on) {
+      // each RECENT_MS of the window on its own (a swing shorter than the
+      // window shows in one of them, whichever part it sits in)
+      for (let from = now - ARRIVAL_WINDOW_MS; settled && from < now; from += RECENT_MS) {
+        const i = a.findIndex((t) => t >= from), j = a.findIndex((t) => t >= from + RECENT_MS);
+        const end = j < 0 ? a.length : j;
+        const q = i < 0 || end - i < MIN_RECENT_ARRIVALS ? null : period(a.slice(i, end), sp.slice(i, end));
+        settled = Boolean(q && !q.irregular && Math.abs(q.frameMs / frameMs - 1) <= ENTRY_RATE_AGREEMENT);
+      }
+    }
     // the arrivals' phase in the refresh (circular mean, last second)
     let sx = 0, sy = 0;
     for (const t of a.filter((t) => t >= now - 1000)) {
@@ -285,7 +309,7 @@ export function createViPhaseLock({ quickReentry = true, maxPpm = MAX_PPM, slewP
       sy += Math.sin(2 * Math.PI * ph);
     }
     const phase = ((Math.atan2(sy, sx) / (2 * Math.PI)) + 1) % 1;
-    return { why: null, refreshMs, frameMs, ratio, m, phase };
+    return { why: null, refreshMs, frameMs, ratio, m, phase, settled };
   }
 
   /**
@@ -340,7 +364,9 @@ export function createViPhaseLock({ quickReentry = true, maxPpm = MAX_PPM, slewP
         entryStreak = 0;
         prevErr = null;
         // the drift the lock has to cancel: m refreshes per frame
-        integral = Math.max(-maxPpm, Math.min(maxPpm, (s.frameMs / (s.m * s.refreshMs) - 1) * 1e6));
+        // the drift to cancel, when the window's period can be trusted for it
+        integral = s.settled ? Math.max(-maxPpm, Math.min(maxPpm, (s.frameMs / (s.m * s.refreshMs) - 1) * 1e6)) : 0;
+        stats.startDrift = s.settled ? "window" : "none";
       }
       stats.on = true;
       reentry = false;
