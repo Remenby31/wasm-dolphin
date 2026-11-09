@@ -366,6 +366,17 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
+      # The core's compile commands (CMAKE_EXPORT_COMPILE_COMMANDS, set by
+      # tools/configure-upstream-wasm.mjs), for a syntax check of a patched
+      # TU without a local core build: em++ -fsyntax-only from its entry.
+      # Paths are the container's (/wasm-dolphin = the checkout).
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: compile-commands-${{ github.sha }}
+          path: ${{ env.REPRO }}/dolphin-wasm/compile_commands.json
+          if-no-files-found: error
+          retention-days: 30
+
   # main only: the published archive must be enough to rebuild the core: no
   # checkout, no git, no network for sources (the Rust crates are vendored in
   # it). Only the toolchain is installed, from the lock inside the archive.
