@@ -40,12 +40,16 @@ test("machine: every field, the JIT's activity and every expected run are checke
   const want = summarize(rep);
   const run = (config, extra = {}) => ({ program: "p", config, status: "done", report: rep, jitBlocksCompiled: config === "jit" ? 9 : 0, jitBlocksRun: config === "jit" ? 99 : 0, ...extra });
   const expected = { p: { interp: want, jit: want } };
-  assert.deepEqual(judgeMachine([run("interp"), run("jit")], expected), []);
+  const blocks = { p: 10 };
+  assert.deepEqual(judgeMachine([run("interp"), run("jit")], expected, blocks), []);
+  // The run compiled 9 blocks: enough for 10 recorded (floor 8), not for 13 (floor 10).
+  assert.match(judgeMachine([run("interp"), run("jit")], expected, { p: 13 })[0], /compiled 9 .*at least 10/);
+  assert.match(judgeMachine([run("interp"), run("jit")], expected, {}).join("\n"), /no jitBlocks count/);
   const off = { p: { interp: want, jit: { ...want, subtestsPassed: want.subtestsPassed + 1 } } };
-  assert.match(judgeMachine([run("interp"), run("jit")], off)[0], /^p jit: got /);
-  assert.match(judgeMachine([run("interp"), run("jit", { jitBlocksCompiled: 0 })], expected)[0], /the JIT compiled 0/);
-  assert.match(judgeMachine([run("interp", { jitBlocksCompiled: 3 }), run("jit")], expected)[0], /interpreter config compiled 3/);
-  assert.match(judgeMachine([run("interp"), run("jit", { status: "timeout" })], expected)[0], /p jit: timeout/);
-  assert.match(judgeMachine([run("interp")], expected)[0], /p jit: expected but not run/);
-  assert.match(judgeMachine([run("interp"), run("jit"), { ...run("jit"), program: "q" }], expected)[0], /q jit: not in/);
+  assert.match(judgeMachine([run("interp"), run("jit")], off, blocks)[0], /^p jit: got /);
+  assert.match(judgeMachine([run("interp"), run("jit", { jitBlocksCompiled: 0 })], expected, blocks)[0], /the JIT compiled 0 /);
+  assert.match(judgeMachine([run("interp", { jitBlocksCompiled: 3 }), run("jit")], expected, blocks)[0], /interpreter config compiled 3/);
+  assert.match(judgeMachine([run("interp"), run("jit", { status: "timeout" })], expected, blocks)[0], /p jit: timeout/);
+  assert.match(judgeMachine([run("interp")], expected, blocks)[0], /p jit: expected but not run/);
+  assert.match(judgeMachine([run("interp"), run("jit"), { ...run("jit"), program: "q" }], expected, { ...blocks, q: 1 })[0], /q jit: not in/);
 });

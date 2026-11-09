@@ -71,9 +71,22 @@ reciprocal and fctiw are left out (2^32 inputs each: hours).
 `browser.mjs` boots each disc in headless Chromium (harness sessions,
 software renderer at full resolution) on the interpreter and on the JIT,
 and compares each report with `machine-expected.json`: every count and
-failure must match, the JIT run must have compiled and run blocks, the
-interpreter run none. The `machine` job of `compat.yml` runs it (about 5
-minutes). The failures are the same gaps as in the Node port.
+failure must match, the JIT run must compile at least 80 % of the blocks
+recorded for the program (`jitBlocks`) and run some, the interpreter run
+none. The `machine` job of `compat.yml` runs it (about 5 minutes). The
+failures are the same gaps as in the Node port.
+
+`machine-expected.json` is a snapshot of the current emulator: a regression
+gate on the known failures. The verdict of each subtest comes from the
+hardware values compiled into the hwtests binaries. For the small programs
+most JIT blocks are libogc's start-up, so the block floor proves the JIT ran,
+not that every test loop compiled (the Node port's `jitCoverage` checks that
+per instruction).
+
+The JIT run is not the shipped configuration: `jitwarmup=0&forcejit=1` (the
+JIT from the first frame, without the stall fuse), software renderer at full
+resolution (`fastsw=0`), `efbaccess=1`. Playwright is installed by version
+(1.56.1) without a lockfile.
 
 ## Not yet ported
 

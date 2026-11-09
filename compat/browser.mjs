@@ -13,7 +13,8 @@
 //
 // Every program × config must finish and match compat/machine-expected.json
 // exactly (test and subtest counts, the first failures with their detail);
-// the JIT config must have compiled and run JIT blocks, the interpreter
+// the JIT config must have compiled at least 80 % of the JIT blocks
+// recorded there for the program (jitBlocks) and run some, the interpreter
 // config none. Exit 1 on any difference, 2 when nothing could be read.
 // --timeout bounds one run, --budget all of them (later runs are "skipped",
 // which is a difference too).
@@ -63,8 +64,11 @@ export const summarize = (rep) => ({
   failures: rep.failures.map((f) => [f.test, f.line, f.msgHash])
 });
 
+// A JIT run must compile at least this share of the blocks recorded for it.
+export const JIT_BLOCK_FLOOR = 0.8;
+
 /** Differences between the results and the expectations, one line each. */
-export function judgeMachine(results, expected) {
+export function judgeMachine(results, expected, jitBlocks = {}) {
   const problems = [];
   const seen = new Set();
   for (const r of results) {
@@ -76,8 +80,12 @@ export function judgeMachine(results, expected) {
     const got = summarize(r.report);
     if (JSON.stringify(got) !== JSON.stringify(want))
       problems.push(`${key}: got ${JSON.stringify(got)}, expected ${JSON.stringify(want)}`);
-    if (r.config === "jit" && !(r.jitBlocksCompiled > 0 && r.jitBlocksRun > 0))
-      problems.push(`${key}: the JIT compiled ${r.jitBlocksCompiled} and ran ${r.jitBlocksRun} blocks`);
+    if (r.config === "jit") {
+      const floor = Math.max(1, Math.floor(JIT_BLOCK_FLOOR * (jitBlocks[r.program] ?? 0)));
+      if (!(r.jitBlocksCompiled >= floor && r.jitBlocksRun > 0))
+        problems.push(`${key}: the JIT compiled ${r.jitBlocksCompiled} and ran ${r.jitBlocksRun} blocks (at least ${floor} compiled expected)`);
+      if (jitBlocks[r.program] === undefined) problems.push(`${key}: no jitBlocks count in compat/machine-expected.json`);
+    }
     if (r.config === "interp" && r.jitBlocksCompiled !== 0)
       problems.push(`${key}: the interpreter config compiled ${r.jitBlocksCompiled} JIT blocks`);
   }
@@ -115,7 +123,8 @@ async function main() {
   const only = values.only ? new Set(values.only.split(",")) : null;
   const isos = readdirSync(values.dir).filter((f) => f.endsWith(".iso")).map((f) => f.slice(0, -4))
     .filter((n) => !only || only.has(n)).sort();
-  let expected = JSON.parse(readFileSync(new URL("./machine-expected.json", import.meta.url), "utf8")).programs;
+  const file = JSON.parse(readFileSync(new URL("./machine-expected.json", import.meta.url), "utf8"));
+  let expected = file.programs;
   if (only) expected = Object.fromEntries(Object.entries(expected).filter(([p]) => only.has(p)));
   const server = await ensureServer({ port: Number(values.port) });
   const results = [];
@@ -130,7 +139,7 @@ async function main() {
       console.error(`[compat] ${program} ${config}: ${r.status} ${rep ? `${rep.testsPassed}/${rep.tests} tests, ${rep.subtestsPassed}/${rep.subtests} subtests` : ""} (${r.seconds} s, JIT blocks ${r.jitBlocksCompiled})`);
     }
   }
-  const problems = judgeMachine(results, expected);
+  const problems = judgeMachine(results, expected, file.jitBlocks);
   const md = markdown(results, problems);
   process.stdout.write(md);
   if (values.json) writeFileSync(values.json, JSON.stringify({ results, problems }, null, 1));
