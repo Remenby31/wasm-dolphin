@@ -299,6 +299,8 @@ export function samplerVerdict(rows, { affinity = null, scheme = null } = {}) {
   if (q(0.5) != null && q(0.5) > OTHER_CPU_MEDIAN_MAX) reasons.push(`other processes ${q(0.5)} % of a core (median) > ${OTHER_CPU_MEDIAN_MAX}`);
   if (q(0.95) != null && q(0.95) > OTHER_CPU_P95_MAX) reasons.push(`other processes ${q(0.95)} % of a core (p95) > ${OTHER_CPU_P95_MAX}`);
   if (rows.some((r) => r.locked)) reasons.push("the lock screen came up");
+  // other processes read from the account's own only: the load is unknown
+  if (rows.length && rows.every((r) => r.otherPartial)) reasons.push("other processes' CPU unreadable (the account sees only its own): load unknown");
   if (scheme && rows.some((r) => r.scheme && r.scheme !== scheme)) reasons.push(`the power scheme changed during the run (expected ${scheme})`);
   if (affinity && rows.some((r) => r.browserAffinity && r.browserAffinity !== affinity)) reasons.push(`a browser process ran outside the class affinity ${affinity}`);
   return { rows: rows.length, otherMedian: q(0.5), otherP95: q(0.95), contaminated: reasons.length > 0, reasons };

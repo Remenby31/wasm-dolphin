@@ -172,25 +172,53 @@ function Reg-Policies($path) {
   return $r
 }
 
-# Busy CPU of the machine and the processes using it, over $sec seconds
-# (CPU time deltas: locale-independent, unlike the perf counters' names).
+# Busy CPU of the machine and the processes using it, over $sec seconds.
+# The raw per-process counters (Win32_PerfRawData_PerfProc_Process: 100 ns
+# of CPU per process, every account's, readable by a standard account and
+# locale-independent); Get-Process CPU times as a fallback, which a standard
+# account only gets for its own processes (then marked partial).
 function Cpu-Busy([int]$sec = 3, [string[]]$exclude = @(), [int[]]$excludePids = @()) {
-  $a = @{}; foreach ($p in Get-Process) { try { $a[$p.Id] = $p.TotalProcessorTime.TotalMilliseconds } catch {} }
-  $t0 = Get-Date
-  Start-Sleep -Seconds $sec
-  $wall = ((Get-Date) - $t0).TotalMilliseconds
+  $partial = $false
+  $read = {
+    $m = @{}; $ts = $null
+    foreach ($q in @(Get-CimInstance Win32_PerfRawData_PerfProc_Process -ErrorAction Stop)) {
+      if ($q.Name -eq '_Total' -or $q.Name -eq 'Idle') { continue }
+      $m[[int]$q.IDProcess] = @([double]$q.PercentProcessorTime, ($q.Name -replace '#\d+$', ''))
+      $ts = [double]$q.Timestamp_Sys100NS
+    }
+    @{ m = $m; ts = $ts }
+  }
   $rows = @()
-  foreach ($p in Get-Process) {
-    try {
-      if (-not $a.ContainsKey($p.Id) -or $p.Id -eq 0) { continue }
-      $d = $p.TotalProcessorTime.TotalMilliseconds - $a[$p.Id]
-      if ($d -gt 0) { $rows += [pscustomobject]@{ name = $p.ProcessName; pid = $p.Id; pct = [math]::Round(100 * $d / $wall, 1) } }
-    } catch {}
+  try {
+    $a = & $read
+    Start-Sleep -Seconds $sec
+    $b = & $read
+    $wall = $b.ts - $a.ts
+    if (-not ($wall -gt 0)) { throw "no timestamp" }
+    foreach ($id in $b.m.Keys) {
+      if (-not $a.m.ContainsKey($id) -or $id -eq 0) { continue }
+      $d = $b.m[$id][0] - $a.m[$id][0]
+      if ($d -gt 0) { $rows += [pscustomobject]@{ name = $b.m[$id][1]; pid = $id; pct = [math]::Round(100 * $d / $wall, 1) } }
+    }
+  } catch {
+    $partial = $true
+    $rows = @()
+    $a = @{}; foreach ($p in Get-Process) { try { $a[$p.Id] = $p.TotalProcessorTime.TotalMilliseconds } catch {} }
+    $t0 = Get-Date
+    Start-Sleep -Seconds $sec
+    $wallMs = ((Get-Date) - $t0).TotalMilliseconds
+    foreach ($p in Get-Process) {
+      try {
+        if (-not $a.ContainsKey($p.Id) -or $p.Id -eq 0) { continue }
+        $d = $p.TotalProcessorTime.TotalMilliseconds - $a[$p.Id]
+        if ($d -gt 0) { $rows += [pscustomobject]@{ name = $p.ProcessName; pid = $p.Id; pct = [math]::Round(100 * $d / $wallMs, 1) } }
+      } catch {}
+    }
   }
   $others = @($rows | Where-Object { $exclude -notcontains $_.name -and $excludePids -notcontains $_.pid })
-  $sum = ($others | Measure-Object -Property pct -Sum).Sum
-  if (-not $sum) { $sum = 0 }
-  return [ordered]@{ seconds = $sec; otherPctOfOneCore = [math]::Round($sum, 1); top = @($others | Sort-Object pct -Descending | Select-Object -First 5) }
+  # a plain sum: Measure-Object on an empty list has no .Sum under StrictMode
+  $sum = 0.0; foreach ($o in $others) { $sum += $o.pct }
+  return [ordered]@{ seconds = $sec; otherPctOfOneCore = [math]::Round($sum, 1); partial = $partial; top = @($others | Sort-Object pct -Descending | Select-Object -First 5) }
 }
 
 function Check {
@@ -536,7 +564,7 @@ function Sampler {
       $eff = (Get-CimInstance Win32_PerfFormattedData_Counters_ProcessorInformation | Where-Object { $_.Name -notmatch '_Total' } |
         ForEach-Object { [double]$_.ProcessorFrequency * [double]$_.PercentProcessorPerformance / 100 } | Measure-Object -Maximum).Maximum
     } catch {}
-    $row = [ordered]@{ t = (Get-Date).ToString("o"); otherPct = $b.otherPctOfOneCore; top = $b.top; maxEffMhz = $(if ($eff) { [math]::Round($eff) } else { $null }); browserAffinity = $(if ($aff.Count) { $aff[0] } else { $null }); scheme = Active-Scheme; locked = [bool](Get-Process -Name LogonUI -ErrorAction SilentlyContinue) }
+    $row = [ordered]@{ t = (Get-Date).ToString("o"); otherPct = $b.otherPctOfOneCore; otherPartial = $b.partial; top = $b.top; maxEffMhz = $(if ($eff) { [math]::Round($eff) } else { $null }); browserAffinity = $(if ($aff.Count) { $aff[0] } else { $null }); scheme = Active-Scheme; locked = [bool](Get-Process -Name LogonUI -ErrorAction SilentlyContinue) }
     ($row | ConvertTo-Json -Depth 4 -Compress) | Out-File -LiteralPath $csv -Append -Encoding UTF8
   }
 }
