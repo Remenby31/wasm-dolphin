@@ -66,7 +66,12 @@ network reporter: the counts and the first 10 failures (source line and
 FNV-1a of the failure message) are painted into the XFB as checksummed rows
 (`homebrew/report.h`), read back from exact captures by `lib/report-rows.mjs`.
 `shim/` stands in for the Wii-only headers (no Wii remote, no network).
-reciprocal and fctiw are left out (2^32 inputs each: hours).
+reciprocal and fctiw are left out (2^32 inputs each: hours). From gxtest,
+bitfield, clipping and rasterization run; intensity and copyfilter fill the
+EFB with CPU pokes, which Dolphin's software renderer ignores
+(`SWEFBInterface::PokeColor` is empty: `homebrew/efbpoke` shows it), and
+tev and lighting run for hours on it: they wait for a GPU runner (wgpu).
+`machine-expected.json` `notes` explains each expected failure.
 
 `browser.mjs` boots each disc in headless Chromium (harness sessions,
 software renderer at full resolution) on the interpreter and on the JIT,
@@ -90,5 +95,5 @@ resolution (`fastsw=0`), `efbaccess=1`. Playwright is installed by version
 
 ## Not yet ported
 
-`gxtest/` on the machine job (next), homebrews for MMU/BAT, VI modes and
-memory cards.
+gxtest intensity/copyfilter/tev/lighting (need wgpu), homebrews for
+MMU/BAT, VI modes and memory cards.
