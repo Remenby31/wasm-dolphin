@@ -26,4 +26,10 @@ export function probeOutDir(name, iso, out = null) {
 
 // Which Chrome ran (race-perf records the same): a wrapper or extra flags
 // left exported would otherwise pass for the engine's own numbers.
-export const chromeInfo = () => ({ path: process.env.HARNESS_CHROME_PATH || "chrome stable", args: process.env.HARNESS_CHROME_ARGS || "" });
+// channel: msedge when HARNESS_BROWSER_CHANNEL says so (the PC kit's Edge
+// runs); display: a run shown on a screen (x11, windows) says so.
+export const chromeInfo = (env = process.env) => ({
+  path: env.HARNESS_CHROME_PATH || "chrome stable", args: env.HARNESS_CHROME_ARGS || "",
+  ...(env.HARNESS_BROWSER_CHANNEL && env.HARNESS_BROWSER_CHANNEL !== "chrome" ? { channel: env.HARNESS_BROWSER_CHANNEL } : {}),
+  ...(env.HARNESS_DISPLAY && env.HARNESS_DISPLAY !== "headless" ? { display: env.HARNESS_DISPLAY } : {})
+});
