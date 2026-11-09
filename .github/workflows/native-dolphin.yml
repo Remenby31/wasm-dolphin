@@ -85,7 +85,7 @@ jobs:
         uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4
         with:
           path: ${{ env.NATIVE }}/Binaries
-          key: native-dolphin-${{ env.DOLPHIN_REF }}-ubuntu-24.04-v1
+          key: native-dolphin-${{ env.DOLPHIN_REF }}-ubuntu-24.04-v2
 
       - name: Build upstream Dolphin (no patch)
         if: steps.cache.outputs.cache-hit != 'true'
@@ -106,8 +106,11 @@ jobs:
           cmake -S "$src" -B "$RUNNER_TEMP/dolphin-build" -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DENABLE_QT=OFF -DENABLE_NOGUI=ON -DENABLE_TESTS=OFF -DENABLE_ANALYTICS=OFF -DENABLE_AUTOUPDATE=OFF \
             -DUSE_DISCORD_PRESENCE=OFF -DUSE_MGBA=OFF -DUSE_RETRO_ACHIEVEMENTS=OFF -DENCODE_FRAMEDUMPS=OFF \
-            -DENABLE_LLVM=OFF -DENABLE_VULKAN=OFF -DUSE_UPNP=OFF -DUSE_SANITIZERS=OFF
+            -DENABLE_LLVM=OFF -DENABLE_VULKAN=OFF -DUSE_UPNP=OFF -DUSE_SANITIZERS=OFF -DLINUX_LOCAL_DEV=ON
           ninja -C "$RUNNER_TEMP/dolphin-build" dolphin-nogui
+          # LINUX_LOCAL_DEV: Dolphin reads Sys next to its binary (shaders, fonts, game settings).
+          rm -rf "$RUNNER_TEMP/dolphin-build/Binaries/Sys"
+          cp -a "$src/Data/Sys" "$RUNNER_TEMP/dolphin-build/Binaries/Sys"
           mkdir -p "$NATIVE"
           cp -a "$RUNNER_TEMP/dolphin-build/Binaries" "$NATIVE/"
           ls -la "$NATIVE/Binaries"

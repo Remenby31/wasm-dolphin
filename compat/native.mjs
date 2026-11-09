@@ -94,12 +94,13 @@ async function main() {
       cores: { type: "string", default: "interp,jit" }, timeout: { type: "string", default: "120" },
       platform: { type: "string", default: "x11" }, config: { type: "string", multiple: true, default: [] },
       json: { type: "string" }, md: { type: "string" }, logs: { type: "string", default: "native-logs" },
-      "keep-user": { type: "string" }
+      "keep-user": { type: "string" }, ext: { type: "string", default: "dol" }
     }
   });
   if (!values.bin || !values.dir) throw new Error("usage: compat/native.mjs --bin <dolphin-emu-nogui> --dir <files>");
   const only = values.only ? new Set(values.only.split(",")) : null;
-  const files = readdirSync(values.dir).filter((f) => /\.(dol|elf|iso)$/.test(f))
+  // One file per program: the .dol (build.sh also writes an .iso of each).
+  const files = readdirSync(values.dir).filter((f) => new RegExp(`\\.(${values.ext.replaceAll(",", "|")})$`).test(f))
     .filter((f) => !only || only.has(f.replace(/\.\w+$/, ""))).sort();
   mkdirSync(values.logs, { recursive: true });
   const results = [];
