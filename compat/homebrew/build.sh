@@ -26,7 +26,7 @@ CPU="cr fctiwz fprf frsp load mtspr nan ni pairedmove rlw srawix"
 # which Dolphin's software renderer ignores (SWEFBInterface::PokeColor is
 # empty), and with tev and lighting they run for hours on it.
 GX="bitfield clipping rasterization"
-OWN="efbpoke"
+OWN="efbpoke battest cardtest vitest"
 
 docker run --rm --platform linux/amd64 -v "$root:/w" -v "$hw:/hw:ro" -v "$out:/out" -w /w "$IMAGE" sh -c '
   set -eu
@@ -36,6 +36,8 @@ docker run --rm --platform linux/amd64 -v "$root:/w" -v "$hw:/hw:ro" -v "$out:/o
   FLAGS="-std=c++17 -O2 -Wall -Wno-unused-function $MACHDEP -DFMT_HEADER_ONLY -fno-ident -ffile-prefix-map=/hw=hwtests -ffile-prefix-map=/w=."
   INC="-I/w/compat/homebrew/shim -I/w/compat/homebrew -I/hw -I/hw/Externals/fmt/include -I/w/harness/homebrew/common -I$P/libogc/include"
   LIBS="-L$P/libogc/lib/cube -Wl,--build-id=none -logc -lm"
+  # The libogc the image ships (machine-expected.json notes cite its card.c).
+  grep -h "define _V_STRING" $P/libogc/include/ogc/libversion.h || true
   build() { # name, sources...
     n=$1; shift
     $CXX $FLAGS $INC "$@" /w/compat/homebrew/hwtests-report.cpp -o /out/$n.elf $MACHDEP $LIBS

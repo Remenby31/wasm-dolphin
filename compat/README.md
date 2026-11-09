@@ -101,5 +101,17 @@ resolution (`fastsw=0`), `efbaccess=1`. Playwright is installed by version
 
 ## Not yet ported
 
-gxtest intensity/copyfilter/tev/lighting (need wgpu), homebrews for
-MMU/BAT, VI modes and memory cards.
+gxtest intensity/copyfilter/tev/lighting (need wgpu); an MMU (page table)
+homebrew.
+
+## Our homebrews (`homebrew/<name>/main.c`)
+
+Same report rows, checked by the program itself against architectural
+values; run on the machine job like the hwtests.
+
+| program | checks |
+|---|---|
+| battest | DBAT3/IBAT3 reprogrammed at run time to EA 0x50000000 (data both ways, remap, a 9-instruction function called 50 times through the BAT, rewritten, called 50 times again), every frame for 600 frames |
+| cardtest | memory card in slot A through libogc's CARD API: mount, create, write per sector, read back, status, delete, unmount, twice |
+| vitest | VI field rate per mode (480i NTSC/EURGB60/MPAL, 240p, 576i, 288p, 480p) measured with the time base against the VI timings, 0.02 % |
+| efbpoke | CPU pokes and peeks of the EFB (pokes are ignored by the software renderer) |
