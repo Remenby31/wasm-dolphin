@@ -10,7 +10,7 @@
 //
 //   node compat/native.mjs --bin <dolphin-emu-nogui> --dir <files> [--only a,b]
 //        [--cores interp,jit] [--timeout 120] [--platform x11] [--config K=V ...]
-//        [--json f] [--md f] [--logs dir]
+//        [--json f] [--md f] [--logs dir] [--keep-user dir]
 //
 // Each run keeps Dolphin's stdout/stderr (--logs). Exit 1 when a run dumped
 // no frame (the setup is broken), 0 otherwise: the table is the result.
@@ -34,14 +34,17 @@ function latestFrames(dir) {
   return files.map((f) => [f, statSync(f).mtimeMs]).sort((a, b) => a[1] - b[1]).map(([f]) => f);
 }
 
-async function runOne({ bin, file, core, timeoutSec, platform, configs, logFile }) {
-  const user = mkdtempSync(path.join(os.tmpdir(), "native-dolphin-"));
+async function runOne({ bin, file, core, timeoutSec, platform, configs, logFile, keepUser }) {
+  const user = keepUser ?? mkdtempSync(path.join(os.tmpdir(), "native-dolphin-"));
   mkdirSync(path.join(user, "Config"), { recursive: true });
   const args = ["-u", user, "-p", platform, "-v", "Software Renderer", "-e", file,
     "-C", `Dolphin.Core.CPUCore=${core}`, "-C", "Dolphin.Core.EmulationSpeed=0",
     "-C", "Dolphin.Movie.DumpFrames=True", "-C", "GFX.Settings.DumpFramesAsImages=True",
     "-C", "GFX.Hacks.EFBAccessEnable=True", "-C", "GFX.Hacks.EFBToTextureEnable=False",
     "-C", "Dolphin.DSP.Backend=No Audio Output", "-C", "Dolphin.Interface.ConfirmStop=False",
+    // Dolphin's own log (User/Logs/dolphin.log), kept with --keep-user.
+    "-C", "Logger.Options.WriteToFile=True", "-C", "Logger.Options.Verbosity=4",
+    ...["BOOT", "CORE", "VIDEO", "COMMON", "FRAMEDUMP", "OSREPORT"].flatMap((t) => ["-C", `Logger.Logs.${t}=True`]),
     ...configs.flatMap((c) => ["-C", c])];
   const log = openSync(logFile, "w");
   const child = spawn(bin, args, { stdio: ["ignore", log, log] });
@@ -63,7 +66,7 @@ async function runOne({ bin, file, core, timeoutSec, platform, configs, logFile 
   }
   if (!exited) child.kill("SIGKILL");
   await new Promise((r) => setTimeout(r, 300));
-  rmSync(user, { recursive: true, force: true }); // the mkdtemp directory above
+  if (!keepUser) rmSync(user, { recursive: true, force: true }); // the mkdtemp directory above
   return { done: !!report?.done, seconds: Math.round((Date.now() - t0) / 1000), frames, frame, exited, report };
 }
 
@@ -87,7 +90,8 @@ async function main() {
       bin: { type: "string" }, dir: { type: "string" }, only: { type: "string" },
       cores: { type: "string", default: "interp,jit" }, timeout: { type: "string", default: "120" },
       platform: { type: "string", default: "x11" }, config: { type: "string", multiple: true, default: [] },
-      json: { type: "string" }, md: { type: "string" }, logs: { type: "string", default: "native-logs" }
+      json: { type: "string" }, md: { type: "string" }, logs: { type: "string", default: "native-logs" },
+      "keep-user": { type: "string" }
     }
   });
   if (!values.bin || !values.dir) throw new Error("usage: compat/native.mjs --bin <dolphin-emu-nogui> --dir <files>");
@@ -101,7 +105,8 @@ async function main() {
     for (const core of values.cores.split(",")) {
       const logFile = path.join(values.logs, `${program}-${core}.log`);
       const r = await runOne({ bin: values.bin, file: path.resolve(values.dir, f), core: CORES[core], timeoutSec: Number(values.timeout),
-        platform: values.platform, configs: values.config, logFile });
+        platform: values.platform, configs: values.config, logFile,
+        keepUser: values["keep-user"] ? path.resolve(values["keep-user"], `${program}-${core}`) : undefined });
       results.push({ program, core, ...r });
       const rep = r.report;
       console.error(`[native] ${program} ${core}: ${r.done ? "done" : "not done"}, ${r.frames} frames${rep ? `, ${rep.testsPassed}/${rep.tests} tests, ${rep.subtestsPassed}/${rep.subtests} subtests, fp ${rep.fingerprint}` : ""} (${r.seconds} s)`);

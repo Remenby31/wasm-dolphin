@@ -127,8 +127,8 @@ jobs:
           set -o pipefail
           extra=(); for c in $CONFIG; do extra+=(--config "$c"); done
           xvfb-run -a -s "-screen 0 1280x1024x24" node compat/native.mjs --bin "$NATIVE/Binaries/dolphin-emu-nogui" \
-            --dir "$RUNNER_TEMP/hwtests-out" --only cputest_cr --cores interp --timeout 60 --logs native-logs/smoke "${extra[@]}" \
-            || { tail -50 native-logs/smoke/*.log; exit 1; }
+            --dir "$RUNNER_TEMP/hwtests-out" --only cputest_cr --cores interp --timeout 60 --logs native-logs/smoke --keep-user native-logs/smoke-user "${extra[@]}" \
+            || { tail -50 native-logs/smoke/*.log; find native-logs/smoke-user -maxdepth 3 | head -40; tail -80 native-logs/smoke-user/*/Logs/dolphin.log; exit 1; }
 
       - name: Run
         shell: bash
