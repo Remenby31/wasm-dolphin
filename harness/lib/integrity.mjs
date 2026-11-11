@@ -48,7 +48,10 @@ export async function readIntegrity(page, { expected = true } = {}) {
 // upload or range given up for another reason, stays fatal.
 
 // Fatal on their total since boot, not only on the window's delta.
-export const SINCE_BOOT_FATAL = Object.freeze(["regionLinkImportType", "regionLinkValidation"]);
+// pthreadsOverPool (patch 0223): pthreads Emscripten had to add past its
+// preallocated pool (-sPTHREAD_POOL_SIZE=16); such a thread starts late,
+// waiting for a new Worker. Every run must stay inside the pool.
+export const SINCE_BOOT_FATAL = Object.freeze(["regionLinkImportType", "regionLinkValidation", "pthreadsOverPool"]);
 const countOf = (k, delta, end) => (delta[k] > 0 ? `${k} ${delta[k]}` : `${k} ${end[k]} since boot`);
 
 // Over a window: the delta of every counter and the fatal ones that moved,

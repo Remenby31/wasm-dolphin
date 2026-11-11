@@ -20,8 +20,8 @@
     {
       "path": "core/upstream/dolphin_web_discio.cpp",
       "hashMode": "lf-normalized",
-      "size": 86522,
-      "sha256": "3840d0126a482a3a09bdc877639512d897f5ccded5345c9afcf488cb2577e275"
+      "size": 86744,
+      "sha256": "8cf2c1f30ddec206c9f854c81554fa272f69e90593c07edd76ce801793d9ae29"
     },
     {
       "path": "core/upstream/dolphin_web_raster_profile.h",
@@ -44,8 +44,8 @@
     {
       "path": "core/upstream/dolphin_web_core.cpp",
       "hashMode": "lf-normalized",
-      "size": 80536,
-      "sha256": "c9fe8f882df26ec00a32ad8bac90940a27ee79754a37931c310ec2dc0fb435d5"
+      "size": 81995,
+      "sha256": "8d18d1ebeb8d443de42a2a93244c9722adc20413e048c65fb23d1c20bc86dba9"
     },
     {
       "path": "src/app.js",
@@ -86,8 +86,8 @@
     {
       "path": "src/core-host.js",
       "hashMode": "lf-normalized",
-      "size": 104104,
-      "sha256": "6704fac52fe0a1316ad49fb94639f1d611564b6c91dc8eee3d972f31ec7940c9"
+      "size": 104996,
+      "sha256": "87fe3d7abd0d25eb9bfa9002f89d0b3e21895dd3ecbe5bef3c8c129da26845c2"
     },
     {
       "path": "src/diagnostic-log-filter.js",
@@ -140,8 +140,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 795843,
-      "sha256": "c0e33bb973494e1dffa22f1f8a01d8be81e0f82e35ec78546eb10c2b5547c5ac"
+      "size": 800328,
+      "sha256": "6e8e953a978bc45a685fb1c2359c9e955a1ce6c18e03fe295430315d67176047"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",
@@ -164,8 +164,8 @@
     {
       "path": "src/upstream-worker-adapter.js",
       "hashMode": "lf-normalized",
-      "size": 64057,
-      "sha256": "102c8e00b2b8b92849b0ab5214fe104c4138421f5faf534d5651ffbbc9da63df"
+      "size": 64332,
+      "sha256": "93952bd2a04cb6fc10e2a3ba848cad055f23051308de198580a0fb57a5b156d1"
     },
     {
       "path": "src/upstream-worker-protocol.js",
@@ -765,6 +765,7 @@
       "validationReadRegionLedgerStale",
       "validationReadRelaxedMadd",
       "validationReadTimeline",
+      "validationReadUberAtVi",
       "validationReadWgpuReadback",
       "validationReadWgpuReplayState",
       "validationSetCorePaused",

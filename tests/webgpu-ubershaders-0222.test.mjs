@@ -54,6 +54,8 @@ test("0222: uber pipelines feed every input the uber vertex shader declares, wit
 
 test("0222 changes no default: the web core keeps ShaderCompilationMode::Synchronous", () => {
   const core = read("core/upstream/dolphin_web_core.cpp");
-  assert.match(core, /Config::SetBase\(Config::GFX_SHADER_COMPILATION_MODE,\n\s+ShaderCompilationMode::Synchronous\);/);
+  // Since 0223 the hybrid mode is a flag (?shadermode=hybrid); without it the
+  // mode stays Synchronous (tests/webgpu-hybrid-ubershaders-0223.test.mjs).
+  assert.match(core, /Config::SetBase\(Config::GFX_SHADER_COMPILATION_MODE,\n\s+shader_hybrid \? ShaderCompilationMode::AsynchronousUberShaders :\n\s+ShaderCompilationMode::Synchronous\);/);
   assert.doesNotMatch(patch, /ShaderCompilationMode|GFX_SHADER_COMPILATION_MODE/);
 });

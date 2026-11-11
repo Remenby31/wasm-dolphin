@@ -1,4 +1,5 @@
 import { asDiscBlob } from "./remote-disc.js";
+import { createGpuFrameTimer } from "./wgpu-gpu-frame-timer.js";
 import { readSwapRing, readViRing } from "./harness-vi-ring.js";
 import { createPipelineLog } from "./harness-pipeline-log.js";
 import { startPcSampler } from "./harness-pc-sampler.js";
@@ -298,6 +299,10 @@ const PRESENTATION_HISTOGRAM_BUCKETS_MS = [8, 12, 16, 20, 24, 33, 50, 100, 200];
 // clock emscripten_get_now() gives the core's VI ring.
 const harnessNow = () => performance.timeOrigin + performance.now();
 let harnessEnabled = false;
+// Patch 0224 (harness only): the replay's GPU time per command buffer
+// (timestamp-query); null until the first harness-on replay encoder, then the
+// timer or { absent } when the device has no timestamp-query.
+let gpuFrameTimer = null;
 // ?fifolog=1: a .dff may boot (FifoPlayer). Harness only, set at loadCore.
 // Harness (validationWgslCorpus): WGSL by hash, null when off.
 let harnessWgslCorpus = null;
@@ -498,6 +503,47 @@ export const regionLinkFailuresForTest = () => regionLinkFailures.snapshot();
 // validationReadIntegrity: the replay's integrity counters, cumulative and
 // flat (fatal ones: INTEGRITY_FATAL), plus non-fatal context (staging waits,
 // presents rejected, presents).
+// Patch 0224/0225 (harness only; read with the integrity snapshot, never
+// drained, so every reader sees the same recent entries): the last closed VI
+// windows [vi_since_load, load generation, uber draws, epoch ms], the last
+// first binds of async pipelines [translation end, ready, first bind (epoch
+// ms), VI tag], the GPU frame timer (or "absent"), the bounded wait counters.
+// Fields absent on a core without the exports.
+const UBER_VI_LOG_READ = 120;
+const RETRIEVE_LOG_READ = 64;
+function readCoreLog(m, fn, max) {
+  if (typeof m?.[fn] !== "function" || typeof m._malloc !== "function") return null;
+  const p = m._malloc(8 * 4 * max);
+  try {
+    const n = m[fn](p, max) >>> 0;
+    const v = new Float64Array(m.HEAPU8.buffer, p, 4 * n);
+    const out = [];
+    for (let k = 0; k < n; k += 1) out.push([v[4 * k], v[4 * k + 1], v[4 * k + 2], v[4 * k + 3]]);
+    return out;
+  } finally {
+    m._free(p);
+  }
+}
+function readUberDiagLogs(m) {
+  const out = {};
+  const vi = readCoreLog(m, "_DolphinWeb_UberViLog", UBER_VI_LOG_READ);
+  if (vi) out.uberViLog = vi;
+  const ret = readCoreLog(m, "_DolphinWeb_RetrieveLog", RETRIEVE_LOG_READ);
+  if (ret) out.retrieveLog = ret;
+  if (gpuFrameTimer) Object.assign(out, gpuFrameTimer.snapshot());
+  if (typeof m?._DolphinWeb_UberWaitStats === "function" && typeof m._malloc === "function") {
+    const p = m._malloc(8 * 10);
+    try {
+      m._DolphinWeb_UberWaitStats(p);
+      const v = new Float64Array(m.HEAPU8.buffer, p, 10);
+      Object.assign(out, { uberWaitUs: v[0], uberWaitMaxUs: v[1], uberWaits: v[2], uberWaitHits: v[3], uberWaitMs: v[4], uberRetrieveHits: v[5], uberWaitWakeups: v[6], uberWaitHitUs: v[7], uberWaitHitMaxUs: v[8], uberWaitMissUs: v[9] });
+    } finally {
+      m._free(p);
+    }
+  }
+  return out;
+}
+
 function readWgpuIntegrity() {
   const m = moduleInstance;
   let geometryCacheCollisions = 0, geometryCacheFailed = 0;
@@ -513,8 +559,14 @@ function readWgpuIntegrity() {
       m._free(p);
     }
   }
+  const pthreads = readPthreadUse();
   return wgpuIntegrity.snapshot({
+    // 0224: per-VI uber windows, first binds, GPU time per command buffer; 0225: the bounded wait
+    ...readUberDiagLogs(m),
     ...coreIntegrityOf(api?.getWebGpuStateCacheStats?.()),
+    // 0223: pthreads allocated past the pool (fatal since boot), and in use
+    pthreadsOverPool: pthreads.error ? null : Math.max(0, pthreads.allocated - PTHREAD_POOL_SIZE),
+    pthreadsRunning: pthreads.error ? null : pthreads.running,
     stagingUnsafe: webGpuCausalStats.mappedStagingUnsafeCapacityCount || 0,
     stagingCapacityWaits: webGpuCausalStats.mappedStagingCapacityWaitCount || 0,
     stagingOversize: webGpuCausalStats.mappedStagingOversizeCount || 0,
@@ -2215,6 +2267,8 @@ async function handleMessage(type, payload) {
         fifoLog: payload.fifoLog,
         efbCopyRam: payload.efbCopyRam,
         efbNoDefer: payload.efbNoDefer,
+        shaderHybrid: payload.shaderHybrid,
+        uberWaitMs: payload.uberWaitMs,
         wgpuMask: payload.wgpuMask,
         wgpuFallback: payload.wgpuFallback,
         dstAlphaTwoPass: payload.dstAlphaTwoPass,
@@ -2552,7 +2606,11 @@ async function handleMessage(type, payload) {
       try {
         stats(ptr);
         const v = new Uint32Array(moduleInstance.HEAPU8.buffer, ptr, 3);
-        return { flushes: v[0], extraDraws: v[1], enabled: v[2] === 1 };
+        // 0223: hybrid flushes drawn in one uber pass while their two pass
+        // pipelines compiled (null: a core without 0223)
+        const uberWaits = typeof moduleInstance._DolphinWeb_DstAlphaUberWaits === "function"
+          ? moduleInstance._DolphinWeb_DstAlphaUberWaits() >>> 0 : null;
+        return { flushes: v[0], extraDraws: v[1], enabled: v[2] === 1, uberWaits };
       } finally {
         moduleInstance._free(ptr);
       }
@@ -2566,6 +2624,21 @@ async function handleMessage(type, payload) {
       return readWgpuIntegrity();
     case "validationReadPthreads":
       return readPthreadUse();
+    case "validationReadUberAtVi": {
+      // Patch 0223: the uber draws of the VI windows that closed at
+      // payload.vi (since the load) and at the tag before it.
+      if (!harnessEnabled) return { error: "harness hooks are off" };
+      const at = moduleInstance?._DolphinWeb_UberDrawsAtVi;
+      if (!at || !moduleInstance._malloc) return { error: "core without patch 0223" };
+      const ptr = moduleInstance._malloc(16);
+      try {
+        at(Number(payload?.vi) >>> 0, ptr);
+        const v = new Uint32Array(moduleInstance.HEAPU8.buffer, ptr, 4);
+        return { vi: Number(payload?.vi) >>> 0, found: v[0] === 1, draws: v[1], drawsBefore: v[2], loadGeneration: v[3] };
+      } finally {
+        moduleInstance._free(ptr);
+      }
+    }
     case "validationReadGeometryCache":
       return harnessGeometryCacheStats();
     case "validationReadJitRegionStats":
@@ -2966,6 +3039,8 @@ async function loadCore({
   fifoLog = false,
   efbCopyRam = false,
   efbNoDefer = false,
+  shaderHybrid = false,
+  uberWaitMs = 0,
   wgpuMask = "",
   wgpuFallback = false,
   dstAlphaTwoPass = true,
@@ -3533,6 +3608,10 @@ async function loadCore({
     dolphinXfbNoDecode: Boolean(xfbNoDecode),
     dolphinEfbCopyRam: Boolean(efbCopyRam),
     dolphinEfbNoDefer: Boolean(efbNoDefer),
+    // Patch 0223: ?shadermode=hybrid, read by the core's EnsureRuntime.
+    dolphinShaderHybrid: shaderHybrid === true,
+    // Patch 0225: ?uberwait=T, read by the core's EnsureRuntime (hybrid only).
+    dolphinUberWaitMs: Number.isInteger(uberWaitMs) && uberWaitMs >= 0 && uberWaitMs <= 50 ? uberWaitMs : 0,
     // Ranks the instructions that block JIT compilation (?jitverbose=1).
     dolphinWebVerbosePpcJit: Boolean(jitVerbose),
     dolphinFrameCap: (frameCapTarget = Number(frameCap) || 0),
@@ -14046,6 +14125,11 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
       dev.pushErrorScope("validation");
       errScope = true;
       enc = dev.createCommandEncoder({ label: "dolphin-frame" });
+      // Patch 0224: time this encoder's passes (harness only)
+      if (harnessEnabled) {
+        gpuFrameTimer ??= createGpuFrameTimer(dev);
+        gpuFrameTimer.beginEncoder?.();
+      }
     }
     return enc;
   };
@@ -14150,6 +14234,7 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
     }
     let submitted = false;
     try {
+      gpuFrameTimer?.beforeFinish?.(enc);
       const renderCommandBuffer = enc.finish();
       q.submit([
         ...(mappedBatch?.ordinary ? [mappedBatch.ordinary.commandBuffer] : []),
@@ -14184,6 +14269,7 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
         });
       }
     }
+    gpuFrameTimer?.afterSubmit?.(reason, submitted);
     enc = null;
     if (errScope) {
       errScope = false;
@@ -15264,6 +15350,9 @@ function drainWebGpuCmdRingOnce(source = "presentation") {
             desc.depthStencilAttachment = ds;
           }
           if (fbId === self._wgEfbColorId) vpDiagNoteEfbPass(loadOp === "clear");
+          // Patch 0224: a begin/end timestamp pair per pass (harness only)
+          const timestampWrites = gpuFrameTimer?.passWrites?.();
+          if (timestampWrites) desc.timestampWrites = timestampWrites;
           pass = enc.beginRenderPass(desc);
           lastAppliedViewport = lastAppliedScissor = null;
           if (causalMetricsEnabled) wgpuUploadAttribution.recordPassBegin();

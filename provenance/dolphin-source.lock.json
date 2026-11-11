@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "5ff006d20b87f2ec0dfd45c69a19ce29a2871c3c91f0a9b5d65125a98a0d04a5",
+  "patchSeriesSha256": "19a561bbe8d18d842baa044be95f6c3afaee8745ac48f620130d515b0f01e858",
   "patches": [
     {
       "order": 1,
@@ -1237,6 +1237,30 @@
     },
     {
       "order": 152,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0223-webgpu-hybrid-ubershaders-async-translation.patch",
+      "size": 33574,
+      "sha256": "b8ca9a1b79ca3697b96071244c179f908bde78ae67f42d6ba7b60294794386cb"
+    },
+    {
+      "order": 153,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0224-webgpu-harness-uber-retrieve-gpu-time-counters.patch",
+      "size": 7573,
+      "sha256": "0f8fea95d2a4bd11e05ffad751abb925337c15ceb41db6026647bd0cea1e0527"
+    },
+    {
+      "order": 154,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0225-webgpu-hybrid-bounded-uber-wait.patch",
+      "size": 19193,
+      "sha256": "038231cc842a37ea4980d98a48305fe9b8dcf95f64b3d8f75100ca0e2d86d2fa"
+    },
+    {
+      "order": 155,
       "cwd": "Externals/SFML/SFML",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0001-sfml-emscripten-config.patch",
@@ -1244,7 +1268,7 @@
       "sha256": "f82197a21fe982ad83f6ee7bbf5a03839b1cebd4d64da3eab11263842bf61d89"
     },
     {
-      "order": 153,
+      "order": 156,
       "cwd": "Externals/xxhash/xxHash",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0002-xxhash-wasm-simd-scalar.patch",

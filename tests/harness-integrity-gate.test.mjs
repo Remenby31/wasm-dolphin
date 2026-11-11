@@ -245,7 +245,10 @@ test("replay-gates reads the pthreads in use at each visit's end", async () => {
 // window's deltas stayed 0.
 test("region link refusals are fatal on their total since boot", async () => {
   const { integrityOf, SINCE_BOOT_FATAL } = await import("../harness/lib/integrity.mjs");
-  assert.deepEqual([...SINCE_BOOT_FATAL], ["regionLinkImportType", "regionLinkValidation"]);
+  // 0223 adds pthreadsOverPool: pthreads past Emscripten's preallocated pool
+  assert.deepEqual([...SINCE_BOOT_FATAL], ["regionLinkImportType", "regionLinkValidation", "pthreadsOverPool"]);
+  assert.deepEqual(integrityOf({ pthreadsOverPool: 1 }, { pthreadsOverPool: 1 }).fatal, ["pthreadsOverPool 1 since boot"]);
+  assert.deepEqual(integrityOf({ pthreadsOverPool: 0 }, { pthreadsOverPool: 0 }).fatal, []);
   const zero = { regionLinkImportType: 0, regionLinkValidation: 0, regionLinkOther: 0 };
   // refused before the window: delta 0, total 3 -> fatal
   assert.deepEqual(integrityOf({ ...zero, regionLinkImportType: 3 }, { ...zero, regionLinkImportType: 3 }).fatal, ["regionLinkImportType 3 since boot"]);

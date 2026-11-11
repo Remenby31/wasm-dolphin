@@ -75,6 +75,12 @@ import { requestedWgpuSparseUbo } from "./wgpu-sparse-ubo-copy-forward.js";
 import { captureSessionAfterDeviceLoss, requestedWgpuSessionRecover } from "./wgpu-session-recovery.js";
 import { wgpuAdapterProblem } from "./wgpu-adapter-check.js";
 
+// Patch 0225: ?uberwait=T -> T ms (an integer 0..50); anything else: 0.
+export function uberWaitMsOf(value) {
+  const n = Number(value);
+  return Number.isInteger(n) && n >= 0 && n <= 50 ? n : 0;
+}
+
 // The disc prefetch for a video backend: the URL's flag, else the default.
 function requestedDiscPrefetch(backend) {
   return discPrefetchSetting(new URLSearchParams(window.location.search).get("discprefetch"),
@@ -169,6 +175,14 @@ export class EmulatorHost {
     this.efbCopyRam = new URLSearchParams(window.location.search).get("efbcopyram") === "1";
     // EFB copies to RAM not deferred (Dolphin's DeferEFBCopies=False).
     this.efbNoDefer = new URLSearchParams(window.location.search).get("efbdefer") === "0";
+    // ?shadermode=hybrid (patch 0223): the WebGPU backend on Dolphin's hybrid
+    // ubershaders (AsynchronousUberShaders, 2 translation threads). Off by
+    // default: Synchronous, no compiler thread.
+    this.shaderHybrid = new URLSearchParams(window.location.search).get("shadermode") === "hybrid";
+    // ?uberwait=T (patch 0225, hybrid mode only): the GPU thread waits at most
+    // T ms per frame (0..50) for a specialized pipeline before an ubershader
+    // one. 0 or absent: no wait (0223 as is).
+    this.uberWaitMs = uberWaitMsOf(new URLSearchParams(window.location.search).get("uberwait"));
     // Harness: optional WebGPU features withheld from the device, comma-separated
     // (e.g. Safari 26 has no dual-source-blending). Empty for the app.
     this.wgpuMask = new URLSearchParams(window.location.search).get("wgpumask") ?? "";
@@ -575,6 +589,8 @@ export class EmulatorHost {
             fifoLog: this.fifoLog,
             efbCopyRam: this.efbCopyRam,
             efbNoDefer: this.efbNoDefer,
+            shaderHybrid: this.shaderHybrid,
+            uberWaitMs: this.uberWaitMs,
             wgpuMask: this.wgpuMask,
             wgpuFallback: this.wgpuFallback,
             dstAlphaTwoPass: this.dstAlphaTwoPass,

@@ -61,7 +61,8 @@ test("a duplicate VI swap, an untagged present and a state load are not stale", 
 });
 
 test("stalePresents is reported in every run's integrity, never fatal yet", () => {
-  assert.deepEqual(INTEGRITY_REPORTED, ["stalePresents", "staleXfbHeld", "staleXfbHeldPreload"]);
+  // 0223 adds the shader translation failures, reported too
+  assert.deepEqual(INTEGRITY_REPORTED, ["stalePresents", "staleXfbHeld", "staleXfbHeldPreload", "xlatFailGlslang", "xlatFailNaga"]);
   assert.ok(!INTEGRITY_FATAL.includes("stalePresents"));
   const i = integrityOf({ presents: 0, stalePresents: 2 }, { presents: 500, stalePresents: 9 });
   assert.deepEqual(i.fatal, []);
