@@ -262,9 +262,9 @@ static double TimerOvershoot(int T) {
   return worst;
 }
 static double g_bound = 0;
-int scenario(int s, int T) {
+int scenario(int s, int T, int trials = 5) {
   int fails = 0;
-  for (int trial = 0; trial < 5; trial += 1) {
+  for (int trial = 0; trial < trials; trial += 1) {
     Cache cache; cache.scenario = s; g_shader_cache = &cache;
     StartWorkers(cache.c);
     DolphinWeb_SetUberWaitMs(T);
@@ -304,7 +304,9 @@ int main() {
   // expiry first: uberWaitMaxUs is a running max over the process
   const int b = scenario(2, 20);
   double v[10]; Stats(v);
-  const int a = scenario(1, 40), c = scenario(3, 50);
+  // ping-pong: 20 trials (without the fix the interleaving makes about half of them ping-pong, so all 20 passing
+  // would be ~1e-6; with it, at most 3 wake-ups by construction: one real compile, one stale wake per no-op item)
+  const int a = scenario(1, 40, 20), c = scenario(3, 50);
   std::fprintf(stderr, "uberWaitMaxUs over the expiry calls: %.0f; failures: ping-pong %d, expiry %d, late snapshot %d\n", v[1], a, b, c);
   return a + b + c;
 }
