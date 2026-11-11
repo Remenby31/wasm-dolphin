@@ -71,6 +71,8 @@
 #include "VideoCommon/VideoConfig.h"
 
 extern "C" void DolphinWeb_SetFastSoftwareRaster(int mode);
+// Patch 0225 (VideoCommon/VertexManagerBase.cpp): the hybrid mode's bounded wait, ms.
+extern "C" void DolphinWeb_SetUberWaitMs(int ms);
 extern "C" std::uint32_t DolphinWeb_SetCachedInterpreterDisableMask(std::uint32_t mask);
 extern "C" std::uint32_t DolphinWeb_GetCachedInterpreterDisableMask();
 extern "C" unsigned int DolphinWeb_SetRendererFeatureMask(unsigned int mask);
@@ -934,6 +936,12 @@ void EnsureRuntime()
   Config::SetBase(Config::GFX_SHADER_COMPILATION_MODE,
                   shader_hybrid ? ShaderCompilationMode::AsynchronousUberShaders :
                                   ShaderCompilationMode::Synchronous);
+  // Patch 0225: ?uberwait=T (Module['dolphinUberWaitMs']), the hybrid mode's
+  // bounded wait before an ubershader pipeline; 0 (the default) outside it.
+  DolphinWeb_SetUberWaitMs(shader_hybrid ? EM_ASM_INT({ return (typeof Module !== 'undefined' &&
+                                                               Number.isInteger(Module['dolphinUberWaitMs'])) ?
+                                                                  Module['dolphinUberWaitMs'] : 0; }) :
+                                           0);
   Config::SetBase(Config::GFX_SHADER_COMPILER_THREADS, shader_hybrid ? 2 : 0);
   Config::SetBase(Config::GFX_SHADER_PRECOMPILER_THREADS, shader_hybrid ? 2 : 0);
   VideoBackendBase::ActivateBackend(s_video_backend);

@@ -132,6 +132,7 @@ export class UpstreamWorkerAdapter {
     efbCopyRam = false,
     efbNoDefer = false,
     shaderHybrid = false,
+    uberWaitMs = 0,
     wgpuMask = "",
     wgpuFallback = false,
     dstAlphaTwoPass = true,
@@ -280,6 +281,7 @@ export class UpstreamWorkerAdapter {
     this.efbCopyRam = Boolean(efbCopyRam);
     this.efbNoDefer = Boolean(efbNoDefer);
     this.shaderHybrid = shaderHybrid === true;
+    this.uberWaitMs = Number.isInteger(uberWaitMs) && uberWaitMs >= 0 && uberWaitMs <= 50 ? uberWaitMs : 0;
     this.wgpuMask = String(wgpuMask || "");
     this.wgpuFallback = Boolean(wgpuFallback);
     this.dstAlphaTwoPass = dstAlphaTwoPass !== false;
@@ -562,6 +564,7 @@ export class UpstreamWorkerAdapter {
       efbCopyRam: this.efbCopyRam,
       efbNoDefer: this.efbNoDefer,
       shaderHybrid: this.shaderHybrid,
+      uberWaitMs: this.uberWaitMs,
       wgpuMask: this.wgpuMask,
       wgpuFallback: this.wgpuFallback,
       dstAlphaTwoPass: this.dstAlphaTwoPass,

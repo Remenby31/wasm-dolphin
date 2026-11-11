@@ -2268,6 +2268,7 @@ async function handleMessage(type, payload) {
         efbCopyRam: payload.efbCopyRam,
         efbNoDefer: payload.efbNoDefer,
         shaderHybrid: payload.shaderHybrid,
+        uberWaitMs: payload.uberWaitMs,
         wgpuMask: payload.wgpuMask,
         wgpuFallback: payload.wgpuFallback,
         dstAlphaTwoPass: payload.dstAlphaTwoPass,
@@ -3039,6 +3040,7 @@ async function loadCore({
   efbCopyRam = false,
   efbNoDefer = false,
   shaderHybrid = false,
+  uberWaitMs = 0,
   wgpuMask = "",
   wgpuFallback = false,
   dstAlphaTwoPass = true,
@@ -3608,6 +3610,8 @@ async function loadCore({
     dolphinEfbNoDefer: Boolean(efbNoDefer),
     // Patch 0223: ?shadermode=hybrid, read by the core's EnsureRuntime.
     dolphinShaderHybrid: shaderHybrid === true,
+    // Patch 0225: ?uberwait=T, read by the core's EnsureRuntime (hybrid only).
+    dolphinUberWaitMs: Number.isInteger(uberWaitMs) && uberWaitMs >= 0 && uberWaitMs <= 50 ? uberWaitMs : 0,
     // Ranks the instructions that block JIT compilation (?jitverbose=1).
     dolphinWebVerbosePpcJit: Boolean(jitVerbose),
     dolphinFrameCap: (frameCapTarget = Number(frameCap) || 0),

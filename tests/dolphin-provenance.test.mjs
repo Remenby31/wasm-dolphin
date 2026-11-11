@@ -328,8 +328,10 @@ test("committed Dolphin provenance and ABI manifests verify", () => {
   // 0219 (harness cache-miss counters) adds VideoCommon/WasmLoadStats.h: 150.
   // 0223 (hybrid ubershaders on WebGPU) is the first to touch
   // AsyncShaderCompiler.h and Spirv.cpp: 152.
+  // 0225 (the hybrid mode's bounded uber wait) is the first to touch
+  // ShaderCache.h: 153.
   // Update deliberately when the series changes what it modifies.
-  assert.equal(result.vendorSnapshot.rootPaths, 152);
+  assert.equal(result.vendorSnapshot.rootPaths, 153);
   assert.equal(result.vendorSnapshot.submodulePaths, 2);
   assert.equal(result.core.abiVersion, 1);
   assert.equal(result.core.memoryContract.jsGlue.initialPages, 24576);
