@@ -9,6 +9,9 @@
 // time (sum of its passes) are logged with a sequence number and the submit's epoch time
 // (performance.timeOrigin + now, the producedT clock) and reason. An encoder
 // begun while every slot is still being read back is not timed (counted).
+// Coverage: only the render passes of the main replay encoder ("dolphin-frame")
+// are timed; the blit, DIAG and other command buffers of the same submit, and
+// any other encoder, are not.
 // The browser quantizes timestamps (Chrome: 100 us without
 // --enable-webgpu-developer-features): the smallest non-zero step seen is
 // published as minStepUs. No timestamp-query on the device: "absent".
@@ -23,12 +26,15 @@ export function createGpuFrameTimer(device, { now = () => performance.timeOrigin
   const resolve = device.createBuffer({ label: "0224-gpu-frame-resolve", size: 16 * MAX_PASSES, usage: bufferUsage.QUERY_RESOLVE | bufferUsage.COPY_SRC });
   const slots = Array.from({ length: READ_SLOTS }, (_, i) => ({ busy: false, buffer: device.createBuffer({ label: `0224-gpu-frame-read-${i}`, size: 16 * MAX_PASSES, usage: bufferUsage.MAP_READ | bufferUsage.COPY_DST }) }));
   const log = [];
-  let current = null, untimed = 0, overflowPasses = 0, minStepNs = null, readErrors = 0, seq = 0;
+  let current = null, untimed = 0, overflowPasses = 0, minStepNs = null, readErrors = 0, seq = 0, abandoned = 0;
   const noteStep = (d) => { if (d > 0n && (minStepNs == null || d < minStepNs)) minStepNs = d; };
   return {
     absent: false,
     // a new replay encoder: timed when a read-back slot is free
     beginEncoder() {
+      // an encoder never submitted (a fatal replay, or one dropped) leaves its
+      // slot: released here, counted
+      if (current) { current.slot.busy = false; current = null; abandoned += 1; }
       const slot = slots.find((s) => !s.busy);
       if (!slot) { untimed += 1; current = null; return; }
       slot.busy = true;
@@ -74,7 +80,7 @@ export function createGpuFrameTimer(device, { now = () => performance.timeOrigin
     // the last n entries: [submit epoch ms, span ms, busy ms, passes, reason code, sequence]
     // (the sequence lets a reader of overlapping snapshots drop repeats and see losses)
     snapshot(n = 600) {
-      return { gpuTimer: "timestamp-query", gpuTimerMinStepUs: minStepNs == null ? null : Number(minStepNs) / 1000, gpuTimerUntimed: untimed, gpuTimerOverflowPasses: overflowPasses, gpuTimerReadErrors: readErrors, gpuFrameLog: log.slice(-n), gpuFrameLogReasons: REASONS };
+      return { gpuTimer: "timestamp-query", gpuTimerMinStepUs: minStepNs == null ? null : Number(minStepNs) / 1000, gpuTimerUntimed: untimed, gpuTimerOverflowPasses: overflowPasses, gpuTimerReadErrors: readErrors, gpuTimerAbandoned: abandoned, gpuFrameLog: log.slice(-n), gpuFrameLogReasons: REASONS };
     }
   };
 }

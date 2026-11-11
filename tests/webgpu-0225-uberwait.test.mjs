@@ -49,7 +49,11 @@ test("0225 core: the wait only in AsynchronousUberShaders, a per-frame budget, n
   assert.match(added, /const double left_us = budget_us - m_uber_wait_frame_us;\n\s+if \(!\(left_us > 0\)\)\n\s+return std::nullopt;/);
   assert.match(added, /static std::atomic<u32> s_uber_wait_us_budget\{0\};/);
   assert.match(added, /std::clamp\(ms, 0, 50\)/);
-  // a finished item wakes the waiting GPU thread
-  assert.match(patch, / m_completed_work\.push_back\(std::move\(item\)\);\n\+\s+\/\/ Patch 0225: a GPU thread waiting for a specialized pipeline wakes\.\n\+\s+m_completed_work_cv\.notify_all\(\);/);
+  // only an item that did real work wakes the waiting GPU thread (no busy loop on re-queued no-op items)
+  assert.match(added, /if \(did_work\)\n\s+\{\n\s+m_real_completions\.fetch_add\(1, std::memory_order_release\);\n\s+m_completed_work_cv\.notify_all\(\);/);
+  assert.equal(added.match(/bool DidWork\(\) const override \{ return config\.has_value\(\); \}/g).length, 2);
+  assert.match(added, /if \(g_shader_cache->WaitForAsyncCompletion\(seen, \(left_us - spent_us\) \/ 1000\)\)/);
+  // a hit is a real pipeline; a call that never blocked is not a wait
+  assert.match(added, /const bool got = res\.has_value\(\) && \*res != nullptr;\n\s+if \(blocked\)/);
   assert.match(added, /extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_UberWaitStats\(double\* out\)/);
 });

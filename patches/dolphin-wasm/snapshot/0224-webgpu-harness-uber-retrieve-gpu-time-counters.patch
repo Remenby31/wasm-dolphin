@@ -157,12 +157,15 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp b/Source/Core/VideoB
      return pending;
    }
  
-@@ -2687,6 +2794,14 @@ u32 WebGPUGfx::PushPendingPipeline(const AbstractPipeline* pipeline)
+@@ -2687,6 +2794,17 @@ u32 WebGPUGfx::PushPendingPipeline(const AbstractPipeline* pipeline)
        id = m_cmd_stream.PushCreatePipelineCfg(blob.data(), blob.size());
      }
      p->SetPushed(id);
-+    // Patch 0224 (harness): this pipeline's first specialized bind.
-+    if (DolphinWeb::LoadStats::On())
++    // Patch 0224 (harness): this pipeline's first specialized bind. Specialized
++    // (GX) pipelines only: the ubershader pipelines the shader cache compiles
++    // ahead (QueueUberShaderPipelines) are bound long after they are ready and
++    // would read as huge switch delays.
++    if (DolphinWeb::LoadStats::On() && p->m_config.usage == AbstractPipelineUsage::GX)
 +    {
 +      const auto* vs = static_cast<const WebGPUShader*>(p->m_config.vertex_shader);
 +      const auto* fs = static_cast<const WebGPUShader*>(p->m_config.pixel_shader);

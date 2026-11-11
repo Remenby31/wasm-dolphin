@@ -20,7 +20,8 @@ test("0224 core: VI windows timed and first binds logged only with the counters 
   assert.match(added, /slot\.t_ms\.store\(DolphinWeb::LoadStats::On\(\) \? EpochMs\(\) : 0\.0, std::memory_order_relaxed\);/);
   assert.match(added, /if \(xlat_stats_async\)\n\s+shader->m_xlat_end_ms = EpochMs\(\);/);
   assert.match(added, /if \(DolphinWeb::LoadStats::On\(\)\)\n\s+pending->m_ready_ms = EpochMs\(\);/);
-  assert.match(added, /\/\/ Patch 0224 \(harness\): this pipeline's first specialized bind\.\n\s+if \(DolphinWeb::LoadStats::On\(\)\)/);
+  // specialized (GX) pipelines only: precompiled uber pipelines would read as huge switch delays
+  assert.match(added, /if \(DolphinWeb::LoadStats::On\(\) && p->m_config\.usage == AbstractPipelineUsage::GX\)/);
   assert.match(added, /extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_UberViLog\(double\* out, u32 max\)/);
   assert.match(added, /extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_RetrieveLog\(double\* out, u32 max\)/);
   // allocated at the first event, never a static array
@@ -77,11 +78,23 @@ test("0224 timer: span and busy of an encoder's passes, with the submit time and
   assert.equal(s.gpuTimerMinStepUs, 500);
 });
 
-test("0224 timer: an encoder begun with every read slot busy is not timed (counted)", () => {
-  const t = createGpuFrameTimer(fakeDevice({ stamps: new BigUint64Array(2 * MAX_PASSES) }), { bufferUsage: usage, mapMode: mode });
+test("0224 timer: an encoder begun with every read slot still reading back is not timed (counted)", () => {
+  // read-backs that never complete keep their slots busy
+  const dev = fakeDevice({ stamps: new BigUint64Array(2 * MAX_PASSES) });
+  const create = dev.createBuffer;
+  dev.createBuffer = (d) => Object.assign(create(d), { mapAsync: () => new Promise(() => {}) });
+  const t = createGpuFrameTimer(dev, { bufferUsage: usage, mapMode: mode });
   const enc = { resolveQuerySet() {}, copyBufferToBuffer() {} };
-  for (let i = 0; i < READ_SLOTS; i += 1) { t.beginEncoder(); t.passWrites(); t.beforeFinish(enc); }
+  for (let i = 0; i < READ_SLOTS; i += 1) { t.beginEncoder(); t.passWrites(); t.beforeFinish(enc); t.afterSubmit("present", true); }
   t.beginEncoder();
   assert.equal(t.passWrites(), null);
   assert.equal(t.snapshot().gpuTimerUntimed, 1);
+});
+
+test("0224 timer: an encoder never submitted (fatal replay) gives its slot back at the next begin", () => {
+  const t = createGpuFrameTimer(fakeDevice({ stamps: new BigUint64Array(2 * MAX_PASSES) }), { bufferUsage: usage, mapMode: mode });
+  const enc = { resolveQuerySet() {}, copyBufferToBuffer() {} };
+  for (let i = 0; i < READ_SLOTS + 2; i += 1) { t.beginEncoder(); assert.ok(t.passWrites()); t.beforeFinish(enc); }
+  assert.equal(t.snapshot().gpuTimerAbandoned, READ_SLOTS + 1);
+  assert.equal(t.snapshot().gpuTimerUntimed, 0);
 });
