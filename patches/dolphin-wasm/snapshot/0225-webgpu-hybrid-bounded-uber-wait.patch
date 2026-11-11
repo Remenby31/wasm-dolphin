@@ -9,7 +9,19 @@ diff --git a/Source/Core/VideoCommon/AsyncShaderCompiler.cpp b/Source/Core/Video
  #include <thread>
  
  #ifdef __EMSCRIPTEN__
-@@ -195,6 +196,18 @@ void AsyncShaderCompiler::RecordThreadStart(double wait_ms)
+@@ -54,6 +55,11 @@ void AsyncShaderCompiler::RetrieveWorkItems()
+     std::lock_guard guard(m_completed_work_lock);
+     m_completed_work.swap(completed_work);
+   }
++#ifdef __EMSCRIPTEN__
++  // Patch 0225: shaders before pipelines (WorkItem::RetrieveAfterShaders).
++  std::stable_partition(completed_work.begin(), completed_work.end(),
++                        [](const WorkItemPtr& item) { return !item->RetrieveAfterShaders(); });
++#endif
+ 
+   while (!completed_work.empty())
+   {
+@@ -195,6 +201,18 @@ void AsyncShaderCompiler::RecordThreadStart(double wait_ms)
    s_start_stats.wait_ms_max = std::max(s_start_stats.wait_ms_max, wait_ms);
  }
  
@@ -28,7 +40,7 @@ diff --git a/Source/Core/VideoCommon/AsyncShaderCompiler.cpp b/Source/Core/Video
  AsyncShaderCompiler::StartStats AsyncShaderCompiler::GetStartStats()
  {
    std::lock_guard guard(s_start_stats_lock);
-@@ -287,8 +300,16 @@ void AsyncShaderCompiler::WorkerThreadRun()
+@@ -287,8 +305,16 @@ void AsyncShaderCompiler::WorkerThreadRun()
  
        if (item->Compile())
        {
@@ -48,7 +60,7 @@ diff --git a/Source/Core/VideoCommon/AsyncShaderCompiler.cpp b/Source/Core/Video
 diff --git a/Source/Core/VideoCommon/AsyncShaderCompiler.h b/Source/Core/VideoCommon/AsyncShaderCompiler.h
 --- a/Source/Core/VideoCommon/AsyncShaderCompiler.h
 +++ b/Source/Core/VideoCommon/AsyncShaderCompiler.h
-@@ -29,6 +29,10 @@ public:
+@@ -29,6 +29,16 @@ public:
      virtual ~WorkItem() = default;
      virtual bool Compile() = 0;
      virtual void Retrieve() = 0;
@@ -56,10 +68,16 @@ diff --git a/Source/Core/VideoCommon/AsyncShaderCompiler.h b/Source/Core/VideoCo
 +    // whose shaders were not ready yet: it is re-queued at its Retrieve). The
 +    // hybrid mode's bounded wait wakes only on items that did real work.
 +    virtual bool DidWork() const { return true; }
++    // Patch 0225: true for a pipeline item. RetrieveWorkItems retrieves every
++    // other item (the shaders) of a batch first, so a pipeline item that found
++    // its shaders pending re-queues itself after they are in the cache, and
++    // compiles for real (else it stayed a no-op, finished without waking the
++    // bounded wait, and the wait slept until its budget ran out).
++    virtual bool RetrieveAfterShaders() const { return false; }
    };
  
    using WorkItemPtr = std::unique_ptr<WorkItem>;
-@@ -47,6 +51,12 @@ public:
+@@ -47,6 +57,12 @@ public:
    // Patch 0223: the one compiler allowed threads on the web, the shader
    // cache's (the graphics-mod and custom-resource ones stay without, as before).
    void AllowWebWorkerThreads() { m_web_worker_threads = true; }
@@ -72,7 +90,7 @@ diff --git a/Source/Core/VideoCommon/AsyncShaderCompiler.h b/Source/Core/VideoCo
  #endif
  
    AsyncShaderCompiler();
-@@ -106,6 +116,9 @@ private:
+@@ -106,6 +122,9 @@ private:
  
    std::deque<WorkItemPtr> m_completed_work;
    std::mutex m_completed_work_lock;
@@ -104,24 +122,26 @@ diff --git a/Source/Core/VideoCommon/ShaderCache.cpp b/Source/Core/VideoCommon/S
  void ShaderCache::RetrieveAsyncShaders()
  {
    m_async_shader_compiler->RetrieveWorkItems();
-@@ -1140,6 +1152,10 @@ void ShaderCache::QueuePipelineCompile(const GXPipelineUid& uid, u32 priority)
+@@ -1140,6 +1152,11 @@ void ShaderCache::QueuePipelineCompile(const GXPipelineUid& uid, u32 priority)
        return true;
      }
  
 +    // Patch 0225: a pipeline whose shaders were not ready compiles nothing
 +    // (it is re-queued at its Retrieve): no wake-up for the bounded wait.
 +    bool DidWork() const override { return config.has_value(); }
++    bool RetrieveAfterShaders() const override { return true; }
 +
      void Retrieve() override
      {
        if (stages_ready)
-@@ -1215,6 +1231,10 @@ void ShaderCache::QueueUberPipelineCompile(const GXUberPipelineUid& uid, u32 pri
+@@ -1215,6 +1232,11 @@ void ShaderCache::QueueUberPipelineCompile(const GXUberPipelineUid& uid, u32 pri
        return true;
      }
  
 +    // Patch 0225: a pipeline whose shaders were not ready compiles nothing
 +    // (it is re-queued at its Retrieve): no wake-up for the bounded wait.
 +    bool DidWork() const override { return config.has_value(); }
++    bool RetrieveAfterShaders() const override { return true; }
 +
      void Retrieve() override
      {
@@ -154,7 +174,7 @@ diff --git a/Source/Core/VideoCommon/VertexManagerBase.cpp b/Source/Core/VideoCo
  #include <array>
  #include <cmath>
  #include <memory>
-@@ -62,6 +63,28 @@ static std::atomic<u32> s_dst_alpha_flushes{0};
+@@ -62,6 +63,33 @@ static std::atomic<u32> s_dst_alpha_flushes{0};
  // with the ubershader pipeline, their pass pipelines not ready yet.
  static std::atomic<u32> s_dst_alpha_uber_waits{0};
  
@@ -178,12 +198,17 @@ diff --git a/Source/Core/VideoCommon/VertexManagerBase.cpp b/Source/Core/VideoCo
 +static std::atomic<u32> s_uber_wait_hits{0};
 +static std::atomic<u32> s_uber_retrieve_hits{0};
 +static std::atomic<u32> s_uber_wait_wakeups{0};
++// the time of the calls that blocked, split: ended on the specialized pipeline
++// (the proof that the wait serves: sum and longest) or not (the budget spent)
++static std::atomic<u64> s_uber_wait_hit_us_sum{0};
++static std::atomic<u32> s_uber_wait_hit_us_max{0};
++static std::atomic<u64> s_uber_wait_miss_us_sum{0};
 +#endif
 +
  std::unique_ptr<VertexManagerBase> g_vertex_manager;
  
  using OpcodeDecoder::Primitive;
-@@ -978,6 +1001,12 @@ void VertexManagerBase::UpdatePipelineObject()
+@@ -978,6 +1006,12 @@ void VertexManagerBase::UpdatePipelineObject()
    {
      // Can we background compile shaders? If so, get the pipeline asynchronously.
      auto res = g_shader_cache->GetPipelineForUidAsync(m_current_pipeline_config);
@@ -196,7 +221,7 @@ diff --git a/Source/Core/VideoCommon/VertexManagerBase.cpp b/Source/Core/VideoCo
      if (res)
      {
        // Specialized shaders are ready, prefer these.
-@@ -1069,8 +1098,63 @@ void VertexManagerBase::OnEFBCopyToRAM()
+@@ -1069,8 +1103,74 @@ void VertexManagerBase::OnEFBCopyToRAM()
    g_gfx->Flush();
  }
  
@@ -240,7 +265,18 @@ diff --git a/Source/Core/VideoCommon/VertexManagerBase.cpp b/Source/Core/VideoCo
 +  {
 +    s_uber_waits.fetch_add(1, std::memory_order_relaxed);
 +    if (got)
++    {
 +      s_uber_wait_hits.fetch_add(1, std::memory_order_relaxed);
++      s_uber_wait_hit_us_sum.fetch_add(w, std::memory_order_relaxed);
++      u32 hp = s_uber_wait_hit_us_max.load(std::memory_order_relaxed);
++      while (w > hp && !s_uber_wait_hit_us_max.compare_exchange_weak(hp, w, std::memory_order_relaxed))
++      {
++      }
++    }
++    else
++    {
++      s_uber_wait_miss_us_sum.fetch_add(w, std::memory_order_relaxed);
++    }
 +  }
 +  else if (got)
 +  {
@@ -260,7 +296,7 @@ diff --git a/Source/Core/VideoCommon/VertexManagerBase.cpp b/Source/Core/VideoCo
    m_draw_counter = 0;
    m_last_efb_copy_draw_counter = 0;
    m_scheduled_command_buffer_kicks.clear();
-@@ -1333,6 +1417,28 @@ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_SetDstAlphaTwoPass(int on)
+@@ -1333,6 +1433,33 @@ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_SetDstAlphaTwoPass(int on)
    s_dst_alpha_two_pass.store(on != 0, std::memory_order_relaxed);
  }
  
@@ -274,7 +310,9 @@ diff --git a/Source/Core/VideoCommon/VertexManagerBase.cpp b/Source/Core/VideoCo
 +
 +// Patch 0225, cumulative: out[0] us spent (sum), [1] longest call (us),
 +// [2] calls that blocked, [3] specialized pipelines got after blocking,
-+// [4] T (ms), [5] got from the first retrieve without blocking, [6] wake-ups.
++// [4] T (ms), [5] got from the first retrieve without blocking, [6] wake-ups,
++// [7] us of the blocked calls that got it (sum), [8] the longest of those (us),
++// [9] us of the blocked calls that did not (sum).
 +extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_UberWaitStats(double* out)
 +{
 +  out[0] = static_cast<double>(s_uber_wait_us_sum.load(std::memory_order_relaxed));
@@ -284,6 +322,9 @@ diff --git a/Source/Core/VideoCommon/VertexManagerBase.cpp b/Source/Core/VideoCo
 +  out[4] = s_uber_wait_us_budget.load(std::memory_order_relaxed) / 1000.0;
 +  out[5] = s_uber_retrieve_hits.load(std::memory_order_relaxed);
 +  out[6] = s_uber_wait_wakeups.load(std::memory_order_relaxed);
++  out[7] = static_cast<double>(s_uber_wait_hit_us_sum.load(std::memory_order_relaxed));
++  out[8] = s_uber_wait_hit_us_max.load(std::memory_order_relaxed);
++  out[9] = static_cast<double>(s_uber_wait_miss_us_sum.load(std::memory_order_relaxed));
 +}
 +
  // Cumulative: [0] flushes drawn through the two passes, [1] extra draws (the

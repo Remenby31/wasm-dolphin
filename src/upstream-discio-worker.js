@@ -532,11 +532,11 @@ function readUberDiagLogs(m) {
   if (ret) out.retrieveLog = ret;
   if (gpuFrameTimer) Object.assign(out, gpuFrameTimer.snapshot());
   if (typeof m?._DolphinWeb_UberWaitStats === "function" && typeof m._malloc === "function") {
-    const p = m._malloc(8 * 7);
+    const p = m._malloc(8 * 10);
     try {
       m._DolphinWeb_UberWaitStats(p);
-      const v = new Float64Array(m.HEAPU8.buffer, p, 7);
-      Object.assign(out, { uberWaitUs: v[0], uberWaitMaxUs: v[1], uberWaits: v[2], uberWaitHits: v[3], uberWaitMs: v[4], uberRetrieveHits: v[5], uberWaitWakeups: v[6] });
+      const v = new Float64Array(m.HEAPU8.buffer, p, 10);
+      Object.assign(out, { uberWaitUs: v[0], uberWaitMaxUs: v[1], uberWaits: v[2], uberWaitHits: v[3], uberWaitMs: v[4], uberRetrieveHits: v[5], uberWaitWakeups: v[6], uberWaitHitUs: v[7], uberWaitHitMaxUs: v[8], uberWaitMissUs: v[9] });
     } finally {
       m._free(p);
     }

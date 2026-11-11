@@ -110,7 +110,7 @@ struct VertexManagerBase {
   std::optional<const AbstractPipeline*> WaitForSpecializedPipeline();
 };
 ${wait}
-static double stat(int i) { double o[7]; DolphinWeb_UberWaitStats(o); return o[i]; }
+static double stat(int i) { double o[10]; DolphinWeb_UberWaitStats(o); return o[i]; }
 int main() {
   int fails = 0;
   auto check = [&](bool ok, const char* what) { if (!ok) { std::fprintf(stderr, "FAIL %s\n", what); fails++; } };
