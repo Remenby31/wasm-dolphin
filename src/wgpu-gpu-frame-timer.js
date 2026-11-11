@@ -6,15 +6,15 @@
 // timestamp pair (up to MAX_PASSES); before finish the pairs are resolved and
 // copied into one of READ_SLOTS mappable buffers; after the submit that buffer
 // is mapped and the encoder's span (first pass begin -> last pass end) and busy
-// time (sum of its passes) are logged with the submit's epoch time
+// time (sum of its passes) are logged with a sequence number and the submit's epoch time
 // (performance.timeOrigin + now, the producedT clock) and reason. An encoder
 // begun while every slot is still being read back is not timed (counted).
 // The browser quantizes timestamps (Chrome: 100 us without
 // --enable-webgpu-developer-features): the smallest non-zero step seen is
 // published as minStepUs. No timestamp-query on the device: "absent".
 export const MAX_PASSES = 64;
-export const READ_SLOTS = 4;
-export const LOG_SIZE = 240;
+export const READ_SLOTS = 16;
+export const LOG_SIZE = 1200;
 const REASONS = ["present", "drain-boundary", "staging-oversize", "other"];
 
 export function createGpuFrameTimer(device, { now = () => performance.timeOrigin + performance.now(), bufferUsage = globalThis.GPUBufferUsage, mapMode = globalThis.GPUMapMode } = {}) {
@@ -23,7 +23,7 @@ export function createGpuFrameTimer(device, { now = () => performance.timeOrigin
   const resolve = device.createBuffer({ label: "0224-gpu-frame-resolve", size: 16 * MAX_PASSES, usage: bufferUsage.QUERY_RESOLVE | bufferUsage.COPY_SRC });
   const slots = Array.from({ length: READ_SLOTS }, (_, i) => ({ busy: false, buffer: device.createBuffer({ label: `0224-gpu-frame-read-${i}`, size: 16 * MAX_PASSES, usage: bufferUsage.MAP_READ | bufferUsage.COPY_DST }) }));
   const log = [];
-  let current = null, untimed = 0, overflowPasses = 0, minStepNs = null, readErrors = 0;
+  let current = null, untimed = 0, overflowPasses = 0, minStepNs = null, readErrors = 0, seq = 0;
   const noteStep = (d) => { if (d > 0n && (minStepNs == null || d < minStepNs)) minStepNs = d; };
   return {
     absent: false,
@@ -67,12 +67,13 @@ export function createGpuFrameTimer(device, { now = () => performance.timeOrigin
           if (first == null || b < first) first = b;
           if (last == null || e > last) last = e;
         }
-        log.push([t, Number(last - first) / 1e6, Number(busy) / 1e6, c.passes, code]);
+        log.push([t, Number(last - first) / 1e6, Number(busy) / 1e6, c.passes, code, seq++]);
         if (log.length > LOG_SIZE) log.splice(0, log.length - LOG_SIZE);
       }).catch(() => { readErrors += 1; c.slot.busy = false; });
     },
-    // the last n entries: [submit epoch ms, span ms, busy ms, passes, reason code]
-    snapshot(n = 120) {
+    // the last n entries: [submit epoch ms, span ms, busy ms, passes, reason code, sequence]
+    // (the sequence lets a reader of overlapping snapshots drop repeats and see losses)
+    snapshot(n = 600) {
       return { gpuTimer: "timestamp-query", gpuTimerMinStepUs: minStepNs == null ? null : Number(minStepNs) / 1000, gpuTimerUntimed: untimed, gpuTimerOverflowPasses: overflowPasses, gpuTimerReadErrors: readErrors, gpuFrameLog: log.slice(-n), gpuFrameLogReasons: REASONS };
     }
   };

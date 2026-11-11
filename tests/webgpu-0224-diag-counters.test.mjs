@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-import { createGpuFrameTimer, MAX_PASSES } from "../src/wgpu-gpu-frame-timer.js";
+import { createGpuFrameTimer, MAX_PASSES, READ_SLOTS } from "../src/wgpu-gpu-frame-timer.js";
 
 const read = (p) => readFileSync(new URL(`../${p}`, import.meta.url), "utf8");
 const patch = read("patches/dolphin-wasm/snapshot/0224-webgpu-harness-uber-retrieve-gpu-time-counters.patch");
@@ -73,14 +73,14 @@ test("0224 timer: span and busy of an encoder's passes, with the submit time and
   await new Promise((r) => setTimeout(r, 0));
   const s = t.snapshot();
   assert.equal(s.gpuTimer, "timestamp-query");
-  assert.deepEqual(s.gpuFrameLog, [[42, 2.1, 1.6, 2, 0]]);
+  assert.deepEqual(s.gpuFrameLog, [[42, 2.1, 1.6, 2, 0, 0]]);
   assert.equal(s.gpuTimerMinStepUs, 500);
 });
 
 test("0224 timer: an encoder begun with every read slot busy is not timed (counted)", () => {
   const t = createGpuFrameTimer(fakeDevice({ stamps: new BigUint64Array(2 * MAX_PASSES) }), { bufferUsage: usage, mapMode: mode });
   const enc = { resolveQuerySet() {}, copyBufferToBuffer() {} };
-  for (let i = 0; i < 4; i += 1) { t.beginEncoder(); t.passWrites(); t.beforeFinish(enc); }
+  for (let i = 0; i < READ_SLOTS; i += 1) { t.beginEncoder(); t.passWrites(); t.beforeFinish(enc); }
   t.beginEncoder();
   assert.equal(t.passWrites(), null);
   assert.equal(t.snapshot().gpuTimerUntimed, 1);
