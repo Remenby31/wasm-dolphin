@@ -79,6 +79,7 @@ public:
     virtual bool DidWork() const { return true; }
     virtual bool RetrieveAfterShaders() const { return false; }
     u64 queued_real_completions = 0;
+    bool real_completions_taken = false;
   };
   static void SetRetrieveShadersFirst(bool on) { s_retrieve_shaders_first.store(on); }
   static inline std::atomic<bool> s_retrieve_shaders_first{false};

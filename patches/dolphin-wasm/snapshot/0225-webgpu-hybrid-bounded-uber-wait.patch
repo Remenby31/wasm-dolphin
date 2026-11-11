@@ -9,15 +9,16 @@ diff --git a/Source/Core/VideoCommon/AsyncShaderCompiler.cpp b/Source/Core/Video
  #include <thread>
  
  #ifdef __EMSCRIPTEN__
-@@ -42,6 +43,7 @@ void AsyncShaderCompiler::QueueWorkItem(WorkItemPtr item, u32 priority)
+@@ -42,6 +43,8 @@ void AsyncShaderCompiler::QueueWorkItem(WorkItemPtr item, u32 priority)
    else
    {
      std::lock_guard guard(m_pending_work_lock);
-+    item->queued_real_completions = m_real_completions.load(std::memory_order_acquire);
++    if (!item->real_completions_taken)
++      item->queued_real_completions = m_real_completions.load(std::memory_order_acquire);
      m_pending_work.emplace(priority, std::move(item));
      m_worker_thread_wake.notify_one();
    }
-@@ -54,6 +56,15 @@ void AsyncShaderCompiler::RetrieveWorkItems()
+@@ -54,6 +57,15 @@ void AsyncShaderCompiler::RetrieveWorkItems()
      std::lock_guard guard(m_completed_work_lock);
      m_completed_work.swap(completed_work);
    }
@@ -33,7 +34,7 @@ diff --git a/Source/Core/VideoCommon/AsyncShaderCompiler.cpp b/Source/Core/Video
  
    while (!completed_work.empty())
    {
-@@ -195,6 +206,18 @@ void AsyncShaderCompiler::RecordThreadStart(double wait_ms)
+@@ -195,6 +207,18 @@ void AsyncShaderCompiler::RecordThreadStart(double wait_ms)
    s_start_stats.wait_ms_max = std::max(s_start_stats.wait_ms_max, wait_ms);
  }
  
@@ -52,7 +53,7 @@ diff --git a/Source/Core/VideoCommon/AsyncShaderCompiler.cpp b/Source/Core/Video
  AsyncShaderCompiler::StartStats AsyncShaderCompiler::GetStartStats()
  {
    std::lock_guard guard(s_start_stats_lock);
-@@ -287,8 +310,24 @@ void AsyncShaderCompiler::WorkerThreadRun()
+@@ -287,8 +311,24 @@ void AsyncShaderCompiler::WorkerThreadRun()
  
        if (item->Compile())
        {
@@ -80,7 +81,7 @@ diff --git a/Source/Core/VideoCommon/AsyncShaderCompiler.cpp b/Source/Core/Video
 diff --git a/Source/Core/VideoCommon/AsyncShaderCompiler.h b/Source/Core/VideoCommon/AsyncShaderCompiler.h
 --- a/Source/Core/VideoCommon/AsyncShaderCompiler.h
 +++ b/Source/Core/VideoCommon/AsyncShaderCompiler.h
-@@ -29,6 +29,23 @@ public:
+@@ -29,6 +29,27 @@ public:
      virtual ~WorkItem() = default;
      virtual bool Compile() = 0;
      virtual void Retrieve() = 0;
@@ -99,12 +100,16 @@ diff --git a/Source/Core/VideoCommon/AsyncShaderCompiler.h b/Source/Core/VideoCo
 +    // work landed since it was built, e.g. its pixel shader) wakes the bounded
 +    // wait too: its re-queue at the next retrieve can now compile for real. The
 +    // wake of a no-op never moves that count, so two no-op items cannot wake
-+    // each other in turn (ping-pong).
++    // each other in turn (ping-pong). A pipeline item takes it before it looks
++    // at its stages (SnapshotRealCompletions), so a shader that finishes between
++    // that look and the queueing still counts as landed since (else the no-op
++    // finished silently and the wait slept until T); QueueWorkItem keeps it.
 +    u64 queued_real_completions = 0;
++    bool real_completions_taken = false;
    };
  
    using WorkItemPtr = std::unique_ptr<WorkItem>;
-@@ -47,6 +64,17 @@ public:
+@@ -47,6 +68,22 @@ public:
    // Patch 0223: the one compiler allowed threads on the web, the shader
    // cache's (the graphics-mod and custom-resource ones stay without, as before).
    void AllowWebWorkerThreads() { m_web_worker_threads = true; }
@@ -114,6 +119,11 @@ diff --git a/Source/Core/VideoCommon/AsyncShaderCompiler.h b/Source/Core/VideoCo
 +  // item finishing never wakes it, so the waiting GPU thread sleeps instead of
 +  // spinning through retrieve -> re-queue -> no-op -> retrieve.
 +  u64 WakeCount() const { return m_wakes.load(std::memory_order_acquire); }
++  void SnapshotRealCompletions(WorkItem* item) const
++  {
++    item->queued_real_completions = m_real_completions.load(std::memory_order_acquire);
++    item->real_completions_taken = true;
++  }
 +  bool WaitForWake(u64 seen, double timeout_ms);
 +  // Patch 0225: retrieve shader items before pipeline items, only while the
 +  // bounded wait is on (?uberwait > 0); off (T = 0, the default), the order of
@@ -122,7 +132,7 @@ diff --git a/Source/Core/VideoCommon/AsyncShaderCompiler.h b/Source/Core/VideoCo
  #endif
  
    AsyncShaderCompiler();
-@@ -106,6 +134,12 @@ private:
+@@ -106,6 +143,12 @@ private:
  
    std::deque<WorkItemPtr> m_completed_work;
    std::mutex m_completed_work_lock;
@@ -157,7 +167,18 @@ diff --git a/Source/Core/VideoCommon/ShaderCache.cpp b/Source/Core/VideoCommon/S
  void ShaderCache::RetrieveAsyncShaders()
  {
    m_async_shader_compiler->RetrieveWorkItems();
-@@ -1140,6 +1152,11 @@ void ShaderCache::QueuePipelineCompile(const GXPipelineUid& uid, u32 priority)
+@@ -1107,6 +1119,10 @@ void ShaderCache::QueuePipelineCompile(const GXPipelineUid& uid, u32 priority)
+     {
+       // Check if all the stages required for this pipeline have been compiled.
+       // If not, this work item becomes a no-op, and re-queues the pipeline for the next frame.
++#ifdef __EMSCRIPTEN__
++      // Patch 0225: the real-work count before the look at the stages.
++      shader_cache->m_async_shader_compiler->SnapshotRealCompletions(this);
++#endif
+       if (SetStagesReady())
+         config = shader_cache->GetGXPipelineConfig(uid);
+     }
+@@ -1140,6 +1156,11 @@ void ShaderCache::QueuePipelineCompile(const GXPipelineUid& uid, u32 priority)
        return true;
      }
  
@@ -169,7 +190,18 @@ diff --git a/Source/Core/VideoCommon/ShaderCache.cpp b/Source/Core/VideoCommon/S
      void Retrieve() override
      {
        if (stages_ready)
-@@ -1215,6 +1232,11 @@ void ShaderCache::QueueUberPipelineCompile(const GXUberPipelineUid& uid, u32 pri
+@@ -1179,6 +1200,10 @@ void ShaderCache::QueueUberPipelineCompile(const GXUberPipelineUid& uid, u32 pri
+     {
+       // Check if all the stages required for this UberPipeline have been compiled.
+       // If not, this work item becomes a no-op, and re-queues the UberPipeline for the next frame.
++#ifdef __EMSCRIPTEN__
++      // Patch 0225: the real-work count before the look at the stages.
++      shader_cache->m_async_shader_compiler->SnapshotRealCompletions(this);
++#endif
+       if (SetStagesReady())
+         config = shader_cache->GetGXPipelineConfig(uid);
+     }
+@@ -1215,6 +1240,11 @@ void ShaderCache::QueueUberPipelineCompile(const GXUberPipelineUid& uid, u32 pri
        return true;
      }
  

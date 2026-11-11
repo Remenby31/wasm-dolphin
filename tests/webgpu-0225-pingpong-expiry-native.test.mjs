@@ -14,6 +14,15 @@
 //    slow. The wait must end at T, without a retrieve and a look after the
 //    expiry. Required: each wait and uberWaitMaxUs <= T + the platform timer's
 //    own overshoot (measured here, same wait) + 4 ms (T = 20 ms, retrieve 40 ms).
+// 3. Late snapshot (judge's fifth review): a pipeline item re-queued while its
+//    pixel shader is pending; the pixel shader finishes between the item's look
+//    at its stages and its queueing (a sync point injected in the mock's
+//    constructor). The item takes the real-work count BEFORE that look (as
+//    ShaderCache's constructors do, checked below), so its no-op wakes the wait.
+//    Required: the specialized pipeline, well before T.
+// Negative control, permanent: the same harness is also built WITHOUT the fixes
+// (each reverted automatically in the extracted code, each reversal checked to
+// match once) and must FAIL every scenario, while the fixed build passes them all.
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -35,7 +44,12 @@ function body(text, signature) {
 }
 const between = (text, a, b) => { const i = text.indexOf(a); const j = text.indexOf(b, i); assert.ok(i >= 0 && j > i, a); return text.slice(i, j); };
 
-function harness() {
+const shaderCache = readVendorFileSync(join(core, "VideoCommon/ShaderCache.cpp"));
+const ascH = readVendorFileSync(join(core, "VideoCommon/AsyncShaderCompiler.h"));
+const once = (text, a, b) => { assert.equal(text.split(a).length - 1, 1, `reversal must match once: ${a.slice(0, 60)}`); return text.replace(a, b); };
+// fixed = false: the three fixes reverted (the no-op compares to the wake count;
+// the expired wait looks again; the pipeline item snapshots at queueing only)
+function harness(fixed) {
   const statics = between(vm, "static std::atomic<u32> s_uber_wait_us_budget{0};", "#endif");
   const setter = body(vm, 'extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_SetUberWaitMs(int ms)').replace("EMSCRIPTEN_KEEPALIVE ", "");
   const stats = body(vm, 'extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_UberWaitStats(double* out)').replace("EMSCRIPTEN_KEEPALIVE ", "");
@@ -44,6 +58,18 @@ function harness() {
   const retrieve = body(asc, "void AsyncShaderCompiler::RetrieveWorkItems()");
   const run = body(asc, "void AsyncShaderCompiler::WorkerThreadRun()");
   const wakeWait = body(asc, "bool AsyncShaderCompiler::WaitForWake(u64 seen, double timeout_ms)");
+  const snapshot = body(ascH, "void SnapshotRealCompletions(WorkItem* item) const");
+  // ShaderCache's two pipeline items take the snapshot before their look at the stages
+  const early = shaderCache.split("SnapshotRealCompletions(this);\n#endif\n      if (SetStagesReady())").length - 1;
+  assert.equal(early, 2, "both pipeline items snapshot before SetStagesReady");
+  let q = queue, w = run, v = wait;
+  if (!fixed) {
+    q = once(q, "item->queued_real_completions = m_real_completions.load(std::memory_order_acquire);", "item->queued_real_completions = m_wakes.load(std::memory_order_acquire);");
+    w = once(w, "m_real_completions.load(std::memory_order_acquire) != item->queued_real_completions;", "m_wakes.load(std::memory_order_acquire) != item->queued_real_completions;");
+    v = once(v, "if (!g_shader_cache->WaitForAsyncWake(seen, (left_us - spent_us) / 1000))\n      break;\n    s_uber_wait_wakeups.fetch_add(1, std::memory_order_relaxed);",
+      "if (g_shader_cache->WaitForAsyncWake(seen, (left_us - spent_us) / 1000))\n      s_uber_wait_wakeups.fetch_add(1, std::memory_order_relaxed);");
+  }
+  const snapshotEarly = fixed ? "true" : "false";
   return String.raw`
 #include <algorithm>
 #include <atomic>
@@ -75,6 +101,7 @@ public:
     virtual bool DidWork() const { return true; }
     virtual bool RetrieveAfterShaders() const { return false; }
     u64 queued_real_completions = 0;
+    bool real_completions_taken = false;
   };
   static void SetRetrieveShadersFirst(bool on) { s_retrieve_shaders_first.store(on); }
   static inline std::atomic<bool> s_retrieve_shaders_first{false};
@@ -83,6 +110,7 @@ public:
   void RetrieveWorkItems();
   bool WaitForWake(u64 seen, double timeout_ms);
   u64 WakeCount() const { return m_wakes.load(); }
+${snapshot}
   bool HasWorkerThreads() const { return !m_worker_threads.empty(); }
   void WorkerThreadRun();
   void Start(int n) { for (int i = 0; i < n; i += 1) m_worker_threads.emplace_back([this] { WorkerThreadRun(); }); }
@@ -104,9 +132,9 @@ using VideoCommon::AsyncShaderCompiler;
 ${statics}
 ${setter}
 ${stats}
-${queue}
+${q}
 ${retrieve}
-${run}
+${w}
 ${wakeWait}
 // start-up by events: a barrier item per worker, until both ran
 struct Barrier : AsyncShaderCompiler::WorkItem {
@@ -136,7 +164,7 @@ struct Real : AsyncShaderCompiler::WorkItem {
 struct Cache;
 struct NoopPipe : AsyncShaderCompiler::WorkItem {
   Cache* sc; double ms; NoopPipe(Cache* s, double m) : sc(s), ms(m) {}
-  bool Compile() override { sleep_ms(ms); return true; }
+  bool Compile() override;
   bool DidWork() const override { return false; }
   bool RetrieveAfterShaders() const override { return true; }
   void Retrieve() override;
@@ -148,16 +176,38 @@ struct SlowRetrieve : AsyncShaderCompiler::WorkItem {
   bool DidWork() const override { return false; }
   void Retrieve() override { sleep_ms(ms); }
 };
+// scenario 3: the pixel shader (real, 10 ms; inserted at Retrieve) and the
+// pipeline item (ShaderCache's PipelineWorkItem: snapshot, look at the stages,
+// a no-op of 5 ms when the shader is pending, re-queued at Retrieve)
+struct PsItem : AsyncShaderCompiler::WorkItem {
+  Cache* sc; PsItem(Cache* s) : sc(s) {}
+  bool Compile() override { sleep_ms(10); return true; }
+  void Retrieve() override;
+};
+struct PipeItem : AsyncShaderCompiler::WorkItem {
+  Cache* sc; bool ready;
+  PipeItem(Cache* s, bool hook);
+  bool Compile() override { sleep_ms(ready ? 0.5 : 5); return true; }
+  bool DidWork() const override { return ready; }
+  bool RetrieveAfterShaders() const override { return true; }
+  void Retrieve() override;
+};
 struct Cache {
   AsyncShaderCompiler c;
   int scenario = 0; bool queued = false;
+  bool ps_pending = false, pipeline_in = false; AbstractPipeline pipeline;
   u64 AsyncWakeCount() const { return c.WakeCount(); }
   bool WaitForAsyncWake(u64 seen, double ms) { return c.WaitForWake(seen, ms); }
   void RetrieveAsyncShaders() { c.RetrieveWorkItems(); }
   std::optional<const AbstractPipeline*> GetPipelineForUidAsync(int) {
+    if (pipeline_in) return &pipeline;
     if (!queued) {
       queued = true;
-      if (scenario == 1) {
+      if (scenario == 3) {
+        ps_pending = true;
+        c.QueueWorkItem(std::make_unique<PsItem>(this), 1);
+        c.QueueWorkItem(std::make_unique<PipeItem>(this, false), 1);
+      } else if (scenario == 1) {
         // worker 1: the real compile (2 ms), worker 2: P1 (5 ms); then P2 on
         // worker 1; both pipeline items finish after the real compile landed
         c.QueueWorkItem(std::make_unique<Real>(2), 0);
@@ -170,16 +220,35 @@ struct Cache {
     return std::nullopt;  // the specialized pipeline is never ready before T
   }
 };
-// re-queued, each no-op takes 3 ms: P1 and P2, 2 ms apart, overlap, so each
-// finishes after the other's wake-up (the ping-pong needs exactly that)
-void NoopPipe::Retrieve() { sc->c.QueueWorkItem(std::make_unique<NoopPipe>(sc, 3), 1); }
+// the first run takes ms; re-queued (ms = 0), a no-op runs until the next
+// wake-up or 5 ms: P1 and P2 overlap, each finishing after the other's wake-up
+// (what the ping-pong needs), by events rather than by timing
+bool NoopPipe::Compile() {
+  if (ms > 0) { sleep_ms(ms); return true; }
+  const u64 w0 = sc->c.m_wakes.load(); const double t0 = emscripten_get_now();
+  while (sc->c.m_wakes.load() == w0 && emscripten_get_now() - t0 < 5) std::this_thread::yield();
+  return true;
+}
+void NoopPipe::Retrieve() { sc->c.QueueWorkItem(std::make_unique<NoopPipe>(sc, 0), 1); }
+void PsItem::Retrieve() { sc->ps_pending = false; }
+PipeItem::PipeItem(Cache* s, bool hook) : sc(s) {
+  if (${snapshotEarly}) sc->c.SnapshotRealCompletions(this);  // ShaderCache: before SetStagesReady
+  ready = !sc->ps_pending;
+  // the injected sync point: the pixel shader finishes here, after the look and
+  // before the queueing (QueueWorkItem snapshots there when none was taken)
+  if (hook && !ready) { const double t0 = emscripten_get_now(); while (sc->c.m_real_completions.load() < 1 && emscripten_get_now() - t0 < 1000) std::this_thread::yield(); }
+}
+void PipeItem::Retrieve() {
+  if (ready) sc->pipeline_in = true;
+  else sc->c.QueueWorkItem(std::make_unique<PipeItem>(sc, true), 1);
+}
 static Cache* g_shader_cache = nullptr;
 struct VertexManagerBase {
   int m_current_pipeline_config = 0;
   double m_uber_wait_frame_us = 0;
   std::optional<const AbstractPipeline*> WaitForSpecializedPipeline();
 };
-${wait}
+${v}
 static void Stats(double* v) { DolphinWeb_UberWaitStats(v); }
 // the platform timer's own overshoot: the longest of 5 timed waits of T ms on a
 // condition variable that nobody signals (a loaded or niced run oversleeps)
@@ -203,13 +272,19 @@ int scenario(int s, int T) {
     Stats(v0);
     VertexManagerBase vmb;
     auto first = cache.GetPipelineForUidAsync(0);
+    if (s == 3) {  // P0 (a no-op) finished, the pixel shader still compiling
+      for (int i = 0; i < 1000; i += 1) { { std::lock_guard g(cache.c.m_completed_work_lock); if (!cache.c.m_completed_work.empty()) break; } sleep_ms(0.2); }
+    }
     const double t0 = emscripten_get_now();
     auto r = vmb.WaitForSpecializedPipeline();
     const double spent = emscripten_get_now() - t0;
     Stats(v1);
     const double waits = v1[2] - v0[2], wakeups = v1[6] - v0[6];
     bool bad;
-    if (s == 1) {
+    if (s == 3) {
+      bad = first.has_value() || !(r && *r) || spent >= 35;
+      std::fprintf(stderr, "late snapshot trial %d: %s after %.2f ms (T = %d ms, required before 35 ms)%s\n", trial, r && *r ? "specialized" : "UBERSHADER", spent, T, bad ? " FAIL" : "");
+    } else if (s == 1) {
       bad = first.has_value() || waits != 1 || wakeups > 3 * waits;
       std::fprintf(stderr, "ping-pong trial %d: %.0f wake-ups for %.0f blocked call(s) in %.2f ms (T = %d ms, bound 3 per call)%s\n", trial, wakeups, waits, spent, T, bad ? " FAIL" : "");
     } else {
@@ -227,24 +302,36 @@ int main() {
   g_bound = 20 + over + 4;  // T + the timer's own overshoot + 4 ms
   std::fprintf(stderr, "timer overshoot %.2f ms: expiry bound T + %.2f ms\n", over, over + 4);
   // expiry first: uberWaitMaxUs is a running max over the process
-  const int b = scenario(2, 20), a = scenario(1, 40);
+  const int b = scenario(2, 20);
   double v[10]; Stats(v);
-  std::fprintf(stderr, "uberWaitMaxUs over all calls: %.0f; failures: ping-pong %d, expiry %d\n", v[1], a, b);
-  return a + b;
+  const int a = scenario(1, 40), c = scenario(3, 50);
+  std::fprintf(stderr, "uberWaitMaxUs over the expiry calls: %.0f; failures: ping-pong %d, expiry %d, late snapshot %d\n", v[1], a, b, c);
+  return a + b + c;
 }
 `;
 }
 
-sourceContractTest("0225 ping-pong and expiry: no-op items never wake each other in turn; an expired wait ends at T", (t) => {
+function build(dir, name, fixed) {
+  const cpp = join(dir, `${name}.cpp`), exe = join(dir, name);
+  writeFileSync(cpp, harness(fixed));
+  const c = spawnSync("clang++", ["-std=c++20", "-O1", "-pthread", "-D__EMSCRIPTEN__", cpp, "-o", exe], { encoding: "utf8" });
+  assert.equal(c.status, 0, c.stderr || c.stdout);
+  const r = spawnSync(exe, [], { encoding: "utf8", timeout: 60000 });
+  const m = /failures: ping-pong (\d+), expiry (\d+), late snapshot (\d+)/.exec(r.stderr);
+  assert.ok(m, `${name}: no summary line:\n${r.stderr}`);
+  return { status: r.status, log: r.stderr.trim(), pingpong: Number(m[1]), expiry: Number(m[2]), late: Number(m[3]) };
+}
+
+sourceContractTest("0225 ping-pong, expiry, late snapshot: the fixed code passes, the same code with the fixes reverted fails (negative control)", (t) => {
   const dir = mkdtempSync(join(tmpdir(), "uberwait-pingpong-"));
   try {
-    const cpp = join(dir, "h.cpp"), exe = join(dir, "h");
-    writeFileSync(cpp, harness());
-    const c = spawnSync("clang++", ["-std=c++20", "-O1", "-pthread", "-D__EMSCRIPTEN__", cpp, "-o", exe], { encoding: "utf8" });
-    assert.equal(c.status, 0, c.stderr || c.stdout);
-    const r = spawnSync(exe, [], { encoding: "utf8", timeout: 60000 });
-    t.diagnostic(r.stderr.trim());
-    assert.equal(r.status, 0, `no ping-pong (<= 3 wake-ups per blocked call) and an expired wait ending by T + timer overshoot + 4 ms:\n${r.stderr}`);
+    const bad = build(dir, "unfixed", false);
+    t.diagnostic(`WITHOUT the fixes (expected to fail):\n${bad.log}`);
+    const good = build(dir, "fixed", true);
+    t.diagnostic(`WITH the fixes:\n${good.log}`);
+    assert.ok(bad.pingpong > 0 && bad.expiry > 0 && bad.late > 0, `the unfixed build must fail every scenario:\n${bad.log}`);
+    assert.notEqual(bad.status, 0);
+    assert.equal(good.status, 0, `no ping-pong (<= 3 wake-ups per blocked call), an expired wait ending by T + timer overshoot + 4 ms, the late-snapshot item waking the wait:\n${good.log}`);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
