@@ -1,0 +1,174 @@
+diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp b/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp
+--- a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp
++++ b/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp
+@@ -467,10 +467,35 @@ struct UberViSlot
+   std::atomic<u32> vi{0xffffffffu};
+   std::atomic<u32> generation{0};
+   std::atomic<u32> draws{0};
++  // Patch 0224 (harness, with patch 0219's counters on): when the window
++  // closed, epoch ms (performance.timeOrigin + now), to align with producedT.
++  std::atomic<double> t_ms{0};
+ };
+ // Allocated at the first VI tag (the harness's), never freed: no static array.
+ static std::atomic<UberViSlot*> s_uber_vi_ring{nullptr};
+ static std::atomic<u32> s_uber_last_generation{0xffffffffu};
++// Patch 0224: the last VI tag's vi_since_load (the log reads backwards from it).
++static std::atomic<u32> s_uber_last_vi{0xffffffffu};
++
++// Patch 0224: epoch milliseconds on this thread (performance.timeOrigin + now:
++// the worker's producedT clock), read only with patch 0219's counters on.
++static double EpochMs()
++{
++  return EM_ASM_DOUBLE({ return performance.timeOrigin + performance.now(); });
++}
++
++// Patch 0224 (harness, with patch 0219's counters on; allocated at the first
++// event, never freed): per pipeline made on an async compiler thread, when its
++// shaders' translation ended (the later of the two), when the pipeline was
++// ready on that thread, when the GPU thread first bound it (its first
++// specialized draw), and the VI tag count then. H3's delay is bind - ready.
++constexpr u32 RETRIEVE_LOG = 256;
++struct RetrieveEvent
++{
++  double xlat_end_ms, ready_ms, first_bind_ms, vi;
++};
++static std::atomic<RetrieveEvent*> s_retrieve_log{nullptr};
++static std::atomic<u32> s_retrieve_count{0};
+ 
+ // 0207: comma-separated counters for the stats line.
+ static std::string AbortCauses()
+@@ -786,7 +811,77 @@ static void CloseUberViWindow(u32 vi_since_load, u32 load_generation, u32 draws)
+   UberViSlot& slot = ring[vi_since_load % UBER_VI_RING];
+   slot.draws.store(draws, std::memory_order_relaxed);
+   slot.generation.store(load_generation, std::memory_order_relaxed);
++  slot.t_ms.store(DolphinWeb::LoadStats::On() ? EpochMs() : 0.0, std::memory_order_relaxed);
+   slot.vi.store(vi_since_load, std::memory_order_release);
++  s_uber_last_vi.store(vi_since_load, std::memory_order_release);
++}
++
++// Patch 0224: the last <max> closed VI windows of this load, oldest first:
++// out[4k..4k+3] = vi_since_load, load generation, uber draws, epoch ms (0 when
++// the counters were off). Returns how many were written.
++extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_UberViLog(double* out, u32 max)
++{
++  const UberViSlot* ring = s_uber_vi_ring.load(std::memory_order_acquire);
++  const u32 last = s_uber_last_vi.load(std::memory_order_acquire);
++  const u32 gen = s_uber_last_generation.load(std::memory_order_relaxed);
++  if (!ring || last == 0xffffffffu)
++    return 0;
++  max = std::min(max, UBER_VI_RING);
++  u32 n = 0;
++  while (n < max && n <= last)
++  {
++    const UberViSlot& slot = ring[(last - n) % UBER_VI_RING];
++    if (slot.vi.load(std::memory_order_acquire) != last - n ||
++        slot.generation.load(std::memory_order_relaxed) != gen)
++      break;
++    ++n;
++  }
++  for (u32 k = 0; k < n; ++k)
++  {
++    const u32 vi = last - (n - 1 - k);
++    const UberViSlot& slot = ring[vi % UBER_VI_RING];
++    out[4 * k] = vi;
++    out[4 * k + 1] = gen;
++    out[4 * k + 2] = slot.draws.load(std::memory_order_relaxed);
++    out[4 * k + 3] = slot.t_ms.load(std::memory_order_relaxed);
++  }
++  return n;
++}
++
++// Patch 0224: one pipeline's first bind (the GPU thread only).
++static void RecordRetrieve(double xlat_end_ms, double ready_ms)
++{
++  RetrieveEvent* log = s_retrieve_log.load(std::memory_order_acquire);
++  if (!log)
++  {
++    log = new RetrieveEvent[RETRIEVE_LOG]();
++    s_retrieve_log.store(log, std::memory_order_release);
++  }
++  const u32 i = s_retrieve_count.load(std::memory_order_relaxed);
++  const u32 last = s_uber_last_vi.load(std::memory_order_relaxed);
++  log[i % RETRIEVE_LOG] = {xlat_end_ms, ready_ms, EpochMs(), last == 0xffffffffu ? -1.0 : double(last)};
++  s_retrieve_count.store(i + 1, std::memory_order_release);
++}
++
++// Patch 0224: the last <max> pipelines' first binds, oldest first: out[4k..]
++// = translation end, ready, first bind (epoch ms), the VI tag then. Returns
++// how many were written.
++extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_RetrieveLog(double* out, u32 max)
++{
++  const RetrieveEvent* log = s_retrieve_log.load(std::memory_order_acquire);
++  const u32 count = s_retrieve_count.load(std::memory_order_acquire);
++  if (!log)
++    return 0;
++  const u32 n = std::min({max, count, RETRIEVE_LOG});
++  for (u32 k = 0; k < n; ++k)
++  {
++    const RetrieveEvent& e = log[(count - n + k) % RETRIEVE_LOG];
++    out[4 * k] = e.xlat_end_ms;
++    out[4 * k + 1] = e.ready_ms;
++    out[4 * k + 2] = e.first_bind_ms;
++    out[4 * k + 3] = e.vi;
++  }
++  return n;
+ }
+ 
+ // Patch 0223: the uber draws of the windows that closed at vi_since_load and
+@@ -975,6 +1070,9 @@ public:
+     m_bridge_id = bridge_id;
+     m_pending = false;
+   }
++  // Patch 0224: when an async compiler thread finished translating it (epoch
++  // ms; 0 when the counters were off or it was translated on the GPU thread).
++  double m_xlat_end_ms = 0;
+ 
+ private:
+   mutable u32 m_bridge_id = 0;
+@@ -1003,7 +1101,11 @@ WebGPUGfx::CreateShaderFromSource(ShaderStage stage, std::string_view source,
+     if (text.empty())
+       m_shader_fail.fetch_add(1, std::memory_order_relaxed);
+     const bool pending = !text.empty();
+-    return std::make_unique<WebGPUShader>(stage, 0u, std::move(text), pending);
++    auto shader = std::make_unique<WebGPUShader>(stage, 0u, std::move(text), pending);
++    // Patch 0224 (harness): the translation's end, for the first-bind log.
++    if (xlat_stats_async)
++      shader->m_xlat_end_ms = EpochMs();
++    return shader;
+   }
+ 
+   DolphinWeb::WebGpuProducerProfile::ScopedSample producer_profile(
+@@ -1104,6 +1206,9 @@ private:
+   mutable bool m_pending = false;
+ 
+ public:
++  // Patch 0224: when the async compiler thread made it (epoch ms; 0 when the
++  // counters were off).
++  double m_ready_ms = 0;
+   void MarkPending() { m_pending = true; }
+   bool IsPending() const { return m_pending; }
+   void SetPushed(u32 bridge_id) const
+@@ -1400,6 +1505,8 @@ WebGPUGfx::CreatePipeline(const AbstractPipelineConfig& config,
+   {
+     auto pending = std::make_unique<WebGPUPipeline>(config, 0u);
+     pending->MarkPending();
++    if (DolphinWeb::LoadStats::On())
++      pending->m_ready_ms = EpochMs();
+     return pending;
+   }
+ 
+@@ -2687,6 +2794,14 @@ u32 WebGPUGfx::PushPendingPipeline(const AbstractPipeline* pipeline)
+       id = m_cmd_stream.PushCreatePipelineCfg(blob.data(), blob.size());
+     }
+     p->SetPushed(id);
++    // Patch 0224 (harness): this pipeline's first specialized bind.
++    if (DolphinWeb::LoadStats::On())
++    {
++      const auto* vs = static_cast<const WebGPUShader*>(p->m_config.vertex_shader);
++      const auto* fs = static_cast<const WebGPUShader*>(p->m_config.pixel_shader);
++      RecordRetrieve(std::max(vs ? vs->m_xlat_end_ms : 0.0, fs ? fs->m_xlat_end_ms : 0.0),
++                     p->m_ready_ms);
++    }
+   }
+   return p->GetBridgeId();
+ }

@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "4de0e9cf9bd4d811126a3870e21390c64afa8afb71c8f0650e890e1b73e30f9a",
+  "patchSeriesSha256": "22b1df16e49772f73010a0938a3a18a1698f1de72ad7db0d4381f9f3a908ef0e",
   "patches": [
     {
       "order": 1,
@@ -1245,6 +1245,14 @@
     },
     {
       "order": 153,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0224-webgpu-harness-uber-retrieve-gpu-time-counters.patch",
+      "size": 7308,
+      "sha256": "c1671ded66e4f3a1fcdfc06447c0b4354cdff46394f0877c2c402541b248cfa8"
+    },
+    {
+      "order": 154,
       "cwd": "Externals/SFML/SFML",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0001-sfml-emscripten-config.patch",
@@ -1252,7 +1260,7 @@
       "sha256": "f82197a21fe982ad83f6ee7bbf5a03839b1cebd4d64da3eab11263842bf61d89"
     },
     {
-      "order": 154,
+      "order": 155,
       "cwd": "Externals/xxhash/xxHash",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0002-xxhash-wasm-simd-scalar.patch",
