@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "a8eecd9d8a2cd79cd530d5dc53d7f09902de15ad21231bc0f1f2d73b4e2e1ed4",
+  "patchSeriesSha256": "706308afd60f4981e9d91caa7ac10d78dfedb5a37bf53d3c75db7f0c748e05c3",
   "patches": [
     {
       "order": 1,
@@ -1256,8 +1256,8 @@
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0225-webgpu-hybrid-bounded-uber-wait.patch",
-      "size": 16983,
-      "sha256": "b67324267b4b1154f2595cc7ffe7838fdb9b6313c8a4037fc20c3e0649d07d94"
+      "size": 17497,
+      "sha256": "02a79af21329de34bd24d9d5aea9bdfd311a1f1efb3b6f82d8c9822320578d9f"
     },
     {
       "order": 155,

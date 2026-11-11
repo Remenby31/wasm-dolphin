@@ -3,7 +3,7 @@
 //
 // Patch 0225 (judge's re-review of e6cbcf21): the missed wake-up. With the
 // REAL AsyncShaderCompiler code (QueueWorkItem, WorkerThreadRun,
-// RetrieveWorkItems, WaitForRealCompletion) and the REAL
+// RetrieveWorkItems, WaitForWake) and the REAL
 // VertexManagerBase::WaitForSpecializedPipeline, all extracted from the patched
 // vendor tree, and work items that behave as ShaderCache's: the vertex shader
 // cached, the pixel shader new; the pipeline item, queued after the pixel
@@ -47,7 +47,7 @@ export function harness() {
   const queue = body(asc, "void AsyncShaderCompiler::QueueWorkItem(WorkItemPtr item, u32 priority)");
   const retrieve = body(asc, "void AsyncShaderCompiler::RetrieveWorkItems()");
   const run = body(asc, "void AsyncShaderCompiler::WorkerThreadRun()");
-  const realWait = body(asc, "bool AsyncShaderCompiler::WaitForRealCompletion(u64 seen, double timeout_ms)");
+  const realWait = body(asc, "bool AsyncShaderCompiler::WaitForWake(u64 seen, double timeout_ms)");
   return String.raw`
 #include <algorithm>
 #include <atomic>
@@ -78,15 +78,15 @@ public:
     virtual void Retrieve() = 0;
     virtual bool DidWork() const { return true; }
     virtual bool RetrieveAfterShaders() const { return false; }
-    u64 queued_wakes = 0;
+    u64 queued_real_completions = 0;
   };
   static void SetRetrieveShadersFirst(bool on) { s_retrieve_shaders_first.store(on); }
   static inline std::atomic<bool> s_retrieve_shaders_first{false};
   using WorkItemPtr = std::unique_ptr<WorkItem>;
   void QueueWorkItem(WorkItemPtr item, u32 priority);
   void RetrieveWorkItems();
-  bool WaitForRealCompletion(u64 seen, double timeout_ms);
-  u64 RealCompletions() const { return m_real_completions.load(); }
+  bool WaitForWake(u64 seen, double timeout_ms);
+  u64 WakeCount() const { return m_wakes.load(); }
   bool HasWorkerThreads() const { return !m_worker_threads.empty(); }
   void WorkerThreadRun();
   void Start(int n) { for (int i = 0; i < n; i += 1) m_worker_threads.emplace_back([this] { WorkerThreadRun(); }); }
@@ -101,6 +101,7 @@ public:
   std::mutex m_completed_work_lock;
   std::condition_variable m_completed_work_cv;
   std::atomic<u64> m_real_completions{0};
+  std::atomic<u64> m_wakes{0};
 };
 }  // namespace VideoCommon
 using VideoCommon::AsyncShaderCompiler;
@@ -167,8 +168,8 @@ struct Cache {
     bool RetrieveAfterShaders() const override { return true; }
     void Retrieve() override { if (ready) sc->pipeline_in = true; else sc->c.QueueWorkItem(std::make_unique<PipelineItem>(sc), sc->pipe_priority); }
   };
-  u64 AsyncRealCompletions() const { return c.RealCompletions(); }
-  bool WaitForAsyncCompletion(u64 seen, double ms) { return c.WaitForRealCompletion(seen, ms); }
+  u64 AsyncWakeCount() const { return c.WakeCount(); }
+  bool WaitForAsyncWake(u64 seen, double ms) { return c.WaitForWake(seen, ms); }
   void RetrieveAsyncShaders() { c.RetrieveWorkItems(); }
   std::optional<const AbstractPipeline*> GetPipelineForUidAsync(int) {
     if (pipeline_in) return &pipeline;

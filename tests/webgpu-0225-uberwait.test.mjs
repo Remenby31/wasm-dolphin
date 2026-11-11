@@ -50,14 +50,17 @@ test("0225 core: the wait only in AsynchronousUberShaders, a per-frame budget, n
   assert.match(added, /static std::atomic<u32> s_uber_wait_us_budget\{0\};/);
   assert.match(added, /std::clamp\(ms, 0, 50\)/);
   // only an item that did real work wakes the waiting GPU thread (no busy loop on re-queued no-op items)
-  assert.match(added, /if \(did_work\)\n\s+\{\n\s+m_real_completions\.fetch_add\(1, std::memory_order_release\);\n\s+m_completed_work_cv\.notify_all\(\);/);
+  assert.match(added, /if \(did_work\)\n\s+m_real_completions\.fetch_add\(1, std::memory_order_release\);\n\s+if \(wake\)\n\s+\{\n\s+m_wakes\.fetch_add\(1, std::memory_order_release\);\n\s+m_completed_work_cv\.notify_all\(\);/);
   assert.equal(added.match(/bool DidWork\(\) const override \{ return config\.has_value\(\); \}/g).length, 2);
-  assert.match(added, /if \(g_shader_cache->WaitForAsyncCompletion\(seen, \(left_us - spent_us\) \/ 1000\)\)/);
+  // an expired wait ends there: no retrieve and no look after the budget (judge's fourth review)
+  assert.match(added, /if \(!g_shader_cache->WaitForAsyncWake\(seen, \(left_us - spent_us\) \/ 1000\)\)\n\s+break;\n\s+s_uber_wait_wakeups\.fetch_add\(1, std::memory_order_relaxed\);/);
   // the missed wake-up fixes (the native test reproduces both bugs): shaders retrieved before
   // pipelines only while the wait is on (T = 0: 0223's order), and a stale no-op wakes the wait
   assert.match(added, /if \(s_retrieve_shaders_first\.load\(std::memory_order_relaxed\)\)\n\s+\{\n\s+std::stable_partition\(completed_work\.begin\(\), completed_work\.end\(\),/);
   assert.match(added, /VideoCommon::AsyncShaderCompiler::SetRetrieveShadersFirst\(ms > 0\);/);
-  assert.match(added, /item->DidWork\(\) \|\|\n\s+m_real_completions\.load\(std::memory_order_acquire\) != item->queued_wakes;/);
+  // the stale no-op compares to the real-work count, which a no-op's wake never moves (no ping-pong)
+  assert.match(added, /const bool did_work = item->DidWork\(\);\n\s+const bool wake =\n\s+did_work \|\|\n\s+m_real_completions\.load\(std::memory_order_acquire\) != item->queued_real_completions;/);
+  assert.match(added, /item->queued_real_completions = m_real_completions\.load\(std::memory_order_acquire\);/);
   assert.equal(added.match(/bool RetrieveAfterShaders\(\) const override \{ return true; \}/g).length, 2);
   // a hit is a real pipeline; a call that never blocked is not a wait
   assert.match(added, /const bool got = res\.has_value\(\) && \*res != nullptr;\n\s+if \(blocked\)/);

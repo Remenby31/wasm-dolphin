@@ -3,7 +3,7 @@
 //
 // Patch 0225, exercised natively: VertexManagerBase::WaitForSpecializedPipeline,
 // DolphinWeb_SetUberWaitMs / DolphinWeb_UberWaitStats and
-// AsyncShaderCompiler::WaitForRealCompletion are extracted from the patched
+// AsyncShaderCompiler::WaitForWake are extracted from the patched
 // vendor tree and compiled against a mock shader cache whose "compiler" thread
 // finishes real work at set times while flooding no-op completions (pipeline
 // items whose shaders were not ready). Checked: the per-frame budget, the
@@ -35,7 +35,7 @@ function harness() {
   const setter = body(vm, 'extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_SetUberWaitMs(int ms)').replace("EMSCRIPTEN_KEEPALIVE ", "");
   const stats = body(vm, 'extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_UberWaitStats(double* out)').replace("EMSCRIPTEN_KEEPALIVE ", "");
   const wait = body(vm, "std::optional<const AbstractPipeline*> VertexManagerBase::WaitForSpecializedPipeline()");
-  const realWait = body(asc, "bool AsyncShaderCompiler::WaitForRealCompletion(u64 seen, double timeout_ms)");
+  const realWait = body(asc, "bool AsyncShaderCompiler::WaitForWake(u64 seen, double timeout_ms)");
   return String.raw`
 #include <algorithm>
 #include <atomic>
@@ -54,12 +54,12 @@ namespace VideoCommon { struct AsyncShaderCompiler { static void SetRetrieveShad
 ${statics}
 ${setter}
 ${stats}
-// the compiler's real-completion wait, extracted
+// the compiler's wake wait, extracted
 struct AsyncShaderCompiler {
   std::mutex m_completed_work_lock;
   std::condition_variable m_completed_work_cv;
-  std::atomic<u64> m_real_completions{0};
-  bool WaitForRealCompletion(u64 seen, double timeout_ms);
+  std::atomic<u64> m_wakes{0};
+  bool WaitForWake(u64 seen, double timeout_ms);
 };
 ${realWait}
 // a mock shader cache: one specialized pipeline, its shader "compiled" by a
@@ -91,16 +91,16 @@ struct MockCache {
     });
   }
   ~MockCache() { stop = true; worker.join(); }
-  void real() { std::lock_guard g(c.m_completed_work_lock); c.m_real_completions.fetch_add(1); c.m_completed_work_cv.notify_all(); }
-  u64 AsyncRealCompletions() const { return c.m_real_completions.load(); }
-  bool WaitForAsyncCompletion(u64 seen, double ms) { return c.WaitForRealCompletion(seen, ms); }
+  void real() { std::lock_guard g(c.m_completed_work_lock); c.m_wakes.fetch_add(1); c.m_completed_work_cv.notify_all(); }
+  u64 AsyncWakeCount() const { return c.m_wakes.load(); }
+  bool WaitForAsyncWake(u64 seen, double ms) { return c.WaitForWake(seen, ms); }
   void RetrieveAsyncShaders() {
     retrieves++;
-    const u64 r = c.m_real_completions.load();
+    const u64 r = c.m_wakes.load();
     if (!shader_in && r >= 1) { shader_in = true; pipe_queued = true; pipe_seen = r; pipe_due = emscripten_get_now() + pipe_ms; }
   }
   std::optional<const AbstractPipeline*> GetPipelineForUidAsync(int) {
-    if (pipe_queued && c.m_real_completions.load() > pipe_seen) return &pipeline;
+    if (pipe_queued && c.m_wakes.load() > pipe_seen) return &pipeline;
     return std::nullopt;
   }
 };
