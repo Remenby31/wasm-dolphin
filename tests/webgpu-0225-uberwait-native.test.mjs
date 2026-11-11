@@ -50,6 +50,7 @@ using u32 = uint32_t; using u64 = uint64_t; using s64 = int64_t;
 static const auto t_origin = std::chrono::steady_clock::now();
 static double emscripten_get_now() { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_origin).count(); }
 struct AbstractPipeline {};
+namespace VideoCommon { struct AsyncShaderCompiler { static void SetRetrieveShadersFirst(bool) {} }; }
 ${statics}
 ${setter}
 ${stats}

@@ -53,8 +53,11 @@ test("0225 core: the wait only in AsynchronousUberShaders, a per-frame budget, n
   assert.match(added, /if \(did_work\)\n\s+\{\n\s+m_real_completions\.fetch_add\(1, std::memory_order_release\);\n\s+m_completed_work_cv\.notify_all\(\);/);
   assert.equal(added.match(/bool DidWork\(\) const override \{ return config\.has_value\(\); \}/g).length, 2);
   assert.match(added, /if \(g_shader_cache->WaitForAsyncCompletion\(seen, \(left_us - spent_us\) \/ 1000\)\)/);
-  // the missed wake-up fix: shaders retrieved before pipelines (the native test reproduces the bug)
-  assert.match(added, /std::stable_partition\(completed_work\.begin\(\), completed_work\.end\(\),\n\s+\[\]\(const WorkItemPtr& item\) \{ return !item->RetrieveAfterShaders\(\); \}\);/);
+  // the missed wake-up fixes (the native test reproduces both bugs): shaders retrieved before
+  // pipelines only while the wait is on (T = 0: 0223's order), and a stale no-op wakes the wait
+  assert.match(added, /if \(s_retrieve_shaders_first\.load\(std::memory_order_relaxed\)\)\n\s+\{\n\s+std::stable_partition\(completed_work\.begin\(\), completed_work\.end\(\),/);
+  assert.match(added, /VideoCommon::AsyncShaderCompiler::SetRetrieveShadersFirst\(ms > 0\);/);
+  assert.match(added, /item->DidWork\(\) \|\|\n\s+m_real_completions\.load\(std::memory_order_acquire\) != item->queued_wakes;/);
   assert.equal(added.match(/bool RetrieveAfterShaders\(\) const override \{ return true; \}/g).length, 2);
   // a hit is a real pipeline; a call that never blocked is not a wait
   assert.match(added, /const bool got = res\.has_value\(\) && \*res != nullptr;\n\s+if \(blocked\)/);

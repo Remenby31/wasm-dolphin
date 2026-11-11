@@ -9,19 +9,31 @@ diff --git a/Source/Core/VideoCommon/AsyncShaderCompiler.cpp b/Source/Core/Video
  #include <thread>
  
  #ifdef __EMSCRIPTEN__
-@@ -54,6 +55,11 @@ void AsyncShaderCompiler::RetrieveWorkItems()
+@@ -42,6 +43,7 @@ void AsyncShaderCompiler::QueueWorkItem(WorkItemPtr item, u32 priority)
+   else
+   {
+     std::lock_guard guard(m_pending_work_lock);
++    item->queued_wakes = m_real_completions.load(std::memory_order_acquire);
+     m_pending_work.emplace(priority, std::move(item));
+     m_worker_thread_wake.notify_one();
+   }
+@@ -54,6 +56,15 @@ void AsyncShaderCompiler::RetrieveWorkItems()
      std::lock_guard guard(m_completed_work_lock);
      m_completed_work.swap(completed_work);
    }
 +#ifdef __EMSCRIPTEN__
-+  // Patch 0225: shaders before pipelines (WorkItem::RetrieveAfterShaders).
-+  std::stable_partition(completed_work.begin(), completed_work.end(),
-+                        [](const WorkItemPtr& item) { return !item->RetrieveAfterShaders(); });
++  // Patch 0225: shaders before pipelines (WorkItem::RetrieveAfterShaders),
++  // only while the bounded wait is on (T > 0); at T = 0 the arrival order.
++  if (s_retrieve_shaders_first.load(std::memory_order_relaxed))
++  {
++    std::stable_partition(completed_work.begin(), completed_work.end(),
++                          [](const WorkItemPtr& item) { return !item->RetrieveAfterShaders(); });
++  }
 +#endif
  
    while (!completed_work.empty())
    {
-@@ -195,6 +201,18 @@ void AsyncShaderCompiler::RecordThreadStart(double wait_ms)
+@@ -195,6 +206,18 @@ void AsyncShaderCompiler::RecordThreadStart(double wait_ms)
    s_start_stats.wait_ms_max = std::max(s_start_stats.wait_ms_max, wait_ms);
  }
  
@@ -40,15 +52,19 @@ diff --git a/Source/Core/VideoCommon/AsyncShaderCompiler.cpp b/Source/Core/Video
  AsyncShaderCompiler::StartStats AsyncShaderCompiler::GetStartStats()
  {
    std::lock_guard guard(s_start_stats_lock);
-@@ -287,8 +305,16 @@ void AsyncShaderCompiler::WorkerThreadRun()
+@@ -287,8 +310,20 @@ void AsyncShaderCompiler::WorkerThreadRun()
  
        if (item->Compile())
        {
-+        const bool did_work = item->DidWork();
++        // real work, or a no-op that finished after real work landed since it
++        // was queued (its re-queue may now compile): both wake the bounded wait
++        const bool did_work =
++            item->DidWork() ||
++            m_real_completions.load(std::memory_order_acquire) != item->queued_wakes;
          std::lock_guard completed_guard(m_completed_work_lock);
          m_completed_work.push_back(std::move(item));
 +        // Patch 0225: a GPU thread waiting for a specialized pipeline wakes,
-+        // only for an item that did real work.
++        // only for real work (or a no-op that may now re-queue for real).
 +        if (did_work)
 +        {
 +          m_real_completions.fetch_add(1, std::memory_order_release);
@@ -60,7 +76,7 @@ diff --git a/Source/Core/VideoCommon/AsyncShaderCompiler.cpp b/Source/Core/Video
 diff --git a/Source/Core/VideoCommon/AsyncShaderCompiler.h b/Source/Core/VideoCommon/AsyncShaderCompiler.h
 --- a/Source/Core/VideoCommon/AsyncShaderCompiler.h
 +++ b/Source/Core/VideoCommon/AsyncShaderCompiler.h
-@@ -29,6 +29,16 @@ public:
+@@ -29,6 +29,21 @@ public:
      virtual ~WorkItem() = default;
      virtual bool Compile() = 0;
      virtual void Retrieve() = 0;
@@ -74,10 +90,15 @@ diff --git a/Source/Core/VideoCommon/AsyncShaderCompiler.h b/Source/Core/VideoCo
 +    // compiles for real (else it stayed a no-op, finished without waking the
 +    // bounded wait, and the wait slept until its budget ran out).
 +    virtual bool RetrieveAfterShaders() const { return false; }
++    // Patch 0225: the wake count (RealCompletions) when the item was queued. A
++    // no-op item that finishes after that count moved (real work landed since
++    // it was built, e.g. its pixel shader) wakes the bounded wait too: its
++    // re-queue at the next retrieve can now compile for real.
++    u64 queued_wakes = 0;
    };
  
    using WorkItemPtr = std::unique_ptr<WorkItem>;
-@@ -47,6 +57,12 @@ public:
+@@ -47,6 +62,16 @@ public:
    // Patch 0223: the one compiler allowed threads on the web, the shader
    // cache's (the graphics-mod and custom-resource ones stay without, as before).
    void AllowWebWorkerThreads() { m_web_worker_threads = true; }
@@ -87,16 +108,21 @@ diff --git a/Source/Core/VideoCommon/AsyncShaderCompiler.h b/Source/Core/VideoCo
 +  // spinning through retrieve -> re-queue -> no-op -> retrieve.
 +  u64 RealCompletions() const { return m_real_completions.load(std::memory_order_acquire); }
 +  bool WaitForRealCompletion(u64 seen, double timeout_ms);
++  // Patch 0225: retrieve shader items before pipeline items, only while the
++  // bounded wait is on (?uberwait > 0); off (T = 0, the default), the order of
++  // 0223 (arrival order) is kept exactly.
++  static void SetRetrieveShadersFirst(bool on) { s_retrieve_shaders_first.store(on, std::memory_order_relaxed); }
  #endif
  
    AsyncShaderCompiler();
-@@ -106,6 +122,9 @@ private:
+@@ -106,6 +131,10 @@ private:
  
    std::deque<WorkItemPtr> m_completed_work;
    std::mutex m_completed_work_lock;
 +  // Patch 0225: signalled when a worker finishes an item that did real work.
 +  std::condition_variable m_completed_work_cv;
 +  std::atomic<u64> m_real_completions{0};
++  static inline std::atomic<bool> s_retrieve_shaders_first{false};
  };
  
  }  // namespace VideoCommon
@@ -296,7 +322,7 @@ diff --git a/Source/Core/VideoCommon/VertexManagerBase.cpp b/Source/Core/VideoCo
    m_draw_counter = 0;
    m_last_efb_copy_draw_counter = 0;
    m_scheduled_command_buffer_kicks.clear();
-@@ -1333,6 +1433,33 @@ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_SetDstAlphaTwoPass(int on)
+@@ -1333,6 +1433,35 @@ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_SetDstAlphaTwoPass(int on)
    s_dst_alpha_two_pass.store(on != 0, std::memory_order_relaxed);
  }
  
@@ -306,6 +332,8 @@ diff --git a/Source/Core/VideoCommon/VertexManagerBase.cpp b/Source/Core/VideoCo
 +{
 +  s_uber_wait_us_budget.store(static_cast<u32>(std::clamp(ms, 0, 50)) * 1000,
 +                              std::memory_order_relaxed);
++  // shaders retrieved before pipelines only while the wait is on (T = 0: 0223's order)
++  VideoCommon::AsyncShaderCompiler::SetRetrieveShadersFirst(ms > 0);
 +}
 +
 +// Patch 0225, cumulative: out[0] us spent (sum), [1] longest call (us),
