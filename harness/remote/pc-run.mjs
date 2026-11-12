@@ -132,7 +132,7 @@ export function simulatedPc({ cpu = "13th Gen Intel(R) Core(TM) i9-13900K", log 
         case "check": return reply({
           action, os: { caption: "Microsoft Windows 11 Pro", build: "26100" }, cpu: { name: cpu, cores: 24, logical: 32 },
           classAffinity: { mask: "0xfff", cores: 6, threads: 12, efficiencyClass: 1, hybrid: true },
-          memory: { totalGiB: 64, freeGiB: 50 }, gpus: [{ name: "NVIDIA GeForce RTX 4080", driver: "32.0.15.6614", driverDate: "2026-10-01", refreshHz: 60 }],
+          memory: { totalGiB: 64, freeGiB: 50 }, gpus: [{ name: "NVIDIA GeForce RTX 4080", driver: "32.0.15.6614", driverDate: "2026-10-01", present: true, started: true, refreshHz: null }], display: [{ target: "00", width: 3840, height: 2160, refreshHz: 60 }],
           browsers: { chrome: { version: "157.0.8103.39", path: "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" }, edge: { version: "157.0.3200.12", path: "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe" } },
           policies: {}, power: { battery: [], activeScheme: st.active, schemes: [...st.schemes], kitSchemeActive: st.active === KIT_SCHEME, overlayAc: null },
           session: { sessions: ["salonkit|console|1|Active|none|08/11/2026 20:00"], lockScreenUp: false, elevated: false, user: "salonkit" }, disk: { drive: "C", freeGiB: 200 },

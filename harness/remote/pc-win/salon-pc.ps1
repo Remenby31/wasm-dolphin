@@ -101,15 +101,61 @@ function Processor-Settings($scheme) {
   return $r
 }
 
-# Per physical core: its efficiency class (higher = faster cores) and its
-# logical processors' mask (group 0). From GetLogicalProcessorInformationEx.
-$CoreInfoSource = @"
+# What the machine is, read without CIM/WMI: over ssh this account's logon
+# is a network one, and WMI (root\cimv2, the ScheduledTasks and Defender
+# cmdlets, which are CIM underneath) refuses it "Remote Enable"
+# (0x80041003; first real PC, 2026-11-12). Performance counters are refused
+# too. Only what any local account may call: kernel32/ntdll, the registry,
+# the task scheduler's COM API, [Environment], files.
+#   Cores: per physical core its efficiency class (higher = faster cores)
+#     and its logical processors' mask (group 0), GetLogicalProcessorInformationEx.
+#   Processes: every process's pid, parent, start time, CPU time and image
+#     (NtQuerySystemInformation(SystemProcessInformation), Task Manager's own
+#     source: every account's processes, no right needed).
+#   CommandLine, OwnerSid: of a process this account may open (its own).
+#   Memory, PowerStatus, UptimeMs: GlobalMemoryStatusEx, GetSystemPowerStatus, GetTickCount64.
+#   EffectiveMhz: the busiest logical processor's frequency x % performance
+#     since the previous call (PDH by English counter names; the sampler,
+#     in the account's own desktop session).
+$NativeSource = @"
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
-public static class SalonKitCores {
+using System.Security.Principal;
+public static class SalonKitNative {
   [DllImport("kernel32.dll", SetLastError = true)]
   static extern bool GetLogicalProcessorInformationEx(int rel, IntPtr buf, ref uint len);
+  [DllImport("ntdll.dll")]
+  static extern int NtQuerySystemInformation(int cls, IntPtr buf, int len, out int ret);
+  [DllImport("ntdll.dll")]
+  static extern int NtQueryInformationProcess(IntPtr h, int cls, IntPtr buf, int len, out int ret);
+  [DllImport("kernel32.dll", SetLastError = true)]
+  static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
+  [DllImport("kernel32.dll")]
+  static extern bool CloseHandle(IntPtr h);
+  [DllImport("advapi32.dll", SetLastError = true)]
+  static extern bool OpenProcessToken(IntPtr h, uint access, out IntPtr token);
+  [StructLayout(LayoutKind.Sequential)]
+  class MemoryStatusEx { public uint dwLength = 64; public uint dwMemoryLoad; public ulong ullTotalPhys; public ulong ullAvailPhys; public ulong ullTotalPageFile; public ulong ullAvailPageFile; public ulong ullTotalVirtual; public ulong ullAvailVirtual; public ulong ullAvailExtendedVirtual; }
+  [DllImport("kernel32.dll", SetLastError = true)]
+  static extern bool GlobalMemoryStatusEx([In, Out] MemoryStatusEx m);
+  [StructLayout(LayoutKind.Sequential)]
+  struct SystemPowerStatus { public byte ACLineStatus; public byte BatteryFlag; public byte BatteryLifePercent; public byte SystemStatusFlag; public int BatteryLifeTime; public int BatteryFullLifeTime; }
+  [DllImport("kernel32.dll", SetLastError = true)]
+  static extern bool GetSystemPowerStatus(out SystemPowerStatus s);
+  [DllImport("kernel32.dll")]
+  static extern ulong GetTickCount64();
+  [DllImport("pdh.dll", CharSet = CharSet.Unicode)]
+  static extern int PdhOpenQueryW(string src, IntPtr user, out IntPtr q);
+  [DllImport("pdh.dll", CharSet = CharSet.Unicode)]
+  static extern int PdhAddEnglishCounterW(IntPtr q, string path, IntPtr user, out IntPtr c);
+  [DllImport("pdh.dll")]
+  static extern int PdhCollectQueryData(IntPtr q);
+  [DllImport("pdh.dll", CharSet = CharSet.Unicode)]
+  static extern int PdhGetFormattedCounterArrayW(IntPtr c, uint fmt, ref uint size, out uint count, IntPtr items);
+
+  static void Need64() { if (IntPtr.Size != 8) throw new PlatformNotSupportedException("64-bit PowerShell only"); }
+
   public static List<long[]> Cores() {
     uint len = 0;
     GetLogicalProcessorInformationEx(0, IntPtr.Zero, ref len);
@@ -132,12 +178,175 @@ public static class SalonKitCores {
     } finally { Marshal.FreeHGlobal(buf); }
     return list;
   }
+
+  // { pid, parent pid, start time (FILETIME, UTC), CPU time (100 ns, kernel + user), session } and the image name
+  // (SYSTEM_PROCESS_INFORMATION, x64 offsets)
+  public static List<object[]> Processes() {
+    Need64();
+    int len = 1 << 20;
+    while (true) {
+      IntPtr buf = Marshal.AllocHGlobal(len);
+      try {
+        int ret;
+        int st = NtQuerySystemInformation(5, buf, len, out ret);
+        if (st == unchecked((int)0xC0000004)) { len = Math.Max(len * 2, ret + 65536); continue; }
+        if (st != 0) throw new InvalidOperationException("NtQuerySystemInformation: 0x" + st.ToString("x8"));
+        var list = new List<object[]>();
+        long off = 0;
+        while (true) {
+          IntPtr p = new IntPtr(buf.ToInt64() + off);
+          int next = Marshal.ReadInt32(p, 0);
+          long create = Marshal.ReadInt64(p, 0x20);
+          long cpu = Marshal.ReadInt64(p, 0x28) + Marshal.ReadInt64(p, 0x30);
+          int nameLen = Marshal.ReadInt16(p, 0x38) & 0xffff;
+          IntPtr nameBuf = Marshal.ReadIntPtr(p, 0x40);
+          string name = (nameBuf == IntPtr.Zero || nameLen == 0) ? null : Marshal.PtrToStringUni(nameBuf, nameLen / 2);
+          long pid = Marshal.ReadIntPtr(p, 0x50).ToInt64();
+          long ppid = Marshal.ReadIntPtr(p, 0x58).ToInt64();
+          int session = Marshal.ReadInt32(p, 0x64);
+          list.Add(new object[] { pid, ppid, create, cpu, (long)session, name });
+          if (next == 0) break;
+          off += next;
+        }
+        return list;
+      } finally { Marshal.FreeHGlobal(buf); }
+    }
+  }
+  const uint QueryLimited = 0x1000;
+  // null when this account may not open the process (another account's)
+  public static string CommandLine(int pid) {
+    Need64();
+    IntPtr h = OpenProcess(QueryLimited, false, pid);
+    if (h == IntPtr.Zero) return null;
+    try {
+      int len = 65536;
+      for (int i = 0; i < 3; i++) {
+        IntPtr buf = Marshal.AllocHGlobal(len);
+        try {
+          int ret;
+          int st = NtQueryInformationProcess(h, 60, buf, len, out ret);
+          if (st == unchecked((int)0xC0000004) || st == unchecked((int)0xC0000023) || st == unchecked((int)0x80000005)) { len = Math.Max(len * 2, ret); continue; }
+          if (st != 0) return null;
+          int n = Marshal.ReadInt16(buf, 0) & 0xffff;
+          IntPtr s = Marshal.ReadIntPtr(buf, 8);
+          return (s == IntPtr.Zero) ? "" : Marshal.PtrToStringUni(s, n / 2);
+        } finally { Marshal.FreeHGlobal(buf); }
+      }
+      return null;
+    } finally { CloseHandle(h); }
+  }
+  public static string OwnerSid(int pid) {
+    IntPtr h = OpenProcess(QueryLimited, false, pid);
+    if (h == IntPtr.Zero) return null;
+    try {
+      IntPtr tok;
+      if (!OpenProcessToken(h, 8, out tok)) return null;
+      try { using (var id = new WindowsIdentity(tok)) { return id.User == null ? null : id.User.Value; } }
+      finally { CloseHandle(tok); }
+    } finally { CloseHandle(h); }
+  }
+  // { total physical, available physical, commit limit } in bytes
+  public static ulong[] Memory() {
+    var m = new MemoryStatusEx();
+    if (!GlobalMemoryStatusEx(m)) throw new System.ComponentModel.Win32Exception();
+    return new ulong[] { m.ullTotalPhys, m.ullAvailPhys, m.ullTotalPageFile };
+  }
+  // { AC line (0 off, 1 on, 255 unknown), battery flag (128: no battery), charge % (255 unknown) }
+  public static int[] PowerStatus() {
+    SystemPowerStatus s;
+    if (!GetSystemPowerStatus(out s)) throw new System.ComponentModel.Win32Exception();
+    return new int[] { s.ACLineStatus, s.BatteryFlag, s.BatteryLifePercent };
+  }
+  public static ulong UptimeMs() { return GetTickCount64(); }
+
+  [StructLayout(LayoutKind.Sequential)]
+  struct DevInfoData { public uint cbSize; public Guid ClassGuid; public uint DevInst; public IntPtr Reserved; }
+  [DllImport("setupapi.dll", SetLastError = true)]
+  static extern IntPtr SetupDiGetClassDevsW(ref Guid cls, IntPtr enumerator, IntPtr hwnd, uint flags);
+  [DllImport("setupapi.dll", SetLastError = true)]
+  static extern bool SetupDiEnumDeviceInfo(IntPtr set, uint idx, ref DevInfoData data);
+  [DllImport("setupapi.dll", SetLastError = true)]
+  static extern bool SetupDiGetDeviceRegistryPropertyW(IntPtr set, ref DevInfoData data, uint prop, out uint regType, byte[] buf, uint size, out uint req);
+  [DllImport("setupapi.dll")]
+  static extern bool SetupDiDestroyDeviceInfoList(IntPtr set);
+  [DllImport("cfgmgr32.dll")]
+  static extern int CM_Get_DevNode_Status(out uint status, out uint problem, uint devInst, uint flags);
+  // The display adapters present now (DIGCF_PRESENT), each as { driver key
+  // under Control\Class ("{4d36e968-...}\0001"), started (DN_STARTED),
+  // problem code }: SetupAPI, no WMI.
+  public static List<object[]> PresentDisplays() {
+    Guid cls = new Guid("4d36e968-e325-11ce-bfc1-08002be10318");
+    IntPtr set = SetupDiGetClassDevsW(ref cls, IntPtr.Zero, IntPtr.Zero, 2);
+    if (set == new IntPtr(-1)) throw new System.ComponentModel.Win32Exception();
+    var list = new List<object[]>();
+    try {
+      for (uint i = 0; ; i++) {
+        var d = new DevInfoData(); d.cbSize = (uint)Marshal.SizeOf(typeof(DevInfoData));
+        if (!SetupDiEnumDeviceInfo(set, i, ref d)) break;
+        byte[] buf = new byte[1024]; uint type, req;
+        string key = SetupDiGetDeviceRegistryPropertyW(set, ref d, 9, out type, buf, (uint)buf.Length, out req) ? System.Text.Encoding.Unicode.GetString(buf, 0, (int)req).TrimEnd('\0') : null;
+        uint st, prob;
+        bool started = false; long problem = -1;
+        if (CM_Get_DevNode_Status(out st, out prob, d.DevInst, 0) == 0) { started = (st & 0x8) != 0; problem = prob; }
+        list.Add(new object[] { key, started, problem });
+      }
+    } finally { SetupDiDestroyDeviceInfoList(set); }
+    return list;
+  }
+
+  static IntPtr pdhQuery = IntPtr.Zero, pdhFreq, pdhPerf;
+  static Dictionary<string, double> PdhArray(IntPtr c) {
+    uint size = 0, count;
+    PdhGetFormattedCounterArrayW(c, 0x200, ref size, out count, IntPtr.Zero);
+    var r = new Dictionary<string, double>();
+    if (size == 0) return r;
+    IntPtr buf = Marshal.AllocHGlobal((int)size);
+    try {
+      if (PdhGetFormattedCounterArrayW(c, 0x200, ref size, out count, buf) != 0) return r;
+      int item = 24;
+      for (int i = 0; i < count; i++) {
+        IntPtr p = new IntPtr(buf.ToInt64() + i * item);
+        string name = Marshal.PtrToStringUni(Marshal.ReadIntPtr(p, 0));
+        int cstatus = Marshal.ReadInt32(p, IntPtr.Size);
+        double v = BitConverter.Int64BitsToDouble(Marshal.ReadInt64(p, IntPtr.Size + 8));
+        if (cstatus == 0 || cstatus == 1) r[name] = v;
+      }
+    } finally { Marshal.FreeHGlobal(buf); }
+    return r;
+  }
+  // -1 on the first call (a rate needs two readings), then since the previous one
+  public static double EffectiveMhz() {
+    Need64();
+    if (pdhQuery == IntPtr.Zero) {
+      IntPtr q;
+      if (PdhOpenQueryW(null, IntPtr.Zero, out q) != 0) throw new InvalidOperationException("PdhOpenQuery");
+      if (PdhAddEnglishCounterW(q, @"\Processor Information(*)\Processor Frequency", IntPtr.Zero, out pdhFreq) != 0 ||
+          PdhAddEnglishCounterW(q, @"\Processor Information(*)\% Processor Performance", IntPtr.Zero, out pdhPerf) != 0) throw new InvalidOperationException("PdhAddEnglishCounter");
+      pdhQuery = q;
+      PdhCollectQueryData(q);
+      return -1;
+    }
+    if (PdhCollectQueryData(pdhQuery) != 0) return -1;
+    var f = PdhArray(pdhFreq); var perf = PdhArray(pdhPerf);
+    double best = -1;
+    foreach (var kv in perf) {
+      if (kv.Key.Contains("_Total") || !f.ContainsKey(kv.Key)) continue;
+      double e = f[kv.Key] * kv.Value / 100.0;
+      if (e > best) best = e;
+    }
+    return best;
+  }
 }
 "@
+# Throws when the type cannot be built or called here (pwsh off Windows in
+# the tests): every caller has a way without it, or reports null.
+function Native {
+  if (-not ("SalonKitNative" -as [type])) { Add-Type -TypeDefinition $NativeSource }
+  return [SalonKitNative]
+}
 function Core-Map {
-  if (-not ("SalonKitCores" -as [type])) { Add-Type -TypeDefinition $CoreInfoSource }
   $i = 0
-  return @([SalonKitCores]::Cores() | ForEach-Object {
+  return @((Native)::Cores() | ForEach-Object {
     $m = [uint64]$_[1]
     $threads = 0; for ($b = 0; $b -lt 64; $b++) { if ($m -band ([uint64]1 -shl $b)) { $threads++ } }
     [ordered]@{ core = $i++; efficiencyClass = [int]$_[0]; mask = ("0x{0:x}" -f $m); threads = $threads; group = [int]$_[2] }
@@ -173,33 +382,52 @@ function Reg-Policies($path) {
   return $r
 }
 
-# Busy CPU of the machine and the processes using it, over $sec seconds.
-# The raw per-process counters (Win32_PerfRawData_PerfProc_Process: 100 ns
-# of CPU per process, every account's, readable by a standard account and
-# locale-independent); Get-Process CPU times as a fallback, which a standard
-# account only gets for its own processes (then marked partial).
+# Every process, as rows: Name (image, "node.exe"), ProcessId,
+# ParentProcessId, CreationDate (UTC ticks), Cpu (100 ns), SessionId.
+# Every account's processes; command lines and owners are asked only for
+# the few that matter (Proc-Owned, Proc-CommandLine).
+function Process-Table {
+  $epoch = [DateTime]::FromFileTimeUtc(0).Ticks
+  @((Native)::Processes() | Where-Object { $_[0] -ne 0 } | ForEach-Object {
+    [pscustomobject]@{ ProcessId = [int]$_[0]; ParentProcessId = [int]$_[1]; CreationDate = [int64]$_[2] + $epoch; Cpu = [double]$_[3]; SessionId = [int]$_[4]; Name = [string]$_[5] }
+  })
+}
+$script:MySid = $null
+function My-Sid {
+  if (-not $script:MySid) { $script:MySid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value }
+  return $script:MySid
+}
+# Owned by the account running this script (another account's process
+# cannot even be opened: never ours).
+function Proc-Owned([int]$id) {
+  $sid = $null
+  try { $sid = (Native)::OwnerSid($id) } catch {}
+  return ($sid -and $sid -eq (My-Sid))
+}
+function Proc-CommandLine([int]$id) {
+  try { return (Native)::CommandLine($id) } catch { return $null }
+}
+
+# Busy CPU of the machine and the processes using it, over $sec seconds:
+# every account's processes' CPU time (Process-Table; 100 ns units,
+# locale-independent). Get-Process CPU times as a fallback, which a
+# standard account only gets for its own processes (then marked partial).
 function Cpu-Busy([int]$sec = 3, [string[]]$exclude = @(), [int[]]$excludePids = @()) {
   $partial = $false
-  $read = {
-    $m = @{}; $ts = $null
-    foreach ($q in @(Get-CimInstance Win32_PerfRawData_PerfProc_Process -ErrorAction Stop)) {
-      if ($q.Name -eq '_Total' -or $q.Name -eq 'Idle') { continue }
-      $m[[int]$q.IDProcess] = @([double]$q.PercentProcessorTime, ($q.Name -replace '#\d+$', ''))
-      $ts = [double]$q.Timestamp_Sys100NS
-    }
-    @{ m = $m; ts = $ts }
-  }
   $rows = @()
   try {
-    $a = & $read
+    $a = @{}; foreach ($q in (Process-Table)) { $a[$q.ProcessId] = $q }
+    $t0 = [Diagnostics.Stopwatch]::StartNew()
     Start-Sleep -Seconds $sec
-    $b = & $read
-    $wall = $b.ts - $a.ts
-    if (-not ($wall -gt 0)) { throw "no timestamp" }
-    foreach ($id in $b.m.Keys) {
-      if (-not $a.m.ContainsKey($id) -or $id -eq 0) { continue }
-      $d = $b.m[$id][0] - $a.m[$id][0]
-      if ($d -gt 0) { $rows += [pscustomobject]@{ name = $b.m[$id][1]; pid = $id; pct = [math]::Round(100 * $d / $wall, 1) } }
+    $b = Process-Table
+    $wall = $t0.Elapsed.Ticks
+    if (-not ($wall -gt 0)) { throw "no elapsed time" }
+    foreach ($q in $b) {
+      $p = $a[$q.ProcessId]
+      # same pid AND same start: Windows reuses pids at once
+      if (-not $p -or $p.CreationDate -ne $q.CreationDate) { continue }
+      $d = $q.Cpu - $p.Cpu
+      if ($d -gt 0) { $rows += [pscustomobject]@{ name = ($q.Name -replace '\.exe$', ''); pid = $q.ProcessId; pct = [math]::Round(100 * $d / $wall, 1) } }
     }
   } catch {
     $partial = $true
@@ -222,57 +450,179 @@ function Cpu-Busy([int]$sec = 3, [string[]]$exclude = @(), [int[]]$excludePids =
   return [ordered]@{ seconds = $sec; otherPctOfOneCore = [math]::Round($sum, 1); partial = $partial; top = @($others | Sort-Object pct -Descending | Select-Object -First 5) }
 }
 
+# One probe of check: its value, or $null and its error kept in
+# $script:ProbeErrors (one unreadable item never hides the others).
+$script:ProbeErrors = [ordered]@{}
+function Probe([string]$name, [scriptblock]$read) {
+  try { return (& $read) } catch { $script:ProbeErrors[$name] = "$($_.Exception.Message)"; return $null }
+}
+# The same for a list: always a list when read (one item, none), $null
+# when not (never [null]: an unread list is not one empty item).
+function Probe-List([string]$name, [scriptblock]$read) {
+  $r = Probe $name $read
+  if ($script:ProbeErrors.Contains($name)) { return $null }
+  return , @($r | Where-Object { $null -ne $_ })
+}
+$CurrentVersion = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion"
+function Os-Info {
+  $b = Reg-Value $CurrentVersion "CurrentBuild"
+  $build = $(if ("$b" -match '^\d+$') { [int]$b } else { $null })
+  $product = Reg-Value $CurrentVersion "ProductName"
+  # ProductName still says "Windows 10" on Windows 11 (Microsoft's own
+  # guidance: tell them by the build, 22000 and up)
+  $caption = "$product"
+  if ($null -ne $build -and $build -ge 22000) { $caption = $caption -replace 'Windows 10', 'Windows 11' }
+  $boot = $null
+  try { $boot = (Get-Date).AddMilliseconds(-[double]((Native)::UptimeMs())).ToString("o") } catch { $script:ProbeErrors["os.lastBoot"] = "$($_.Exception.Message)" }
+  [ordered]@{
+    caption = $caption; productName = $product; edition = Reg-Value $CurrentVersion "EditionID"; displayVersion = Reg-Value $CurrentVersion "DisplayVersion"
+    version = $(if ($null -ne $build) { "10.0.$build" } else { $null }); build = $(if ($null -ne $build) { "$build" } else { $null }); ubr = Reg-Value $CurrentVersion "UBR"; locale = (Get-Culture).Name
+    lastBoot = $boot
+  }
+}
+function Cpu-Info($cores) {
+  $k = "HKLM:\HARDWARE\DESCRIPTION\System\CentralProcessor\0"
+  [ordered]@{ name = "$(Reg-Value $k 'ProcessorNameString')".Trim(); cores = $(if ($cores) { @($cores).Count } else { $null }); logical = [Environment]::ProcessorCount; maxClockMhz = Reg-Value $k "~MHz"; manufacturer = Reg-Value $k "VendorIdentifier" }
+}
+function Memory-Info {
+  $m = (Native)::Memory()
+  [ordered]@{ totalGiB = [math]::Round($m[0] / 1GB, 1); freeGiB = [math]::Round($m[1] / 1GB, 1); commitLimitGiB = [math]::Round($m[2] / 1GB, 1) }
+}
+# Win32_Battery's shape (BatteryStatus 1 = discharging, 2 = on AC, null =
+# unknown): what the preflight reads. No battery: an empty list. 255 is
+# "unknown" for both GetSystemPowerStatus fields: a battery flag of 255
+# throws (the probe is then null: the preflight blocks), an AC line of 255
+# gives BatteryStatus null.
+function Battery-Info {
+  $s = (Native)::PowerStatus()
+  if ($s[1] -eq 255) { throw "battery status unknown (GetSystemPowerStatus BatteryFlag 255)" }
+  if ($s[1] -band 128) { return @() }
+  @([ordered]@{ BatteryStatus = $(if ($s[0] -eq 0) { 1 } elseif ($s[0] -eq 1) { 2 } else { $null }); EstimatedChargeRemaining = $(if ($s[2] -eq 255) { $null } else { $s[2] }); acLine = $s[0] })
+}
+# The display adapters from their driver keys (the display class, readable
+# by every account), each marked present (SetupAPI's present devices; a
+# driver left installed for a card taken out stays in the class key) and
+# started; present null when SetupAPI could not be asked. A registry
+# failure throws (the list is then null, never empty). The refresh rate is
+# Display-Info's.
+$DisplayClass = "HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}"
+function Gpu-Info {
+  $present = $null
+  try {
+    $present = @{}
+    foreach ($d in (Native)::PresentDisplays()) { if ($d[0]) { $present[([string]$d[0]).ToLower()] = @([bool]$d[1], [long]$d[2]) } }
+  } catch { $present = $null; $script:ProbeErrors["gpus.present"] = "$($_.Exception.Message)" }
+  # the subkeys' names only: Get-ChildItem opens each, and the class's
+  # Properties subkey is refused to every account (CI windows-2025)
+  $cls = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($DisplayClass.Substring(6))
+  if (-not $cls) { throw "cannot open $DisplayClass" }
+  try { $names = @($cls.GetSubKeyNames()) } finally { $cls.Close() }
+  @($names | Where-Object { $_ -match '^\d{4}$' } | ForEach-Object {
+    $dev = "{4d36e968-e325-11ce-bfc1-08002be10318}\$_"
+    $p = $null
+    try { $p = Get-ItemProperty -LiteralPath (Join-Path $DisplayClass $_) -ErrorAction Stop } catch {}
+    if ($p -and ($p.PSObject.Properties.Name -contains "DriverDesc")) {
+      $date = $null
+      $raw = $(if ($p.PSObject.Properties.Name -contains "DriverDate") { "$($p.DriverDate)" } else { "" })
+      if ($raw -match '^(\d{1,2})-(\d{1,2})-(\d{4})$') { $date = "{0}-{1:00}-{2:00}" -f $Matches[3], [int]$Matches[1], [int]$Matches[2] }
+      $pr = $(if ($null -eq $present) { $null } else { $present[$dev] })
+      [ordered]@{ name = $p.DriverDesc; driver = $(if ($p.PSObject.Properties.Name -contains "DriverVersion") { $p.DriverVersion } else { $null }); driverDate = $date
+        present = $(if ($null -eq $present) { $null } else { $null -ne $pr }); started = $(if ($pr) { $pr[0] } else { $null }); problem = $(if ($pr) { $pr[1] } else { $null })
+        refreshHz = $null; pnp = $(if ($p.PSObject.Properties.Name -contains "MatchingDeviceId") { $p.MatchingDeviceId } else { $null }) }
+    }
+  })
+}
+# The screens' modes from the display configuration the graphics kernel
+# keeps (GraphicsDrivers\Configuration: the latest monitor set by its
+# Timestamp, one subkey per target, VSyncFreq = refresh rate). The ssh
+# session's own screen is a placeholder, EnumDisplaySettings would read
+# that. May be refused to a standard account: then null, said in
+# probeErrors, and the preflight warns (refresh unknown).
+$GfxConfig = "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers\Configuration"
+function Display-Info {
+  $best = $null; $bestTs = [int64]-1
+  foreach ($set in @(Get-ChildItem -LiteralPath $GfxConfig -ErrorAction Stop)) {
+    $ts = Reg-Value $set.PSPath "Timestamp"
+    if ($null -ne $ts -and [int64]$ts -gt $bestTs) { $best = $set; $bestTs = [int64]$ts }
+  }
+  if (-not $best) { throw "no display configuration with a Timestamp under $GfxConfig" }
+  $targets = @(Get-ChildItem -LiteralPath $best.PSPath -ErrorAction Stop | ForEach-Object { Get-ChildItem -LiteralPath $_.PSPath -ErrorAction Stop })
+  $r = @($targets | ForEach-Object {
+    $num = Reg-Value $_.PSPath "VSyncFreq.Numerator"; $den = Reg-Value $_.PSPath "VSyncFreq.Denominator"
+    [ordered]@{ set = $best.PSChildName; target = $_.PSChildName; width = Reg-Value $_.PSPath "PrimSurfSize.cx"; height = Reg-Value $_.PSPath "PrimSurfSize.cy"
+      # outside 20-500 Hz: not a screen's rate (a virtual display gives 1)
+      refreshHz = $(if ($num -and $den) { $hz = [math]::Round([double]$num / [double]$den, 2); if ($hz -ge 20 -and $hz -le 500) { $hz } else { $null } } else { $null })
+      vsync = $(if ($num -and $den) { "$num/$den" } else { $null }) }
+  })
+  if (-not @($r | Where-Object { $_.refreshHz }).Count) { throw "no screen refresh rate in $($best.PSChildName) (VSyncFreq $(@($r | ForEach-Object { $_.vsync }) -join ', '))" }
+  return $r
+}
+# nvidia-smi when the NVIDIA driver installed it: the dGPU's own reading.
+function Nvidia-Info {
+  $smi = "$env:SystemRoot\System32\nvidia-smi.exe"
+  if (-not (Test-Path -LiteralPath $smi)) { return $null }
+  $out = @(& $smi --query-gpu=name,driver_version,display_active,pstate --format=csv,noheader 2>$null)
+  if ($LASTEXITCODE -ne 0) { throw "nvidia-smi exit $LASTEXITCODE" }
+  @($out | Where-Object { $_ } | ForEach-Object { $f = @("$_" -split ',\s*'); [ordered]@{ name = $f[0]; driver = $f[1]; displayActive = $f[2]; pstate = $f[3] } })
+}
+# Defender's real-time protection from its registry keys (the cmdlet is
+# CIM): off when a key says so, null when neither key can be read (the
+# product key may be refused to a standard account: unknown, not "on").
+function Defender-Info {
+  $keys = @("HKLM:\SOFTWARE\Microsoft\Windows Defender\Real-Time Protection", "HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\Real-Time Protection")
+  $read = 0; $off = $false
+  foreach ($k in $keys) {
+    try { $p = Get-ItemProperty -LiteralPath $k -ErrorAction Stop; $read++ } catch { continue }
+    if (($p.PSObject.Properties.Name -contains "DisableRealtimeMonitoring") -and $p.DisableRealtimeMonitoring -eq 1) { $off = $true }
+  }
+  [ordered]@{ realTime = $(if ($off) { $false } elseif ($read) { $true } else { $null }); source = "registry" }
+}
+function Sessions-Info {
+  # quser: every session of the machine; "No User exists" on stderr when none
+  @((& "$env:SystemRoot\System32\quser.exe" 2>$null) | Select-Object -Skip 1 | ForEach-Object { ($_ -replace '^\s*>?', '') -replace '\s{2,}', '|' })
+}
+
 function Check {
-  $os = Get-CimInstance Win32_OperatingSystem
-  $cs = Get-CimInstance Win32_ComputerSystem
-  $cpu = @(Get-CimInstance Win32_Processor)[0]
-  $active = Active-Scheme
-  $battery = @(Get-CimInstance Win32_Battery | Select-Object BatteryStatus, EstimatedChargeRemaining)
-  $kitDrive = (Split-Path -Qualifier $KitDir).TrimEnd(":")
-  $chrome = File-Version @("$env:ProgramFiles\Google\Chrome\Application\chrome.exe", "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe", "$env:LOCALAPPDATA\Google\Chrome\Application\chrome.exe")
-  $edge = File-Version @("${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe", "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe")
-  $sessions = @()
-  try { $sessions = @((quser 2>$null) | Select-Object -Skip 1 | ForEach-Object { ($_ -replace '^\s*>?', '') -replace '\s{2,}', '|' }) } catch {}
-  $locked = [bool](Get-Process -Name LogonUI -ErrorAction SilentlyContinue)
-  $screens = @()
-  try { Add-Type -AssemblyName System.Windows.Forms; $screens = @([System.Windows.Forms.Screen]::AllScreens | ForEach-Object { [ordered]@{ primary = $_.Primary; width = $_.Bounds.Width; height = $_.Bounds.Height } }) } catch {}
-  $hvci = Reg-Value "HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity" "Enabled"
-  $defender = $null
-  try { $mp = Get-MpComputerStatus; $defender = [ordered]@{ realTime = $mp.RealTimeProtectionEnabled } } catch {}
-  $node = File-Version @((Join-Path $KitDir "node\node.exe"))
-  # OpenSSH's shell for the administrator's commands: cmd.exe must get /d
-  # (AutoRun off: HKCU\...\Command Processor\AutoRun would otherwise run
-  # elevated before the kit's fixed command)
-  $sshd = [ordered]@{ defaultShell = Reg-Value "HKLM:\SOFTWARE\OpenSSH" "DefaultShell"; defaultShellCommandOption = Reg-Value "HKLM:\SOFTWARE\OpenSSH" "DefaultShellCommandOption" }
+  $kitDrive = Probe "disk" { (Split-Path -Qualifier $KitDir).TrimEnd(":") }
+  $coreMap = Probe-List "coreMap" { Core-Map }
+  $active = Probe "power" { Active-Scheme }
   $affinity = $null
   try { $affinity = Class-Affinity $Cores } catch { $affinity = [ordered]@{ error = "$_" } }
   Out-Result ([ordered]@{
     action = "check"; at = (Get-Date).ToString("o"); host = $env:COMPUTERNAME; user = "$env:USERDOMAIN\$env:USERNAME"
-    os = [ordered]@{ caption = $os.Caption; version = $os.Version; build = $os.BuildNumber; locale = (Get-Culture).Name; lastBoot = $os.LastBootUpTime.ToString("o") }
-    cpu = [ordered]@{ name = $cpu.Name.Trim(); cores = $cpu.NumberOfCores; logical = $cpu.NumberOfLogicalProcessors; maxClockMhz = $cpu.MaxClockSpeed; manufacturer = $cpu.Manufacturer }
-    coreMap = @(Core-Map); classAffinity = $affinity
-    memory = [ordered]@{ totalGiB = [math]::Round($cs.TotalPhysicalMemory / 1GB, 1); freeGiB = [math]::Round($os.FreePhysicalMemory * 1KB / 1GB, 1); commitLimitGiB = [math]::Round($os.TotalVirtualMemorySize * 1KB / 1GB, 1) }
-    gpus = @(Get-CimInstance Win32_VideoController | ForEach-Object { [ordered]@{ name = $_.Name; driver = $_.DriverVersion; driverDate = $(if ($_.DriverDate) { $_.DriverDate.ToString("yyyy-MM-dd") } else { $null }); refreshHz = $_.CurrentRefreshRate; mode = "$($_.CurrentHorizontalResolution)x$($_.CurrentVerticalResolution)"; pnp = $_.PNPDeviceID } })
-    screens = $screens
-    gpuPreference = Reg-Policies "HKCU:\Software\Microsoft\DirectX\UserGpuPreferences"
+    os = Probe "os" { Os-Info }
+    cpu = Probe "cpu" { Cpu-Info $coreMap }
+    coreMap = $coreMap; classAffinity = $affinity
+    memory = Probe "memory" { Memory-Info }
+    gpus = Probe-List "gpus" { Gpu-Info }
+    display = Probe-List "display" { Display-Info }
+    nvidia = Probe "nvidia" { Nvidia-Info }
+    gpuPreference = Probe "gpuPreference" { Reg-Policies "HKCU:\Software\Microsoft\DirectX\UserGpuPreferences" }
     hags = Reg-Value "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" "HwSchMode"
     gameMode = Reg-Value "HKCU:\Software\Microsoft\GameBar" "AutoGameModeEnabled"
-    browsers = [ordered]@{ chrome = $chrome; edge = $edge }
-    policies = [ordered]@{
+    browsers = [ordered]@{
+      chrome = Probe "chrome" { File-Version @("$env:ProgramFiles\Google\Chrome\Application\chrome.exe", "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe", "$env:LOCALAPPDATA\Google\Chrome\Application\chrome.exe") }
+      edge = Probe "edge" { File-Version @("${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe", "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe") }
+    }
+    policies = Probe "policies" { [ordered]@{
       chromeMachine = Reg-Policies "HKLM:\SOFTWARE\Policies\Google\Chrome"; chromeUser = Reg-Policies "HKCU:\SOFTWARE\Policies\Google\Chrome"
       edgeMachine = Reg-Policies "HKLM:\SOFTWARE\Policies\Microsoft\Edge"; edgeUser = Reg-Policies "HKCU:\SOFTWARE\Policies\Microsoft\Edge"
-    }
+    } }
     power = [ordered]@{
-      battery = $battery; activeScheme = $active; schemes = @(All-Schemes); kitSchemeActive = ($active -eq $KitScheme)
+      battery = Probe-List "battery" { Battery-Info }; activeScheme = $active; schemes = Probe-List "schemes" { All-Schemes }; kitSchemeActive = ($active -eq $KitScheme)
       overlayAc = Reg-Value "HKLM:\SYSTEM\CurrentControlSet\Control\Power\User\PowerSchemes" "ActiveOverlayAcPowerScheme"
-      processor = Processor-Settings $active
+      processor = $(if ($active) { Probe "processor" { Processor-Settings $active } } else { $null })
     }
-    session = [ordered]@{ sessions = $sessions; lockScreenUp = $locked; sshSession = [bool]$env:SSH_CLIENT; elevated = (Is-Elevated); user = $env:USERNAME }
-    security = [ordered]@{ memoryIntegrity = $hvci; defender = $defender }
-    disk = [ordered]@{ drive = $kitDrive; freeGiB = [math]::Round((Get-PSDrive -Name $kitDrive).Free / 1GB, 1) }
-    kit = [ordered]@{ dir = $KitDir; node = $node; tasks = @(Kit-Tasks) }
-    sshd = $sshd
-    cpuBusy = Cpu-Busy 3
+    session = [ordered]@{ sessions = Probe-List "sessions" { Sessions-Info }; lockScreenUp = [bool](Get-Process -Name LogonUI -ErrorAction SilentlyContinue); sshSession = [bool]$env:SSH_CLIENT; elevated = (Is-Elevated); user = $env:USERNAME }
+    security = [ordered]@{ memoryIntegrity = Reg-Value "HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity" "Enabled"; defender = Probe "defender" { Defender-Info } }
+    disk = [ordered]@{ drive = $kitDrive; freeGiB = $(if ($kitDrive) { Probe "disk" { [math]::Round(([IO.DriveInfo]::new($kitDrive)).AvailableFreeSpace / 1GB, 1) } } else { $null }) }
+    kit = [ordered]@{ dir = $KitDir; node = Probe "node" { File-Version @((Join-Path $KitDir "node\node.exe")) }; tasks = Probe-List "tasks" { Kit-Tasks }; processes = Probe-List "processes" { Kit-Processes } }
+    # OpenSSH's shell for the administrator's commands: cmd.exe must get /d
+    # (AutoRun off: HKCU\...\Command Processor\AutoRun would otherwise run
+    # elevated before the kit's fixed command)
+    sshd = [ordered]@{ defaultShell = Reg-Value "HKLM:\SOFTWARE\OpenSSH" "DefaultShell"; defaultShellCommandOption = Reg-Value "HKLM:\SOFTWARE\OpenSSH" "DefaultShellCommandOption" }
+    cpuBusy = Probe "cpuBusy" { Cpu-Busy 3 }
+    probeErrors = $script:ProbeErrors
   })
 }
 
@@ -291,8 +641,10 @@ function Snapshot {
     job = $Job; at = (Get-Date).ToString("o"); activeScheme = $active; schemes = @(All-Schemes)
     processor = Processor-Settings $active
     tasks = @(Kit-Tasks)
-    kitProcesses = @(Kit-Processes)
+    kitProcesses = $null
   }
+  # unreadable: null, said so (restore then compares no process list)
+  try { $state.kitProcesses = @(Kit-Processes) } catch { $state["kitProcessesError"] = "$_" }
   ($state | ConvertTo-Json -Depth 8) | Set-Content -LiteralPath $sf -Encoding UTF8
   Out-Result ([ordered]@{ action = "snapshot"; job = $Job; existing = $false; state = $state })
 }
@@ -318,20 +670,23 @@ function Is-Elevated {
 function Stop-KitJob([string]$jd) {
   $killed = @(); $warn = @()
   if (Test-Path -LiteralPath $jd) { "stop $((Get-Date).ToString('o'))" | Set-Content -LiteralPath (Join-Path $jd "stop") }
-  if (Get-ScheduledTask -TaskPath $TaskPath -TaskName $Job -ErrorAction SilentlyContinue) { Stop-ScheduledTask -TaskPath $TaskPath -TaskName $Job -ErrorAction SilentlyContinue }
+  try { $t = Kit-Task $Job; if ($t) { $t.Stop(0) } } catch { $warn += "task not stopped: $_" }
   foreach ($f in @("inner.pid", "node.pid", "sampler.pid")) {
     $p = Read-PidFile (Join-Path $jd $f)
     if ($p) { try { $p.Kill(); $killed += $p.Id } catch {} }
   }
-  for ($round = 0; $round -lt 5; $round++) {
-    $left = @(Job-Processes $jd)
-    if (-not $left.Count) { break }
-    foreach ($q in $left) { try { Stop-Process -Id $q.ProcessId -Force -ErrorAction Stop; $killed += $q.ProcessId } catch {} }
-    Start-Sleep -Milliseconds 500
-  }
-  $still = @(Job-Processes $jd | ForEach-Object { [ordered]@{ pid = $_.ProcessId; name = $_.Name } })
-  if ($still.Count) { $warn += "processes of the job still running: $(($still | ForEach-Object { "$($_.name) $($_.pid)" }) -join ', ')" }
-  if (Get-ScheduledTask -TaskPath $TaskPath -TaskName $Job -ErrorAction SilentlyContinue) { Unregister-ScheduledTask -TaskPath $TaskPath -TaskName $Job -Confirm:$false }
+  $still = @()
+  try {
+    for ($round = 0; $round -lt 5; $round++) {
+      $left = @(Job-Processes $jd)
+      if (-not $left.Count) { break }
+      foreach ($q in $left) { try { Stop-Process -Id $q.ProcessId -Force -ErrorAction Stop; $killed += $q.ProcessId } catch {} }
+      Start-Sleep -Milliseconds 500
+    }
+    $still = @(Job-Processes $jd | ForEach-Object { [ordered]@{ pid = $_.ProcessId; name = $_.Name } })
+    if ($still.Count) { $warn += "processes of the job still running: $(($still | ForEach-Object { "$($_.name) $($_.pid)" }) -join ', ')" }
+  } catch { $still = $null; $warn += "the process table could not be read (the job's processes not searched): $_" }
+  try { if (Kit-Task $Job) { (Kit-Folder).DeleteTask($Job, 0) } } catch { $warn += "task not unregistered: $_" }
   # the job's TEMP (this account's own files; never elevated)
   $tmp = Join-Path $jd "tmp"
   try { Remove-Tree $tmp } catch { $warn += "job tmp not fully removed: $_" }
@@ -341,7 +696,9 @@ function Stop-KitJob([string]$jd) {
 function Cleanup {
   Need-Job
   $r = Stop-KitJob (Job-Dir)
-  Out-Result ([ordered]@{ action = "cleanup"; job = $Job; killed = $r.killed; jobProcesses = $r.still; jobTmp = $r.tmpLeft; warnings = $r.warnings; power = (Power-State); tasks = @(Kit-Tasks); kitProcesses = @(Kit-Processes) })
+  $kp = $null
+  try { $kp = @(Kit-Processes) } catch { $r.warnings += "kit processes not read: $_" }
+  Out-Result ([ordered]@{ action = "cleanup"; job = $Job; killed = $r.killed; jobProcesses = $r.still; jobTmp = $r.tmpLeft; warnings = $r.warnings; power = (Power-State); tasks = @(Kit-Tasks); kitProcesses = $kp })
 }
 
 # The power state as this account reads it (the admin commands change it).
@@ -349,7 +706,35 @@ function Power-State {
   $active = Active-Scheme
   [ordered]@{ activeScheme = $active; schemes = @(All-Schemes); processor = Processor-Settings $active; kitScheme = $(if (All-Schemes | Where-Object { $_ -eq $KitScheme }) { Processor-Settings $KitScheme } else { $null }) }
 }
-function Kit-Tasks { @(Get-ScheduledTask -TaskPath $TaskPath -ErrorAction SilentlyContinue | ForEach-Object { [string]$_.TaskName }) }
+# The task scheduler through its own COM API (Schedule.Service, an RPC
+# to the service any local account may call): the ScheduledTasks cmdlets
+# are CIM (root\Microsoft\Windows\TaskScheduler), refused to this
+# account's ssh logon like root\cimv2.
+$TaskStates = @{ 0 = "Unknown"; 1 = "Disabled"; 2 = "Queued"; 3 = "Ready"; 4 = "Running" }
+function Task-Service {
+  $svc = New-Object -ComObject Schedule.Service
+  $svc.Connect()
+  return $svc
+}
+# \SalonKit\, $null while it does not exist (-Create: made then)
+function Kit-Folder([switch]$Create) {
+  $svc = Task-Service
+  try { return $svc.GetFolder($TaskPath.TrimEnd('\')) } catch {}
+  if ($Create) { return $svc.GetFolder("\").CreateFolder($TaskPath.Trim('\')) }
+  return $null
+}
+# the job's registered task, $null when there is none
+function Kit-Task([string]$name) {
+  $f = Kit-Folder
+  if (-not $f) { return $null }
+  try { return $f.GetTask($name) } catch { return $null }
+}
+function Kit-Tasks {
+  $f = Kit-Folder
+  if (-not $f) { return @() }
+  # 1: TASK_ENUM_HIDDEN
+  @(foreach ($t in $f.GetTasks(1)) { if ($null -ne $t) { [string]$t.Name } })
+}
 
 # A folder deleted without ever following a reparse point (junction,
 # symlink): such an entry is removed itself, never what it points to.
@@ -377,13 +762,21 @@ function Holds-Path([string]$line, [string]$path) {
   $p = [regex]::Escape($path.TrimEnd('\'))
   return [regex]::IsMatch($line, "$p(\\|`"|')", 'IgnoreCase')
 }
+# The kit's images among every process (Process-Table), each with its
+# command line: read for these only, and only this account's can be.
+# Throws when the table cannot be read: never "no process" by default.
+function Kit-Image-Rows {
+  @(Process-Table | Where-Object { $KitImages -contains $_.Name } | ForEach-Object {
+    Add-Member -InputObject $_ -NotePropertyName CommandLine -NotePropertyValue (Proc-CommandLine $_.ProcessId) -PassThru
+  })
+}
 # The job's processes: node, chrome, msedge, powershell whose command line
 # holds the job's folder (its browsers carry --user-data-dir under the
 # job's TEMP), and their descendants of those images (a browser helper);
 # never this script's own invocations.
 function Job-Processes([string]$jd) {
   $me = $PID
-  $all = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $KitImages -contains $_.Name })
+  $all = @(Kit-Image-Rows)
   $ids = @{}
   foreach ($q in $all) {
     if ((Holds-Path $q.CommandLine $jd) -and $q.ProcessId -ne $me -and $q.CommandLine -notmatch 'salon-pc\.ps1' -and (Is-UsersKitProcess $q)) { $ids[[int]$q.ProcessId] = $true }
@@ -403,7 +796,7 @@ function Job-Processes([string]$jd) {
 # $KitDir), but this script's short actions.
 function Kit-Processes {
   $me = $PID
-  @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+  @(Kit-Image-Rows | Where-Object {
     $KitImages -contains $_.Name -and (Holds-Path $_.CommandLine $KitDir) -and $_.ProcessId -ne $me -and $_.CommandLine -notmatch 'salon-pc\.ps1 .*-Action (restore|cleanup|status|check|snapshot|uninstall)'
   } | ForEach-Object { [ordered]@{ pid = $_.ProcessId; name = $_.Name } })
 }
@@ -421,15 +814,14 @@ function Read-PidFile($file) {
   try { if ($p.StartTime.ToUniversalTime().Ticks -ne [int64]$f[1]) { return $null } } catch { return $null }
   # the pid file is the user's to write: it counts only for one of the
   # kit's images owned by the user (never csrss, never another account's)
-  $cim = Get-CimInstance Win32_Process -Filter "ProcessId = $($p.Id)" -ErrorAction SilentlyContinue
-  if (-not $cim -or -not (Is-UsersKitProcess $cim)) { return $null }
+  if (-not (Is-UsersKitProcess ([pscustomobject]@{ Name = "$($p.ProcessName).exe"; ProcessId = $p.Id }))) { return $null }
   return $p
 }
 # One of the kit's images, owned by the account running this script.
-function Is-UsersKitProcess($cim) {
-  if ($KitImages -notcontains $cim.Name) { return $false }
-  try { $o = Invoke-CimMethod -InputObject $cim -MethodName GetOwner -ErrorAction Stop } catch { return $false }
-  return ($o.ReturnValue -eq 0 -and $o.User -eq $env:USERNAME -and $o.Domain -eq $env:USERDOMAIN)
+# $q: a row with Name ("node.exe") and ProcessId.
+function Is-UsersKitProcess($q) {
+  if ($KitImages -notcontains $q.Name) { return $false }
+  return (Proc-Owned $q.ProcessId)
 }
 function Start-Job-Task {
   Need-Job
@@ -438,16 +830,22 @@ function Start-Job-Task {
   foreach ($f in @("exit", "log", "node.pid", "stop")) { $p = Join-Path $jd $f; if (Test-Path -LiteralPath $p) { throw "job $Job ran already ($p): use a new job id" } }
   $self = $PSCommandPath
   $arg = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$self`" -Action inner -Job $Job -KitDir `"$KitDir`""
-  $act = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $arg -WorkingDirectory $jd
-  # Interactive: runs in the logged-on user's desktop session (a browser
-  # started from the ssh session would have no screen: session 0 has none).
-  $prin = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
-  $set = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours $TaskHours) -MultipleInstances IgnoreNew
-  Register-ScheduledTask -TaskPath $TaskPath -TaskName $Job -Action $act -Principal $prin -Settings $set -Force | Out-Null
-  Start-ScheduledTask -TaskPath $TaskPath -TaskName $Job
+  $user = "$env:USERDOMAIN\$env:USERNAME"
+  $def = (Task-Service).NewTask(0)
+  $act = $def.Actions.Create(0)   # TASK_ACTION_EXEC
+  $act.Path = "powershell.exe"; $act.Arguments = $arg; $act.WorkingDirectory = $jd
+  # Interactive token, least privilege: runs in the logged-on user's
+  # desktop session (a browser started from the ssh session would have no
+  # screen: session 0 has none), never elevated.
+  $def.Principal.UserId = $user; $def.Principal.LogonType = 3; $def.Principal.RunLevel = 0
+  $def.Settings.DisallowStartIfOnBatteries = $false; $def.Settings.StopIfGoingOnBatteries = $false
+  $def.Settings.ExecutionTimeLimit = "PT$($TaskHours)H"; $def.Settings.MultipleInstances = 2   # ignore new
+  # 6: create or update; 3: TASK_LOGON_INTERACTIVE_TOKEN (no password)
+  [void](Kit-Folder -Create).RegisterTaskDefinition($Job, $def, 6, $user, $null, 3)
+  [void](Kit-Task $Job).Run($null)
   Start-Sleep -Seconds 3
-  $info = Get-ScheduledTaskInfo -TaskPath $TaskPath -TaskName $Job
-  Out-Result ([ordered]@{ action = "start"; job = $Job; lastResult = $info.LastTaskResult; state = "$((Get-ScheduledTask -TaskPath $TaskPath -TaskName $Job).State)" })
+  $t = Kit-Task $Job
+  Out-Result ([ordered]@{ action = "start"; job = $Job; lastResult = $t.LastTaskResult; state = $TaskStates[[int]$t.State] })
 }
 
 function Status {
@@ -463,20 +861,21 @@ function Status {
   # plain strings: Get-Content's lines carry PSProvider & co., which
   # ConvertTo-Json -Depth 8 walks for minutes (CI windows-2025)
   if (Test-Path -LiteralPath (Join-Path $jd "log")) { $tail = @(Get-Content -LiteralPath (Join-Path $jd "log") -Tail 15 | ForEach-Object { [string]$_ }) }
-  $task = Get-ScheduledTask -TaskPath $TaskPath -TaskName $Job -ErrorAction SilentlyContinue
+  $task = Kit-Task $Job
   $inner = Read-PidFile (Join-Path $jd "inner.pid")
   $state = "missing"
   if ($done) { $state = "done" }
-  elseif ($task -and "$($task.State)" -eq "Running") { $state = "running" }
+  elseif ($task -and [int]$task.State -eq 4) { $state = "running" }
   elseif ($inner) { $state = "running" }
   elseif ($task -and (Test-Path -LiteralPath (Join-Path $jd "inner.pid"))) {
     # the task ran, its inner is gone and wrote no exit: killed (time limit,
     # logoff, crash). Never "ready" forever with the clamp on.
     $state = "dead"
   } elseif ($task) {
-    $info = Get-ScheduledTaskInfo -TaskPath $TaskPath -TaskName $Job -ErrorAction SilentlyContinue
+    # never run: LastRunTime is 1899-12-30
     $state = "queued"
-    if ($info -and $info.LastRunTime -and $info.LastRunTime.Year -gt 2000) { $state = "dead" }
+    $last = $null; try { $last = [datetime]$task.LastRunTime } catch {}
+    if ($last -and $last.Year -gt 2000) { $state = "dead" }
   }
   Out-Result ([ordered]@{ action = "status"; job = $Job; state = $state; exit = $exit; logTail = $tail })
 }
@@ -554,16 +953,18 @@ function Sampler {
   while (-not (Test-Path -LiteralPath (Join-Path $jd "exit"))) {
     # the job's own processes by command line (its browsers carry the job's
     # profile folder): Baptiste's own Chrome counts as "other", as it should
-    $ours = @(Job-Processes $jd | ForEach-Object { [int]$_.ProcessId }) + @($PID)
+    $ours = @($PID)
+    try { $ours += @(Job-Processes $jd | ForEach-Object { [int]$_.ProcessId }) } catch {}
     foreach ($f in @("inner.pid", "node.pid")) { $q = Read-PidFile (Join-Path $jd $f); if ($q) { $ours += $q.Id } }
     $b = Cpu-Busy 5 @("Idle") $ours
     $aff = @(Get-Process -Id ($ours | Select-Object -Unique) -ErrorAction SilentlyContinue | Where-Object { @("chrome", "msedge") -contains $_.ProcessName } | Select-Object -First 1 | ForEach-Object { try { "0x{0:x}" -f $_.ProcessorAffinity.ToInt64() } catch { $null } })
     $eff = $null
     try {
       # the busiest core's effective clock: frequency x % performance (a
-      # cap the firmware ignores shows here; Microsoft's own check)
-      $eff = (Get-CimInstance Win32_PerfFormattedData_Counters_ProcessorInformation | Where-Object { $_.Name -notmatch '_Total' } |
-        ForEach-Object { [double]$_.ProcessorFrequency * [double]$_.PercentProcessorPerformance / 100 } | Measure-Object -Maximum).Maximum
+      # cap the firmware ignores shows here; Microsoft's own check), PDH
+      # since the previous loop (-1 the first time: none)
+      $e = (Native)::EffectiveMhz()
+      if ($e -gt 0) { $eff = $e }
     } catch {}
     $row = [ordered]@{ t = (Get-Date).ToString("o"); otherPct = $b.otherPctOfOneCore; otherPartial = $b.partial; top = $b.top; maxEffMhz = $(if ($eff) { [math]::Round($eff) } else { $null }); browserAffinity = $(if ($aff.Count) { $aff[0] } else { $null }); scheme = Active-Scheme; locked = [bool](Get-Process -Name LogonUI -ErrorAction SilentlyContinue) }
     ($row | ConvertTo-Json -Depth 4 -Compress) | Out-File -LiteralPath $csv -Append -Encoding UTF8
@@ -579,7 +980,7 @@ function Uninstall {
   $procs = @(Kit-Processes)
   if ($procs.Count) { throw "kit processes running: $(($procs | ForEach-Object { "$($_.name) $($_.pid)" }) -join ', ')" }
   if ((Split-Path -Leaf $KitDir) -ne "salon-kit") { throw "refused: -KitDir $KitDir is not a salon-kit folder" }
-  try { $svc = New-Object -ComObject Schedule.Service; $svc.Connect(); $svc.GetFolder("\").DeleteFolder("SalonKit", 0) } catch {}
+  try { (Task-Service).GetFolder("\").DeleteFolder($TaskPath.Trim('\'), 0) } catch {}
   Remove-Tree $KitDir
   Out-Result ([ordered]@{ action = "uninstall"; kitDir = $KitDir; removed = -not (Test-Path -LiteralPath $KitDir) })
 }

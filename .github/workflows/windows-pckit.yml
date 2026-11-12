@@ -53,10 +53,25 @@ jobs:
             $r | Format-Table -AutoSize | Out-String -Width 200
             if ($r) { exit 1 }
           } else { "PSScriptAnalyzer not on this image: parse only" }
-      - name: check (this machine as the kit sees it)
+      # The real PC refuses CIM/WMI to the kit's ssh logon (0x80041003,
+      # 2026-11-12); this runner's admin would not. nocim.ps1 runs the
+      # script with every CIM/WMI-backed cmdlet shadowed by a function that
+      # fails the same way: the kit's actions below go through it.
+      - name: A wrapper where CIM/WMI fails as over the PC's ssh
         shell: powershell
         run: |
-          $o = powershell -NoProfile -ExecutionPolicy Bypass -File harness\remote\pc-win\salon-pc.ps1 -Action check -KitDir "$env:RUNNER_TEMP\salon-kit"
+          @'
+          param([string]$Action, [string]$Job = "", [string]$KitDir)
+          $ErrorActionPreference = "Stop"
+          foreach ($n in @("Get-CimInstance", "Get-CimClass", "Invoke-CimMethod", "New-CimSession", "Get-WmiObject", "Invoke-WmiMethod", "Get-ScheduledTask", "Get-ScheduledTaskInfo", "Register-ScheduledTask", "Unregister-ScheduledTask", "Start-ScheduledTask", "Stop-ScheduledTask", "New-ScheduledTaskAction", "New-ScheduledTaskPrincipal", "New-ScheduledTaskSettingsSet", "Get-MpComputerStatus", "Get-MpPreference", "Get-Counter")) {
+            Set-Item -Path "function:global:$n" -Value { throw "NOCIM: $($MyInvocation.MyCommand.Name) called (Access denied 0x80041003 over the PC's ssh)" }
+          }
+          & (Join-Path $env:GITHUB_WORKSPACE "harness\remote\pc-win\salon-pc.ps1") -Action $Action -Job $Job -KitDir $KitDir
+          '@ | Set-Content -Encoding UTF8 "$env:RUNNER_TEMP\nocim.ps1"
+      - name: check (this machine as the kit sees it, CIM/WMI refused)
+        shell: powershell
+        run: |
+          $o = powershell -NoProfile -ExecutionPolicy Bypass -File "$env:RUNNER_TEMP\nocim.ps1" -Action check -KitDir "$env:RUNNER_TEMP\salon-kit"
           $o | Select-Object -Last 1 | Set-Content -Encoding UTF8 "$env:RUNNER_TEMP\check.txt"
           $o | Select-Object -Last 1
       - name: Preflight reading of that check
@@ -67,6 +82,13 @@ jobs:
             import { parseKitJson, preflight, preflightMarkdown } from "./harness/lib/pc-kit.mjs";
             const c = parseKitJson(readFileSync(process.env.RUNNER_TEMP + "/check.txt", "utf8").replace(/^\uFEFF/, ""));
             if (!c?.cpu?.name || !c.power?.activeScheme) throw new Error("check gave no CPU or scheme");
+            console.log("probeErrors", JSON.stringify(c.probeErrors));
+            console.log("display", JSON.stringify(c.display), "gpus", JSON.stringify(c.gpus), "battery", JSON.stringify(c.power?.battery));
+            if (!Array.isArray(c.gpus) || c.gpus.some((g) => typeof g.present !== "boolean")) throw new Error("check without CIM: display adapters not read, or their presence unknown (SetupAPI)");
+            if (/NOCIM|80041003/.test(JSON.stringify(c))) throw new Error("check called a CIM/WMI cmdlet");
+            if (!(Number(c.os?.build) >= 17763) || !(c.memory?.totalGiB > 0) || !c.coreMap?.length) throw new Error("check without CIM: os build, memory or core map missing");
+            if (c.cpuBusy?.partial !== false) throw new Error("check without CIM: other processes CPU not read (partial)");
+            if (!Array.isArray(c.kit?.tasks) || !Array.isArray(c.kit?.processes)) throw new Error("check without CIM: kit tasks or processes not read");
             console.log(preflightMarkdown(preflight(c, { browsers: ["chrome", "msedge"] })));'
       - name: The admin list, as pc-run sends it (the clamp, its undoing, the boot task)
         shell: bash
@@ -148,7 +170,7 @@ jobs:
         timeout-minutes: 6
         shell: powershell
         run: |
-          $k = "$env:RUNNER_TEMP\salon-kit"; $s = "$PWD\harness\remote\pc-win\salon-pc.ps1"
+          $k = "$env:RUNNER_TEMP\salon-kit"; $s = "$env:RUNNER_TEMP\nocim.ps1"
           # every call bounded and echoed: a hung one names itself
           function Kit([string[]]$a) {
             $j = Start-Job -ScriptBlock { param($s, $a) powershell -NoProfile -ExecutionPolicy Bypass -File $s @a 2>&1 | Select-Object -Last 1 } -ArgumentList $s, $a
@@ -173,7 +195,7 @@ jobs:
         timeout-minutes: 4
         shell: powershell
         run: |
-          $k = "$env:RUNNER_TEMP\salon-kit"; $s = "$PWD\harness\remote\pc-win\salon-pc.ps1"
+          $k = "$env:RUNNER_TEMP\salon-kit"; $s = "$env:RUNNER_TEMP\nocim.ps1"
           New-Item -ItemType Directory -Force -Path "$k\jobs\ci3" | Out-Null
           @{ cwd = "$PWD"; affinity = $null; restoreAtEnd = $true; env = @{}; steps = @(
             @{ name = "long"; args = @("-e", "setTimeout(() => {}, 600000)"); env = @{}; continueOnError = $true },
@@ -227,7 +249,7 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = "Continue"
-          $k = "$env:RUNNER_TEMP\salon-kit"; $s = "$PWD\harness\remote\pc-win\salon-pc.ps1"; $fail = @()
+          $k = "$env:RUNNER_TEMP\salon-kit"; $s = "$env:RUNNER_TEMP\nocim.ps1"; $fail = @()
           New-Item -ItemType Directory -Force -Path C:\sentinel, "$k\jobs\ci6\tmp" | Out-Null; Set-Content C:\sentinel\keep.txt keep
           cmd /c mklink /J "$k\jobs\ci6\tmp\evil" C:\sentinel | Out-Null
           powershell -NoProfile -ExecutionPolicy Bypass -File $s -Action cleanup -Job ci6 -KitDir $k | Select-Object -Last 1

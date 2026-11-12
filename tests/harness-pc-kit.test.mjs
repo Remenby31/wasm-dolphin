@@ -233,7 +233,8 @@ test("pc-kit: the preflight blocks on each Windows trap it can see", () => {
   assert.deepEqual(blocked((c) => { c.policies.chromeMachine = { DefaultJavaScriptOptimizerSetting: 2 }; }), ["chrome-jit-policy"]);
   assert.deepEqual(blocked((c) => { c.classAffinity = { error: "only 4 cores of the fastest class (asked 6)" }; }), ["class-affinity"]);
   const warns = (mut) => { const c = structuredClone(base); mut(c); return preflight(c).warnings.map((b) => b.id); };
-  assert.deepEqual(warns((c) => { c.gpus[0].refreshHz = 144; }), ["refresh-60"]);
+  assert.deepEqual(warns((c) => { c.display[0].refreshHz = 144; }), ["refresh-60"]);
+  assert.deepEqual(warns((c) => { c.gpus[0].refreshHz = 144; }), ["refresh-60"], "a rate from the adapter counts too");
   assert.deepEqual(warns((c) => { c.policies.edgeUser = { EnhanceSecurityMode: 2 }; }), ["edge-esm-policy"]);
   assert.deepEqual(warns((c) => { c.classAffinity.threads = 6; }), ["smt"]);
   const bench = (st, verdict = "jit", b = "chrome") => preflight(base, { bench: { [b]: { jit: { verdict }, perRun: [{ state: st }] } } }).blocked.map((x) => x.id);
@@ -263,9 +264,55 @@ test("pc-kit: sampler contamination and the J1b table", () => {
   assert.equal(fail[0].verdict, "fail");
 });
 
+// Never ok by default: what the kit's account could not read (a probe in
+// probeErrors, a null reading, battery flag 255, a refresh rate unknown,
+// an adapter not present) blocks a blocking item and warns otherwise.
+test("pc-kit: the preflight never reads a failed or unknown probe as ok", () => {
+  const base = JSON.parse(goodCheck());
+  const pf = (mut) => { const c = structuredClone(base); mut(c); const p = preflight(c); return { blocked: p.blocked.map((b) => b.id), warnings: p.warnings.map((b) => b.id) }; };
+  // each probe failing alone, as salon-pc.ps1 reports it (value null + probeErrors)
+  const fail = (probe, set) => pf((c) => { set(c); c.probeErrors = { [probe]: "Access is denied" }; });
+  assert.deepEqual(fail("battery", (c) => { c.power.battery = null; }).blocked, ["mains"], "battery unreadable: blocked");
+  assert.deepEqual(fail("power", (c) => { c.power.activeScheme = null; }).blocked, ["kit-scheme-not-left"]);
+  assert.deepEqual(fail("schemes", (c) => { c.power.schemes = null; }).blocked, ["kit-scheme-not-left"]);
+  assert.deepEqual(fail("policies", (c) => { c.policies = null; }).blocked, ["chrome-jit-policy"]);
+  assert.deepEqual(fail("sessions", (c) => { c.session.sessions = null; }).blocked, ["unlocked-session"]);
+  assert.deepEqual(fail("chrome", (c) => { c.browsers.chrome = null; }).blocked, ["browser-chrome"]);
+  assert.deepEqual(fail("disk", (c) => { c.disk.freeGiB = null; }).blocked, ["disk"]);
+  assert.ok(fail("cpuBusy", (c) => { c.cpuBusy = null; }).warnings.includes("idle"), "load unreadable: warned");
+  assert.ok(pf((c) => { c.cpuBusy.partial = true; }).warnings.includes("idle"), "load read for the kit's own processes only: warned");
+  assert.ok(fail("os", (c) => { c.os = null; }).warnings.includes("windows-11"));
+  assert.ok(fail("memory", (c) => { c.memory = null; }).warnings.includes("memory"), "an info item unreadable warns");
+  assert.ok(fail("gpus", (c) => { c.gpus = null; }).warnings.includes("gpu-dgpu"));
+  assert.ok(fail("cpu", (c) => { c.cpu = null; }).warnings.includes("gb6-known"));
+  // a probe failing with a value still there (sub-probe error) is not ok either
+  assert.ok(pf((c) => { c.probeErrors = { "gpus.present": "SetupDiGetClassDevs failed" }; }).warnings.includes("gpu-dgpu"));
+  // battery: unknown status, never "on mains"
+  assert.deepEqual(pf((c) => { c.power.battery = [{ BatteryStatus: null, EstimatedChargeRemaining: 80 }]; }).blocked, ["mains"], "AC line 255: unknown, blocked");
+  assert.deepEqual(pf((c) => { delete c.power.battery; }).blocked, ["mains"], "no battery reading at all: blocked");
+  // refresh rate unknown: warned, never ok
+  assert.deepEqual(pf((c) => { c.display = null; c.probeErrors = { display: "Requested registry access is not allowed." }; }).warnings, ["refresh-60"]);
+  assert.deepEqual(pf((c) => { delete c.display; c.gpus[0].refreshHz = null; }).warnings, ["refresh-60"]);
+  // a driver left for an adapter that is not there is no dGPU
+  assert.ok(pf((c) => { c.gpus[0].present = false; }).warnings.includes("gpu-dgpu"));
+  assert.ok(pf((c) => { c.gpus[0].present = null; }).warnings.includes("gpu-dgpu"), "presence unknown: not counted");
+  assert.ok(!pf((c) => { c.gpus[0].present = null; c.nvidia = [{ name: "NVIDIA GeForce RTX 4080" }]; }).warnings.includes("gpu-dgpu"), "nvidia-smi answering is presence");
+  // everything degraded at once: nothing it depends on reads as ok
+  const all = pf((c) => {
+    c.power.battery = null; c.power.activeScheme = null; c.power.schemes = null; c.policies = null; c.session.sessions = null; c.disk.freeGiB = null;
+    c.cpuBusy = null; c.os = null; c.memory = null; c.gpus = null; c.display = null; c.cpu = null; c.coreMap = null; c.classAffinity = { error: "x" };
+    c.probeErrors = Object.fromEntries(["battery", "power", "schemes", "policies", "sessions", "disk", "cpuBusy", "os", "memory", "gpus", "display", "cpu", "coreMap"].map((k) => [k, "Access is denied"]));
+  });
+  for (const id of ["mains", "kit-scheme-not-left", "chrome-jit-policy", "unlocked-session", "disk", "class-affinity"]) assert.ok(all.blocked.includes(id), `${id} blocked`);
+  for (const id of ["idle", "windows-11", "memory", "gpu-dgpu", "igpu-present", "refresh-60", "gb6-known", "smt"]) assert.ok(all.warnings.includes(id), `${id} warned`);
+});
+
 test("pc-kit: restore diff", () => {
-  const before = { activeScheme: "a", schemes: ["a", "b"], processor: { X: { ac: 0 } }, tasks: [] };
-  assert.deepEqual(restoreDiff(before, { power: structuredClone(before), tasks: [], bootTask: false }, "j"), []);
+  const before = { activeScheme: "a", schemes: ["a", "b"], processor: { X: { ac: 0 } }, tasks: [], kitProcesses: [] };
+  assert.deepEqual(restoreDiff(before, { power: structuredClone(before), tasks: [], bootTask: false, jobProcesses: [], kitProcesses: [] }, "j"), []);
+  // a process list the PC could not read is never "nothing left"
+  assert.deepEqual(restoreDiff(before, { power: structuredClone(before), tasks: [], bootTask: false, jobProcesses: null, kitProcesses: null }, "j").map((x) => x.split(" (")[0]), ["job processes unknown", "kit processes unknown"]);
+  assert.match(restoreDiff({ ...before, kitProcesses: null }, { power: structuredClone(before), tasks: [], bootTask: false, jobProcesses: [], kitProcesses: [] }, "j").join(), /kit processes unknown \(not read at the snapshot\)/);
   const d = restoreDiff(before, { power: { activeScheme: KIT_SCHEME, schemes: ["a", "b", KIT_SCHEME], processor: { X: { ac: 1 } } }, tasks: ["j"], bootTask: true, jobProcesses: [{ name: "msedge.exe", pid: 9 }], kitProcesses: [{ name: "node.exe", pid: 8 }], jobTmp: true }, "j");
   assert.equal(d.length, 9);
   assert.match(d.join(), /SalonKit.j still registered.*boot task.*msedge\.exe 9.*node\.exe 8.*TEMP/);
@@ -398,14 +445,17 @@ test("pc-run: the whole flow in --dry-run (no connection)", () => {
   }
 });
 
-// salon-pc.ps1 under pwsh, powercfg and the task cmdlets mocked: the
-// standard account's side. It reads the power state and never writes it.
+// salon-pc.ps1 under pwsh: the standard account's side. powercfg mocked,
+// the task scheduler's COM API (New-Object -ComObject Schedule.Service)
+// faked, and every CIM/WMI-backed cmdlet (Get-CimInstance, the
+// ScheduledTasks and Defender modules, Get-Counter) failing as WMI does for
+// the kit's ssh logon on a real PC (0x80041003, 2026-11-12): the script
+// must never call them. It reads the power state and never writes it.
 const PWSH = process.env.PWSH || "pwsh";
 const hasPwsh = spawnSync(PWSH, ["-NoProfile", "-Command", "1"], { encoding: "utf8" }).status === 0;
-test("pc-kit: salon-pc.ps1 (standard account) snapshot, power, cleanup, status with powercfg mocked", { skip: hasPwsh ? false : "no pwsh" }, () => {
-  const dir = mkdtempSync(path.join(os.tmpdir(), "pc-kit-ps-"));
-  try {
-    const harness = `
+const SALON_PC = path.join(ROOT, "harness", "remote", "pc-win", "salon-pc.ps1");
+const CIM_CMDLETS = ["Get-CimInstance", "Get-CimClass", "Invoke-CimMethod", "New-CimSession", "Get-WmiObject", "Invoke-WmiMethod", "Get-ScheduledTask", "Get-ScheduledTaskInfo", "Register-ScheduledTask", "Unregister-ScheduledTask", "Start-ScheduledTask", "Stop-ScheduledTask", "New-ScheduledTaskAction", "New-ScheduledTaskPrincipal", "New-ScheduledTaskSettingsSet", "Get-MpComputerStatus", "Get-MpPreference", "Get-Counter", "Get-PnpDevice", "Get-PnpDeviceProperty", "Get-HotFix"];
+const PS_MOCKS = `
 $ErrorActionPreference = 'Stop'
 $global:pc = @{ active = '381b4222-f694-41f0-9685-ff5bb260df2e'; schemes = [System.Collections.ArrayList]@('381b4222-f694-41f0-9685-ff5bb260df2e', '8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c'); log = [System.Collections.ArrayList]@() }
 function global:powercfg {
@@ -421,13 +471,38 @@ function global:powercfg {
     default { $global:LASTEXITCODE = 1 }
   }
 }
+$global:cim = [System.Collections.ArrayList]@()
+foreach ($n in @(${CIM_CMDLETS.map((c) => `'${c}'`).join(", ")})) {
+  Set-Item -Path "function:global:$n" -Value { [void]$global:cim.Add($MyInvocation.MyCommand.Name); throw "Access denied (0x80041003): WMI refuses this logon Remote Enable" }
+}
 $global:tasks = [System.Collections.ArrayList]@()
-function global:Get-ScheduledTask { param($TaskPath, $TaskName, $ErrorAction) @($global:tasks | Where-Object { -not $TaskName -or $_ -eq $TaskName } | ForEach-Object { [pscustomobject]@{ TaskName = $_; State = 'Ready' } }) }
-function global:Unregister-ScheduledTask { param($TaskPath, $TaskName, $Confirm) $global:tasks.Remove($TaskName) }
-function global:Stop-ScheduledTask { param($TaskPath, $TaskName, $ErrorAction) }
-function global:Get-CimInstance { param($ClassName, $Filter, $ErrorAction) @() }
-$s = '${path.join(ROOT, "harness", "remote", "pc-win", "salon-pc.ps1")}'
-$k = '${dir}'
+$global:taskLog = [System.Collections.ArrayList]@()
+function global:FakeTask([string]$n) {
+  $t = [pscustomobject]@{ Name = $n; State = 3; LastRunTime = [datetime]'1899-12-30'; LastTaskResult = 0 }
+  $t | Add-Member -MemberType ScriptMethod -Name Stop -Value { param($f) [void]$global:taskLog.Add("stop $($this.Name)") }
+  $t
+}
+function global:FakeFolder {
+  $f = [pscustomobject]@{ Path = '\\SalonKit' }
+  $f | Add-Member -MemberType ScriptMethod -Name GetTasks -Value { param($flags) foreach ($n in $global:tasks) { FakeTask $n } }
+  $f | Add-Member -MemberType ScriptMethod -Name GetTask -Value { param($n) if ($global:tasks -notcontains $n) { throw "The system cannot find the file specified. (0x80070002)" }; FakeTask $n }
+  $f | Add-Member -MemberType ScriptMethod -Name DeleteTask -Value { param($n, $fl) [void]$global:taskLog.Add("delete $n"); [void]$global:tasks.Remove($n) }
+  $f
+}
+function global:New-Object {
+  param([string]$ComObject)
+  if ($ComObject -ne 'Schedule.Service') { throw "New-Object $($ComObject) not mocked" }
+  $svc = [pscustomobject]@{}
+  $svc | Add-Member -MemberType ScriptMethod -Name Connect -Value { }
+  $svc | Add-Member -MemberType ScriptMethod -Name GetFolder -Value { param($p) if ($p -ne '\\SalonKit') { throw "folder $p not mocked" }; FakeFolder }
+  $svc
+}
+$s = '${SALON_PC}'
+`;
+test("pc-kit: salon-pc.ps1 (standard account) snapshot, power, cleanup, status with powercfg mocked", { skip: hasPwsh ? false : "no pwsh" }, () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "pc-kit-ps-"));
+  try {
+    const harness = PS_MOCKS + `$k = '${dir}'
 & $s -Action snapshot -Job t1 -KitDir $k
 & $s -Action power -KitDir $k
 & $s -Action snapshot -Job t1 -KitDir $k
@@ -466,6 +541,60 @@ Set-Content -LiteralPath (Join-Path (Join-Path (Join-Path $k "jobs") "t4") "exit
     assert.deepEqual([st3.state, st3.exit], ["done", -1], "an empty exit file is done, exit unknown (-1), not a crash");
     assert.deepEqual([st4.state, st4.exit], ["done", 0]);
     assert.deepEqual(writes.writes, [], "the standard account's script never writes a power setting");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// The first real PC refused the kit's ssh account every CIM/WMI call
+// (Get-CimInstance Win32_OperatingSystem: PermissionDenied 0x80041003, an
+// ssh logon is a network one and WMI root\cimv2 grants it no "Remote
+// Enable"): check died at its first line. Every action the ssh account runs
+// now reads the registry, kernel32/ntdll, [Environment], quser,
+// Get-Process, nvidia-smi and the task scheduler's COM API instead.
+test("pc-kit: salon-pc.ps1 never calls a CIM/WMI cmdlet (its code, not its comments)", () => {
+  const code = readFileSync(SALON_PC, "utf8").split(/\r?\n/).filter((l) => !/^\s*#/.test(l)).map((l) => l.replace(/\s#\s.*$/, "")).join("\n");
+  const found = [...new Set([...code.matchAll(/\b(?:Get-Cim\w*|\w+-Cim\w+|Get-WmiObject|\w+-WmiMethod|\w+-ScheduledTask\w*|Get-Mp\w+|Get-Counter|Get-PnpDevice\w*|Get-HotFix|Win32_\w+|root\\cimv2|System\.Management\b(?!\.Automation))\b|\[wmi(?:class|searcher)?\]/gi)].map((m) => m[0]))];
+  assert.deepEqual(found, [], "CIM/WMI is refused to the kit's ssh logon on a real PC: registry, native calls, COM task scheduler only");
+});
+
+test("pc-kit: salon-pc.ps1 check (and snapshot, power, status, cleanup) with every CIM/WMI cmdlet failing 0x80041003", { skip: hasPwsh ? false : "no pwsh" }, () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "pc-kit-nocim-"));
+  try {
+    const harness = PS_MOCKS + `$k = '${dir}'
+$env:SALONKIT_TEST_ELEVATED = '0'
+[void]$global:tasks.Add('old1')
+& $s -Action check -KitDir $k
+& $s -Action snapshot -Job c1 -KitDir $k
+& $s -Action power -KitDir $k
+& $s -Action status -Job old1 -KitDir $k
+& $s -Action cleanup -Job old1 -KitDir $k
+"SALONKIT-JSON " + (@{ cim = @($global:cim); taskLog = @($global:taskLog); tasks = @($global:tasks) } | ConvertTo-Json -Compress)
+`;
+    const f = path.join(dir, "h.ps1");
+    writeFileSync(f, harness);
+    const r = spawnSync(PWSH, ["-NoProfile", "-File", f], { encoding: "utf8", timeout: 120000 });
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+    const out = r.stdout.split(/\r?\n/).filter((l) => l.startsWith("SALONKIT-JSON ")).map((l) => JSON.parse(l.slice(14)));
+    const [check, snap, power, status, cleanup, log] = out;
+    assert.deepEqual(log.cim, [], "no CIM/WMI cmdlet was called");
+    assert.equal(check.action, "check", "check completes without CIM");
+    assert.doesNotMatch(JSON.stringify(check), /80041003/, "no probe went through WMI");
+    assert.equal(check.session.elevated, false);
+    assert.equal(check.power.activeScheme, "381b4222-f694-41f0-9685-ff5bb260df2e");
+    assert.deepEqual(check.kit.tasks, ["old1"], "the kit's tasks read through the task scheduler's COM API");
+    assert.equal(typeof check.cpuBusy?.otherPctOfOneCore, "number", "the CPU load is read (Get-Process at worst, marked partial)");
+    assert.equal(typeof check.probeErrors, "object", "what could not be read is said, item by item");
+    for (const k of ["gpus", "coreMap"]) assert.ok(check[k] === null || Array.isArray(check[k]), `${k}: a list or null, never [null]`);
+    assert.ok(check.power.battery === null || Array.isArray(check.power.battery));
+    assert.equal(snap.action, "snapshot");
+    assert.deepEqual(snap.state.tasks, ["old1"]);
+    assert.equal(power.power.activeScheme, "381b4222-f694-41f0-9685-ff5bb260df2e");
+    assert.equal(status.state, "queued", "a registered task never run, read through COM");
+    assert.equal(cleanup.action, "cleanup");
+    assert.deepEqual(cleanup.tasks, []);
+    assert.deepEqual(log.taskLog, ["stop old1", "delete old1"], "cleanup stops then unregisters the job's task through COM");
+    assert.deepEqual(log.tasks, []);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
