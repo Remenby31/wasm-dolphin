@@ -444,7 +444,7 @@ function global:FakeFolder {
 }
 function global:New-Object {
   param([string]$ComObject)
-  if ($ComObject -ne 'Schedule.Service') { throw "New-Object $ComObject: not mocked" }
+  if ($ComObject -ne 'Schedule.Service') { throw "New-Object $($ComObject) not mocked" }
   $svc = [pscustomobject]@{}
   $svc | Add-Member -MemberType ScriptMethod -Name Connect -Value { }
   $svc | Add-Member -MemberType ScriptMethod -Name GetFolder -Value { param($p) if ($p -ne '\\SalonKit') { throw "folder $p not mocked" }; FakeFolder }
