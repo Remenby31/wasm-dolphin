@@ -83,6 +83,8 @@ jobs:
             const c = parseKitJson(readFileSync(process.env.RUNNER_TEMP + "/check.txt", "utf8").replace(/^\uFEFF/, ""));
             if (!c?.cpu?.name || !c.power?.activeScheme) throw new Error("check gave no CPU or scheme");
             console.log("probeErrors", JSON.stringify(c.probeErrors));
+            console.log("display", JSON.stringify(c.display), "gpus", JSON.stringify(c.gpus), "battery", JSON.stringify(c.power?.battery));
+            if (!Array.isArray(c.gpus) || c.gpus.some((g) => typeof g.present !== "boolean")) throw new Error("check without CIM: display adapters not read, or their presence unknown (SetupAPI)");
             if (/NOCIM|80041003/.test(JSON.stringify(c))) throw new Error("check called a CIM/WMI cmdlet");
             if (!(Number(c.os?.build) >= 17763) || !(c.memory?.totalGiB > 0) || !c.coreMap?.length) throw new Error("check without CIM: os build, memory or core map missing");
             if (c.cpuBusy?.partial !== false) throw new Error("check without CIM: other processes CPU not read (partial)");

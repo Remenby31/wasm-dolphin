@@ -235,46 +235,66 @@ export function knobIneffective(points, { minDrop = 0.05, minAsk = 0.75 } = {}) 
 // `bench` (optional) pc-bench results per browser.
 export function preflight(check, { browsers = ["chrome", "msedge"], bench = {}, needIso = null } = {}) {
   const items = [];
-  const add = (id, level, ok, seen, fix = null) => items.push({ id, level: ok ? "ok" : level, seen, ...(ok ? {} : { fix }) });
+  // Never ok by default: an item whose probe failed (salon-pc.ps1's
+  // probeErrors) or gave nothing is not ok. It blocks when the item blocks;
+  // a warn or info item warns.
+  const errs = check.probeErrors ?? {};
+  const add = (id, level, ok, seen, fix = null, deps = []) => {
+    const failed = deps.filter((d) => Object.keys(errs).some((k) => k === d || k.startsWith(`${d}.`)));
+    if (failed.length) {
+      ok = false;
+      seen = `${seen} [unreadable: ${failed.map((d) => `${d}: ${errs[d] ?? Object.entries(errs).find(([k]) => k.startsWith(`${d}.`))?.[1]}`).join("; ")}]`;
+    }
+    if (failed.length && level === "info") level = "warn";
+    items.push({ id, level: ok ? "ok" : level, seen, ...(ok ? {} : { fix }) });
+  };
+  const unread = "unreadable from the kit's account: see probeErrors, fix the probe or check by hand";
   const os = check.os ?? {};
-  add("windows-11", "warn", Number(os.build) >= 22000, `${os.caption ?? "?"} build ${os.build ?? "?"}`, "J1b's target is Windows 11");
-  const bat = check.power?.battery ?? [];
-  add("mains", "block", !bat.length || bat.every((b) => b.BatteryStatus !== 1), bat.length ? `battery ${bat.map((b) => `${b.EstimatedChargeRemaining}% status ${b.BatteryStatus}`).join(", ")}` : "no battery (desktop)", "plug the PC in: on battery Windows lowers the QoS and the frequency");
+  add("windows-11", "warn", Number(os.build) >= 22000, `${os.caption ?? "?"} build ${os.build ?? "?"}`, "J1b's target is Windows 11", ["os"]);
+  const bat = check.power?.battery;
+  const batOk = Array.isArray(bat) && bat.every((b) => b && b.BatteryStatus === 2);
+  add("mains", "block", batOk, bat == null ? "battery state unknown" : bat.length ? `battery ${bat.map((b) => `${b?.EstimatedChargeRemaining ?? "?"}% status ${b?.BatteryStatus ?? "unknown"}`).join(", ")}` : "no battery (desktop)", bat == null ? `battery state ${unread}` : "plug the PC in: on battery Windows lowers the QoS and the frequency", ["battery"]);
   add("kit-not-elevated", "block", check.session?.elevated === false, `kit account ${check.session?.user ?? "?"}: ${check.session?.elevated ? "ELEVATED" : check.session?.elevated === false ? "standard" : "?"}`, "the kit's ssh must be a standard (non-administrator) account (salonkit): everything but the closed admin list runs there");
   const sh = check.sshd ?? {};
   const shellOk = sshdShellOk(sh);
   add("sshd-shell", "block", shellOk, `OpenSSH DefaultShell ${sh.defaultShell ?? "unset"}, DefaultShellCommandOption ${sh.defaultShellCommandOption ?? "unset"}`, "as admin, once: HKLM\\SOFTWARE\\OpenSSH DefaultShell = C:\\Windows\\System32\\cmd.exe and DefaultShellCommandOption = /d /c (no AutoRun before the admin commands)");
-  add("kit-scheme-not-left", "block", !check.power?.kitSchemeActive && !(check.power?.schemes ?? []).includes(KIT_SCHEME), `active scheme ${check.power?.activeScheme}`, "a previous job left the kit's scheme: pc-run.mjs restore --job <that job>");
+  const schemes = check.power?.schemes;
+  add("kit-scheme-not-left", "block", Boolean(check.power?.activeScheme) && Array.isArray(schemes) && !check.power?.kitSchemeActive && !schemes.includes(KIT_SCHEME), `active scheme ${check.power?.activeScheme ?? "unknown"}${Array.isArray(schemes) ? "" : ", scheme list unknown"}`, "a previous job left the kit's scheme: pc-run.mjs restore --job <that job>", ["power", "schemes"]);
   const ovl = String(check.power?.overlayAc ?? "").toLowerCase();
   add("power-mode", "warn", !ovl || ovl === "00000000-0000-0000-0000-000000000000" || ovl === "ded574b5-45a0-4f42-8737-46345c09c238", `power mode overlay (AC) ${ovl || "none"}`, "Settings > System > Power: 'Balanced' or 'Best performance' on mains (best power efficiency throttles)");
-  add("unlocked-session", "block", !check.session?.lockScreenUp && (check.session?.sessions ?? []).some((s) => /\|Active\||\|Actif\||\bActive\b|\bActif\b/i.test(s)), `sessions ${JSON.stringify(check.session?.sessions ?? [])}, lock screen ${check.session?.lockScreenUp ? "up" : "down"}`,
-    "log on at the PC and leave the desktop unlocked (screen saver and sleep off for the session): a locked or hidden window is EcoQoS");
+  add("unlocked-session", "block", !check.session?.lockScreenUp && (check.session?.sessions ?? []).some((s) => /\|Active\||\|Actif\||\bActive\b|\bActif\b/i.test(s)), `sessions ${JSON.stringify(check.session?.sessions ?? null)}, lock screen ${check.session?.lockScreenUp ? "up" : "down"}`,
+    "log on at the PC and leave the desktop unlocked (screen saver and sleep off for the session): a locked or hidden window is EcoQoS", ["sessions"]);
   for (const b of browsers) {
     const v = b === "msedge" ? check.browsers?.edge : check.browsers?.chrome;
-    add(`browser-${b}`, "block", Boolean(v?.version), v ? `${v.version} (${v.path})` : "not installed", `install ${b === "msedge" ? "Edge" : "Chrome"} stable (the kit never installs a browser)`);
+    add(`browser-${b}`, "block", Boolean(v?.version), v ? `${v.version} (${v.path})` : "not installed", `install ${b === "msedge" ? "Edge" : "Chrome"} stable (the kit never installs a browser)`, [b === "msedge" ? "edge" : "chrome"]);
   }
-  const gpus = check.gpus ?? [];
-  const nvidia = gpus.filter((g) => /nvidia/i.test(g.name));
-  add("gpu-dgpu", "warn", nvidia.length > 0, gpus.map((g) => `${g.name} (driver ${g.driver}, ${g.driverDate ?? "?"}, ${g.refreshHz ?? "?"} Hz)`).join("; ") || "none", "J1b targets an RTX 3060 class GPU: record what this one is");
-  add("igpu-present", "info", gpus.length <= 1, `${gpus.length} display adapters`, "with an iGPU too, Chrome may composite on it: check the adapter of pc-bench/webgpu-adapter, set chrome.exe/msedge.exe to 'High performance' in Settings > Display > Graphics");
-  const hz = Math.max(0, ...gpus.map((g) => Number(g.refreshHz) || 0));
-  add("refresh-60", "warn", hz === 0 || (hz >= 59 && hz <= 61), `${hz || "?"} Hz`, "the J1a figures are at 60 Hz: set the screen to 60 Hz for the J1b runs (and record it), or measure 144 Hz separately");
+  // only the adapters present now: a driver left for a card taken out
+  // stays in the registry (present null: not known, never counted)
+  const allGpus = check.gpus ?? [];
+  const gpus = allGpus.filter((g) => g?.present === true);
+  const smi = Array.isArray(check.nvidia) ? check.nvidia : [];
+  const nvidia = [...gpus.filter((g) => /nvidia/i.test(g.name)), ...smi];
+  add("gpu-dgpu", "warn", nvidia.length > 0, allGpus.map((g) => `${g.name} (driver ${g.driver}, ${g.driverDate ?? "?"}, ${g.present === true ? "present" : g.present === false ? "ABSENT" : "presence unknown"})`).join("; ") + (smi.length ? `; nvidia-smi: ${smi.map((g) => g.name).join(", ")}` : "") || "none", "J1b targets an RTX 3060 class GPU: record what this one is", ["gpus"]);
+  add("igpu-present", check.gpus == null ? "warn" : "info", check.gpus != null && gpus.length <= 1, `${gpus.length} display adapters present`, "with an iGPU too, Chrome may composite on it: check the adapter of pc-bench/webgpu-adapter, set chrome.exe/msedge.exe to 'High performance' in Settings > Display > Graphics", ["gpus"]);
+  const rates = [...(check.display ?? []), ...allGpus].map((g) => Number(g?.refreshHz) || 0).filter((x) => x > 0);
+  add("refresh-60", "warn", rates.length > 0 && rates.every((hz) => hz >= 59 && hz <= 61), rates.length ? `${rates.join(", ")} Hz` : "refresh rate unknown", rates.length ? "the J1a figures are at 60 Hz: set the screen to 60 Hz for the J1b runs (and record it), or measure 144 Hz separately" : "refresh rate not readable by the kit's account: read it at the PC (Settings > Display > Advanced display) and record it", ["display"]);
   const pol = { ...(check.policies?.chromeMachine ?? {}), ...(check.policies?.chromeUser ?? {}) };
-  add("chrome-jit-policy", "block", pol.DefaultJavaScriptJitSetting !== 2 && pol.DefaultJavaScriptOptimizerSetting !== 2 && pol.HardwareAccelerationModeEnabled !== 0,
-    `Chrome policies ${JSON.stringify(pol)}`, "a policy blocks the JIT, the optimizer or the GPU: measure is meaningless");
+  add("chrome-jit-policy", "block", check.policies != null && pol.DefaultJavaScriptJitSetting !== 2 && pol.DefaultJavaScriptOptimizerSetting !== 2 && pol.HardwareAccelerationModeEnabled !== 0,
+    check.policies == null ? "Chrome policies unknown" : `Chrome policies ${JSON.stringify(pol)}`, "a policy blocks the JIT, the optimizer or the GPU: measure is meaningless", ["policies"]);
   const epol = { ...(check.policies?.edgeMachine ?? {}), ...(check.policies?.edgeUser ?? {}) };
   if (browsers.includes("msedge")) {
-    add("edge-esm-policy", "warn", epol.EnhanceSecurityMode == null || epol.EnhanceSecurityMode === 0, `Edge EnhanceSecurityMode ${epol.EnhanceSecurityMode ?? "unset"}`, "enhanced security runs Wasm in an interpreter: the bench says which mode ran");
+    add("edge-esm-policy", "warn", epol.EnhanceSecurityMode == null || epol.EnhanceSecurityMode === 0, `Edge EnhanceSecurityMode ${epol.EnhanceSecurityMode ?? "unset"}`, "enhanced security runs Wasm in an interpreter: the bench says which mode ran", ["policies"]);
   }
   const mem = check.memory ?? {};
-  add("memory", "info", mem.totalGiB == null || mem.totalGiB <= 17, `${mem.totalGiB ?? "?"} GiB (free ${mem.freeGiB ?? "?"})`, "more than the 16 GB target: memory is not clamped (Salon commits ~1.5 GiB; noted, not corrected)");
-  add("disk", "block", (check.disk?.freeGiB ?? 0) >= 5, `${check.disk?.freeGiB ?? "?"} GiB free on ${check.disk?.drive ?? "?"}:`, "free 5 GB for the kit (tree, node, profiles, results)");
+  add("memory", mem.totalGiB == null ? "warn" : "info", mem.totalGiB != null && mem.totalGiB <= 17, `${mem.totalGiB ?? "?"} GiB (free ${mem.freeGiB ?? "?"})`, "more than the 16 GB target (or unknown): memory is not clamped (Salon commits ~1.5 GiB; noted, not corrected)", ["memory"]);
+  add("disk", "block", (check.disk?.freeGiB ?? 0) >= 5, `${check.disk?.freeGiB ?? "?"} GiB free on ${check.disk?.drive ?? "?"}:`, "free 5 GB for the kit (tree, node, profiles, results)", ["disk"]);
   const aff = check.classAffinity;
-  add("class-affinity", "block", Boolean(aff?.mask) && !aff.error, aff?.error ?? `${aff?.cores} cores / ${aff?.threads} threads, class ${aff?.efficiencyClass}${aff?.hybrid ? " (hybrid CPU: E-cores excluded)" : ""}, mask ${aff?.mask}`, "the CPU has fewer than 6 cores of its fastest class");
-  add("smt", "warn", !aff || aff.threads === 2 * aff.cores, aff ? `${aff.threads} threads on ${aff.cores} cores` : "?", "no SMT on this CPU (e.g. Core Ultra 200S): 6 threads instead of the i5-12400's 12");
-  add("gb6-known", "warn", Boolean(gb6Of(check.cpu?.name ?? "")), `${check.cpu?.name ?? "?"}`, "host CPU not in the public table: pass --host-gb6 <score> with its source");
+  add("class-affinity", "block", Boolean(aff?.mask) && !aff.error, aff?.error ?? `${aff?.cores} cores / ${aff?.threads} threads, class ${aff?.efficiencyClass}${aff?.hybrid ? " (hybrid CPU: E-cores excluded)" : ""}, mask ${aff?.mask}`, "the CPU has fewer than 6 cores of its fastest class", ["coreMap"]);
+  add("smt", "warn", Boolean(aff?.mask) && aff.threads === 2 * aff.cores, aff?.mask ? `${aff.threads} threads on ${aff.cores} cores` : "?", "no SMT on this CPU (e.g. Core Ultra 200S): 6 threads instead of the i5-12400's 12", ["coreMap"]);
+  add("gb6-known", "warn", Boolean(gb6Of(check.cpu?.name ?? "")), `${check.cpu?.name ?? "?"}`, "host CPU not in the public table: pass --host-gb6 <score> with its source", ["cpu"]);
   const busy = check.cpuBusy?.otherPctOfOneCore;
-  add("idle", "warn", busy == null || busy < 25, `other processes ${busy ?? "?"} % of one core (${(check.cpuBusy?.top ?? []).map((t) => `${t.name} ${t.pct}`).join(", ")})`, "close what runs (updates, indexing, games launchers) before measuring");
+  const partial = check.cpuBusy?.partial === true;
+  add("idle", "warn", busy != null && busy < 25 && !partial, `other processes ${busy ?? "?"} % of one core${partial ? " (PARTIAL: only the kit account's own processes seen)" : ""} (${(check.cpuBusy?.top ?? []).map((t) => `${t.name} ${t.pct}`).join(", ")})`, busy == null || partial ? "the other processes' CPU could not be read: check Task Manager at the PC before measuring" : "close what runs (updates, indexing, games launchers) before measuring", ["cpuBusy"]);
   add("hvci", "info", true, `memory integrity ${check.security?.memoryIntegrity ?? "unknown"}`, null);
   add("hags", "info", true, `hardware-accelerated GPU scheduling ${check.hags === 2 ? "on" : check.hags === 1 ? "off" : "default"}`, null);
   for (const [b, r] of Object.entries(bench)) {
@@ -393,10 +413,15 @@ export function restoreDiff(before, after, job) {
   if (JSON.stringify(p.processor) !== JSON.stringify(before.processor)) d.push(`processor settings ${JSON.stringify(p.processor)}, were ${JSON.stringify(before.processor)}`);
   if ((after.tasks ?? []).includes(job)) d.push(`scheduled task \\SalonKit\\${job} still registered`);
   if (after.bootTask) d.push(`the boot task ${BOOT_TASK} still exists`);
-  if ((after.jobProcesses ?? []).length) d.push(`job processes still running: ${after.jobProcesses.map((x) => `${x.name} ${x.pid}`).join(", ")}`);
-  const was = new Set((before.kitProcesses ?? []).map((x) => x.pid));
-  const extra = (after.kitProcesses ?? []).filter((x) => !was.has(x.pid));
-  if (extra.length) d.push(`kit processes left: ${extra.map((x) => `${x.name} ${x.pid}`).join(", ")}`);
+  // a process list the PC could not read is a difference: unknown, not "none left"
+  if (after.jobProcesses == null) d.push("job processes unknown (not read): not verified gone");
+  else if (after.jobProcesses.length) d.push(`job processes still running: ${after.jobProcesses.map((x) => `${x.name} ${x.pid}`).join(", ")}`);
+  if (before.kitProcesses == null || after.kitProcesses == null) d.push(`kit processes unknown (not read ${before.kitProcesses == null ? "at the snapshot" : "after the cleanup"}): not verified restored`);
+  else {
+    const was = new Set(before.kitProcesses.map((x) => x.pid));
+    const extra = after.kitProcesses.filter((x) => !was.has(x.pid));
+    if (extra.length) d.push(`kit processes left: ${extra.map((x) => `${x.name} ${x.pid}`).join(", ")}`);
+  }
   if (after.jobTmp) d.push("the job's TEMP folder is still there");
   return d;
 }

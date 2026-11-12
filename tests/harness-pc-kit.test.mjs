@@ -233,7 +233,8 @@ test("pc-kit: the preflight blocks on each Windows trap it can see", () => {
   assert.deepEqual(blocked((c) => { c.policies.chromeMachine = { DefaultJavaScriptOptimizerSetting: 2 }; }), ["chrome-jit-policy"]);
   assert.deepEqual(blocked((c) => { c.classAffinity = { error: "only 4 cores of the fastest class (asked 6)" }; }), ["class-affinity"]);
   const warns = (mut) => { const c = structuredClone(base); mut(c); return preflight(c).warnings.map((b) => b.id); };
-  assert.deepEqual(warns((c) => { c.gpus[0].refreshHz = 144; }), ["refresh-60"]);
+  assert.deepEqual(warns((c) => { c.display[0].refreshHz = 144; }), ["refresh-60"]);
+  assert.deepEqual(warns((c) => { c.gpus[0].refreshHz = 144; }), ["refresh-60"], "a rate from the adapter counts too");
   assert.deepEqual(warns((c) => { c.policies.edgeUser = { EnhanceSecurityMode: 2 }; }), ["edge-esm-policy"]);
   assert.deepEqual(warns((c) => { c.classAffinity.threads = 6; }), ["smt"]);
   const bench = (st, verdict = "jit", b = "chrome") => preflight(base, { bench: { [b]: { jit: { verdict }, perRun: [{ state: st }] } } }).blocked.map((x) => x.id);
@@ -263,9 +264,55 @@ test("pc-kit: sampler contamination and the J1b table", () => {
   assert.equal(fail[0].verdict, "fail");
 });
 
+// Never ok by default: what the kit's account could not read (a probe in
+// probeErrors, a null reading, battery flag 255, a refresh rate unknown,
+// an adapter not present) blocks a blocking item and warns otherwise.
+test("pc-kit: the preflight never reads a failed or unknown probe as ok", () => {
+  const base = JSON.parse(goodCheck());
+  const pf = (mut) => { const c = structuredClone(base); mut(c); const p = preflight(c); return { blocked: p.blocked.map((b) => b.id), warnings: p.warnings.map((b) => b.id) }; };
+  // each probe failing alone, as salon-pc.ps1 reports it (value null + probeErrors)
+  const fail = (probe, set) => pf((c) => { set(c); c.probeErrors = { [probe]: "Access is denied" }; });
+  assert.deepEqual(fail("battery", (c) => { c.power.battery = null; }).blocked, ["mains"], "battery unreadable: blocked");
+  assert.deepEqual(fail("power", (c) => { c.power.activeScheme = null; }).blocked, ["kit-scheme-not-left"]);
+  assert.deepEqual(fail("schemes", (c) => { c.power.schemes = null; }).blocked, ["kit-scheme-not-left"]);
+  assert.deepEqual(fail("policies", (c) => { c.policies = null; }).blocked, ["chrome-jit-policy"]);
+  assert.deepEqual(fail("sessions", (c) => { c.session.sessions = null; }).blocked, ["unlocked-session"]);
+  assert.deepEqual(fail("chrome", (c) => { c.browsers.chrome = null; }).blocked, ["browser-chrome"]);
+  assert.deepEqual(fail("disk", (c) => { c.disk.freeGiB = null; }).blocked, ["disk"]);
+  assert.ok(fail("cpuBusy", (c) => { c.cpuBusy = null; }).warnings.includes("idle"), "load unreadable: warned");
+  assert.ok(pf((c) => { c.cpuBusy.partial = true; }).warnings.includes("idle"), "load read for the kit's own processes only: warned");
+  assert.ok(fail("os", (c) => { c.os = null; }).warnings.includes("windows-11"));
+  assert.ok(fail("memory", (c) => { c.memory = null; }).warnings.includes("memory"), "an info item unreadable warns");
+  assert.ok(fail("gpus", (c) => { c.gpus = null; }).warnings.includes("gpu-dgpu"));
+  assert.ok(fail("cpu", (c) => { c.cpu = null; }).warnings.includes("gb6-known"));
+  // a probe failing with a value still there (sub-probe error) is not ok either
+  assert.ok(pf((c) => { c.probeErrors = { "gpus.present": "SetupDiGetClassDevs failed" }; }).warnings.includes("gpu-dgpu"));
+  // battery: unknown status, never "on mains"
+  assert.deepEqual(pf((c) => { c.power.battery = [{ BatteryStatus: null, EstimatedChargeRemaining: 80 }]; }).blocked, ["mains"], "AC line 255: unknown, blocked");
+  assert.deepEqual(pf((c) => { delete c.power.battery; }).blocked, ["mains"], "no battery reading at all: blocked");
+  // refresh rate unknown: warned, never ok
+  assert.deepEqual(pf((c) => { c.display = null; c.probeErrors = { display: "Requested registry access is not allowed." }; }).warnings, ["refresh-60"]);
+  assert.deepEqual(pf((c) => { delete c.display; c.gpus[0].refreshHz = null; }).warnings, ["refresh-60"]);
+  // a driver left for an adapter that is not there is no dGPU
+  assert.ok(pf((c) => { c.gpus[0].present = false; }).warnings.includes("gpu-dgpu"));
+  assert.ok(pf((c) => { c.gpus[0].present = null; }).warnings.includes("gpu-dgpu"), "presence unknown: not counted");
+  assert.ok(!pf((c) => { c.gpus[0].present = null; c.nvidia = [{ name: "NVIDIA GeForce RTX 4080" }]; }).warnings.includes("gpu-dgpu"), "nvidia-smi answering is presence");
+  // everything degraded at once: nothing it depends on reads as ok
+  const all = pf((c) => {
+    c.power.battery = null; c.power.activeScheme = null; c.power.schemes = null; c.policies = null; c.session.sessions = null; c.disk.freeGiB = null;
+    c.cpuBusy = null; c.os = null; c.memory = null; c.gpus = null; c.display = null; c.cpu = null; c.coreMap = null; c.classAffinity = { error: "x" };
+    c.probeErrors = Object.fromEntries(["battery", "power", "schemes", "policies", "sessions", "disk", "cpuBusy", "os", "memory", "gpus", "display", "cpu", "coreMap"].map((k) => [k, "Access is denied"]));
+  });
+  for (const id of ["mains", "kit-scheme-not-left", "chrome-jit-policy", "unlocked-session", "disk", "class-affinity"]) assert.ok(all.blocked.includes(id), `${id} blocked`);
+  for (const id of ["idle", "windows-11", "memory", "gpu-dgpu", "igpu-present", "refresh-60", "gb6-known", "smt"]) assert.ok(all.warnings.includes(id), `${id} warned`);
+});
+
 test("pc-kit: restore diff", () => {
-  const before = { activeScheme: "a", schemes: ["a", "b"], processor: { X: { ac: 0 } }, tasks: [] };
-  assert.deepEqual(restoreDiff(before, { power: structuredClone(before), tasks: [], bootTask: false }, "j"), []);
+  const before = { activeScheme: "a", schemes: ["a", "b"], processor: { X: { ac: 0 } }, tasks: [], kitProcesses: [] };
+  assert.deepEqual(restoreDiff(before, { power: structuredClone(before), tasks: [], bootTask: false, jobProcesses: [], kitProcesses: [] }, "j"), []);
+  // a process list the PC could not read is never "nothing left"
+  assert.deepEqual(restoreDiff(before, { power: structuredClone(before), tasks: [], bootTask: false, jobProcesses: null, kitProcesses: null }, "j").map((x) => x.split(" (")[0]), ["job processes unknown", "kit processes unknown"]);
+  assert.match(restoreDiff({ ...before, kitProcesses: null }, { power: structuredClone(before), tasks: [], bootTask: false, jobProcesses: [], kitProcesses: [] }, "j").join(), /kit processes unknown \(not read at the snapshot\)/);
   const d = restoreDiff(before, { power: { activeScheme: KIT_SCHEME, schemes: ["a", "b", KIT_SCHEME], processor: { X: { ac: 1 } } }, tasks: ["j"], bootTask: true, jobProcesses: [{ name: "msedge.exe", pid: 9 }], kitProcesses: [{ name: "node.exe", pid: 8 }], jobTmp: true }, "j");
   assert.equal(d.length, 9);
   assert.match(d.join(), /SalonKit.j still registered.*boot task.*msedge\.exe 9.*node\.exe 8.*TEMP/);
@@ -407,7 +454,7 @@ test("pc-run: the whole flow in --dry-run (no connection)", () => {
 const PWSH = process.env.PWSH || "pwsh";
 const hasPwsh = spawnSync(PWSH, ["-NoProfile", "-Command", "1"], { encoding: "utf8" }).status === 0;
 const SALON_PC = path.join(ROOT, "harness", "remote", "pc-win", "salon-pc.ps1");
-const CIM_CMDLETS = ["Get-CimInstance", "Get-CimClass", "Invoke-CimMethod", "New-CimSession", "Get-WmiObject", "Invoke-WmiMethod", "Get-ScheduledTask", "Get-ScheduledTaskInfo", "Register-ScheduledTask", "Unregister-ScheduledTask", "Start-ScheduledTask", "Stop-ScheduledTask", "New-ScheduledTaskAction", "New-ScheduledTaskPrincipal", "New-ScheduledTaskSettingsSet", "Get-MpComputerStatus", "Get-MpPreference", "Get-Counter"];
+const CIM_CMDLETS = ["Get-CimInstance", "Get-CimClass", "Invoke-CimMethod", "New-CimSession", "Get-WmiObject", "Invoke-WmiMethod", "Get-ScheduledTask", "Get-ScheduledTaskInfo", "Register-ScheduledTask", "Unregister-ScheduledTask", "Start-ScheduledTask", "Stop-ScheduledTask", "New-ScheduledTaskAction", "New-ScheduledTaskPrincipal", "New-ScheduledTaskSettingsSet", "Get-MpComputerStatus", "Get-MpPreference", "Get-Counter", "Get-PnpDevice", "Get-PnpDeviceProperty", "Get-HotFix"];
 const PS_MOCKS = `
 $ErrorActionPreference = 'Stop'
 $global:pc = @{ active = '381b4222-f694-41f0-9685-ff5bb260df2e'; schemes = [System.Collections.ArrayList]@('381b4222-f694-41f0-9685-ff5bb260df2e', '8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c'); log = [System.Collections.ArrayList]@() }
@@ -507,7 +554,7 @@ Set-Content -LiteralPath (Join-Path (Join-Path (Join-Path $k "jobs") "t4") "exit
 // Get-Process, nvidia-smi and the task scheduler's COM API instead.
 test("pc-kit: salon-pc.ps1 never calls a CIM/WMI cmdlet (its code, not its comments)", () => {
   const code = readFileSync(SALON_PC, "utf8").split(/\r?\n/).filter((l) => !/^\s*#/.test(l)).map((l) => l.replace(/\s#\s.*$/, "")).join("\n");
-  const found = [...new Set([...code.matchAll(/\b(?:Get-Cim\w*|\w+-Cim\w+|Get-WmiObject|\w+-WmiMethod|\w+-ScheduledTask\w*|Get-Mp\w+|Get-Counter|Win32_\w+|root\\cimv2)\b/gi)].map((m) => m[0]))];
+  const found = [...new Set([...code.matchAll(/\b(?:Get-Cim\w*|\w+-Cim\w+|Get-WmiObject|\w+-WmiMethod|\w+-ScheduledTask\w*|Get-Mp\w+|Get-Counter|Get-PnpDevice\w*|Get-HotFix|Win32_\w+|root\\cimv2|System\.Management\b(?!\.Automation))\b|\[wmi(?:class|searcher)?\]/gi)].map((m) => m[0]))];
   assert.deepEqual(found, [], "CIM/WMI is refused to the kit's ssh logon on a real PC: registry, native calls, COM task scheduler only");
 });
 

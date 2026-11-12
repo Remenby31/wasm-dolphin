@@ -259,6 +259,41 @@ public static class SalonKitNative {
   }
   public static ulong UptimeMs() { return GetTickCount64(); }
 
+  [StructLayout(LayoutKind.Sequential)]
+  struct DevInfoData { public uint cbSize; public Guid ClassGuid; public uint DevInst; public IntPtr Reserved; }
+  [DllImport("setupapi.dll", SetLastError = true)]
+  static extern IntPtr SetupDiGetClassDevsW(ref Guid cls, IntPtr enumerator, IntPtr hwnd, uint flags);
+  [DllImport("setupapi.dll", SetLastError = true)]
+  static extern bool SetupDiEnumDeviceInfo(IntPtr set, uint idx, ref DevInfoData data);
+  [DllImport("setupapi.dll", SetLastError = true)]
+  static extern bool SetupDiGetDeviceRegistryPropertyW(IntPtr set, ref DevInfoData data, uint prop, out uint regType, byte[] buf, uint size, out uint req);
+  [DllImport("setupapi.dll")]
+  static extern bool SetupDiDestroyDeviceInfoList(IntPtr set);
+  [DllImport("cfgmgr32.dll")]
+  static extern int CM_Get_DevNode_Status(out uint status, out uint problem, uint devInst, uint flags);
+  // The display adapters present now (DIGCF_PRESENT), each as { driver key
+  // under Control\Class ("{4d36e968-...}\0001"), started (DN_STARTED),
+  // problem code }: SetupAPI, no WMI.
+  public static List<object[]> PresentDisplays() {
+    Guid cls = new Guid("4d36e968-e325-11ce-bfc1-08002be10318");
+    IntPtr set = SetupDiGetClassDevsW(ref cls, IntPtr.Zero, IntPtr.Zero, 2);
+    if (set == new IntPtr(-1)) throw new System.ComponentModel.Win32Exception();
+    var list = new List<object[]>();
+    try {
+      for (uint i = 0; ; i++) {
+        var d = new DevInfoData(); d.cbSize = (uint)Marshal.SizeOf(typeof(DevInfoData));
+        if (!SetupDiEnumDeviceInfo(set, i, ref d)) break;
+        byte[] buf = new byte[1024]; uint type, req;
+        string key = SetupDiGetDeviceRegistryPropertyW(set, ref d, 9, out type, buf, (uint)buf.Length, out req) ? System.Text.Encoding.Unicode.GetString(buf, 0, (int)req).TrimEnd('\0') : null;
+        uint st, prob;
+        bool started = false; long problem = -1;
+        if (CM_Get_DevNode_Status(out st, out prob, d.DevInst, 0) == 0) { started = (st & 0x8) != 0; problem = prob; }
+        list.Add(new object[] { key, started, problem });
+      }
+    } finally { SetupDiDestroyDeviceInfoList(set); }
+    return list;
+  }
+
   static IntPtr pdhQuery = IntPtr.Zero, pdhFreq, pdhPerf;
   static Dictionary<string, double> PdhArray(IntPtr c) {
     uint size = 0, count;
@@ -430,17 +465,18 @@ function Probe-List([string]$name, [scriptblock]$read) {
 }
 $CurrentVersion = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion"
 function Os-Info {
-  $build = [int](Reg-Value $CurrentVersion "CurrentBuild")
+  $b = Reg-Value $CurrentVersion "CurrentBuild"
+  $build = $(if ("$b" -match '^\d+$') { [int]$b } else { $null })
   $product = Reg-Value $CurrentVersion "ProductName"
   # ProductName still says "Windows 10" on Windows 11 (Microsoft's own
   # guidance: tell them by the build, 22000 and up)
   $caption = "$product"
-  if ($build -ge 22000) { $caption = $caption -replace 'Windows 10', 'Windows 11' }
+  if ($null -ne $build -and $build -ge 22000) { $caption = $caption -replace 'Windows 10', 'Windows 11' }
   $boot = $null
   try { $boot = (Get-Date).AddMilliseconds(-[double]((Native)::UptimeMs())).ToString("o") } catch { $script:ProbeErrors["os.lastBoot"] = "$($_.Exception.Message)" }
   [ordered]@{
     caption = $caption; productName = $product; edition = Reg-Value $CurrentVersion "EditionID"; displayVersion = Reg-Value $CurrentVersion "DisplayVersion"
-    version = "10.0.$build"; build = "$build"; ubr = Reg-Value $CurrentVersion "UBR"; locale = (Get-Culture).Name
+    version = $(if ($null -ne $build) { "10.0.$build" } else { $null }); build = $(if ($null -ne $build) { "$build" } else { $null }); ubr = Reg-Value $CurrentVersion "UBR"; locale = (Get-Culture).Name
     lastBoot = $boot
   }
 }
@@ -452,30 +488,68 @@ function Memory-Info {
   $m = (Native)::Memory()
   [ordered]@{ totalGiB = [math]::Round($m[0] / 1GB, 1); freeGiB = [math]::Round($m[1] / 1GB, 1); commitLimitGiB = [math]::Round($m[2] / 1GB, 1) }
 }
-# Win32_Battery's shape (BatteryStatus 1 = discharging, 2 = on AC): what
-# the preflight reads. No battery: an empty list.
+# Win32_Battery's shape (BatteryStatus 1 = discharging, 2 = on AC, null =
+# unknown): what the preflight reads. No battery: an empty list. 255 is
+# "unknown" for both GetSystemPowerStatus fields: a battery flag of 255
+# throws (the probe is then null: the preflight blocks), an AC line of 255
+# gives BatteryStatus null.
 function Battery-Info {
   $s = (Native)::PowerStatus()
+  if ($s[1] -eq 255) { throw "battery status unknown (GetSystemPowerStatus BatteryFlag 255)" }
   if ($s[1] -band 128) { return @() }
-  @([ordered]@{ BatteryStatus = $(if ($s[0] -eq 0) { 1 } else { 2 }); EstimatedChargeRemaining = $(if ($s[2] -eq 255) { $null } else { $s[2] }); acLine = $s[0] })
+  @([ordered]@{ BatteryStatus = $(if ($s[0] -eq 0) { 1 } elseif ($s[0] -eq 1) { 2 } else { $null }); EstimatedChargeRemaining = $(if ($s[2] -eq 255) { $null } else { $s[2] }); acLine = $s[0] })
 }
 # The display adapters from their driver keys (the display class, readable
-# by every account). The current mode and refresh rate belong to the
-# desktop session: unreadable from ssh by a standard account (the
-# GraphicsDrivers\Configuration key is refused; the ssh session's own
-# screen is a 1024x768 placeholder), so refreshHz stays null.
+# by every account), each marked present (SetupAPI's present devices; a
+# driver left installed for a card taken out stays in the class key) and
+# started; present null when SetupAPI could not be asked. A registry
+# failure throws (the list is then null, never empty). The refresh rate is
+# Display-Info's.
 $DisplayClass = "HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}"
 function Gpu-Info {
-  @(Get-ChildItem -LiteralPath $DisplayClass -ErrorAction SilentlyContinue | Where-Object { $_.PSChildName -match '^\d{4}$' } | ForEach-Object {
+  $present = $null
+  try {
+    $present = @{}
+    foreach ($d in (Native)::PresentDisplays()) { if ($d[0]) { $present[([string]$d[0]).ToLower()] = @([bool]$d[1], [long]$d[2]) } }
+  } catch { $present = $null; $script:ProbeErrors["gpus.present"] = "$($_.Exception.Message)" }
+  $keys = @(Get-ChildItem -LiteralPath $DisplayClass -ErrorAction Stop)
+  @($keys | Where-Object { $_.PSChildName -match '^\d{4}$' } | ForEach-Object {
+    $dev = "{4d36e968-e325-11ce-bfc1-08002be10318}\$($_.PSChildName)"
     $p = $null
     try { $p = Get-ItemProperty -LiteralPath $_.PSPath -ErrorAction Stop } catch {}
     if ($p -and ($p.PSObject.Properties.Name -contains "DriverDesc")) {
       $date = $null
       $raw = $(if ($p.PSObject.Properties.Name -contains "DriverDate") { "$($p.DriverDate)" } else { "" })
       if ($raw -match '^(\d{1,2})-(\d{1,2})-(\d{4})$') { $date = "{0}-{1:00}-{2:00}" -f $Matches[3], [int]$Matches[1], [int]$Matches[2] }
-      [ordered]@{ name = $p.DriverDesc; driver = $(if ($p.PSObject.Properties.Name -contains "DriverVersion") { $p.DriverVersion } else { $null }); driverDate = $date; refreshHz = $null; mode = $null; pnp = $(if ($p.PSObject.Properties.Name -contains "MatchingDeviceId") { $p.MatchingDeviceId } else { $null }) }
+      $pr = $(if ($null -eq $present) { $null } else { $present[$dev] })
+      [ordered]@{ name = $p.DriverDesc; driver = $(if ($p.PSObject.Properties.Name -contains "DriverVersion") { $p.DriverVersion } else { $null }); driverDate = $date
+        present = $(if ($null -eq $present) { $null } else { $null -ne $pr }); started = $(if ($pr) { $pr[0] } else { $null }); problem = $(if ($pr) { $pr[1] } else { $null })
+        refreshHz = $null; pnp = $(if ($p.PSObject.Properties.Name -contains "MatchingDeviceId") { $p.MatchingDeviceId } else { $null }) }
     }
   })
+}
+# The screens' modes from the display configuration the graphics kernel
+# keeps (GraphicsDrivers\Configuration: the latest monitor set by its
+# Timestamp, one subkey per target, VSyncFreq = refresh rate). The ssh
+# session's own screen is a placeholder, EnumDisplaySettings would read
+# that. May be refused to a standard account: then null, said in
+# probeErrors, and the preflight warns (refresh unknown).
+$GfxConfig = "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers\Configuration"
+function Display-Info {
+  $best = $null; $bestTs = [int64]-1
+  foreach ($set in @(Get-ChildItem -LiteralPath $GfxConfig -ErrorAction Stop)) {
+    $ts = Reg-Value $set.PSPath "Timestamp"
+    if ($null -ne $ts -and [int64]$ts -gt $bestTs) { $best = $set; $bestTs = [int64]$ts }
+  }
+  if (-not $best) { throw "no display configuration with a Timestamp under $GfxConfig" }
+  $targets = @(Get-ChildItem -LiteralPath $best.PSPath -ErrorAction Stop | ForEach-Object { Get-ChildItem -LiteralPath $_.PSPath -ErrorAction Stop })
+  $r = @($targets | ForEach-Object {
+    $num = Reg-Value $_.PSPath "VSyncFreq.Numerator"; $den = Reg-Value $_.PSPath "VSyncFreq.Denominator"
+    [ordered]@{ set = $best.PSChildName; target = $_.PSChildName; width = Reg-Value $_.PSPath "PrimSurfSize.cx"; height = Reg-Value $_.PSPath "PrimSurfSize.cy"
+      refreshHz = $(if ($num -and $den) { [math]::Round([double]$num / [double]$den, 2) } else { $null }) }
+  })
+  if (-not @($r | Where-Object { $_.refreshHz }).Count) { throw "no VSyncFreq in $($best.PSChildName)" }
+  return $r
 }
 # nvidia-smi when the NVIDIA driver installed it: the dGPU's own reading.
 function Nvidia-Info {
@@ -515,6 +589,7 @@ function Check {
     coreMap = $coreMap; classAffinity = $affinity
     memory = Probe "memory" { Memory-Info }
     gpus = Probe-List "gpus" { Gpu-Info }
+    display = Probe-List "display" { Display-Info }
     nvidia = Probe "nvidia" { Nvidia-Info }
     gpuPreference = Probe "gpuPreference" { Reg-Policies "HKCU:\Software\Microsoft\DirectX\UserGpuPreferences" }
     hags = Reg-Value "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" "HwSchMode"
@@ -604,7 +679,7 @@ function Stop-KitJob([string]$jd) {
     }
     $still = @(Job-Processes $jd | ForEach-Object { [ordered]@{ pid = $_.ProcessId; name = $_.Name } })
     if ($still.Count) { $warn += "processes of the job still running: $(($still | ForEach-Object { "$($_.name) $($_.pid)" }) -join ', ')" }
-  } catch { $warn += "the process table could not be read (the job's processes not searched): $_" }
+  } catch { $still = $null; $warn += "the process table could not be read (the job's processes not searched): $_" }
   try { if (Kit-Task $Job) { (Kit-Folder).DeleteTask($Job, 0) } } catch { $warn += "task not unregistered: $_" }
   # the job's TEMP (this account's own files; never elevated)
   $tmp = Join-Path $jd "tmp"
