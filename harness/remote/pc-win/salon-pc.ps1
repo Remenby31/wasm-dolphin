@@ -512,11 +512,15 @@ function Gpu-Info {
     $present = @{}
     foreach ($d in (Native)::PresentDisplays()) { if ($d[0]) { $present[([string]$d[0]).ToLower()] = @([bool]$d[1], [long]$d[2]) } }
   } catch { $present = $null; $script:ProbeErrors["gpus.present"] = "$($_.Exception.Message)" }
-  $keys = @(Get-ChildItem -LiteralPath $DisplayClass -ErrorAction Stop)
-  @($keys | Where-Object { $_.PSChildName -match '^\d{4}$' } | ForEach-Object {
-    $dev = "{4d36e968-e325-11ce-bfc1-08002be10318}\$($_.PSChildName)"
+  # the subkeys' names only: Get-ChildItem opens each, and the class's
+  # Properties subkey is refused to every account (CI windows-2025)
+  $cls = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($DisplayClass.Substring(6))
+  if (-not $cls) { throw "cannot open $DisplayClass" }
+  try { $names = @($cls.GetSubKeyNames()) } finally { $cls.Close() }
+  @($names | Where-Object { $_ -match '^\d{4}$' } | ForEach-Object {
+    $dev = "{4d36e968-e325-11ce-bfc1-08002be10318}\$_"
     $p = $null
-    try { $p = Get-ItemProperty -LiteralPath $_.PSPath -ErrorAction Stop } catch {}
+    try { $p = Get-ItemProperty -LiteralPath (Join-Path $DisplayClass $_) -ErrorAction Stop } catch {}
     if ($p -and ($p.PSObject.Properties.Name -contains "DriverDesc")) {
       $date = $null
       $raw = $(if ($p.PSObject.Properties.Name -contains "DriverDate") { "$($p.DriverDate)" } else { "" })
@@ -546,9 +550,11 @@ function Display-Info {
   $r = @($targets | ForEach-Object {
     $num = Reg-Value $_.PSPath "VSyncFreq.Numerator"; $den = Reg-Value $_.PSPath "VSyncFreq.Denominator"
     [ordered]@{ set = $best.PSChildName; target = $_.PSChildName; width = Reg-Value $_.PSPath "PrimSurfSize.cx"; height = Reg-Value $_.PSPath "PrimSurfSize.cy"
-      refreshHz = $(if ($num -and $den) { [math]::Round([double]$num / [double]$den, 2) } else { $null }) }
+      # outside 20-500 Hz: not a screen's rate (a virtual display gives 1)
+      refreshHz = $(if ($num -and $den) { $hz = [math]::Round([double]$num / [double]$den, 2); if ($hz -ge 20 -and $hz -le 500) { $hz } else { $null } } else { $null })
+      vsync = $(if ($num -and $den) { "$num/$den" } else { $null }) }
   })
-  if (-not @($r | Where-Object { $_.refreshHz }).Count) { throw "no VSyncFreq in $($best.PSChildName)" }
+  if (-not @($r | Where-Object { $_.refreshHz }).Count) { throw "no screen refresh rate in $($best.PSChildName) (VSyncFreq $(@($r | ForEach-Object { $_.vsync }) -join ', '))" }
   return $r
 }
 # nvidia-smi when the NVIDIA driver installed it: the dGPU's own reading.
