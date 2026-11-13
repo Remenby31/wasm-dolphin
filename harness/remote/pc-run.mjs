@@ -682,8 +682,15 @@ async function main() {
     return void (process.exitCode = d.length ? 1 : 0);
   }
   if (cmd === "uninstall") { console.log(JSON.stringify(kit(t, "uninstall"))); return; }
-  if (cmd === "fetch") { t.getDir(W(KIT_DIR, "jobs", job), outDir); console.log(jobReport(path.join(outDir, job))); return; }
+  if (cmd === "fetch") {
+    t.getDir(W(KIT_DIR, "jobs", job), outDir);
+    // the elevated-host warning (and every preflight item) belongs to the report of a fetched job too
+    const cf = path.join(outDir, `check-${job}.json`);
+    const pf = existsSync(cf) ? { preflight: preflight(JSON.parse(readFileSync(cf, "utf8")), { allowElevated: values["allow-elevated-host"] }) } : {};
+    console.log(jobReport(path.join(outDir, job), { check: pf.preflight ? pf : null })); return;
+  }
 
+  if (values["allow-elevated-host"]) log("[pc-run] --allow-elevated-host: the standard-account check is a warning; this run executes under the --host administrator account");
   const pre = check(t, { a, iso: values.iso ?? null, browsers: browsers.map(channelOf), cores: Number(values.cores), allowElevated: values["allow-elevated-host"] });
   mkdirSync(outDir, { recursive: true });
   writeFileSync(path.join(outDir, `check-${job}.json`), JSON.stringify(pre.check, null, 1) + "\n");

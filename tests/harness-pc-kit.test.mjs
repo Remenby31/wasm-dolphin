@@ -22,7 +22,7 @@ import { parseWin32Battery } from "../harness/lib/system.mjs";
 import { buildKernel, reference, SHAPES } from "../harness/lib/wasm-kernel.mjs";
 import { benchScore, classifyJit, summarizeCalls, summarizeRuns } from "../harness/probes/pc-bench.mjs";
 import {
-  ADMIN, ADMIN_PATTERNS, assertAdmin, origFromGetActive, sshdShellOk, assertSendable, benchHold, calibrationTarget, setKitDir, stepWindows, versionOutliers, encodePs, gb6Of, j1bTable, KIT_SCHEME, kitCommand, knobIneffective, nextProbe, parseKitJson, preflight, restoreDiff, samplerVerdict
+  ADMIN, ADMIN_PATTERNS, assertAdmin, origFromGetActive, sshdShellOk, assertSendable, benchHold, calibrationTarget, setKitDir, stepWindows, versionOutliers, encodePs, gb6Of, j1bTable, KIT_SCHEME, kitCommand, knobIneffective, nextProbe, parseKitJson, preflight, preflightMarkdown, restoreDiff, samplerVerdict
 } from "../harness/lib/pc-kit.mjs";
 import { calibrate } from "../harness/remote/pc-win/pc-calibrate.mjs";
 import { admin, adminTransport, assertFitsTask, benchFindings, benchSteps, calibrateFromMac, clampOf, jobReport, jobSpec, parcoursSteps, runJob, simulatedPc } from "../harness/remote/pc-run.mjs";
@@ -228,7 +228,8 @@ test("pc-kit: the preflight blocks on each Windows trap it can see", () => {
   assert.deepEqual(blocked((c) => { c.browsers.edge = null; }, { browsers: ["chrome"] }), [], "Edge not asked");
   assert.deepEqual(blocked((c) => { c.power.kitSchemeActive = true; }), ["kit-scheme-not-left"]);
   assert.deepEqual(blocked((c) => { c.session.elevated = true; }), ["kit-not-elevated"], "the kit's account must be a standard one");
-  { const c = structuredClone(base); c.session.elevated = true; const p = preflight(c, { allowElevated: true }); assert.equal(p.blocked.length, 0, "--allow-elevated-host: not a block"); assert.deepEqual(p.warnings.map((w) => w.id), ["kit-not-elevated"], "but always a warning"); }
+  { const c = structuredClone(base); c.session.elevated = true; const p = preflight(c, { allowElevated: true }); assert.equal(p.blocked.length, 0, "--allow-elevated-host: not a block"); assert.deepEqual(p.warnings.map((w) => w.id), ["kit-not-elevated"], "but always a warning"); assert.match(preflightMarkdown(p), /ELEVATED HOST ACCEPTED/, "and the report says so"); }
+  { const c = structuredClone(base); c.session.elevated = null; assert.deepEqual(preflight(c, { allowElevated: true }).blocked.map((b) => b.id), ["kit-not-elevated"], "an unread elevation is still a block"); assert.deepEqual(preflight(c).blocked.map((b) => b.id), ["kit-not-elevated"]); }
   assert.deepEqual(blocked((c) => { c.sshd.defaultShellCommandOption = "/c"; }), ["sshd-shell"], "cmd without /d runs HKCU AutoRun before an admin command");
   assert.deepEqual(blocked((c) => { c.sshd = {}; }), ["sshd-shell"]);
   assert.deepEqual(blocked((c) => { c.policies.chromeMachine = { DefaultJavaScriptOptimizerSetting: 2 }; }), ["chrome-jit-policy"]);

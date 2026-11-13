@@ -589,7 +589,7 @@ function Check {
   $affinity = $null
   try { $affinity = Class-Affinity $Cores } catch { $affinity = [ordered]@{ error = "$_" } }
   Out-Result ([ordered]@{
-    action = "check"; at = (Get-Date).ToString("o"); host = $env:COMPUTERNAME; user = "$env:USERDOMAIN\$env:USERNAME"
+    action = "check"; at = (Get-Date).ToString("o"); host = $env:COMPUTERNAME; user = [Security.Principal.WindowsIdentity]::GetCurrent().Name
     os = Probe "os" { Os-Info }
     cpu = Probe "cpu" { Cpu-Info $coreMap }
     coreMap = $coreMap; classAffinity = $affinity
@@ -831,13 +831,13 @@ function Start-Job-Task {
   $self = $PSCommandPath
   $arg = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$self`" -Action inner -Job $Job -KitDir `"$KitDir`""
   # the logon name as Windows knows it (a local account's domain is the machine, but USERDOMAIN reads WORKGROUP in an ssh session)
-  $user = if ($env:SALONKIT_TEST_ELEVATED) { "$env:USERDOMAIN\$env:USERNAME" } else { [Security.Principal.WindowsIdentity]::GetCurrent().Name }
+  $user = [Security.Principal.WindowsIdentity]::GetCurrent().Name
   $def = (Task-Service).NewTask(0)
   $act = $def.Actions.Create(0)   # TASK_ACTION_EXEC
   $act.Path = "powershell.exe"; $act.Arguments = $arg; $act.WorkingDirectory = $jd
   # Interactive token, least privilege: runs in the logged-on user's
   # desktop session (a browser started from the ssh session would have no
-  # screen: session 0 has none), never elevated.
+  # screen: session 0 has none), RunLevel 0 (limited token; with pc-run --allow-elevated-host the account itself is an administrator).
   $def.Principal.UserId = $user; $def.Principal.LogonType = 3; $def.Principal.RunLevel = 0
   $def.Settings.DisallowStartIfOnBatteries = $false; $def.Settings.StopIfGoingOnBatteries = $false
   $def.Settings.ExecutionTimeLimit = "PT$($TaskHours)H"; $def.Settings.MultipleInstances = 2   # ignore new
