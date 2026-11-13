@@ -589,7 +589,7 @@ function Check {
   $affinity = $null
   try { $affinity = Class-Affinity $Cores } catch { $affinity = [ordered]@{ error = "$_" } }
   Out-Result ([ordered]@{
-    action = "check"; at = (Get-Date).ToString("o"); host = $env:COMPUTERNAME; user = "$env:USERDOMAIN\$env:USERNAME"
+    action = "check"; at = (Get-Date).ToString("o"); host = $env:COMPUTERNAME; user = (Logon-Name)
     os = Probe "os" { Os-Info }
     cpu = Probe "cpu" { Cpu-Info $coreMap }
     coreMap = $coreMap; classAffinity = $affinity
@@ -653,6 +653,11 @@ function Read-State {
   $sf = State-File
   if (-not (Test-Path -LiteralPath $sf)) { throw "no snapshot for job $Job ($sf): run -Action snapshot first" }
   return Get-Content -Raw -LiteralPath $sf | ConvertFrom-Json
+}
+
+# The logon name as Windows knows it (a local account's domain is the machine, but USERDOMAIN reads WORKGROUP in an ssh session). pwsh off Windows has no WindowsIdentity: the env names then.
+function Logon-Name {
+  try { [Security.Principal.WindowsIdentity]::GetCurrent().Name } catch { "$env:USERDOMAIN\$env:USERNAME" }
 }
 
 # check refuses to go on elevated: this script is the standard account's.
@@ -830,13 +835,13 @@ function Start-Job-Task {
   foreach ($f in @("exit", "log", "node.pid", "stop")) { $p = Join-Path $jd $f; if (Test-Path -LiteralPath $p) { throw "job $Job ran already ($p): use a new job id" } }
   $self = $PSCommandPath
   $arg = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$self`" -Action inner -Job $Job -KitDir `"$KitDir`""
-  $user = "$env:USERDOMAIN\$env:USERNAME"
+  $user = Logon-Name
   $def = (Task-Service).NewTask(0)
   $act = $def.Actions.Create(0)   # TASK_ACTION_EXEC
   $act.Path = "powershell.exe"; $act.Arguments = $arg; $act.WorkingDirectory = $jd
   # Interactive token, least privilege: runs in the logged-on user's
   # desktop session (a browser started from the ssh session would have no
-  # screen: session 0 has none), never elevated.
+  # screen: session 0 has none), RunLevel 0 (limited token; with pc-run --allow-elevated-host the account itself is an administrator).
   $def.Principal.UserId = $user; $def.Principal.LogonType = 3; $def.Principal.RunLevel = 0
   $def.Settings.DisallowStartIfOnBatteries = $false; $def.Settings.StopIfGoingOnBatteries = $false
   $def.Settings.ExecutionTimeLimit = "PT$($TaskHours)H"; $def.Settings.MultipleInstances = 2   # ignore new

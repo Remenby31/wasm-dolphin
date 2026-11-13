@@ -233,7 +233,7 @@ export function knobIneffective(points, { minDrop = 0.05, minAsk = 0.75 } = {}) 
 // Each item: id, level (block: no measure; warn: measure, flagged; info),
 // and what was seen. `check` is salon-pc.ps1 -Action check's result;
 // `bench` (optional) pc-bench results per browser.
-export function preflight(check, { browsers = ["chrome", "msedge"], bench = {}, needIso = null } = {}) {
+export function preflight(check, { browsers = ["chrome", "msedge"], bench = {}, needIso = null, allowElevated = false } = {}) {
   const items = [];
   // Never ok by default: an item whose probe failed (salon-pc.ps1's
   // probeErrors) or gave nothing is not ok. It blocks when the item blocks;
@@ -254,7 +254,8 @@ export function preflight(check, { browsers = ["chrome", "msedge"], bench = {}, 
   const bat = check.power?.battery;
   const batOk = Array.isArray(bat) && bat.every((b) => b && b.BatteryStatus === 2);
   add("mains", "block", batOk, bat == null ? "battery state unknown" : bat.length ? `battery ${bat.map((b) => `${b?.EstimatedChargeRemaining ?? "?"}% status ${b?.BatteryStatus ?? "unknown"}`).join(", ")}` : "no battery (desktop)", bat == null ? `battery state ${unread}` : "plug the PC in: on battery Windows lowers the QoS and the frequency", ["battery"]);
-  add("kit-not-elevated", "block", check.session?.elevated === false, `kit account ${check.session?.user ?? "?"}: ${check.session?.elevated ? "ELEVATED" : check.session?.elevated === false ? "standard" : "?"}`, "the kit's ssh must be a standard (non-administrator) account (salonkit): everything but the closed admin list runs there");
+  // --allow-elevated-host (opt-in, owner's decision): an administrator account that is the PC's logged-in user drives the kit; the item stays visible as a warning in every report
+  add("kit-not-elevated", allowElevated && check.session?.elevated === true ? "warn" : "block", check.session?.elevated === false, `kit account ${check.session?.user ?? "?"}: ${check.session?.elevated ? "ELEVATED" : check.session?.elevated === false ? "standard" : "?"}`, allowElevated && check.session?.elevated === true ? "ELEVATED HOST ACCEPTED (--allow-elevated-host): this run, its cleanup and its restore execute under an administrator account, not the standard salonkit" : "the kit's ssh must be a standard (non-administrator) account (salonkit): everything but the closed admin list runs there");
   const sh = check.sshd ?? {};
   const shellOk = sshdShellOk(sh);
   add("sshd-shell", "block", shellOk, `OpenSSH DefaultShell ${sh.defaultShell ?? "unset"}, DefaultShellCommandOption ${sh.defaultShellCommandOption ?? "unset"}`, "as admin, once: HKLM\\SOFTWARE\\OpenSSH DefaultShell = C:\\Windows\\System32\\cmd.exe and DefaultShellCommandOption = /d /c (no AutoRun before the admin commands)");
