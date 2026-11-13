@@ -830,7 +830,8 @@ function Start-Job-Task {
   foreach ($f in @("exit", "log", "node.pid", "stop")) { $p = Join-Path $jd $f; if (Test-Path -LiteralPath $p) { throw "job $Job ran already ($p): use a new job id" } }
   $self = $PSCommandPath
   $arg = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$self`" -Action inner -Job $Job -KitDir `"$KitDir`""
-  $user = "$env:USERDOMAIN\$env:USERNAME"
+  # the logon name as Windows knows it (a local account's domain is the machine, but USERDOMAIN reads WORKGROUP in an ssh session)
+  $user = if ($env:SALONKIT_TEST_ELEVATED) { "$env:USERDOMAIN\$env:USERNAME" } else { [Security.Principal.WindowsIdentity]::GetCurrent().Name }
   $def = (Task-Service).NewTask(0)
   $act = $def.Actions.Create(0)   # TASK_ACTION_EXEC
   $act.Path = "powershell.exe"; $act.Arguments = $arg; $act.WorkingDirectory = $jd
