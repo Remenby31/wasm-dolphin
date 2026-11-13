@@ -25,6 +25,9 @@
 //   any command with --dry-run: no connection; every ssh/scp printed, a
 //   simulated PC answers (the commands' shape and the flow, checked offline)
 //
+//   --allow-elevated-host (opt-in): the --host account may be an administrator (the PC's own logged-in user); the
+//   standard-account check then warns instead of blocking. Default off: the kit's account is salonkit.
+//
 // What it changes on the PC: the kit's power scheme (a copy of the active
 // one, carrying the clamp) and the boot task SalonKitRestore (SYSTEM, at
 // startup: puts the snapshot's scheme back and deletes itself; the kit's
@@ -256,12 +259,12 @@ export function restoreJob(t, a, job, before) {
   return { after: { power: p.power, tasks: p.tasks, kitProcesses: c.kitProcesses, jobProcesses: c.jobProcesses, jobTmp: c.jobTmp, bootTask: r.bootTask }, warnings: c.warnings ?? [], killed: c.killed ?? [] };
 }
 
-export function check(t, { a = null, iso = null, browsers = ["chrome", "msedge"], cores = CLASS_CORES } = {}) {
+export function check(t, { a = null, iso = null, browsers = ["chrome", "msedge"], cores = CLASS_CORES, allowElevated = false } = {}) {
   initKitDir(t);
   pushKitScript(t);
   const c = kit(t, "check", { Cores: cores });
   if (iso) c.iso = kit(t, "stat", { Path: iso });
-  const p = preflight(c, { browsers, needIso: iso });
+  const p = preflight(c, { browsers, needIso: iso, allowElevated });
   // the admin channel, only once its shell is known safe (cmd /d): one
   // read-only line of the list
   if (a && !p.blocked.some((b) => b.id === "sshd-shell")) {
@@ -641,7 +644,7 @@ async function main() {
       host: { type: "string" }, "admin-host": { type: "string" }, job: { type: "string" }, out: { type: "string" }, "dry-run": { type: "boolean", default: false },
       iso: { type: "string" }, film: { type: "string", multiple: true }, browser: { type: "string", default: "chrome,msedge" }, runs: { type: "string", default: "3" },
       query: { type: "string", default: J1_QUERY }, engine: { type: "string" }, calibration: { type: "string" }, "clamp-mhz": { type: "string" }, "no-clamp": { type: "boolean", default: false },
-      "host-gb6": { type: "string" }, homebrew: { type: "string" }, "js-flags": { type: "string" }, cores: { type: "string", default: String(CLASS_CORES) }
+      "host-gb6": { type: "string" }, "allow-elevated-host": { type: "boolean", default: false }, homebrew: { type: "string" }, "js-flags": { type: "string" }, cores: { type: "string", default: String(CLASS_CORES) }
     }
   });
   const cmd = positionals[0];
@@ -681,7 +684,7 @@ async function main() {
   if (cmd === "uninstall") { console.log(JSON.stringify(kit(t, "uninstall"))); return; }
   if (cmd === "fetch") { t.getDir(W(KIT_DIR, "jobs", job), outDir); console.log(jobReport(path.join(outDir, job))); return; }
 
-  const pre = check(t, { a, iso: values.iso ?? null, browsers: browsers.map(channelOf), cores: Number(values.cores) });
+  const pre = check(t, { a, iso: values.iso ?? null, browsers: browsers.map(channelOf), cores: Number(values.cores), allowElevated: values["allow-elevated-host"] });
   mkdirSync(outDir, { recursive: true });
   writeFileSync(path.join(outDir, `check-${job}.json`), JSON.stringify(pre.check, null, 1) + "\n");
   log(preflightMarkdown(pre.preflight));

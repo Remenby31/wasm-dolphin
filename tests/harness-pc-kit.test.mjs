@@ -228,6 +228,7 @@ test("pc-kit: the preflight blocks on each Windows trap it can see", () => {
   assert.deepEqual(blocked((c) => { c.browsers.edge = null; }, { browsers: ["chrome"] }), [], "Edge not asked");
   assert.deepEqual(blocked((c) => { c.power.kitSchemeActive = true; }), ["kit-scheme-not-left"]);
   assert.deepEqual(blocked((c) => { c.session.elevated = true; }), ["kit-not-elevated"], "the kit's account must be a standard one");
+  { const c = structuredClone(base); c.session.elevated = true; const p = preflight(c, { allowElevated: true }); assert.equal(p.blocked.length, 0, "--allow-elevated-host: not a block"); assert.deepEqual(p.warnings.map((w) => w.id), ["kit-not-elevated"], "but always a warning"); }
   assert.deepEqual(blocked((c) => { c.sshd.defaultShellCommandOption = "/c"; }), ["sshd-shell"], "cmd without /d runs HKCU AutoRun before an admin command");
   assert.deepEqual(blocked((c) => { c.sshd = {}; }), ["sshd-shell"]);
   assert.deepEqual(blocked((c) => { c.policies.chromeMachine = { DefaultJavaScriptOptimizerSetting: 2 }; }), ["chrome-jit-policy"]);
